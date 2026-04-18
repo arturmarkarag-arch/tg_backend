@@ -1,0 +1,38 @@
+{
+  "name": "server",
+  "version": "1.0.0",
+  "private": true,
+  "type": "commonjs",
+  "scripts": {
+    "dev": "nodemon index.js",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.1030.0",
+    "@bull-board/api": "^7.0.0",
+    "@bull-board/express": "^7.0.0",
+    "axios": "^1.7.2",
+    "bullmq": "^5.74.1",
+    "busboy": "^1.6.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.3.1",
+    "express": "^5.2.1",
+    "form-data": "^4.0.0",
+    "ioredis": "^5.10.1",
+    "mongoose": "^7.7.0",
+    "node-telegram-bot-api": "^0.67.0",
+    "openai": "^4.8.0",
+    "sharp": "^0.34.5",
+    "socket.io": "^4.8.3"
+  },
+  "devDependencies": {
+    "mongodb-memory-server": "^8.14.0",
+    "nodemon": "^3.0.1",
+    "supertest": "^6.3.3",
+    "vitest": "^1.6.1"
+  },
+  "vitest": {
+    "globals": true,
+    "environment": "node"
+  }
+}

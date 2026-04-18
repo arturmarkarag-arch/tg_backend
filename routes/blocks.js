@@ -1,0 +1,155 @@
+const express = require('express');
+const router = express.Router();
+const Block = require('../models/Block');
+const Product = require('../models/Product');
+const { getIO } = require('../socket');
+
+// Seed 120 blocks if they don't exist
+async function ensureBlocks() {
+  const count = await Block.countDocuments();
+  if (count >= 120) return;
+  const existing = await Block.find({}, 'blockId').lean();
+  const existingNumbers = new Set(existing.map((b) => b.blockId));
+  const toCreate = [];
+  for (let i = 1; i <= 120; i++) {
+    if (!existingNumbers.has(i)) toCreate.push({ blockId: i, productIds: [] });
+  }
+  if (toCreate.length) await Block.insertMany(toCreate);
+}
+
+// GET /api/blocks — all blocks with product count
+router.get('/', async (req, res) => {
+  await ensureBlocks();
+  const blocks = await Block.find().sort('blockId').populate('productIds').lean();
+  res.json(blocks);
+});
+
+// POST /api/blocks — create a new block with the next sequential blockId
+router.post('/', async (req, res) => {
+  try {
+    const lastBlock = await Block.findOne().sort({ blockId: -1 }).lean();
+    const nextBlockId = lastBlock ? lastBlock.blockId + 1 : 1;
+    const block = await Block.create({ blockId: nextBlockId, productIds: [] });
+    const created = await Block.findById(block._id).populate('productIds').lean();
+
+    try {
+      const io = getIO();
+      io.emit('blocks_updated');
+    } catch (_) {}
+
+    res.status(201).json(created);
+  } catch (err) {
+    console.error('[blocks/create] Error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET /api/blocks/incoming/products — products not assigned to any block
+router.get('/incoming/products', async (req, res) => {
+  const blocks = await Block.find({}, 'productIds').lean();
+  const assignedIds = new Set();
+  for (const b of blocks) {
+    for (const pid of b.productIds) {
+      assignedIds.add(pid.toString());
+    }
+  }
+
+  const products = await Product.find({ status: { $in: ['active', 'pending'] } }).sort('-createdAt').lean();
+  const unassigned = products.filter((p) => !assignedIds.has(p._id.toString()));
+  res.json(unassigned);
+});
+
+// GET /api/blocks/search/products?q=term — search products across all blocks
+router.get('/search/products', async (req, res) => {
+  const q = req.query.q;
+  if (!q) return res.status(400).json({ error: 'Missing search query' });
+
+  const products = await Product.find({
+    $or: [
+      { name: { $regex: q, $options: 'i' } },
+      { brand: { $regex: q, $options: 'i' } },
+      { model: { $regex: q, $options: 'i' } },
+    ],
+  }).lean();
+
+  res.json(products);
+});
+
+// GET /api/blocks/:number — single block with populated products
+router.get('/:number', async (req, res) => {
+  const num = Number(req.params.number);
+  if (!num || num < 1) return res.status(400).json({ error: 'Invalid block number' });
+
+  await ensureBlocks();
+  const block = await Block.findOne({ blockId: num }).populate('productIds').lean();
+  if (!block) return res.status(404).json({ error: 'Block not found' });
+  res.json(block);
+});
+
+// POST /api/blocks/move — move product between blocks
+router.post('/move', async (req, res) => {
+  const { productId, fromBlock, toBlock, toIndex } = req.body;
+  if (!productId || !fromBlock || !toBlock || toIndex == null) {
+    return res.status(400).json({ error: 'Missing required fields: productId, fromBlock, toBlock, toIndex' });
+  }
+
+  try {
+    const source = await Block.findOne({ blockId: fromBlock });
+    const target = fromBlock === toBlock ? source : await Block.findOne({ blockId: toBlock });
+
+    if (!source || !target) {
+      return res.status(404).json({ error: 'Block not found' });
+    }
+
+    const idx = source.productIds.findIndex((id) => id.toString() === productId);
+    if (idx === -1) {
+      return res.status(400).json({ error: 'Product not found in source block' });
+    }
+    source.productIds.splice(idx, 1);
+    source.version += 1;
+
+    const safeIndex = Math.min(Math.max(0, toIndex), target.productIds.length);
+    target.productIds.splice(safeIndex, 0, productId);
+    target.version += 1;
+
+    await source.save();
+    if (fromBlock !== toBlock) await target.save();
+
+    const updatedSource = await Block.findOne({ blockId: fromBlock }).populate('productIds').lean();
+    const updatedTarget = fromBlock === toBlock
+      ? updatedSource
+      : await Block.findOne({ blockId: toBlock }).populate('productIds').lean();
+
+    res.json({ source: updatedSource, target: updatedTarget });
+  } catch (err) {
+    console.error('[blocks/move] Error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/blocks/:number/add — add product to block
+router.post('/:number/add', async (req, res) => {
+  const num = Number(req.params.number);
+  const { productId, index } = req.body;
+  if (!productId) return res.status(400).json({ error: 'Missing productId' });
+
+  const block = await Block.findOne({ blockId: num });
+  if (!block) return res.status(404).json({ error: 'Block not found' });
+
+  const safeIndex = index != null ? Math.min(Math.max(0, index), block.productIds.length) : block.productIds.length;
+  block.productIds.splice(safeIndex, 0, productId);
+  block.version += 1;
+  await block.save();
+
+  const updated = await Block.findOne({ blockId: num }).populate('productIds').lean();
+
+  // Broadcast to all clients so they see the update in real time
+  try {
+    const io = getIO();
+    io.emit('block_updated', updated);
+  } catch (_) { /* socket not initialized yet */ }
+
+  res.json(updated);
+});
+
+module.exports = router;
