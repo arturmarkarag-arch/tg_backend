@@ -1,5 +1,11 @@
 const dotenv = require('dotenv');
-dotenv.config({ path: '../.env' });
+const path = require('path');
+
+// Load local .env from repo root only when running locally.
+// In production (Render), environment variables are provided by the service.
+if (process.env.NODE_ENV !== 'production') {
+  dotenv.config({ path: path.resolve(__dirname, '../.env') });
+}
 
 const http = require('http');
 const mongoose = require('mongoose');
@@ -10,12 +16,15 @@ const { runArchiveCleanup } = require('./routes/archive');
 const { initSocket } = require('./socket');
 
 const PORT = Number(process.env.PORT) || 5000;
-const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/tg_manager';
+const MONGODB_URI = process.env.MONGODB_URI || (process.env.NODE_ENV === 'production' ? null : 'mongodb://localhost:27017/tg_manager');
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 
 async function startServer() {
   try {
+    if (!MONGODB_URI) {
+      throw new Error('MONGODB_URI is required in production');
+    }
     await mongoose.connect(MONGODB_URI, { useNewUrlParser: true, useUnifiedTopology: true });
     console.log('Connected to MongoDB');
 
@@ -32,7 +41,7 @@ async function startServer() {
     initSocket(server);
 
     server.listen(PORT, () => {
-      console.log(`Server listening on http://localhost:${PORT}`);
+      console.log(`Server listening on port ${PORT}`);
     });
   } catch (error) {
     console.error('Failed to start server:', error);

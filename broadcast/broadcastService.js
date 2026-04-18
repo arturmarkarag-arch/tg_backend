@@ -15,11 +15,14 @@ const Product = require('../models/Product');
 const User = require('../models/User');
 const { imageQueue, sendQueue } = require('./queues');
 
-const SERVER_BASE_URL = process.env.SERVER_BASE_URL || `http://localhost:${process.env.PORT || 5000}`;
+const SERVER_BASE_URL = process.env.SERVER_BASE_URL || (process.env.NODE_ENV === 'production' ? null : `http://localhost:${process.env.PORT || 5000}`);
 
 function getPhotoUrl(photoUrl) {
   if (!photoUrl) return null;
   if (photoUrl.startsWith('http://') || photoUrl.startsWith('https://')) return photoUrl;
+  if (!SERVER_BASE_URL) {
+    throw new Error('SERVER_BASE_URL must be configured in production to build absolute photo URLs');
+  }
   return `${SERVER_BASE_URL.replace(/\/+$/, '')}/${photoUrl.replace(/^\/+/, '')}`;
 }
 

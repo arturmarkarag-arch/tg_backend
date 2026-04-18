@@ -4,7 +4,11 @@
  */
 const IORedis = require('ioredis');
 
-const REDIS_URL = process.env.REDIS_URL || 'redis://127.0.0.1:6379';
+const REDIS_URL = process.env.REDIS_URL || (process.env.NODE_ENV === 'production' ? null : 'redis://127.0.0.1:6379');
+
+if (!REDIS_URL && process.env.NODE_ENV === 'production') {
+  throw new Error('REDIS_URL is required in production when broadcast is enabled');
+}
 
 /** Shared connection opts passed to BullMQ Queue / Worker constructors */
 const redisOpts = {
