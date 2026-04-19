@@ -1,6 +1,8 @@
 const express = require('express');
 const Order = require('../models/Order');
 const User = require('../models/User');
+const { sendOrderConfirmation } = require('../telegramBot');
+const { validateTelegramInitData } = require('../utils/validateTelegramInitData');
 
 const router = express.Router();
 
@@ -74,14 +76,28 @@ router.get('/:id', async (req, res) => {
 });
 
 router.post('/', async (req, res) => {
-  const { buyerTelegramId, items, shippingAddress, contactInfo, emojiType } = req.body;
-  if (!buyerTelegramId || !Array.isArray(items) || items.length === 0) {
-    return res.status(400).json({ error: 'buyerTelegramId and items are required' });
+  const { initData, buyerTelegramId, items, shippingAddress, contactInfo, emojiType } = req.body;
+  let telegramId = buyerTelegramId;
+
+  if (!telegramId && initData) {
+    const validation = validateTelegramInitData(initData, process.env.TELEGRAM_BOT_TOKEN);
+    if (validation.valid && validation.parsedData) {
+      telegramId = validation.parsedData.user?.id || validation.parsedData.id;
+    }
+  }
+
+  if (!telegramId || !Array.isArray(items) || items.length === 0) {
+    return res.status(400).json({ error: 'buyerTelegramId or valid initData and items are required' });
   }
 
   const totalPrice = items.reduce((sum, item) => sum + (item.price || 0) * item.quantity, 0);
-  const order = new Order({ buyerTelegramId, items, shippingAddress, contactInfo, emojiType, totalPrice });
+  const order = new Order({ buyerTelegramId: String(telegramId), items, shippingAddress, contactInfo, emojiType, totalPrice });
   await order.save();
+
+  sendOrderConfirmation(order.buyerTelegramId, items.length, totalPrice, order._id.toString()).catch((err) => {
+    console.error('Failed to send order confirmation:', err?.message || err);
+  });
+
   res.status(201).json(order);
 });
 

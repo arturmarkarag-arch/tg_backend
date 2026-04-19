@@ -52,6 +52,7 @@ const SHELF_PAGE_SIZE = 5;
 const orderInFlight = new Set();
 
 const SERVER_BASE_URL = process.env.SERVER_BASE_URL || (process.env.NODE_ENV === 'production' ? null : `http://localhost:${process.env.PORT || 5000}`);
+const WEB_APP_URL = process.env.WEB_APP_URL || 'http://localhost:5173/mini-app';
 
 let bot = null;
 let status = {
@@ -67,16 +68,19 @@ const roleCommands = {
     '/shelf - Переглянути ',
     '/mylist - Переглянути обрані товари',
     '/order - Оформити замовлення з обраних товарів',
+    '/miniapp - Відкрити Mini App',
   ],
   warehouse: [
     '/help - Показати доступні команди',
     '/profile - Мій профіль',
     '/receive - Прийняти товар на склад',
     '/ship - Переглянути замовлення для відвантаження',
+    '/miniapp - Відкрити Mini App',
   ],
   admin: [
     '/help - Показати доступні команди',
     '/profile - Мій профіль',
+    '/miniapp - Відкрити Mini App',
   ],
 };
 
@@ -90,16 +94,19 @@ const roleBotCommands = {
     { command: '/shelf', description: 'Переглянути товари' },
     { command: '/mylist', description: 'Переглянути обрані товари' },
     { command: '/order', description: 'Оформити замовлення' },
+    { command: '/miniapp', description: 'Відкрити Mini App' },
     { command: '/help', description: 'Показати доступні команди' },
     { command: '/profile', description: 'Мій профіль' },
   ],
   warehouse: [
     { command: '/receive', description: 'Прийняти товар на склад' },
     { command: '/ship', description: 'Замовлення для відвантаження' },
+    { command: '/miniapp', description: 'Відкрити Mini App' },
     { command: '/help', description: 'Показати доступні команди' },
     { command: '/profile', description: 'Мій профіль' },
   ],
   admin: [
+    { command: '/miniapp', description: 'Відкрити Mini App' },
     { command: '/help', description: 'Показати доступні команди' },
     { command: '/profile', description: 'Мій профіль' },
   ],
@@ -198,6 +205,21 @@ async function sendMessageWithRetry(chatId, text, attempts = 3) {
       return sendMessageWithRetry(chatId, text, attempts - 1);
     }
     throw error;
+  }
+}
+
+async function sendOrderConfirmation(chatId, itemCount, totalPrice, orderId) {
+  if (!chatId) return null;
+
+  const maybeUrl = SERVER_BASE_URL ? `${SERVER_BASE_URL.replace(/\/+$/, '')}/orders/${orderId}` : null;
+  const message = `✅ Ваше замовлення з ${itemCount} позицій сформовано на суму ${totalPrice}.` +
+    (maybeUrl ? `\nПереглянути замовлення: ${maybeUrl}` : '');
+
+  try {
+    return await sendMessageWithRetry(chatId, message);
+  } catch (err) {
+    console.warn('Не вдалося надіслати підтвердження замовлення:', err?.message || err);
+    return null;
   }
 }
 
@@ -646,6 +668,25 @@ async function initBot(token) {
         }
 
         await bot.sendMessage(chatId, buildProfileMessage(user));
+        return;
+      }
+
+      if (text === '/miniapp') {
+        if (!user) {
+          await bot.sendMessage(chatId, getUnknownUserMessage());
+          return;
+        }
+
+        if (WEB_APP_URL.startsWith('https://')) {
+          await bot.sendMessage(chatId, 'Відкрийте Mini App:', {
+            reply_markup: {
+              inline_keyboard: [[{ text: 'Відкрити Mini App', web_app: { url: WEB_APP_URL } }]],
+            },
+          });
+          return;
+        }
+
+        await bot.sendMessage(chatId, `Відкрийте Mini App: ${WEB_APP_URL}`);
         return;
       }
 
@@ -1302,4 +1343,5 @@ module.exports = {
   initBot,
   getBotStatus,
   getBot: () => bot,
+  sendOrderConfirmation,
 };

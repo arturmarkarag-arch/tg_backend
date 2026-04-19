@@ -80,8 +80,45 @@ router.get('/images/:filename', async (req, res) => {
 });
 
 router.get('/', async (req, res) => {
-  const products = await Product.find({ status: { $ne: 'archived' } }).sort({ orderNumber: 1, createdAt: -1 });
-  res.json(products);
+  const limit = Math.min(50, Math.max(1, Number(req.query.limit) || 24));
+  const offset = Math.max(0, Number(req.query.offset) || 0);
+  const dateFilter = req.query.date_filter;
+  const query = { status: { $ne: 'archived' } };
+
+  if (dateFilter) {
+    const parsedDate = new Date(dateFilter);
+    if (!Number.isNaN(parsedDate.getTime())) {
+      const nextDay = new Date(parsedDate);
+      nextDay.setUTCDate(nextDay.getUTCDate() + 1);
+      query.createdAt = { $gte: parsedDate, $lt: nextDay };
+    }
+  }
+
+  const total = await Product.countDocuments(query);
+  const products = await Product.find(query)
+    .sort({ orderNumber: 1, createdAt: -1 })
+    .skip(offset)
+    .limit(limit)
+    .lean();
+
+  const items = products.map((product) => ({
+    id: product._id,
+    title: product.name,
+    price: product.price,
+    quantity: product.quantity,
+    image_url: product.imageUrls?.[0] || product.localImageUrl || '',
+    thumbnail_url: product.imageUrls?.[0] || product.localImageUrl || '',
+    status: product.status,
+    createdAt: product.createdAt,
+  }));
+
+  res.json({
+    items,
+    offset,
+    limit,
+    total,
+    hasMore: offset + items.length < total,
+  });
 });
 
 router.get('/pending', async (req, res) => {

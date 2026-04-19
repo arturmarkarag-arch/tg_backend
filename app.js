@@ -10,6 +10,7 @@ const deliveryGroupsRouter = require('./routes/deliveryGroups');
 const { router: archiveRouter } = require('./routes/archive');
 const broadcastRouter = require('./routes/broadcast');
 const blocksRouter = require('./routes/blocks');
+const telegramV1Router = require('./routes/v1/telegram');
 const { getBotStatus } = require('./telegramBot');
 const { verifyOpenAIConnection } = require('./openaiClient');
 
@@ -50,14 +51,17 @@ app.get('/api/openai-status', async (req, res) => {
 });
 
 app.use('/api/products', productsRouter);
+app.use('/api/v1/products', productsRouter);
 app.use('/api/users', usersRouter);
 app.use('/api/activity', activityRouter);
 app.use('/api/warehouse', warehouseRouter);
 app.use('/api/orders', ordersRouter);
+app.use('/api/v1/orders', ordersRouter);
 app.use('/api/delivery-groups', deliveryGroupsRouter);
 app.use('/api/archive', archiveRouter);
 app.use('/api/broadcast', broadcastRouter);
 app.use('/api/blocks', blocksRouter);
+app.use('/api/v1/telegram', telegramV1Router);
 
 // Initialize broadcast workers + Bull Board UI (only if Redis is available)
 if (process.env.REDIS_URL || process.env.ENABLE_BROADCAST === 'true') {
