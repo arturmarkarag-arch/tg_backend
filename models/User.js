@@ -12,6 +12,20 @@ const UserSchema = new mongoose.Schema(
     shopAddress: { type: String, default: '' },
     shopCity: { type: String, default: '' },
     warehouseZone: { type: String, default: '' },
+    botBlocked: { type: Boolean, default: false },
+    botLastActivityAt: { type: Date, default: null },
+    botLastSessionAt: { type: Date, default: null },
+    lastBotState: {
+      shop: {
+        productIds: [{ type: String }],
+        currentIndex: { type: Number, default: 0 },
+        updatedAt: { type: Date, default: null },
+      },
+      shelf: {
+        page: { type: Number, default: 0 },
+        updatedAt: { type: Date, default: null },
+      },
+    },
     isOnline: { type: Boolean, default: false },
     lastActive: { type: Date, default: Date.now },
   },

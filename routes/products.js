@@ -101,24 +101,29 @@ router.get('/', async (req, res) => {
     .limit(limit)
     .lean();
 
-  const items = products.map((product) => ({
-    id: product._id,
-    title: product.name,
-    price: product.price,
-    quantity: product.quantity,
-    image_url: product.imageUrls?.[0] || product.localImageUrl || '',
-    thumbnail_url: product.imageUrls?.[0] || product.localImageUrl || '',
-    status: product.status,
-    createdAt: product.createdAt,
-  }));
+  const isV1 = String(req.baseUrl || '').includes('/api/v1') || String(req.originalUrl || '').startsWith('/api/v1');
+  if (isV1) {
+    const items = products.map((product) => ({
+      id: product._id,
+      title: product.name,
+      price: product.price,
+      quantity: product.quantity,
+      image_url: product.imageUrls?.[0] || product.localImageUrl || '',
+      thumbnail_url: product.imageUrls?.[0] || product.localImageUrl || '',
+      status: product.status,
+      createdAt: product.createdAt,
+    }));
 
-  res.json({
-    items,
-    offset,
-    limit,
-    total,
-    hasMore: offset + items.length < total,
-  });
+    return res.json({
+      items,
+      offset,
+      limit,
+      total,
+      hasMore: offset + items.length < total,
+    });
+  }
+
+  res.json(products);
 });
 
 router.get('/pending', async (req, res) => {

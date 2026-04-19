@@ -8,6 +8,7 @@ const Product = require('./models/Product');
 const Order = require('./models/Order');
 const PendingReaction = require('./models/PendingReaction');
 const BotSession = require('./models/BotSession');
+const BotInteractionLog = require('./models/BotInteractionLog');
 const Block = require('./models/Block');
 const { getIO } = require('./socket');
 
@@ -25,6 +26,7 @@ const r2Client = new S3Client({
 const SESSION_TTL = {
   receive: 30 * 60 * 1000,       // 30 min
   shelf: 2 * 60 * 60 * 1000,     // 2 hours
+  shop: 2 * 60 * 60 * 1000,      // 2 hours
   ship: 4 * 60 * 60 * 1000,      // 4 hours
 };
 
@@ -46,7 +48,87 @@ async function deleteSession(chatId, type, key = '') {
   await BotSession.deleteOne({ chatId: String(chatId), type, key });
 }
 
+async function updateUserBotActivity(chatId) {
+  try {
+    await User.findOneAndUpdate(
+      { telegramId: String(chatId) },
+      {
+        botBlocked: false,
+        botLastActivityAt: new Date(),
+        botLastSessionAt: new Date(),
+      }
+    );
+  } catch (_) {}
+}
+
+async function persistUserBotState(chatId, state) {
+  try {
+    await User.findOneAndUpdate(
+      { telegramId: String(chatId) },
+      { $set: state },
+      { new: true }
+    );
+  } catch (_) {}
+}
+
+async function markUserBotBlocked(chatId) {
+  try {
+    await User.findOneAndUpdate({ telegramId: String(chatId) }, { botBlocked: true });
+  } catch (_) {}
+}
+
+async function logBotInteraction(telegramId, type, action, label = '', context = {}) {
+  try {
+    await BotInteractionLog.create({ telegramId: String(telegramId), type, action, label, context });
+  } catch (_) {}
+}
+
+async function handleMyChatMemberUpdate(update) {
+  try {
+    const payload = update?.my_chat_member || update || {};
+    const chatId = String(payload.chat?.id || payload.chat_id || payload.from?.id || '');
+    const newStatus = payload.new_chat_member?.status || payload.new_chat_member_status;
+    if (!chatId || !newStatus) return;
+
+    if (newStatus === 'kicked') {
+      await markUserBotBlocked(chatId);
+      await logBotInteraction(chatId, 'system', 'my_chat_member', 'kicked', { payload });
+      return;
+    }
+
+    if (['member', 'administrator', 'creator'].includes(newStatus)) {
+      await User.findOneAndUpdate(
+        { telegramId: chatId },
+        { botBlocked: false, botLastActivityAt: new Date() }
+      );
+      await logBotInteraction(chatId, 'system', 'my_chat_member', newStatus, { payload });
+    }
+  } catch (error) {
+    console.error('Failed to handle my_chat_member update:', error);
+  }
+}
+
+async function checkBotAccess(chatId) {
+  try {
+    await bot.sendChatAction(chatId, 'typing');
+    await updateUserBotActivity(chatId);
+    return true;
+  } catch (error) {
+    const errCode = error?.response?.body?.error_code;
+    const description = error?.response?.body?.description || '';
+    if (errCode === 403 && description.toLowerCase().includes('blocked')) {
+      await markUserBotBlocked(chatId);
+      return false;
+    }
+    throw error;
+  }
+}
+
 const SHELF_PAGE_SIZE = 5;
+const SHOP_PREFETCH_COUNT = 8;
+const SHOP_PREFETCH_THRESHOLD = 5;
+const shopPhotoBufferCache = new Map();
+const shopPhotoBufferFetchPromises = new Map();
 
 // Guard against double-submit of /order (in-memory is fine, non-critical)
 const orderInFlight = new Set();
@@ -65,7 +147,8 @@ const roleCommands = {
   seller: [
     '/help - Показати доступні команди',
     '/profile - Мій профіль',
-    '/shelf - Переглянути ',
+    '/shelf - Переглянути товари у вигляді списку',
+    '/shop - Переглянути товари в одному товарі з навігацією',
     '/mylist - Переглянути обрані товари',
     '/order - Оформити замовлення з обраних товарів',
     '/miniapp - Відкрити Mini App',
@@ -92,6 +175,7 @@ function buildRoleHelp(role) {
 const roleBotCommands = {
   seller: [
     { command: '/shelf', description: 'Переглянути товари' },
+    { command: '/shop', description: 'Переглянути товари в одному повідомленні' },
     { command: '/mylist', description: 'Переглянути обрані товари' },
     { command: '/order', description: 'Оформити замовлення' },
     { command: '/miniapp', description: 'Відкрити Mini App' },
@@ -163,6 +247,95 @@ function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function trimShopPhotoCache() {
+  while (shopPhotoBufferCache.size > SHOP_PREFETCH_COUNT) {
+    const oldestKey = shopPhotoBufferCache.keys().next().value;
+    shopPhotoBufferCache.delete(oldestKey);
+  }
+}
+
+async function cacheShopPhotoBuffer(product) {
+  if (!product || product.telegramFileId) return null;
+  const photoUrl = getPhotoUrl(product.imageUrls?.[0]);
+  if (!photoUrl) return null;
+
+  const productId = String(product._id);
+  if (shopPhotoBufferCache.has(productId)) {
+    return shopPhotoBufferCache.get(productId);
+  }
+  if (shopPhotoBufferFetchPromises.has(productId)) {
+    return shopPhotoBufferFetchPromises.get(productId);
+  }
+
+  const promise = (async () => {
+    try {
+      const buffer = await fetchPhotoBuffer(photoUrl);
+      shopPhotoBufferCache.set(productId, buffer);
+      trimShopPhotoCache();
+      return buffer;
+    } catch (error) {
+      return null;
+    } finally {
+      shopPhotoBufferFetchPromises.delete(productId);
+    }
+  })();
+
+  shopPhotoBufferFetchPromises.set(productId, promise);
+  return promise;
+}
+
+function countCachedShopPhotos(productIds = [], currentIndex = 0) {
+  if (!Array.isArray(productIds) || !productIds.length) return 0;
+
+  const start = currentIndex + 1;
+  const end = Math.min(productIds.length, start + SHOP_PREFETCH_COUNT);
+  let count = 0;
+
+  for (let i = start; i < end; i += 1) {
+    const id = productIds[i];
+    if (id && shopPhotoBufferCache.has(String(id))) {
+      count += 1;
+    }
+  }
+
+  return count;
+}
+
+async function preloadShopPhotos(productIds = [], currentIndex = 0) {
+  if (!Array.isArray(productIds) || !productIds.length) return;
+
+  const start = currentIndex + 1;
+  const end = Math.min(productIds.length, start + SHOP_PREFETCH_COUNT);
+  const idsToLoad = [];
+  for (let i = start; i < end; i += 1) {
+    const id = productIds[i];
+    if (!id || shopPhotoBufferCache.has(String(id))) continue;
+    idsToLoad.push(String(id));
+  }
+
+  if (!idsToLoad.length) return;
+
+  const products = await Product.find({ _id: { $in: idsToLoad } }).lean();
+  const productsById = new Map(products.map((p) => [String(p._id), p]));
+
+  await Promise.allSettled(
+    idsToLoad.map((id) => cacheShopPhotoBuffer(productsById.get(id)))
+  );
+}
+
+async function ensureShopPhotoBuffer(productIds = [], currentIndex = 0) {
+  if (!Array.isArray(productIds) || !productIds.length) return;
+
+  const start = currentIndex + 1;
+  const end = Math.min(productIds.length, start + SHOP_PREFETCH_COUNT);
+  const totalWindow = Math.max(0, end - start);
+  const cachedAhead = countCachedShopPhotos(productIds, currentIndex);
+
+  if (cachedAhead < totalWindow || cachedAhead <= SHOP_PREFETCH_THRESHOLD) {
+    await preloadShopPhotos(productIds, currentIndex);
+  }
+}
+
 function isLocalUrl(photoUrl) {
   try {
     const parsed = new URL(photoUrl);
@@ -195,10 +368,17 @@ async function fetchPhotoBuffer(photoUrl) {
 
 async function sendMessageWithRetry(chatId, text, attempts = 3) {
   try {
-    return await bot.sendMessage(chatId, text);
+    const result = await bot.sendMessage(chatId, text);
+    await updateUserBotActivity(chatId);
+    return result;
   } catch (error) {
+    const errCode = error?.response?.body?.error_code;
+    const description = error?.response?.body?.description || '';
+    if (errCode === 403 && description.toLowerCase().includes('blocked')) {
+      await markUserBotBlocked(chatId);
+    }
     const retryAfter = Number(error?.response?.body?.parameters?.retry_after || 0);
-    if (attempts > 0 && error?.response?.body?.error_code === 429) {
+    if (attempts > 0 && errCode === 429) {
       const delayMs = (retryAfter || 2) * 1000;
       console.warn(`Telegram 429 on sendMessage, retrying after ${delayMs}ms (${attempts - 1} attempts left)`);
       await delay(delayMs);
@@ -225,10 +405,17 @@ async function sendOrderConfirmation(chatId, itemCount, totalPrice, orderId) {
 
 async function sendPhotoWithRetry(chatId, photo, options = {}, attempts = 3) {
   try {
-    return await bot.sendPhoto(chatId, photo, options);
+    const result = await bot.sendPhoto(chatId, photo, options);
+    await updateUserBotActivity(chatId);
+    return result;
   } catch (error) {
+    const errCode = error?.response?.body?.error_code;
+    const description = error?.response?.body?.description || '';
+    if (errCode === 403 && description.toLowerCase().includes('blocked')) {
+      await markUserBotBlocked(chatId);
+    }
     const retryAfter = Number(error?.response?.body?.parameters?.retry_after || 0);
-    if (attempts > 0 && error?.response?.body?.error_code === 429) {
+    if (attempts > 0 && errCode === 429) {
       const delayMs = (retryAfter || 2) * 1000;
       console.warn(`Telegram 429 on sendPhoto, retrying after ${delayMs}ms (${attempts - 1} attempts left)`);
       await delay(delayMs);
@@ -245,6 +432,12 @@ async function sendShelfProducts(chatId, page = 0) {
     return;
   }
 
+  const user = await User.findOne({ telegramId: chatId });
+  const persistentShelfPage = user?.lastBotState?.shelf?.page;
+  const effectivePage = arguments.length === 0 && Number.isInteger(persistentShelfPage)
+    ? persistentShelfPage
+    : page;
+
   // Delete previous shelf messages first
   const prev = await getSession(chatId, 'shelf');
   if (prev?.messageIds?.length) {
@@ -252,7 +445,7 @@ async function sendShelfProducts(chatId, page = 0) {
   }
 
   const totalPages = Math.ceil(products.length / SHELF_PAGE_SIZE);
-  const safePage = Math.max(0, Math.min(page, totalPages - 1));
+  const safePage = Math.max(0, Math.min(effectivePage, totalPages - 1));
   const pageProducts = products.slice(safePage * SHELF_PAGE_SIZE, (safePage + 1) * SHELF_PAGE_SIZE);
 
   const sentIds = [];
@@ -325,6 +518,12 @@ async function sendShelfProducts(chatId, page = 0) {
     page: safePage,
     messageIds: sentIds,
   });
+  await persistUserBotState(chatId, {
+    'lastBotState.shelf': {
+      page: safePage,
+      updatedAt: new Date(),
+    },
+  });
 }
 
 async function deleteShelfMessages(chatId, messageIds) {
@@ -332,6 +531,296 @@ async function deleteShelfMessages(chatId, messageIds) {
     try {
       await bot.deleteMessage(chatId, msgId);
     } catch (_) { /* message may already be deleted */ }
+  }
+}
+
+function buildShopCaption(product, currentIndex, totalProducts) {
+  return [
+    `📦 #${product.orderNumber || 'N/A'} — ${product.name || 'Без назви'}`,
+    `💰 ${product.price || 0} zł`,
+    `📦 В упаковці: ${product.quantityPerPackage || '?'} шт`,
+    '',
+    `${currentIndex + 1} / ${totalProducts}`,
+  ].join('\n');
+}
+
+function buildShopKeyboard(productId, currentIndex, totalPages, selectedQty = 0, pendingCount = 0) {
+  const qtyLabels = ['1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣'];
+  const qtyRow = qtyLabels.map((label, idx) => {
+    const qty = idx + 1;
+    return {
+      text: qty === selectedQty ? `✅ ${label}` : label,
+      callback_data: `shop_qty:${productId}:${qty}`,
+    };
+  });
+
+  const navRow = [];
+  if (currentIndex > 0) navRow.push({ text: '◀️ Назад', callback_data: `shop_prev:${currentIndex}` });
+  navRow.push({ text: `${currentIndex + 1}/${totalPages}`, callback_data: 'noop' });
+  if (currentIndex < totalPages - 1) navRow.push({ text: 'Далі ▶️', callback_data: `shop_next:${currentIndex}` });
+
+  const actionRow = [
+    { text: `🛒 Мій список (${pendingCount})`, callback_data: 'shop_mylist' },
+    { text: '✅ Оформити', callback_data: 'shop_order' },
+  ];
+
+  const keyboard = [qtyRow];
+  if (navRow.length) keyboard.push(navRow);
+  keyboard.push(actionRow);
+  return { inline_keyboard: keyboard };
+}
+
+async function deleteShopMessage(chatId, messageId) {
+  try {
+    await bot.deleteMessage(chatId, messageId);
+  } catch (_) { /* message may already be deleted */ }
+}
+
+function getShopMenuLabel(shopSession = {}) {
+  const total = Array.isArray(shopSession.productIds) ? shopSession.productIds.length : 0;
+  const index = Number.isInteger(shopSession.currentIndex) ? shopSession.currentIndex : -1;
+  return index >= 0 && index < total - 1 ? 'Продовжити замовлення' : 'Товари';
+}
+
+function buildShopControlKeyboard(label = 'Товари') {
+  return {
+    keyboard: [[{ text: label }]],
+    resize_keyboard: true,
+    one_time_keyboard: false,
+  };
+}
+
+function getShopMenuPrompt(label = 'Товари') {
+  return label === 'Продовжити замовлення'
+    ? 'Продовжіть замовлення з того місця, де зупинились.'
+    : 'Натисніть кнопку нижче, щоб переглянути товари.';
+}
+
+async function setShopMenuButton(chatId, label = 'Товари', resetSession = false) {
+  const prev = await getSession(chatId, 'shop');
+  if (prev?.menuMessageId) {
+    await deleteShopMessage(chatId, prev.menuMessageId);
+  }
+
+  const sent = await bot.sendMessage(chatId, getShopMenuPrompt(label), {
+    reply_markup: buildShopControlKeyboard(label),
+  });
+
+  const newSession = resetSession
+    ? { menuMessageId: String(sent.message_id), menuLabel: label }
+    : { ...(prev || {}), menuMessageId: String(sent.message_id), menuLabel: label };
+
+  await setSession(chatId, 'shop', newSession);
+  return sent;
+}
+
+async function deleteShopMenuMessage(chatId, session) {
+  if (!session?.menuMessageId) return;
+  await deleteShopMessage(chatId, session.menuMessageId);
+}
+
+async function upsertPendingReaction(chatId, messageId, productId, quantity) {
+  const doc = {
+    sellerTelegramId: chatId,
+    productId,
+    messageId,
+    chatId,
+    emoji: `x${quantity}`,
+    quantity,
+  };
+
+  try {
+    return await PendingReaction.findOneAndUpdate(
+      { sellerTelegramId: chatId, productId },
+      doc,
+      { upsert: true, new: true, setDefaultsOnInsert: true }
+    );
+  } catch (error) {
+    if (error.code === 11000) {
+      return await PendingReaction.findOneAndUpdate(
+        { sellerTelegramId: chatId, productId },
+        doc,
+        { upsert: true, new: true, setDefaultsOnInsert: true }
+      );
+    }
+    throw error;
+  }
+}
+
+async function fixPendingReactionIndexes() {
+  try {
+    const collection = PendingReaction.collection;
+    const indexes = await collection.indexes();
+    const oldIndex = indexes.find((idx) => idx.name === 'sellerTelegramId_1_messageId_1');
+    if (oldIndex) {
+      await collection.dropIndex(oldIndex.name);
+      console.log('[Bot] Dropped legacy PendingReaction index:', oldIndex.name);
+    }
+
+    const duplicates = await collection.aggregate([
+      {
+        $group: {
+          _id: { sellerTelegramId: '$sellerTelegramId', productId: '$productId' },
+          ids: { $push: { id: '$_id', updatedAt: '$updatedAt' } },
+          count: { $sum: 1 },
+        },
+      },
+      { $match: { count: { $gt: 1 } } },
+    ]).toArray();
+
+    for (const dup of duplicates) {
+      dup.ids.sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
+      const removeIds = dup.ids.slice(1).map((item) => item.id);
+      if (removeIds.length) {
+        await collection.deleteMany({ _id: { $in: removeIds } });
+        console.log('[Bot] Removed duplicate PendingReaction docs for', dup._id);
+      }
+    }
+
+    await collection.createIndex({ sellerTelegramId: 1, productId: 1 }, { unique: true });
+    console.log('[Bot] Ensured PendingReaction index: sellerTelegramId_1_productId_1');
+  } catch (error) {
+    console.warn('[Bot] Failed to fix PendingReaction indexes:', error?.message || error);
+  }
+}
+
+async function getPendingQuantity(chatId, productId) {
+  if (!productId) return 0;
+  const pending = await PendingReaction.findOne({ sellerTelegramId: chatId, productId });
+  return pending?.quantity || 0;
+}
+
+async function makeProductMedia(product, caption) {
+  const photoUrl = getPhotoUrl(product.imageUrls?.[0]);
+  if (product.telegramFileId) {
+    return { type: 'photo', media: product.telegramFileId, caption, isBuffer: false };
+  }
+  if (!photoUrl) {
+    return null;
+  }
+
+  const buffer = await cacheShopPhotoBuffer(product);
+  if (buffer) {
+    return { type: 'photo', media: buffer, caption, isBuffer: true };
+  }
+
+  return { type: 'photo', media: photoUrl, caption, isBuffer: false };
+}
+
+async function sendShopMedia(chatId, product, caption, replyMarkup) {
+  const media = await makeProductMedia(product, caption);
+  if (!media) {
+    return await bot.sendMessage(chatId, caption, { reply_markup: replyMarkup });
+  }
+
+  const sendOpts = { caption, reply_markup: replyMarkup };
+  if (media.isBuffer) {
+    sendOpts.filename = 'shop.jpg';
+  }
+
+  const sent = await bot.sendPhoto(chatId, media.media, sendOpts);
+  if (sent?.photo?.length && !product.telegramFileId) {
+    const fileId = sent.photo[sent.photo.length - 1].file_id;
+    await Product.findByIdAndUpdate(product._id, { telegramFileId: fileId }).catch(() => {});
+  }
+  return sent;
+}
+
+async function updateShopMessage(chatId, msgId, product, caption, replyMarkup) {
+  const media = await makeProductMedia(product, caption);
+  if (!media) {
+    return await bot.editMessageText(caption, { chat_id: chatId, message_id: msgId, reply_markup: replyMarkup });
+  }
+
+  if (media.isBuffer) {
+    const attachName = 'photo';
+    const [formData] = bot._formatSendData(attachName, media.media, { filename: 'shop.jpg', contentType: 'image/jpeg' });
+    const payload = { type: 'photo', media: `attach://${attachName}`, caption: media.caption };
+    const opts = {
+      qs: {
+        chat_id: chatId,
+        message_id: msgId,
+        reply_markup: JSON.stringify(replyMarkup),
+        media: JSON.stringify(payload),
+      },
+      formData,
+    };
+
+    try {
+      const updated = await bot._request('editMessageMedia', opts);
+      if (updated?.photo?.length && !product.telegramFileId) {
+        const fileId = updated.photo[updated.photo.length - 1].file_id;
+        await Product.findByIdAndUpdate(product._id, { telegramFileId: fileId }).catch(() => {});
+      }
+      return updated;
+    } catch (error) {
+      console.warn('editMessageMedia buffer failed, falling back to sendPhoto', error?.message || error);
+      const sent = await bot.sendPhoto(chatId, media.media, { caption: media.caption, reply_markup: replyMarkup, filename: 'shop.jpg' });
+      if (sent?.photo?.length && !product.telegramFileId) {
+        const fileId = sent.photo[sent.photo.length - 1].file_id;
+        await Product.findByIdAndUpdate(product._id, { telegramFileId: fileId }).catch(() => {});
+      }
+      try {
+        await bot.deleteMessage(chatId, msgId);
+      } catch (_) {}
+      return sent;
+    }
+  }
+
+  return await bot.editMessageMedia(media, { chat_id: chatId, message_id: msgId, reply_markup: replyMarkup });
+}
+
+async function sendShopProducts(chatId, index = 0) {
+  const products = await Product.find({ status: 'active' }).sort({ orderNumber: 1 }).lean();
+  if (!products.length) {
+    await bot.sendMessage(chatId, 'Активних товарів на складі поки що немає.');
+    return;
+  }
+
+  const prev = await getSession(chatId, 'shop');
+  const user = await User.findOne({ telegramId: chatId });
+  if (prev?.messageId) {
+    await deleteShopMessage(chatId, prev.messageId);
+  }
+  if (prev?.menuMessageId) {
+    await deleteShopMessage(chatId, prev.menuMessageId);
+  }
+
+  const totalProducts = products.length;
+  const persistentShopIndex = user?.lastBotState?.shop?.currentIndex;
+  const desiredIndex = (prev?.currentIndex != null && Number.isInteger(prev.currentIndex))
+    ? prev.currentIndex
+    : (Number.isInteger(persistentShopIndex) ? persistentShopIndex : index);
+  const safeIndex = Math.max(0, Math.min(desiredIndex, totalProducts - 1));
+  const product = products[safeIndex];
+  const caption = buildShopCaption(product, safeIndex, totalProducts);
+  const photoUrl = getPhotoUrl(product.imageUrls?.[0]);
+  const pendingCount = await PendingReaction.countDocuments({ sellerTelegramId: chatId });
+  const selectedQty = await getPendingQuantity(chatId, product._id);
+  const replyMarkup = buildShopKeyboard(String(product._id), safeIndex, totalProducts, selectedQty, pendingCount);
+
+  try {
+    const productIds = products.map((p) => String(p._id));
+    const preloadPromise = ensureShopPhotoBuffer(productIds, safeIndex);
+    const sent = await sendShopMedia(chatId, product, caption, replyMarkup);
+    if (sent?.message_id) {
+      await setSession(chatId, 'shop', {
+        productIds,
+        currentIndex: safeIndex,
+        messageId: String(sent.message_id),
+        hasPhoto: Boolean(product.telegramFileId || photoUrl),
+      });
+      await persistUserBotState(chatId, {
+        'lastBotState.shop': {
+          productIds,
+          currentIndex: safeIndex,
+          updatedAt: new Date(),
+        },
+      });
+    }
+    preloadPromise.catch(() => {});
+  } catch (error) {
+    console.error('Failed to send shop message', product._id, error);
   }
 }
 
@@ -606,7 +1095,7 @@ async function initBot(token) {
     bot = new TelegramBot(token, {
       polling: {
         params: {
-          allowed_updates: ['message', 'message_reaction', 'callback_query'],
+          allowed_updates: ['message', 'message_reaction', 'callback_query', 'my_chat_member'],
         },
       },
     });
@@ -621,8 +1110,15 @@ async function initBot(token) {
       try {
       const chatId = String(msg.chat.id);
       const rawText = msg.text?.trim() || '';
-      const text = rawText.split(' ')[0] || '';
+      const text = (rawText.match(/^\/\S+/)?.[0] || '').split('@')[0].toLowerCase();
+      const messageText = rawText.toLowerCase();
       const user = await User.findOne({ telegramId: chatId });
+      if (user) {
+        updateUserBotActivity(chatId).catch(() => {});
+        if (messageText === 'товари' || messageText === 'продовжити замовлення') {
+          await logBotInteraction(chatId, 'reply', messageText, messageText);
+        }
+      }
 
       // Step-by-step /receive flow takes priority (but not for other commands)
       const rState = await getSession(chatId, 'receive');
@@ -644,10 +1140,13 @@ async function initBot(token) {
         // Set per-chat commands based on role
         await setRoleCommands(chatId, user.role);
 
-        await bot.sendMessage(
+        const shopSession = await getSession(chatId, 'shop');
+        const label = getShopMenuLabel(shopSession);
+        const sent = await bot.sendMessage(
           chatId,
           `Привіт, ${user.firstName || 'користувачу'}! Ви зайшли як ${user.role}.\n\n${buildRoleHelp(user.role)}`
         );
+        await setShopMenuButton(chatId, label);
         return;
       }
 
@@ -657,7 +1156,10 @@ async function initBot(token) {
           return;
         }
 
+        const shopSession = await getSession(chatId, 'shop');
+        const label = getShopMenuLabel(shopSession);
         await bot.sendMessage(chatId, buildRoleHelp(user.role));
+        await setShopMenuButton(chatId, label);
         return;
       }
 
@@ -702,6 +1204,21 @@ async function initBot(token) {
         }
 
         await sendShelfProducts(chatId);
+        return;
+      }
+
+      if (text === '/shop' || messageText === 'товари' || messageText === 'продовжити замовлення') {
+        if (!user) {
+          await bot.sendMessage(chatId, getUnknownUserMessage());
+          return;
+        }
+
+        if (user.role !== 'seller') {
+          await bot.sendMessage(chatId, 'Ця команда доступна лише продавцю. Використайте /help, щоб побачити доступні команди.');
+          return;
+        }
+
+        await sendShopProducts(chatId);
         return;
       }
 
@@ -750,6 +1267,10 @@ async function initBot(token) {
         try {
           const result = await finalizeOrder(chatId);
           await bot.sendMessage(chatId, result);
+          const shopSession = await getSession(chatId, 'shop');
+          const nextLabel = getShopMenuLabel(shopSession);
+          const reset = Array.isArray(shopSession?.productIds) && shopSession.currentIndex >= shopSession.productIds.length - 1;
+          await setShopMenuButton(chatId, nextLabel, reset);
         } finally {
           orderInFlight.delete(chatId);
         }
@@ -985,7 +1506,15 @@ async function initBot(token) {
       try {
       const chatId = String(query.message.chat.id);
       const msgId = String(query.message.message_id);
-      const data = query.data || '';
+      const data = String(query.data || '').trim();
+      const user = await User.findOne({ telegramId: chatId });
+      if (user) {
+        updateUserBotActivity(chatId).catch(() => {});
+        await logBotInteraction(chatId, 'callback', data, data, {
+          messageId: msgId,
+          chatId,
+        });
+      }
 
       // Handle "noop" for already-processed buttons
       if (data === 'noop') {
@@ -1079,6 +1608,169 @@ async function initBot(token) {
           const result = await finalizeOrder(chatId);
           await bot.answerCallbackQuery(query.id);
           await bot.sendMessage(chatId, result);
+        } finally {
+          orderInFlight.delete(chatId);
+        }
+        return;
+      }
+
+      // ── Shop quantity buttons: shop_qty:productId:qty ──
+      if (data.startsWith('shop_qty:')) {
+        const parts = data.split(':');
+        const productId = parts[1];
+        const quantity = parseInt(parts[2], 10);
+        if (!productId || !quantity) {
+          await bot.answerCallbackQuery(query.id);
+          return;
+        }
+
+        const product = await Product.findById(productId);
+        if (!product) {
+          await bot.answerCallbackQuery(query.id, { text: 'Товар не знайдено', show_alert: true });
+          return;
+        }
+
+        await upsertPendingReaction(chatId, msgId, product._id, quantity);
+
+        const shopSession = await getSession(chatId, 'shop');
+        const totalProducts = shopSession?.productIds?.length || 0;
+        const currentIndex = shopSession?.currentIndex || 0;
+        const nextIndex = Math.min(currentIndex + 1, totalProducts - 1);
+
+        const nextProductId = shopSession?.productIds?.[nextIndex];
+        const nextProduct = nextProductId ? await Product.findById(nextProductId) : null;
+        const pendingCount = await PendingReaction.countDocuments({ sellerTelegramId: chatId });
+
+        if (nextProduct && nextIndex !== currentIndex) {
+          const caption = buildShopCaption(nextProduct, nextIndex, totalProducts);
+          const selectedQty = await getPendingQuantity(chatId, nextProduct._id);
+          const replyMarkup = buildShopKeyboard(String(nextProduct._id), nextIndex, totalProducts, selectedQty, pendingCount);
+
+          try {
+            const preloadPromise = ensureShopPhotoBuffer(shopSession.productIds, nextIndex);
+            const updated = await updateShopMessage(chatId, msgId, nextProduct, caption, replyMarkup);
+            await setSession(chatId, 'shop', {
+              ...shopSession,
+              currentIndex: nextIndex,
+              hasPhoto: Boolean(updated?.photo || nextProduct.telegramFileId || getPhotoUrl(nextProduct.imageUrls?.[0])),
+              messageId: String(updated?.message_id || shopSession.messageId),
+            });
+          await persistUserBotState(chatId, {
+            'lastBotState.shop': {
+              productIds: shopSession.productIds,
+              currentIndex: nextIndex,
+              updatedAt: new Date(),
+            },
+          });
+            preloadPromise.catch(() => {});
+          } catch (error) {
+            console.error('Failed to advance shop message', error);
+          }
+        } else {
+          const replyMarkup = buildShopKeyboard(String(product._id), currentIndex, totalProducts, quantity, pendingCount);
+          try {
+            await bot.editMessageReplyMarkup(replyMarkup, { chat_id: chatId, message_id: msgId });
+          } catch (_) {}
+        }
+
+        await bot.answerCallbackQuery(query.id, { text: `✅ ${product.name} — ${quantity} шт`, show_alert: false });
+        return;
+      }
+
+      // ── Shop navigation: prev / next ──
+      if (data.startsWith('shop_prev:') || data.startsWith('shop_next:')) {
+        const shopSession = await getSession(chatId, 'shop');
+        if (!shopSession) {
+          await bot.answerCallbackQuery(query.id, { text: 'Сесія не знайдена. Натисніть /shop знову.', show_alert: true });
+          return;
+        }
+
+        const currentPage = parseInt(data.split(':')[1], 10);
+        let newIndex = currentPage;
+        if (data.startsWith('shop_next:')) {
+          newIndex = currentPage + 1;
+        } else {
+          newIndex = currentPage - 1;
+        }
+
+        const totalProducts = shopSession.productIds?.length || 0;
+        if (newIndex < 0) newIndex = 0;
+        if (newIndex >= totalProducts) newIndex = totalProducts - 1;
+
+        const productId = shopSession.productIds?.[newIndex];
+        const product = productId ? await Product.findById(productId) : null;
+        if (!product) {
+          await bot.answerCallbackQuery(query.id, { text: 'Товар не знайдено', show_alert: true });
+          return;
+        }
+
+        const caption = buildShopCaption(product, newIndex, totalProducts);
+        const pendingCount = await PendingReaction.countDocuments({ sellerTelegramId: chatId });
+        const selectedQty = await getPendingQuantity(chatId, product._id);
+        const replyMarkup = buildShopKeyboard(String(product._id), newIndex, totalProducts, selectedQty, pendingCount);
+
+        try {
+          const preloadPromise = ensureShopPhotoBuffer(shopSession.productIds, newIndex);
+          const updated = await updateShopMessage(chatId, msgId, product, caption, replyMarkup);
+          await setSession(chatId, 'shop', {
+            ...shopSession,
+            currentIndex: newIndex,
+            hasPhoto: Boolean(updated?.photo || product.telegramFileId || getPhotoUrl(product.imageUrls?.[0])),
+            messageId: String(updated?.message_id || shopSession.messageId),
+          });
+          await persistUserBotState(chatId, {
+            'lastBotState.shop': {
+              productIds: shopSession.productIds,
+              currentIndex: newIndex,
+              updatedAt: new Date(),
+            },
+          });
+          preloadPromise.catch(() => {});
+        } catch (error) {
+          console.error('Failed to update shop message', error);
+        }
+
+        await bot.answerCallbackQuery(query.id);
+        return;
+      }
+
+      // ── Shop: show my list ──
+      if (data === 'shop_mylist') {
+        const pending = await PendingReaction.find({ sellerTelegramId: chatId }).populate('productId');
+        if (!pending.length) {
+          await bot.answerCallbackQuery(query.id, { text: 'Список порожній', show_alert: true });
+          return;
+        }
+        const lines = pending
+          .filter((p) => p.productId)
+          .map((p, i) => `${i + 1}. ${p.productId.name} — ${p.productId.price} zł x${p.quantity || 1}`);
+        const total = pending.filter((p) => p.productId).reduce((sum, p) => sum + p.productId.price * (p.quantity || 1), 0);
+        await bot.answerCallbackQuery(query.id);
+        await bot.sendMessage(chatId, `🛒 Ваш список:
+
+${lines.join('\n')}
+
+Разом: ${total} zł
+
+Натисніть ✅ Оформити або /order`);
+        return;
+      }
+
+      // ── Shop: place order ──
+      if (data === 'shop_order') {
+        if (orderInFlight.has(chatId)) {
+          await bot.answerCallbackQuery(query.id, { text: 'Замовлення вже обробляється...', show_alert: false });
+          return;
+        }
+        orderInFlight.add(chatId);
+        try {
+          const result = await finalizeOrder(chatId);
+          await bot.answerCallbackQuery(query.id);
+          await bot.sendMessage(chatId, result);
+          const shopSession = await getSession(chatId, 'shop');
+          const nextLabel = getShopMenuLabel(shopSession);
+          const reset = Array.isArray(shopSession?.productIds) && shopSession.currentIndex >= shopSession.productIds.length - 1;
+          await setShopMenuButton(chatId, nextLabel, reset);
         } finally {
           orderInFlight.delete(chatId);
         }
@@ -1204,11 +1896,18 @@ async function initBot(token) {
         return;
       }
 
+      console.warn('[Bot] Unknown callback query action:', { data, chatId, msgId });
       await bot.answerCallbackQuery(query.id, { text: 'Невідома дія.', show_alert: true });
       } catch (err) {
         console.error('[Bot] Callback query handler error:', err);
         try { await bot.answerCallbackQuery(query.id); } catch (_) {}
       }
+    });
+
+    bot.on('my_chat_member', async (update) => {
+      await handleMyChatMemberUpdate(update).catch((err) => {
+        console.error('my_chat_member handler failed:', err);
+      });
     });
 
     const originalProcessUpdate = bot.processUpdate.bind(bot);
@@ -1344,4 +2043,5 @@ module.exports = {
   getBotStatus,
   getBot: () => bot,
   sendOrderConfirmation,
+  fixPendingReactionIndexes,
 };

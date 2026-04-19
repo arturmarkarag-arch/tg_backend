@@ -36,7 +36,8 @@ function validateTelegramInitData(initData, botToken) {
     return { valid: false, parsedData, rawData, error: 'Missing hash value' };
   }
 
-  const secretKey = crypto.createHash('sha256').update(botToken).digest();
+  // ВИПРАВЛЕНО: Telegram вимагає HMAC-SHA256("WebAppData", botToken) як ключ
+  const secretKey = crypto.createHmac('sha256', 'WebAppData').update(botToken).digest();
   const dataCheckString = buildDataCheckString(rawData);
   const hmac = crypto.createHmac('sha256', secretKey).update(dataCheckString).digest('hex');
 
