@@ -26,6 +26,16 @@ const UserSchema = new mongoose.Schema(
         updatedAt: { type: Date, default: null },
       },
     },
+    miniAppState: {
+      lastViewedProductId: { type: String, default: '' },
+      currentIndex: { type: Number, default: 0 },
+      orderItems: {
+        type: Map,
+        of: Number,
+        default: {},
+      },
+      updatedAt: { type: Date, default: null },
+    },
     isOnline: { type: Boolean, default: false },
     lastActive: { type: Date, default: Date.now },
   },

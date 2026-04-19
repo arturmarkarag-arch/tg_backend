@@ -388,6 +388,29 @@ async function sendMessageWithRetry(chatId, text, attempts = 3) {
   }
 }
 
+async function sendAdminNotification(message) {
+  try {
+    const admins = await User.find({ role: 'admin' }).lean();
+    if (!admins.length) {
+      console.warn('[Bot] No admins found to notify about registration request');
+      return;
+    }
+
+    await Promise.all(
+      admins.map(async (admin) => {
+        if (!admin.telegramId) return;
+        try {
+          await sendMessageWithRetry(admin.telegramId, message);
+        } catch (error) {
+          console.warn('[Bot] Failed to notify admin', admin.telegramId, error.message || error);
+        }
+      })
+    );
+  } catch (error) {
+    console.error('[Bot] sendAdminNotification failed:', error.message || error);
+  }
+}
+
 async function sendOrderConfirmation(chatId, itemCount, totalPrice, orderId) {
   if (!chatId) return null;
 
@@ -2043,5 +2066,6 @@ module.exports = {
   getBotStatus,
   getBot: () => bot,
   sendOrderConfirmation,
+  sendAdminNotification,
   fixPendingReactionIndexes,
 };
