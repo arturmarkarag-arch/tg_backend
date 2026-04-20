@@ -119,7 +119,7 @@ router.post('/mini-app/state', async (req, res) => {
 
 // POST /api/v1/telegram/register-request — заявка на реєстрацію нового продавця
 router.post('/register-request', async (req, res) => {
-  const { initData, firstName, lastName, phoneNumber, shopCity, shopAddress, shopName } = req.body;
+  const { initData, firstName, lastName, phoneNumber, shopCity, shopAddress, shopName, deliveryGroupId } = req.body;
   if (!initData) {
     return res.status(400).json({ error: 'initData is required' });
   }
@@ -134,7 +134,7 @@ router.post('/register-request', async (req, res) => {
     return res.status(400).json({ error: 'Telegram user id is missing' });
   }
 
-  if (!firstName || !lastName || !phoneNumber || !shopCity || !shopAddress || !shopName) {
+  if (!firstName || !lastName || !phoneNumber || !shopCity || !shopAddress || !shopName || !deliveryGroupId) {
     return res.status(400).json({ error: 'All registration fields are required' });
   }
 
@@ -148,6 +148,11 @@ router.post('/register-request', async (req, res) => {
     return res.status(409).json({ error: 'Registration request already exists' });
   }
 
+  const group = await DeliveryGroup.findById(deliveryGroupId).lean();
+  if (!group) {
+    return res.status(400).json({ error: 'Selected delivery group not found' });
+  }
+
   const request = await RegistrationRequest.create({
     telegramId,
     firstName,
@@ -156,6 +161,7 @@ router.post('/register-request', async (req, res) => {
     shopCity,
     shopAddress,
     shopName,
+    deliveryGroupId,
     status: 'pending',
     meta: { submittedAt: new Date() },
   });
@@ -168,6 +174,7 @@ router.post('/register-request', async (req, res) => {
     `Місто: ${shopCity}\n` +
     `Назва магазину: ${shopName}\n` +
     `Адреса: ${shopAddress}\n` +
+    `Група доставки: ${group.name} (${['Нд', 'Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб'][group.dayOfWeek] || 'День'})\n` +
     `Запит створено: ${new Date().toLocaleString()}`;
 
   sendAdminNotification(message).catch(() => {});
@@ -224,8 +231,16 @@ router.post('/register-requests/:id/approve', async (req, res) => {
     shopCity: request.shopCity,
     shopAddress: request.shopAddress,
     shopName: request.shopName,
+    deliveryGroupId: request.deliveryGroupId || '',
   });
   await user.save();
+  if (request.deliveryGroupId) {
+    await DeliveryGroup.findByIdAndUpdate(
+      request.deliveryGroupId,
+      { $addToSet: { members: request.telegramId } },
+      { new: true }
+    );
+  }
   await RegistrationRequest.findByIdAndUpdate(req.params.id, { status: 'approved' });
 
   res.json({ message: 'User approved', telegramId: user.telegramId, role: user.role });

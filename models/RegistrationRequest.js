@@ -9,6 +9,7 @@ const RegistrationRequestSchema = new mongoose.Schema(
     shopCity: { type: String, required: true },
     shopAddress: { type: String, required: true },
     shopName: { type: String, required: true },
+    deliveryGroupId: { type: String, required: true },
     status: { type: String, enum: ['pending', 'approved', 'rejected'], default: 'pending' },
     meta: { type: mongoose.Schema.Types.Mixed, default: {} },
   },

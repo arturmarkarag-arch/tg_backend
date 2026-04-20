@@ -11,6 +11,7 @@ const UserSchema = new mongoose.Schema(
     shopName: { type: String, default: '' },
     shopAddress: { type: String, default: '' },
     shopCity: { type: String, default: '' },
+    deliveryGroupId: { type: String, default: '' },
     warehouseZone: { type: String, default: '' },
     botBlocked: { type: Boolean, default: false },
     botLastActivityAt: { type: Date, default: null },
