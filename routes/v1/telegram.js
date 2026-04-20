@@ -2,6 +2,7 @@ const express = require('express');
 const { validateTelegramInitData } = require('../../utils/validateTelegramInitData');
 const User = require('../../models/User');
 const RegistrationRequest = require('../../models/RegistrationRequest');
+const DeliveryGroup = require('../../models/DeliveryGroup');
 const { sendAdminNotification } = require('../../telegramBot');
 
 const router = express.Router();
