@@ -50,6 +50,7 @@ router.post('/me', async (req, res) => {
   if (!user) {
     return res.status(403).json({
       error: 'not_registered',
+      telegramId,
       message: 'Вас не знайдено в системі. Зверніться до адміністратора.',
     });
   }
