@@ -1156,7 +1156,16 @@ async function initBot(token) {
 
       if (text === '/start') {
         if (!user) {
-          await bot.sendMessage(chatId, getUnknownUserMessage());
+          const message = 'Вас не знайдено в системі. Натисніть кнопку, щоб зареєструватися через Mini App.';
+          if (WEB_APP_URL.startsWith('https://')) {
+            await bot.sendMessage(chatId, message, {
+              reply_markup: {
+                inline_keyboard: [[{ text: 'Реєстрація в Mini App', web_app: { url: WEB_APP_URL } }]],
+              },
+            });
+          } else {
+            await bot.sendMessage(chatId, `Відкрийте Mini App: ${WEB_APP_URL}`);
+          }
           return;
         }
 
