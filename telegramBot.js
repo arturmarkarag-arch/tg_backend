@@ -600,8 +600,8 @@ async function deleteShopMessage(chatId, messageId) {
 }
 
 function getShopMenuLabel(shopSession = {}) {
-  const total = Array.isArray(shopSession.productIds) ? shopSession.productIds.length : 0;
-  const index = Number.isInteger(shopSession.currentIndex) ? shopSession.currentIndex : -1;
+  const total = Array.isArray(shopSession?.productIds) ? shopSession.productIds.length : 0;
+  const index = Number.isInteger(shopSession?.currentIndex) ? shopSession.currentIndex : -1;
   return index >= 0 && index < total - 1 ? 'Продовжити замовлення' : 'Товари';
 }
 
@@ -1679,7 +1679,7 @@ async function initBot(token) {
           const replyMarkup = buildShopKeyboard(String(nextProduct._id), nextIndex, totalProducts, selectedQty, pendingCount);
 
           try {
-            const preloadPromise = ensureShopPhotoBuffer(shopSession.productIds, nextIndex);
+            const preloadPromise = ensureShopPhotoBuffer(shopSession?.productIds || [], nextIndex);
             const updated = await updateShopMessage(chatId, msgId, nextProduct, caption, replyMarkup);
             await setSession(chatId, 'shop', {
               ...shopSession,
@@ -1742,7 +1742,7 @@ async function initBot(token) {
         const replyMarkup = buildShopKeyboard(String(product._id), newIndex, totalProducts, selectedQty, pendingCount);
 
         try {
-          const preloadPromise = ensureShopPhotoBuffer(shopSession.productIds, newIndex);
+          const preloadPromise = ensureShopPhotoBuffer(shopSession?.productIds || [], newIndex);
           const updated = await updateShopMessage(chatId, msgId, product, caption, replyMarkup);
           await setSession(chatId, 'shop', {
             ...shopSession,
