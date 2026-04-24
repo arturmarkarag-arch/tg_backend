@@ -19,13 +19,13 @@
   <h1>Load Test Report</h1>
   <div class="section">
     <p><span class="badge">Target</span>http://localhost:5000</p>
-    <p><span class="badge">Shop users</span>55</p>
-    <p><span class="badge">Warehouse users</span>5</p>
+    <p><span class="badge">Shop users</span>30</p>
+    <p><span class="badge">Warehouse users</span>30</p>
     <p><span class="badge">Duration</span>60s</p>
     <p><span class="badge">Mongo URI</span>mongodb+srv://danzakuduro32_db_user:NMQSb6q0KOSVqplx@cluster0.p5rmla3.mongodb.net/tg_manager?retryWrites=true&w=majority&appName=Cluster0</p>
     <p><span class="badge">Telegram token</span>present</p>
-    <p><span class="badge">Mongo requests</span>4011</p>
-    <p><span class="badge">Cloudflare requests</span>2271</p>
+    <p><span class="badge">Mongo requests</span>527</p>
+    <p><span class="badge">Cloudflare requests</span>213</p>
   </div>
   <div class="section">
     <h2>Tested Services</h2>
@@ -53,15 +53,15 @@
         <tr><th>Action</th><th>Total</th><th>Errors</th><th>Avg ms</th></tr>
       </thead>
       <tbody>
-        <tr><td>browse</td><td>2571</td><td>0</td><td>689.3</td></tr><tr><td>orders</td><td>23</td><td>0</td><td>1346.7</td></tr><tr><td>groups</td><td>0</td><td>0</td><td>0</td></tr><tr><td>saveState</td><td>1276</td><td>0</td><td>527.5</td></tr><tr><td>products</td><td>21</td><td>0</td><td>971.3</td></tr><tr><td>warehouse</td><td>120</td><td>0</td><td>1903.1</td></tr><tr><td>images</td><td>2271</td><td>0</td><td>387.0</td></tr>
+        <tr><td>browse</td><td>243</td><td>1</td><td>4278.9</td></tr><tr><td>orders</td><td>26</td><td>8</td><td>6362.7</td></tr><tr><td>groups</td><td>0</td><td>0</td><td>0</td></tr><tr><td>saveState</td><td>116</td><td>0</td><td>3387.5</td></tr><tr><td>products</td><td>26</td><td>5</td><td>5368.0</td></tr><tr><td>warehouse</td><td>116</td><td>52</td><td>5141.1</td></tr><tr><td>images</td><td>213</td><td>4</td><td>2879.0</td></tr>
       </tbody>
     </table>
-    <p>Total requests: 6282</p>
-    <p>Total errors: 0</p>
+    <p>Total requests: 740</p>
+    <p>Total errors: 70</p>
   </div>
   <div class="section">
     <h2>Warehouse error details</h2>
-    <p>No warehouse errors captured.</p>
+    <table><thead><tr><th>Time</th><th>Endpoint</th><th>Action</th><th>Worker</th><th>Status</th><th>Message</th></tr></thead><tbody><tr><td>2026-04-24T03:07:24.100Z</td><td>http://localhost:5000/api/blocks</td><td>unknown</td><td>unknown</td><td>N/A</td><td>timeout of 15000ms exceeded</td></tr><tr><td>2026-04-24T03:07:29.152Z</td><td>http://localhost:5000/api/blocks/incoming/products</td><td>unknown</td><td>unknown</td><td>N/A</td><td>timeout of 15000ms exceeded</td></tr><tr><td>2026-04-24T03:07:29.298Z</td><td>http://localhost:5000/api/blocks/incoming/products</td><td>unknown</td><td>unknown</td><td>N/A</td><td>timeout of 15000ms exceeded</td></tr><tr><td>2026-04-24T03:07:30.797Z</td><td>http://localhost:5000/api/blocks</td><td>unknown</td><td>unknown</td><td>N/A</td><td>timeout of 15000ms exceeded</td></tr><tr><td>2026-04-24T03:07:30.798Z</td><td>http://localhost:5000/api/blocks</td><td>unknown</td><td>unknown</td><td>N/A</td><td>timeout of 15000ms exceeded</td></tr><tr><td>2026-04-24T03:07:33.397Z</td><td>http://localhost:5000/api/blocks/move</td><td>move</td><td>warehouse_3</td><td>N/A</td><td>timeout of 15000ms exceeded</td></tr><tr><td>2026-04-24T03:07:35.702Z</td><td>http://localhost:5000/api/blocks</td><td>unknown</td><td>unknown</td><td>N/A</td><td>timeout of 15000ms exceeded</td></tr><tr><td>2026-04-24T03:07:36.501Z</td><td>http://localhost:5000/api/blocks/incoming/products</td><td>unknown</td><td>unknown</td><td>N/A</td><td>timeout of 15000ms exceeded</td></tr><tr><td>2026-04-24T03:07:38.201Z</td><td>http://localhost:5000/api/blocks</td><td>unknown</td><td>unknown</td><td>N/A</td><td>timeout of 15000ms exceeded</td></tr><tr><td>2026-04-24T03:07:39.302Z</td><td>http://localhost:5000/api/blocks</td><td>unknown</td><td>unknown</td><td>N/A</td><td>timeout of 15000ms exceeded</td></tr></tbody></table>
   </div>
   <div class="section">
     <h2>Latency growth</h2>
@@ -69,7 +69,7 @@
   </div>
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
   <script>
-    const chartData = [{"x":157,"y":830.8},{"x":314,"y":808},{"x":471,"y":641},{"x":628,"y":628.9},{"x":785,"y":550.2},{"x":942,"y":567.1},{"x":1099,"y":548.6},{"x":1256,"y":562.8},{"x":1413,"y":609.4},{"x":1570,"y":482.7},{"x":1727,"y":353.6},{"x":1884,"y":746.9},{"x":2041,"y":545.8},{"x":2198,"y":568.2},{"x":2355,"y":661.4},{"x":2512,"y":567.2},{"x":2669,"y":555.4},{"x":2826,"y":524.9},{"x":2983,"y":684.3},{"x":3140,"y":469.7},{"x":3297,"y":639},{"x":3454,"y":623.9},{"x":3611,"y":529.7},{"x":3768,"y":611.8},{"x":3925,"y":642.4},{"x":4082,"y":615},{"x":4239,"y":514},{"x":4396,"y":527.2},{"x":4553,"y":702.2},{"x":4710,"y":515.3},{"x":4867,"y":350.8},{"x":5024,"y":523.6},{"x":5181,"y":454},{"x":5338,"y":520.4},{"x":5495,"y":691},{"x":5652,"y":357.6},{"x":5809,"y":679.9},{"x":5966,"y":296.9},{"x":6123,"y":542.4},{"x":6280,"y":707.2},{"x":6282,"y":279.5}];
+    const chartData = [{"x":18,"y":1434.1},{"x":36,"y":3064},{"x":54,"y":2856.6},{"x":72,"y":2849.9},{"x":90,"y":3605.1},{"x":108,"y":4100.4},{"x":126,"y":4433.7},{"x":144,"y":5755.9},{"x":162,"y":12455.5},{"x":180,"y":8550.1},{"x":198,"y":4851.9},{"x":216,"y":6851.8},{"x":234,"y":4710.6},{"x":252,"y":5686.6},{"x":270,"y":4926.2},{"x":288,"y":3873.9},{"x":306,"y":10972.8},{"x":324,"y":4846.7},{"x":342,"y":6510.2},{"x":360,"y":7493.8},{"x":378,"y":5390.2},{"x":396,"y":5723.1},{"x":414,"y":3238},{"x":432,"y":3394.8},{"x":450,"y":4641},{"x":468,"y":6744.3},{"x":486,"y":7993.7},{"x":504,"y":6747.7},{"x":522,"y":7262.1},{"x":540,"y":4842.9},{"x":558,"y":4914.1},{"x":576,"y":4483.6},{"x":594,"y":4040.7},{"x":612,"y":6017.8},{"x":630,"y":7724.5},{"x":648,"y":6891.2},{"x":666,"y":4709.4},{"x":684,"y":5419.2},{"x":702,"y":3378.2},{"x":720,"y":3587.8},{"x":738,"y":3731.2},{"x":740,"y":113}];
     const ctx = document.getElementById('latencyChart').getContext('2d');
     new Chart(ctx, {
       type: 'line',

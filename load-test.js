@@ -58,6 +58,20 @@ function isCloudflareEndpoint(url) {
   return u.includes('/api/products/images/') || u.includes('/products/images/') || u.includes('cloudflare') || u.includes('r2');
 }
 
+function normalizeEndpoint(endpoint) {
+  try {
+    const url = new URL(String(endpoint), TARGET_HOST);
+    return `${url.pathname}${url.search}`;
+  } catch {
+    return String(endpoint);
+  }
+}
+
+function maskConnectionString(uri) {
+  if (!uri || typeof uri !== 'string') return uri;
+  return uri.replace(/(mongodb(?:\+srv)?:\/\/)([^:@\/]+)(:[^@\/]+)?@/, '$1***:***@');
+}
+
 function trackRequest(endpoint, duration, isError = false, category = 'other', meta = {}) {
   counters.totalRequests += 1;
   if (isCloudflareEndpoint(endpoint)) {
@@ -71,7 +85,7 @@ function trackRequest(endpoint, duration, isError = false, category = 'other', m
     duration,
     category,
     isError,
-    endpoint,
+    endpoint: normalizeEndpoint(endpoint),
     meta,
   });
 }
@@ -480,6 +494,7 @@ function generateHtmlReport() {
     total: entry.total,
     errors: entry.errors,
     avgMs: entry.total ? (entry.time / entry.total).toFixed(1) : 0,
+    errorRate: entry.total ? (entry.errors / entry.total) : 0,
   }));
   const totalRequests = rows.reduce((sum, row) => sum + row.total, 0);
   const totalErrors = rows.reduce((sum, row) => sum + row.errors, 0);
@@ -498,15 +513,71 @@ function generateHtmlReport() {
     }
   });
 
-  const warehouseErrors = errorDetails.filter((item) => item.category === 'warehouse');
-  const errorRows = warehouseErrors.slice(-10).map((item) => ({
+  const endpointMap = {};
+  requestTimeline.forEach((item) => {
+    const key = `${item.category}|${item.endpoint}`;
+    if (!endpointMap[key]) {
+      endpointMap[key] = {
+        category: item.category,
+        endpoint: item.endpoint,
+        total: 0,
+        errors: 0,
+        time: 0,
+      };
+    }
+    endpointMap[key].total += 1;
+    endpointMap[key].errors += item.isError ? 1 : 0;
+    endpointMap[key].time += item.duration;
+  });
+
+  const endpointRows = Object.values(endpointMap).map((entry) => ({
+    category: entry.category,
+    endpoint: entry.endpoint,
+    total: entry.total,
+    errors: entry.errors,
+    avgMs: entry.total ? (entry.time / entry.total).toFixed(1) : 0,
+    errorRate: entry.total ? (entry.errors / entry.total) : 0,
+  }));
+
+  const topSlowEndpoints = endpointRows
+    .filter((entry) => entry.total >= 3)
+    .sort((a, b) => b.avgMs - a.avgMs)
+    .slice(0, 10);
+
+  const topErrorEndpoints = endpointRows
+    .filter((entry) => entry.errors > 0)
+    .sort((a, b) => b.errorRate - a.errorRate || b.errors - a.errors)
+    .slice(0, 10);
+
+  const errorRows = errorDetails.slice(-15).map((item) => ({
     timestamp: item.timestamp,
     endpoint: item.endpoint,
+    category: item.category,
     message: item.message,
     status: item.status || 'N/A',
     workerId: item.workerId || 'unknown',
     action: item.action || 'unknown',
   }));
+
+  const slowCategories = rows.filter((item) => item.total >= 10 && item.avgMs > 3000);
+  const errorCategories = rows.filter((item) => item.total >= 10 && item.errorRate >= 0.1);
+  const recommendations = [];
+  if (slowCategories.length) {
+    recommendations.push(`High latency detected in categories: ${slowCategories.map((item) => `${item.action} (${item.avgMs}ms avg)`).join(', ')}.`);
+  }
+  if (errorCategories.length) {
+    recommendations.push(`Elevated error rate in categories: ${errorCategories.map((item) => `${item.action} (${(item.errorRate * 100).toFixed(1)}%)`).join(', ')}.`);
+  }
+  if (topSlowEndpoints.length) {
+    recommendations.push(`Investigate slow endpoints: ${topSlowEndpoints.slice(0, 3).map((entry) => `${entry.endpoint} (${entry.avgMs}ms)`).join(', ')}.`);
+  }
+  if (topErrorEndpoints.length) {
+    recommendations.push(`Investigate error-prone endpoints: ${topErrorEndpoints.slice(0, 3).map((entry) => `${entry.endpoint} (${(entry.errorRate * 100).toFixed(1)}% errors)`).join(', ')}.`);
+  }
+  if (!recommendations.length) {
+    recommendations.push('No obvious hotspots detected from request metrics, but continue checking backend logs and database performance.');
+  }
+
   const chartData = JSON.stringify(buckets);
 
   const html = `<!DOCTYPE html>
@@ -533,7 +604,7 @@ function generateHtmlReport() {
     <p><span class="badge">Shop users</span>${VIRTUAL_USERS}</p>
     <p><span class="badge">Warehouse users</span>${WAREHOUSE_USERS}</p>
     <p><span class="badge">Duration</span>${DURATION_SEC}s</p>
-    <p><span class="badge">Mongo URI</span>${MONGODB_URI}</p>
+    <p><span class="badge">Mongo URI</span>${maskConnectionString(MONGODB_URI)}</p>
     <p><span class="badge">Telegram token</span>${TELEGRAM_BOT_TOKEN ? 'present' : 'missing'}</p>
     <p><span class="badge">Mongo requests</span>${counters.mongoRequests}</p>
     <p><span class="badge">Cloudflare requests</span>${counters.cloudflareRequests}</p>
@@ -561,18 +632,42 @@ function generateHtmlReport() {
     <h2>Results</h2>
     <table>
       <thead>
-        <tr><th>Action</th><th>Total</th><th>Errors</th><th>Avg ms</th></tr>
+        <tr><th>Action</th><th>Total</th><th>Errors</th><th>Avg ms</th><th>Error %</th></tr>
       </thead>
       <tbody>
-        ${rows.map((row) => `<tr><td>${row.action}</td><td>${row.total}</td><td>${row.errors}</td><td>${row.avgMs}</td></tr>`).join('')}
+        ${rows.map((row) => `<tr><td>${row.action}</td><td>${row.total}</td><td>${row.errors}</td><td>${row.avgMs}</td><td>${(row.errorRate * 100).toFixed(1)}%</td></tr>`).join('')}
       </tbody>
     </table>
     <p>Total requests: ${totalRequests}</p>
     <p>Total errors: ${totalErrors}</p>
   </div>
   <div class="section">
-    <h2>Warehouse error details</h2>
-    ${errorRows.length ? `<table><thead><tr><th>Time</th><th>Endpoint</th><th>Action</th><th>Worker</th><th>Status</th><th>Message</th></tr></thead><tbody>${errorRows.map((row) => `<tr><td>${row.timestamp}</td><td>${row.endpoint}</td><td>${row.action}</td><td>${row.workerId}</td><td>${row.status}</td><td>${row.message}</td></tr>`).join('')}</tbody></table>` : '<p>No warehouse errors captured.</p>'}
+    <h2>Hot spots</h2>
+    <ul>
+      ${recommendations.map((text) => `<li>${text}</li>`).join('')}
+    </ul>
+  </div>
+  <div class="section">
+    <h2>Top slow endpoints</h2>
+    <table>
+      <thead><tr><th>Category</th><th>Endpoint</th><th>Total</th><th>Errors</th><th>Avg ms</th><th>Error %</th></tr></thead>
+      <tbody>
+        ${topSlowEndpoints.map((entry) => `<tr><td>${entry.category}</td><td>${entry.endpoint}</td><td>${entry.total}</td><td>${entry.errors}</td><td>${entry.avgMs}</td><td>${(entry.errorRate * 100).toFixed(1)}%</td></tr>`).join('')}
+      </tbody>
+    </table>
+  </div>
+  <div class="section">
+    <h2>Top error endpoints</h2>
+    <table>
+      <thead><tr><th>Category</th><th>Endpoint</th><th>Total</th><th>Errors</th><th>Avg ms</th><th>Error %</th></tr></thead>
+      <tbody>
+        ${topErrorEndpoints.map((entry) => `<tr><td>${entry.category}</td><td>${entry.endpoint}</td><td>${entry.total}</td><td>${entry.errors}</td><td>${entry.avgMs}</td><td>${(entry.errorRate * 100).toFixed(1)}%</td></tr>`).join('')}
+      </tbody>
+    </table>
+  </div>
+  <div class="section">
+    <h2>Error samples</h2>
+    ${errorRows.length ? `<table><thead><tr><th>Time</th><th>Category</th><th>Endpoint</th><th>Action</th><th>Worker</th><th>Status</th><th>Message</th></tr></thead><tbody>${errorRows.map((row) => `<tr><td>${row.timestamp}</td><td>${row.category}</td><td>${row.endpoint}</td><td>${row.action}</td><td>${row.workerId}</td><td>${row.status}</td><td>${row.message}</td></tr>`).join('')}</tbody></table>` : '<p>No errors captured.</p>'}
   </div>
   <div class="section">
     <h2>Latency growth</h2>
