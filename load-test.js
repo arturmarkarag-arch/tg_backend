@@ -11,7 +11,7 @@ const envPath = fs.existsSync(path.resolve(__dirname, '.env'))
   : path.resolve(__dirname, '../.env');
 dotenv.config({ path: envPath });
 
-const TARGET_HOST = process.env.TARGET_HOST || 'http://localhost:5000';
+const TARGET_HOST = process.env.TARGET_HOST || 'https://tg-backend-j27i.onrender.com';
 const API_BASE = `${TARGET_HOST}/api`;
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/tg_manager';
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || '';
