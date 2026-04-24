@@ -2,8 +2,12 @@ const express = require('express');
 const { S3Client, DeleteObjectCommand } = require('@aws-sdk/client-s3');
 const Product = require('../models/Product');
 const { shiftUp } = require('../utils/shiftOrderNumbers');
+const { telegramAuth, requireTelegramRoles } = require('../middleware/telegramAuth');
 
 const router = express.Router();
+
+router.use(telegramAuth);
+router.use(requireTelegramRoles(['admin', 'warehouse']));
 
 const r2Client = new S3Client({
   region: process.env.R2_REGION || 'auto',
@@ -97,6 +101,7 @@ router.post('/:id/restore', async (req, res) => {
   product.status = 'active';
   product.archivedAt = null;
   product.originalOrderNumber = null;
+  product.restoredFromArchive = true;
   product.orderNumber = restoreOrder;
   await product.save();
 

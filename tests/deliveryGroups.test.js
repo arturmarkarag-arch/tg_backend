@@ -1,15 +1,46 @@
 const request = require('supertest');
 const mongoose = require('mongoose');
+const crypto = require('crypto');
 const { MongoMemoryServer } = require('mongodb-memory-server');
 const app = require('../app');
 const DeliveryGroup = require('../models/DeliveryGroup');
 const User = require('../models/User');
 
 let mongoServer;
+let adminHeader;
+
+function buildTelegramInitData(payload, botToken) {
+  const rawData = {};
+  const params = new URLSearchParams();
+
+  for (const [key, value] of Object.entries(payload)) {
+    const stringValue = typeof value === 'string' ? value : JSON.stringify(value);
+    rawData[key] = stringValue;
+    params.append(key, stringValue);
+  }
+
+  const checkString = Object.keys(rawData)
+    .sort()
+    .map((key) => `${key}=${rawData[key]}`)
+    .join('\n');
+
+  const secretKey = crypto.createHmac('sha256', 'WebAppData').update(botToken).digest();
+  const hash = crypto.createHmac('sha256', secretKey).update(checkString).digest('hex');
+  params.append('hash', hash);
+  return params.toString();
+}
 
 beforeAll(async () => {
+  process.env.TELEGRAM_BOT_TOKEN = 'test-token';
   mongoServer = await MongoMemoryServer.create();
   await mongoose.connect(mongoServer.getUri(), { useNewUrlParser: true, useUnifiedTopology: true });
+});
+
+beforeEach(async () => {
+  await DeliveryGroup.deleteMany({});
+  await User.deleteMany({});
+  const admin = await User.create({ telegramId: 'admin1', role: 'admin', firstName: 'Admin' });
+  adminHeader = buildTelegramInitData({ user: { id: admin.telegramId, first_name: admin.firstName }, auth_date: String(Math.floor(Date.now() / 1000)) }, process.env.TELEGRAM_BOT_TOKEN);
 });
 
 afterEach(async () => {
@@ -26,6 +57,7 @@ describe('Delivery Groups API', () => {
   it('creates a delivery group', async () => {
     const res = await request(app)
       .post('/api/delivery-groups')
+      .set('x-telegram-initdata', adminHeader)
       .send({ name: 'Група 1', dayOfWeek: 1 });
 
     expect(res.status).toBe(201);
@@ -37,6 +69,7 @@ describe('Delivery Groups API', () => {
   it('rejects group without required fields', async () => {
     const res = await request(app)
       .post('/api/delivery-groups')
+      .set('x-telegram-initdata', adminHeader)
       .send({ name: 'No day' });
 
     expect(res.status).toBe(400);
@@ -47,7 +80,7 @@ describe('Delivery Groups API', () => {
     await DeliveryGroup.create({ name: 'G1', dayOfWeek: 0 });
     await DeliveryGroup.create({ name: 'G2', dayOfWeek: 3 });
 
-    const res = await request(app).get('/api/delivery-groups');
+    const res = await request(app).get('/api/delivery-groups').set('x-telegram-initdata', adminHeader);
 
     expect(res.status).toBe(200);
     expect(res.body).toHaveLength(2);
@@ -58,6 +91,7 @@ describe('Delivery Groups API', () => {
 
     const res = await request(app)
       .patch(`/api/delivery-groups/${group._id}`)
+      .set('x-telegram-initdata', adminHeader)
       .send({ name: 'New', dayOfWeek: 5 });
 
     expect(res.status).toBe(200);
@@ -68,7 +102,7 @@ describe('Delivery Groups API', () => {
   it('deletes a delivery group', async () => {
     const group = await DeliveryGroup.create({ name: 'ToDelete', dayOfWeek: 2 });
 
-    const res = await request(app).delete(`/api/delivery-groups/${group._id}`);
+    const res = await request(app).delete(`/api/delivery-groups/${group._id}`).set('x-telegram-initdata', adminHeader);
 
     expect(res.status).toBe(200);
     expect(res.body.message).toBe('Group deleted');
@@ -81,6 +115,7 @@ describe('Delivery Groups API', () => {
     const fakeId = new mongoose.Types.ObjectId();
     const res = await request(app)
       .patch(`/api/delivery-groups/${fakeId}`)
+      .set('x-telegram-initdata', adminHeader)
       .send({ name: 'Ghost' });
 
     expect(res.status).toBe(404);
@@ -88,18 +123,9 @@ describe('Delivery Groups API', () => {
 
   it('returns 404 when deleting non-existent group', async () => {
     const fakeId = new mongoose.Types.ObjectId();
-    const res = await request(app).delete(`/api/delivery-groups/${fakeId}`);
+    const res = await request(app).delete(`/api/delivery-groups/${fakeId}`).set('x-telegram-initdata', adminHeader);
 
     expect(res.status).toBe(404);
-  });
-
-  it('stores telegramChatId', async () => {
-    const res = await request(app)
-      .post('/api/delivery-groups')
-      .send({ name: 'Chat group', dayOfWeek: 4, telegramChatId: '-1001234567890' });
-
-    expect(res.status).toBe(201);
-    expect(res.body.telegramChatId).toBe('-1001234567890');
   });
 
   describe('User <-> Group sync', () => {
@@ -109,6 +135,7 @@ describe('Delivery Groups API', () => {
 
       await request(app)
         .patch(`/api/delivery-groups/${group._id}`)
+        .set('x-telegram-initdata', adminHeader)
         .send({ members: ['111'] });
 
       const updated = await User.findOne({ telegramId: '111' });
@@ -121,6 +148,7 @@ describe('Delivery Groups API', () => {
 
       await request(app)
         .patch(`/api/delivery-groups/${group._id}`)
+        .set('x-telegram-initdata', adminHeader)
         .send({ members: [] });
 
       const updated = await User.findOne({ telegramId: '222' });
@@ -131,7 +159,7 @@ describe('Delivery Groups API', () => {
       await User.create({ telegramId: '333', role: 'seller', warehouseZone: 'DelGroup' });
       const group = await DeliveryGroup.create({ name: 'DelGroup', dayOfWeek: 2, members: ['333'] });
 
-      await request(app).delete(`/api/delivery-groups/${group._id}`);
+      await request(app).delete(`/api/delivery-groups/${group._id}`).set('x-telegram-initdata', adminHeader);
 
       const updated = await User.findOne({ telegramId: '333' });
       expect(updated.warehouseZone).toBe('');
@@ -142,6 +170,7 @@ describe('Delivery Groups API', () => {
 
       await request(app)
         .post('/api/users')
+        .set('x-telegram-initdata', adminHeader)
         .send({ telegramId: '444', role: 'seller', warehouseZone: 'UserSync' });
 
       const group = await DeliveryGroup.findOne({ name: 'UserSync' });
@@ -152,7 +181,7 @@ describe('Delivery Groups API', () => {
       const group = await DeliveryGroup.create({ name: 'CleanUp', dayOfWeek: 0, members: ['555'] });
       await User.create({ telegramId: '555', role: 'seller', warehouseZone: 'CleanUp' });
 
-      await request(app).delete('/api/users/555');
+      await request(app).delete('/api/users/555').set('x-telegram-initdata', adminHeader);
 
       const updated = await DeliveryGroup.findById(group._id);
       expect(updated.members).not.toContain('555');
@@ -165,6 +194,7 @@ describe('Delivery Groups API', () => {
 
       await request(app)
         .post('/api/users')
+        .set('x-telegram-initdata', adminHeader)
         .send({ telegramId: '666', warehouseZone: 'To' });
 
       const updatedG1 = await DeliveryGroup.findById(g1._id);
@@ -178,14 +208,16 @@ describe('Delivery Groups API', () => {
     it('returns 404 for non-existent group broadcast', async () => {
       const fakeId = new mongoose.Types.ObjectId();
       const res = await request(app)
-        .post(`/api/delivery-groups/${fakeId}/broadcast`);
+        .post(`/api/delivery-groups/${fakeId}/broadcast`)
+        .set('x-telegram-initdata', adminHeader);
       expect(res.status).toBe(404);
     });
 
     it('returns 400 for group with no members', async () => {
       const group = await DeliveryGroup.create({ name: 'Empty', dayOfWeek: 1, members: [] });
       const res = await request(app)
-        .post(`/api/delivery-groups/${group._id}/broadcast`);
+        .post(`/api/delivery-groups/${group._id}/broadcast`)
+        .set('x-telegram-initdata', adminHeader);
       expect(res.status).toBe(400);
       expect(res.body.error).toMatch(/учасників/i);
     });

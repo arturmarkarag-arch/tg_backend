@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const DeliveryGroup = require('./DeliveryGroup');
 
 const UserSchema = new mongoose.Schema(
   {
@@ -30,11 +31,13 @@ const UserSchema = new mongoose.Schema(
     miniAppState: {
       lastViewedProductId: { type: String, default: '' },
       currentIndex: { type: Number, default: 0 },
+      currentPage: { type: Number, default: 0 },
       orderItems: {
         type: Map,
         of: Number,
         default: {},
       },
+      viewMode: { type: String, enum: ['carousel', 'grid'], default: 'carousel' },
       updatedAt: { type: Date, default: null },
     },
     isOnline: { type: Boolean, default: false },
@@ -42,5 +45,25 @@ const UserSchema = new mongoose.Schema(
   },
   { timestamps: true }
 );
+
+async function removeFromDeliveryGroups(telegramId) {
+  if (!telegramId) return;
+  await DeliveryGroup.updateMany(
+    { members: telegramId },
+    { $pull: { members: telegramId } }
+  );
+}
+
+UserSchema.post('findOneAndDelete', async function (doc) {
+  if (doc?.telegramId) {
+    await removeFromDeliveryGroups(doc.telegramId);
+  }
+});
+
+UserSchema.post('deleteOne', { document: true, query: false }, async function () {
+  if (this?.telegramId) {
+    await removeFromDeliveryGroups(this.telegramId);
+  }
+});
 
 module.exports = mongoose.model('User', UserSchema);

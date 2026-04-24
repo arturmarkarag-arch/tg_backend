@@ -110,6 +110,25 @@ describe('Orders API', () => {
     expect(res.body.orders[0].status).toBe('confirmed');
   });
 
+  it('filters orders by buyerTelegramId', async () => {
+    const productId = new mongoose.Types.ObjectId().toString();
+
+    await request(app).post('/api/orders').send({
+      buyerTelegramId: 'user111',
+      items: [{ productId, quantity: 1, price: 10 }],
+    });
+    await request(app).post('/api/orders').send({
+      buyerTelegramId: 'user222',
+      items: [{ productId, quantity: 2, price: 20 }],
+    });
+
+    const res = await request(app).get('/api/orders?buyerTelegramId=user111&status=all');
+
+    expect(res.status).toBe(200);
+    expect(res.body.orders).toHaveLength(1);
+    expect(res.body.orders[0].buyerTelegramId).toBe('user111');
+  });
+
   it('excludes cancelled orders by default', async () => {
     const productId = new mongoose.Types.ObjectId().toString();
 

@@ -44,7 +44,7 @@ describe('Broadcast API routes', () => {
   it('POST /api/broadcast/start returns error when no recipients exist', async () => {
     await Product.create({
       orderNumber: 1,
-      name: 'Test product',
+      brand: 'Test product',
       price: 100,
       quantity: 5,
       status: 'active',
@@ -62,7 +62,7 @@ describe('Broadcast API routes', () => {
   it('POST /api/broadcast/start enqueues jobs when products and recipients exist', async () => {
     await Product.create({
       orderNumber: 1,
-      name: 'Broadcast product',
+      brand: 'Broadcast product',
       price: 200,
       quantity: 10,
       quantityPerPackage: 5,
@@ -95,7 +95,7 @@ describe('Broadcast API routes', () => {
   it('POST /api/broadcast/start respects recipientIds filter', async () => {
     await Product.create({
       orderNumber: 1,
-      name: 'Filtered product',
+      brand: 'Filtered product',
       price: 50,
       quantity: 3,
       status: 'active',
@@ -116,8 +116,8 @@ describe('Broadcast API routes', () => {
   });
 
   it('POST /api/broadcast/start respects productFilter', async () => {
-    await Product.create({ orderNumber: 1, name: 'Active', price: 10, quantity: 1, status: 'active' });
-    await Product.create({ orderNumber: 2, name: 'Archived', price: 20, quantity: 1, status: 'archived' });
+    await Product.create({ orderNumber: 1, brand: 'Active', price: 10, quantity: 1, status: 'active' });
+    await Product.create({ orderNumber: 2, brand: 'Archived', price: 20, quantity: 1, status: 'archived' });
     await User.create({ telegramId: '999', role: 'seller', firstName: 'Seller' });
 
     const res = await request(app)

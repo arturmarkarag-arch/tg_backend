@@ -17,6 +17,16 @@ function parseTelegramInitData(initData) {
   return { parsedData, rawData };
 }
 
+function getInitDataFromRequest(req) {
+  if (!req) return null;
+  return req.body?.initData || req.query?.initData || req.headers?.['x-telegram-initdata'] || req.headers?.['x-telegram-init-data'] || null;
+}
+
+function getTelegramId(parsedData) {
+  if (!parsedData) return '';
+  return String(parsedData.user?.id || parsedData.id || parsedData.user?.telegram_id || '');
+}
+
 function buildDataCheckString(rawData) {
   return Object.keys(rawData)
     .filter((key) => key !== 'hash')
@@ -49,7 +59,20 @@ function validateTelegramInitData(initData, botToken) {
   };
 }
 
+function getTelegramAuth(req, botToken) {
+  const initData = getInitDataFromRequest(req);
+  const validation = validateTelegramInitData(initData, botToken);
+  return {
+    ...validation,
+    initData,
+    telegramId: getTelegramId(validation.parsedData),
+  };
+}
+
 module.exports = {
   validateTelegramInitData,
   parseTelegramInitData,
+  getInitDataFromRequest,
+  getTelegramId,
+  getTelegramAuth,
 };

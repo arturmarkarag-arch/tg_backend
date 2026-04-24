@@ -1,29 +1,24 @@
 const User = require('../models/User');
-const { validateTelegramInitData } = require('../utils/validateTelegramInitData');
-
-function getTelegramInitData(req) {
-  return req.body?.initData || req.query?.initData || req.headers['x-telegram-initdata'] || req.headers['x-telegram-init-data'];
-}
+const { getTelegramAuth } = require('../utils/validateTelegramInitData');
 
 async function telegramAuth(req, res, next) {
-  const initData = getTelegramInitData(req);
-  if (!initData) {
-    return res.status(401).json({ error: 'initData is required' });
-  }
-
-  const { valid, parsedData, error } = validateTelegramInitData(initData, process.env.TELEGRAM_BOT_TOKEN);
+  const { valid, parsedData, telegramId, initData, error } = getTelegramAuth(req, process.env.TELEGRAM_BOT_TOKEN);
   if (!valid) {
     return res.status(401).json({ error: error || 'Invalid initData' });
   }
 
-  const telegramId = String(parsedData.user?.id || parsedData.id || '');
   if (!telegramId) {
     return res.status(400).json({ error: 'Telegram user id is missing' });
   }
 
+  const user = await User.findOne({ telegramId }).lean();
+  if (!user) {
+    return res.status(403).json({ error: 'not_registered', message: 'User is not registered' });
+  }
+
   req.telegramInitData = initData;
   req.telegramParsedData = parsedData;
-  req.telegramUser = parsedData.user || null;
+  req.telegramUser = user;
   req.telegramId = telegramId;
   next();
 }

@@ -10,7 +10,6 @@ const DeliveryGroupSchema = new mongoose.Schema(
       max: 6,
     },
     members: [{ type: String }],
-    telegramChatId: { type: String, default: '' },
   },
   { timestamps: true }
 );

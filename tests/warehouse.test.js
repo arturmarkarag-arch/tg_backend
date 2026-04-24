@@ -22,7 +22,7 @@ afterAll(async () => {
 
 describe('Warehouse API', () => {
   it('assigns products to a warehouse task', async () => {
-    const product = await Product.create({ name: 'Warehouse product', price: 10, quantity: 2 });
+    const product = await Product.create({ brand: 'Warehouse product', price: 10, quantity: 2 });
 
     const response = await request(app)
       .post('/api/warehouse/assign')

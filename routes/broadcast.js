@@ -18,7 +18,7 @@ router.post('/start', async (req, res) => {
     // Sanitize productFilter to prevent MongoDB query injection
     const safeFilter = {};
     if (productFilter && typeof productFilter === 'object') {
-      const allowedKeys = ['status', 'deliveryGroup', 'category', 'brand'];
+      const allowedKeys = ['status', 'category', 'brand'];
       for (const key of allowedKeys) {
         if (productFilter[key] !== undefined) {
           // Only allow string values, not operators like $where/$gt

@@ -1,8 +1,11 @@
 const express = require('express');
 const User = require('../models/User');
 const DeliveryGroup = require('../models/DeliveryGroup');
+const { telegramAuth, requireTelegramRole } = require('../middleware/telegramAuth');
 
 const router = express.Router();
+router.use(telegramAuth);
+router.use(requireTelegramRole('admin'));
 
 async function syncDeliveryGroupMembership(telegramId, groupName) {
   // Remove user from all groups first

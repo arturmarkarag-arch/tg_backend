@@ -4,6 +4,8 @@ const crypto = require('crypto');
 const Busboy = require('busboy');
 const { S3Client, PutObjectCommand, GetObjectCommand, HeadBucketCommand } = require('@aws-sdk/client-s3');
 const { shiftUp, shiftDown } = require('../utils/shiftOrderNumbers');
+const Block = require('../models/Block');
+const { getIO } = require('../socket');
 const Product = require('../models/Product');
 
 const s3Client = new S3Client({
@@ -61,6 +63,10 @@ async function uploadToR2(fileBuffer, filename, contentType) {
   return safeFilename;
 }
 
+function getProductTitle(product) {
+  return product.brand || product.model || product.category || `#${product.orderNumber}`;
+}
+
 const router = express.Router();
 
 router.get('/images/:filename', async (req, res) => {
@@ -105,7 +111,7 @@ router.get('/', async (req, res) => {
   if (isV1) {
     const items = products.map((product) => ({
       id: product._id,
-      title: product.name,
+      title: getProductTitle(product),
       price: product.price,
       quantity: product.quantity,
       image_url: product.imageUrls?.[0] || product.localImageUrl || '',
@@ -140,7 +146,7 @@ router.patch('/reorder', async (req, res) => {
   const bulkOps = order.map((id, index) => ({
     updateOne: {
       filter: { _id: id },
-      update: { positionOrder: index },
+      update: { orderNumber: index + 1 },
     },
   }));
 
@@ -179,13 +185,14 @@ router.post('/', async (req, res) => {
     fields = req.body;
   }
 
-  const { orderNumber, name, description, category, brand, model, deliveryGroup, warehouse, status } = fields;
+  const { orderNumber, name, category, brand, model, warehouse, status } = fields;
   const price = Number(fields.price ?? 0);
   const quantity = Number(fields.quantity ?? 0);
   const parsedOrderNumber = Number(orderNumber ?? 0);
+  const currentBrand = brand || name || '';
 
-  if (!name || price <= 0 || quantity < 0 || parsedOrderNumber <= 0) {
-    return res.status(400).json({ error: "Порядковий номер, назва, ціна та кількість є обов'язковими" });
+  if (price <= 0 || quantity < 0 || parsedOrderNumber <= 0) {
+    return res.status(400).json({ error: "Порядковий номер, ціна та кількість є обов'язковими" });
   }
 
   await shiftUp({ orderNumber: { $gte: parsedOrderNumber } });
@@ -200,15 +207,12 @@ router.post('/', async (req, res) => {
 
   const product = new Product({
     orderNumber: parsedOrderNumber,
-    name,
-    description: description || '',
     price,
     quantity,
     warehouse: warehouse || '',
     category: category || '',
-    brand: brand || '',
+    brand: currentBrand,
     model: model || '',
-    deliveryGroup: deliveryGroup || '',
     status: status || 'pending',
     imageUrls,
     imageNames,
@@ -231,8 +235,9 @@ router.patch('/:id', async (req, res) => {
     files = parsed.files;
   }
 
-  const { orderNumber, name, description, category, brand, model, deliveryGroup, warehouse, status, price, quantity } = fields;
+  const { orderNumber, name, category, brand, model, warehouse, status, price, quantity } = fields;
   const parsedOrderNumber = orderNumber !== undefined ? Number(orderNumber) : product.orderNumber;
+  const incomingBrand = brand || name;
 
   if (orderNumber !== undefined && (Number.isNaN(parsedOrderNumber) || parsedOrderNumber <= 0)) {
     return res.status(400).json({ error: 'Порядковий номер має бути цілим числом більше за 0' });
@@ -247,12 +252,9 @@ router.patch('/:id', async (req, res) => {
   }
 
   product.orderNumber = parsedOrderNumber;
-  if (name !== undefined) product.name = name;
-  if (description !== undefined) product.description = description;
   if (category !== undefined) product.category = category;
-  if (brand !== undefined) product.brand = brand;
+  if (incomingBrand !== undefined) product.brand = incomingBrand;
   if (model !== undefined) product.model = model;
-  if (deliveryGroup !== undefined) product.deliveryGroup = deliveryGroup;
   if (warehouse !== undefined) product.warehouse = warehouse;
   if (status !== undefined) {
     if (status === 'archived') {
@@ -297,6 +299,17 @@ router.delete('/:id', async (req, res) => {
 
   // Shift remaining active/pending products down
   await shiftDown({ orderNumber: { $gt: oldOrder }, status: { $ne: 'archived' } });
+
+  // Remove archived product from any blocks so it disappears from warehouse/blocks views
+  await Block.updateMany(
+    { productIds: product._id },
+    { $pull: { productIds: product._id }, $inc: { version: 1 } }
+  );
+
+  try {
+    const io = getIO();
+    io.emit('blocks_updated');
+  } catch (_) {}
 
   res.json({ message: 'Product archived' });
 });

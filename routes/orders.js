@@ -1,8 +1,9 @@
 const express = require('express');
 const Order = require('../models/Order');
 const User = require('../models/User');
+const RegistrationRequest = require('../models/RegistrationRequest');
 const { sendOrderConfirmation } = require('../telegramBot');
-const { validateTelegramInitData } = require('../utils/validateTelegramInitData');
+const { validateTelegramInitData, getTelegramId, getTelegramAuth } = require('../utils/validateTelegramInitData');
 
 const router = express.Router();
 
@@ -10,8 +11,12 @@ router.get('/', async (req, res) => {
   const page = Math.max(1, parseInt(req.query.page) || 1);
   const pageSize = Math.min(100, Math.max(1, parseInt(req.query.pageSize) || 20));
   const status = req.query.status; // optional: 'new', 'confirmed', 'fulfilled', 'cancelled'
+  const buyerTelegramId = req.query.buyerTelegramId;
 
   const filter = {};
+  if (buyerTelegramId) {
+    filter.buyerTelegramId = buyerTelegramId;
+  }
   if (status && status !== 'all') {
     filter.status = status;
   } else if (!status) {
@@ -80,18 +85,29 @@ router.post('/', async (req, res) => {
   let telegramId = buyerTelegramId;
 
   if (!telegramId && initData) {
-    const validation = validateTelegramInitData(initData, process.env.TELEGRAM_BOT_TOKEN);
-    if (validation.valid && validation.parsedData) {
-      telegramId = validation.parsedData.user?.id || validation.parsedData.id;
+    const validation = getTelegramAuth(req, process.env.TELEGRAM_BOT_TOKEN);
+    if (!validation.valid) {
+      return res.status(401).json({ error: validation.error || 'Invalid initData' });
     }
+    telegramId = validation.telegramId;
   }
 
   if (!telegramId || !Array.isArray(items) || items.length === 0) {
     return res.status(400).json({ error: 'buyerTelegramId or valid initData and items are required' });
   }
 
+  telegramId = String(telegramId);
+  const buyer = await User.findOne({ telegramId }).lean();
+  if (!buyer) {
+    const pendingRequest = await RegistrationRequest.findOne({ telegramId, status: 'pending' }).lean();
+    if (pendingRequest) {
+      return res.status(403).json({ error: 'pending_registration', message: 'Ваша заявка на реєстрацію очікує підтвердження' });
+    }
+    return res.status(403).json({ error: 'not_registered', message: 'Потрібно завершити реєстрацію, перш ніж робити замовлення' });
+  }
+
   const totalPrice = items.reduce((sum, item) => sum + (item.price || 0) * item.quantity, 0);
-  const order = new Order({ buyerTelegramId: String(telegramId), items, shippingAddress, contactInfo, emojiType, totalPrice });
+  const order = new Order({ buyerTelegramId: buyer.telegramId, items, shippingAddress, contactInfo, emojiType, totalPrice });
   await order.save();
 
   sendOrderConfirmation(order.buyerTelegramId, items.length, totalPrice, order._id.toString()).catch((err) => {

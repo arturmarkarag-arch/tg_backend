@@ -20,7 +20,10 @@ async function ensureBlocks() {
 // GET /api/blocks — all blocks with product count
 router.get('/', async (req, res) => {
   await ensureBlocks();
-  const blocks = await Block.find().sort('blockId').populate('productIds').lean();
+  const blocks = await Block.find()
+    .sort('blockId')
+    .populate({ path: 'productIds', match: { status: { $in: ['active', 'pending'] } } })
+    .lean();
   res.json(blocks);
 });
 
@@ -66,9 +69,9 @@ router.get('/search/products', async (req, res) => {
 
   const products = await Product.find({
     $or: [
-      { name: { $regex: q, $options: 'i' } },
       { brand: { $regex: q, $options: 'i' } },
       { model: { $regex: q, $options: 'i' } },
+      { category: { $regex: q, $options: 'i' } },
     ],
   }).lean();
 
@@ -81,7 +84,9 @@ router.get('/:number', async (req, res) => {
   if (!num || num < 1) return res.status(400).json({ error: 'Invalid block number' });
 
   await ensureBlocks();
-  const block = await Block.findOne({ blockId: num }).populate('productIds').lean();
+  const block = await Block.findOne({ blockId: num })
+    .populate({ path: 'productIds', match: { status: { $in: ['active', 'pending'] } } })
+    .lean();
   if (!block) return res.status(404).json({ error: 'Block not found' });
   res.json(block);
 });

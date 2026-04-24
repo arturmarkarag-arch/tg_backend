@@ -9,9 +9,10 @@ const Order = require('./models/Order');
 const PendingReaction = require('./models/PendingReaction');
 const BotSession = require('./models/BotSession');
 const BotInteractionLog = require('./models/BotInteractionLog');
+const RegistrationRequest = require('./models/RegistrationRequest');
+const DeliveryGroup = require('./models/DeliveryGroup');
 const Block = require('./models/Block');
 const { getIO } = require('./socket');
-
 const r2Client = new S3Client({
   region: process.env.R2_REGION || 'auto',
   endpoint: process.env.R2_ENDPOINT,
@@ -75,6 +76,10 @@ async function markUserBotBlocked(chatId) {
   try {
     await User.findOneAndUpdate({ telegramId: String(chatId) }, { botBlocked: true });
   } catch (_) {}
+}
+
+function getProductTitle(product) {
+  return product.brand || product.model || product.category || `#${product.orderNumber}`;
 }
 
 async function logBotInteraction(telegramId, type, action, label = '', context = {}) {
@@ -147,51 +152,51 @@ const roleCommands = {
   seller: [
     '/help - Показати доступні команди',
     '/profile - Мій профіль',
-    '/shelf - Переглянути товари у вигляді списку',
+    // '/shelf - Переглянути товари у вигляді списку',
     '/shop - Переглянути товари в одному товарі з навігацією',
-    '/mylist - Переглянути обрані товари',
-    '/order - Оформити замовлення з обраних товарів',
-    '/miniapp - Відкрити Mini App',
+    // '/mylist - Переглянути обрані товари',
+    // '/order - Оформити замовлення з обраних товарів',
+    '/miniapp - Відкрити товари',
   ],
   warehouse: [
     '/help - Показати доступні команди',
     '/profile - Мій профіль',
     '/receive - Прийняти товар на склад',
     '/ship - Переглянути замовлення для відвантаження',
-    '/miniapp - Відкрити Mini App',
+    '/miniapp - Відкрити склад',
   ],
   admin: [
     '/help - Показати доступні команди',
     '/profile - Мій профіль',
-    '/miniapp - Відкрити Mini App',
+    '/miniapp - Відкрити товари',
   ],
 };
 
 function buildRoleHelp(role) {
   const commands = roleCommands[role] || roleCommands.admin;
-  return `Ваша роль: ${role}\n\nДоступні команди:\n${commands.join('\n')}`;
+  return `Доступні команди:\n${commands.join('\n')}`;
 }
 
 const roleBotCommands = {
   seller: [
-    { command: '/shelf', description: 'Переглянути товари' },
-    { command: '/shop', description: 'Переглянути товари в одному повідомленні' },
-    { command: '/mylist', description: 'Переглянути обрані товари' },
-    { command: '/order', description: 'Оформити замовлення' },
-    { command: '/miniapp', description: 'Відкрити Mini App' },
+    //{ command: '/shelf', description: 'Переглянути товари' },
+    { command: '/miniapp', description: 'Відкрити товари в додатку' },
+    { command: '/shop', description: 'Переглянути товари в телеграмі' },
+    //{ command: '/mylist', description: 'Обрані товари' },
+    //{ command: '/order', description: 'Оформити замовлення' },
     { command: '/help', description: 'Показати доступні команди' },
     { command: '/profile', description: 'Мій профіль' },
   ],
   warehouse: [
     { command: '/receive', description: 'Прийняти товар на склад' },
     { command: '/ship', description: 'Замовлення для відвантаження' },
-    { command: '/miniapp', description: 'Відкрити Mini App' },
+    { command: '/miniapp', description: 'Відкрити склад' },
     { command: '/help', description: 'Показати доступні команди' },
     { command: '/profile', description: 'Мій профіль' },
   ],
   admin: [
-    { command: '/miniapp', description: 'Відкрити Mini App' },
-    { command: '/help', description: 'Показати доступні команди' },
+    { command: '/miniapp', description: 'Відкрити Адмінку' },
+    //{ command: '/help', description: 'Показати доступні команди' },
     { command: '/profile', description: 'Мій профіль' },
   ],
 };
@@ -222,7 +227,7 @@ function buildProfileMessage(user) {
   }
 
   if (user.role === 'warehouse') {
-    lines.push(`Зона складу: ${user.warehouseZone || 'не вказано'}`);
+    // warehouse zone display removed
   }
 
   return lines.join('\n');
@@ -366,9 +371,9 @@ async function fetchPhotoBuffer(photoUrl) {
   }
 }
 
-async function sendMessageWithRetry(chatId, text, attempts = 3) {
+async function sendMessageWithRetry(chatId, text, options = {}, attempts = 3) {
   try {
-    const result = await bot.sendMessage(chatId, text);
+    const result = await bot.sendMessage(chatId, text, options);
     await updateUserBotActivity(chatId);
     return result;
   } catch (error) {
@@ -382,13 +387,13 @@ async function sendMessageWithRetry(chatId, text, attempts = 3) {
       const delayMs = (retryAfter || 2) * 1000;
       console.warn(`Telegram 429 on sendMessage, retrying after ${delayMs}ms (${attempts - 1} attempts left)`);
       await delay(delayMs);
-      return sendMessageWithRetry(chatId, text, attempts - 1);
+      return sendMessageWithRetry(chatId, text, options, attempts - 1);
     }
     throw error;
   }
 }
 
-async function sendAdminNotification(message) {
+async function sendAdminNotification(message, requestId) {
   try {
     const admins = await User.find({ role: 'admin' }).lean();
     if (!admins.length) {
@@ -396,11 +401,20 @@ async function sendAdminNotification(message) {
       return;
     }
 
+    const replyMarkup = requestId
+      ? {
+          inline_keyboard: [[
+            { text: '✅ Підтвердити', callback_data: `regreq_approve:${requestId}` },
+            { text: '❌ Відхилити', callback_data: `regreq_reject:${requestId}` },
+          ]],
+        }
+      : undefined;
+
     await Promise.all(
       admins.map(async (admin) => {
         if (!admin.telegramId) return;
         try {
-          await sendMessageWithRetry(admin.telegramId, message);
+          await sendMessageWithRetry(admin.telegramId, message, replyMarkup ? { reply_markup: replyMarkup } : {});
         } catch (error) {
           console.warn('[Bot] Failed to notify admin', admin.telegramId, error.message || error);
         }
@@ -414,9 +428,7 @@ async function sendAdminNotification(message) {
 async function sendOrderConfirmation(chatId, itemCount, totalPrice, orderId) {
   if (!chatId) return null;
 
-  const maybeUrl = SERVER_BASE_URL ? `${SERVER_BASE_URL.replace(/\/+$/, '')}/orders/${orderId}` : null;
-  const message = `✅ Ваше замовлення з ${itemCount} позицій сформовано на суму ${totalPrice}.` +
-    (maybeUrl ? `\nПереглянути замовлення: ${maybeUrl}` : '');
+  const message = 'Замовлення сформовано!';
 
   try {
     return await sendMessageWithRetry(chatId, message);
@@ -449,7 +461,11 @@ async function sendPhotoWithRetry(chatId, photo, options = {}, attempts = 3) {
 }
 
 async function sendShelfProducts(chatId, page = 0) {
-  const products = await Product.find({ status: 'active' }).sort({ orderNumber: 1 }).lean();
+  let products = await Product.find({ status: 'active' }).sort({ orderNumber: 1 }).lean();
+  products = products.map((product) => ({
+    ...product,
+    name: product.brand || product.model || product.category || `#${product.orderNumber}`,
+  }));
   if (!products.length) {
     await bot.sendMessage(chatId, 'Активних товарів на складі поки що немає.');
     return;
@@ -474,7 +490,7 @@ async function sendShelfProducts(chatId, page = 0) {
   const sentIds = [];
 
   for (const product of pageProducts) {
-    const caption = `📦 #${product.orderNumber} — ${product.name || 'Без назви'}\n💰 ${product.price} zł | 📦 ${product.quantityPerPackage || '?'} шт/уп`;
+    const caption = `📦 #${product.orderNumber} — ${getProductTitle(product)}\n💰 ${product.price} zł | 📦 ${product.quantityPerPackage || '?'} шт/уп`;
     const photoUrl = getPhotoUrl(product.imageUrls?.[0]);
 
     const qtyButtons = [
@@ -527,10 +543,7 @@ async function sendShelfProducts(chatId, page = 0) {
 
   const bottomButtons = [];
   bottomButtons.push(navButtons);
-  bottomButtons.push([
-    { text: `🛒 Мій список (${await PendingReaction.countDocuments({ sellerTelegramId: chatId })})`, callback_data: 'shelf_mylist' },
-    { text: '✅ Оформити', callback_data: 'shelf_order' },
-  ]);
+  // shelf action buttons disabled
 
   const navMsg = await bot.sendMessage(chatId, `Товари ${safePage * SHELF_PAGE_SIZE + 1}–${safePage * SHELF_PAGE_SIZE + pageProducts.length} з ${products.length}`, {
     reply_markup: { inline_keyboard: bottomButtons },
@@ -559,7 +572,7 @@ async function deleteShelfMessages(chatId, messageIds) {
 
 function buildShopCaption(product, currentIndex, totalProducts) {
   return [
-    `📦 #${product.orderNumber || 'N/A'} — ${product.name || 'Без назви'}`,
+    `📦 #${product.orderNumber || 'N/A'} — ${getProductTitle(product)}`,
     `💰 ${product.price || 0} zł`,
     `📦 В упаковці: ${product.quantityPerPackage || '?'} шт`,
     '',
@@ -587,9 +600,14 @@ function buildShopKeyboard(productId, currentIndex, totalPages, selectedQty = 0,
     { text: '✅ Оформити', callback_data: 'shop_order' },
   ];
 
+  const resetRow = [
+    { text: '🔄 Скинути стан', callback_data: 'shop_reset' },
+  ];
+
   const keyboard = [qtyRow];
   if (navRow.length) keyboard.push(navRow);
-  keyboard.push(actionRow);
+  if (actionRow.length) keyboard.push(actionRow);
+  keyboard.push(resetRow);
   return { inline_keyboard: keyboard };
 }
 
@@ -599,42 +617,28 @@ async function deleteShopMessage(chatId, messageId) {
   } catch (_) { /* message may already be deleted */ }
 }
 
-function getShopMenuLabel(shopSession = {}) {
-  const total = Array.isArray(shopSession?.productIds) ? shopSession.productIds.length : 0;
-  const index = Number.isInteger(shopSession?.currentIndex) ? shopSession.currentIndex : -1;
-  return index >= 0 && index < total - 1 ? 'Продовжити замовлення' : 'Товари';
-}
-
-function buildShopControlKeyboard(label = 'Товари') {
-  return {
-    keyboard: [[{ text: label }]],
-    resize_keyboard: true,
-    one_time_keyboard: false,
-  };
-}
-
-function getShopMenuPrompt(label = 'Товари') {
-  return label === 'Продовжити замовлення'
-    ? 'Продовжіть замовлення з того місця, де зупинились.'
-    : 'Натисніть кнопку нижче, щоб переглянути товари.';
-}
-
 async function setShopMenuButton(chatId, label = 'Товари', resetSession = false) {
   const prev = await getSession(chatId, 'shop');
   if (prev?.menuMessageId) {
     await deleteShopMessage(chatId, prev.menuMessageId);
   }
 
-  const sent = await bot.sendMessage(chatId, getShopMenuPrompt(label), {
-    reply_markup: buildShopControlKeyboard(label),
-  });
+  if (prev) {
+    const newSession = { ...prev };
+    delete newSession.menuMessageId;
+    delete newSession.menuLabel;
+    if (Object.keys(newSession).length === 0) {
+      await deleteSession(chatId, 'shop');
+    } else {
+      await setSession(chatId, 'shop', newSession);
+    }
+  }
 
-  const newSession = resetSession
-    ? { menuMessageId: String(sent.message_id), menuLabel: label }
-    : { ...(prev || {}), menuMessageId: String(sent.message_id), menuLabel: label };
+  if (resetSession) {
+    await persistUserBotState(chatId, { 'lastBotState.shop': null });
+  }
 
-  await setSession(chatId, 'shop', newSession);
-  return sent;
+  return null;
 }
 
 async function deleteShopMenuMessage(chatId, session) {
@@ -793,8 +797,12 @@ async function updateShopMessage(chatId, msgId, product, caption, replyMarkup) {
   return await bot.editMessageMedia(media, { chat_id: chatId, message_id: msgId, reply_markup: replyMarkup });
 }
 
-async function sendShopProducts(chatId, index = 0) {
-  const products = await Product.find({ status: 'active' }).sort({ orderNumber: 1 }).lean();
+async function sendShopProducts(chatId, index = 0, forceIndex = false) {
+  let products = await Product.find({ status: 'active' }).sort({ orderNumber: 1 }).lean();
+  products = products.map((product) => ({
+    ...product,
+    name: product.brand || product.model || product.category || `#${product.orderNumber}`,
+  }));
   if (!products.length) {
     await bot.sendMessage(chatId, 'Активних товарів на складі поки що немає.');
     return;
@@ -811,9 +819,11 @@ async function sendShopProducts(chatId, index = 0) {
 
   const totalProducts = products.length;
   const persistentShopIndex = user?.lastBotState?.shop?.currentIndex;
-  const desiredIndex = (prev?.currentIndex != null && Number.isInteger(prev.currentIndex))
-    ? prev.currentIndex
-    : (Number.isInteger(persistentShopIndex) ? persistentShopIndex : index);
+  const desiredIndex = forceIndex
+    ? index
+    : (prev?.currentIndex != null && Number.isInteger(prev.currentIndex))
+      ? prev.currentIndex
+      : (Number.isInteger(persistentShopIndex) ? persistentShopIndex : index);
   const safeIndex = Math.max(0, Math.min(desiredIndex, totalProducts - 1));
   const product = products[safeIndex];
   const caption = buildShopCaption(product, safeIndex, totalProducts);
@@ -840,6 +850,7 @@ async function sendShopProducts(chatId, index = 0) {
           updatedAt: new Date(),
         },
       });
+      await setShopMenuButton(chatId, 'Товари');
     }
     preloadPromise.catch(() => {});
   } catch (error) {
@@ -1004,10 +1015,8 @@ async function handleReceiveStep(chatId, msg, state) {
  */
 function buildCarouselMessage(productName, position, entry, currentIndex, totalEntries) {
   const caption = [
-    `📦 Позиція: ${position || 'N/A'}`,
+    `📦 ${position || 'N/A'}`,
     `🏪 Магазин: ${entry.shopName}`,
-    `👤 Покупець: ${entry.buyerName}`,
-    `📍 Адреса: ${entry.address}`,
     `📊 Кількість: ${entry.quantity}`,
     '',
     `${currentIndex + 1} / ${totalEntries}`,
@@ -1025,6 +1034,27 @@ function buildCarouselMessage(productName, position, entry, currentIndex, totalE
   inline_keyboard.push(actionRow);
 
   return { caption, reply_markup: { inline_keyboard } };
+}
+
+async function getShippingBlockPositions(productIds) {
+  if (!Array.isArray(productIds) || !productIds.length) return new Map();
+
+  const blocks = await Block.find(
+    { productIds: { $in: productIds } },
+    'blockId productIds'
+  ).sort({ blockId: 1 }).lean();
+
+  const positions = new Map();
+  for (const block of blocks) {
+    for (let index = 0; index < block.productIds.length; index += 1) {
+      const pid = String(block.productIds[index]);
+      if (!positions.has(pid)) {
+        positions.set(pid, { blockId: block.blockId, index });
+      }
+    }
+  }
+
+  return positions;
 }
 
 async function shipOrders(chatId) {
@@ -1062,14 +1092,28 @@ async function shipOrders(chatId) {
     }
   }
 
-  // Sort by orderNumber
-  const sorted = Array.from(productMap.values()).sort(
-    (a, b) => (a.product.orderNumber ?? 0) - (b.product.orderNumber ?? 0)
-  );
+  const productIds = Array.from(productMap.keys());
+  const blockPositions = await getShippingBlockPositions(productIds);
+
+  const sorted = Array.from(productMap.values()).sort((a, b) => {
+    const aPos = blockPositions.get(String(a.product._id));
+    const bPos = blockPositions.get(String(b.product._id));
+
+    if (aPos && bPos) {
+      if (aPos.blockId !== bPos.blockId) return aPos.blockId - bPos.blockId;
+      return aPos.index - bPos.index;
+    }
+    if (aPos) return -1;
+    if (bPos) return 1;
+    return (a.product.orderNumber ?? 0) - (b.product.orderNumber ?? 0);
+  });
 
   for (const { product, entries } of sorted) {
-    const position = product.orderNumber || 'N/A';
-    const { caption, reply_markup } = buildCarouselMessage(product.name, position, entries[0], 0, entries.length);
+    const positionInfo = blockPositions.get(String(product._id));
+    const position = positionInfo
+      ? `Блок ${positionInfo.blockId} позиція ${positionInfo.index + 1}`
+      : product.orderNumber || 'N/A';
+    const { caption, reply_markup } = buildCarouselMessage(getProductTitle(product), position, entries[0], 0, entries.length);
 
     try {
       let sent;
@@ -1091,7 +1135,7 @@ async function shipOrders(chatId) {
       if (sent?.message_id) {
         await setSession(chatId, 'ship', {
           productId: String(product._id),
-          productName: product.name,
+          productName: getProductTitle(product),
           position,
           entries,
           currentIndex: 0,
@@ -1102,6 +1146,9 @@ async function shipOrders(chatId) {
     } catch (error) {
       console.error('Failed to send shipping carousel message', error);
     }
+
+    // Throttle warehouse order dispatch to avoid rapid-fire Telegram requests and 429 errors
+    await delay(500 + Math.floor(Math.random() * 501));
   }
 
   await bot.sendMessage(chatId, `📋 Відправлено ${sorted.length} позицій для пакування.\n\nЩоб позначити товар як закінчений — відповідте (reply) на повідомлення з товаром словом "Закінчився".`);
@@ -1172,13 +1219,11 @@ async function initBot(token) {
         // Set per-chat commands based on role
         await setRoleCommands(chatId, user.role);
 
-        const shopSession = await getSession(chatId, 'shop');
-        const label = getShopMenuLabel(shopSession);
         const sent = await bot.sendMessage(
           chatId,
           `Привіт, ${user.firstName || 'користувачу'}! Ви зайшли як ${user.role}.\n\n${buildRoleHelp(user.role)}`
         );
-        await setShopMenuButton(chatId, label);
+        await setShopMenuButton(chatId, user.role === 'warehouse' ? 'Склад' : 'Товари');
         return;
       }
 
@@ -1188,10 +1233,8 @@ async function initBot(token) {
           return;
         }
 
-        const shopSession = await getSession(chatId, 'shop');
-        const label = getShopMenuLabel(shopSession);
         await bot.sendMessage(chatId, buildRoleHelp(user.role));
-        await setShopMenuButton(chatId, label);
+        await setShopMenuButton(chatId, user.role === 'warehouse' ? 'Склад' : 'Товари');
         return;
       }
 
@@ -1214,7 +1257,7 @@ async function initBot(token) {
         if (WEB_APP_URL.startsWith('https://')) {
           await bot.sendMessage(chatId, 'Відкрийте Mini App:', {
             reply_markup: {
-              inline_keyboard: [[{ text: 'Відкрити Mini App', web_app: { url: WEB_APP_URL } }]],
+              inline_keyboard: [[{ text: user.role === 'warehouse' ? 'Відкрити склад' : 'Відкрити товари', web_app: { url: WEB_APP_URL } }]],
             },
           });
           return;
@@ -1224,6 +1267,7 @@ async function initBot(token) {
         return;
       }
 
+      /*
       if (text === '/shelf') {
         if (!user) {
           await bot.sendMessage(chatId, getUnknownUserMessage());
@@ -1238,6 +1282,7 @@ async function initBot(token) {
         await sendShelfProducts(chatId);
         return;
       }
+      */
 
       if (text === '/shop' || messageText === 'товари' || messageText === 'продовжити замовлення') {
         if (!user) {
@@ -1254,6 +1299,7 @@ async function initBot(token) {
         return;
       }
 
+      /*
       if (text === '/orders' || text === '/mylist') {
         if (!user) {
           await bot.sendMessage(chatId, getUnknownUserMessage());
@@ -1279,7 +1325,9 @@ async function initBot(token) {
         await bot.sendMessage(chatId, `Ваші обрані товари:\n\n${lines.join('\n')}\n\nРазом: ${total} zł\n\nНадішліть /order щоб оформити замовлення.`);
         return;
       }
+      */
 
+      /*
       if (text === '/order') {
         if (!user) {
           await bot.sendMessage(chatId, getUnknownUserMessage());
@@ -1300,14 +1348,16 @@ async function initBot(token) {
           const result = await finalizeOrder(chatId);
           await bot.sendMessage(chatId, result);
           const shopSession = await getSession(chatId, 'shop');
-          const nextLabel = getShopMenuLabel(shopSession);
           const reset = Array.isArray(shopSession?.productIds) && shopSession.currentIndex >= shopSession.productIds.length - 1;
-          await setShopMenuButton(chatId, nextLabel, reset);
+          await setShopMenuButton(chatId, 'Товари', reset);
         } finally {
           orderInFlight.delete(chatId);
         }
         return;
       }
+      */
+
+      // ...видалено старий блок /receive для продавця...
 
       if (text === '/receive') {
         if (!user) {
@@ -1377,7 +1427,15 @@ async function initBot(token) {
         if (!product) {
           const nameMatch = captionText.match(/— "(.+?)"/);
           if (nameMatch) {
-            product = await Product.findOne({ name: nameMatch[1], status: { $ne: 'archived' } });
+            const displayName = nameMatch[1];
+            product = await Product.findOne({
+              status: { $ne: 'archived' },
+              $or: [
+                { brand: displayName },
+                { model: displayName },
+                { category: displayName },
+              ],
+            });
           }
         }
 
@@ -1387,7 +1445,7 @@ async function initBot(token) {
         }
 
         if (product.status === 'archived') {
-          await bot.sendMessage(chatId, `"${product.name}" вже в архіві.`);
+          await bot.sendMessage(chatId, `"${getProductTitle(product)}" вже в архіві.`);
           return;
         }
 
@@ -1408,7 +1466,7 @@ async function initBot(token) {
           cancelledCount++;
           const buyer = buyerMap.get(order.buyerTelegramId);
           const buyerName = [buyer?.firstName, buyer?.lastName].filter(Boolean).join(' ') || order.buyerTelegramId;
-          await bot.sendMessage(order.buyerTelegramId, `⛔ Товар "${product.name}" на складі скінчився. Замовлення для ${buyerName} не буде виконано.`).catch(() => null);
+          await bot.sendMessage(order.buyerTelegramId, `⛔ Товар "${getProductTitle(product)}" на складі скінчився. Замовлення для ${buyerName} не буде виконано.`).catch(() => null);
         }
 
         // Archive product
@@ -1436,7 +1494,7 @@ async function initBot(token) {
 
         // Update carousel message
         try {
-          const doneCaption = `📦 "${product.name}"\n❌ Скасовано замовлень: ${cancelledCount}\nТовар переміщено в архів.`;
+          const doneCaption = `📦 "${getProductTitle(product)}"\n❌ Скасовано замовлень: ${cancelledCount}\nТовар переміщено в архів.`;
           if (replied.photo) {
             await bot.editMessageCaption(doneCaption, {
               chat_id: chatId, message_id: repliedMsgId,
@@ -1451,7 +1509,7 @@ async function initBot(token) {
         } catch (_) {}
 
         if (carousel) await deleteSession(chatId, 'ship', repliedMsgId);
-        await bot.sendMessage(chatId, `📦 "${product.name}" — скасовано замовлень: ${cancelledCount}. Товар в архіві.`);
+        await bot.sendMessage(chatId, `📦 "${getProductTitle(product)}" — скасовано замовлень: ${cancelledCount}. Товар в архіві.`);
         return;
       }
 
@@ -1486,7 +1544,7 @@ async function initBot(token) {
             { upsert: true, new: true }
           );
 
-          await bot.sendMessage(chatId, `✅ ${product.name} (${likesOnly ? '1 шт' : quantity + ' шт'}) додано до списку.\nПереглянути: /mylist\nОформити: /order`);
+          await bot.sendMessage(chatId, `✅ ${getProductTitle(product)} (${likesOnly ? '1 шт' : quantity + ' шт'}) додано до списку.\nПереглянути: /mylist\nОформити: /order`);
           return;
         }
       }
@@ -1554,6 +1612,76 @@ async function initBot(token) {
         return;
       }
 
+      // ── Registration request review buttons ──
+      if (data.startsWith('regreq_')) {
+        const parts = data.split(':');
+        const action = parts[0];
+        const requestId = parts[1];
+
+        if (!requestId) {
+          await bot.answerCallbackQuery(query.id, { text: 'Невірні дані заявки', show_alert: true });
+          return;
+        }
+
+        const request = await RegistrationRequest.findById(requestId).lean();
+        if (!request || request.status !== 'pending') {
+          await bot.answerCallbackQuery(query.id, { text: 'Заявку вже оброблено або не знайдено', show_alert: true });
+          try {
+            await bot.editMessageReplyMarkup(
+              { inline_keyboard: [[{ text: '❌ Заявка оброблена', callback_data: 'noop' }]] },
+              { chat_id: chatId, message_id: msgId }
+            );
+          } catch (_) {}
+          return;
+        }
+
+        if (action === 'regreq_approve') {
+          const existingUser = await User.findOne({ telegramId: request.telegramId }).lean();
+          if (existingUser) {
+            await RegistrationRequest.findByIdAndUpdate(requestId, { status: 'rejected' });
+            await bot.answerCallbackQuery(query.id, { text: 'Користувач вже зареєстрований', show_alert: true });
+          } else {
+            const user = new User({
+              telegramId: request.telegramId,
+              role: request.role,
+              firstName: request.firstName,
+              lastName: request.lastName,
+              shopName: request.role === 'seller' ? request.shopName : '',
+              deliveryGroupId: request.role === 'seller' ? request.deliveryGroupId || '' : '',
+            });
+            await user.save();
+            if (request.role === 'seller' && request.deliveryGroupId) {
+              await DeliveryGroup.findByIdAndUpdate(
+                request.deliveryGroupId,
+                { $addToSet: { members: request.telegramId } },
+                { new: true }
+              );
+            }
+            await RegistrationRequest.findByIdAndDelete(requestId);
+            await bot.answerCallbackQuery(query.id, { text: 'Заявку схвалено', show_alert: false });
+            await sendMessageWithRetry(
+              request.telegramId,
+              `✅ Ваша заявка на реєстрацію схвалена. Ви тепер зареєстровані як ${request.role === 'seller' ? 'продавець' : 'склад'}.`
+            );
+          }
+        } else if (action === 'regreq_reject') {
+          await RegistrationRequest.findByIdAndUpdate(requestId, { status: 'rejected' });
+          await bot.answerCallbackQuery(query.id, { text: 'Заявку відхилено', show_alert: false });
+          await sendMessageWithRetry(request.telegramId, '❌ Ваша заявка на реєстрацію була відхилена.');
+        } else {
+          await bot.answerCallbackQuery(query.id);
+          return;
+        }
+
+        try {
+          await bot.editMessageReplyMarkup(
+            { inline_keyboard: [[{ text: '✅ Оброблено', callback_data: 'noop' }]] },
+            { chat_id: chatId, message_id: msgId }
+          );
+        } catch (_) {}
+        return;
+      }
+
       // ── Shelf quantity buttons: sq:productId:qty ──
       if (data.startsWith('sq:')) {
         const parts = data.split(':');
@@ -1600,10 +1728,11 @@ async function initBot(token) {
           );
         } catch (_) { /* message too old or unchanged */ }
 
-        await bot.answerCallbackQuery(query.id, { text: `✅ ${product.name} — ${quantity} шт`, show_alert: false });
+        await bot.answerCallbackQuery(query.id, { text: `✅ ${getProductTitle(product)} — ${quantity} шт`, show_alert: false });
         return;
       }
 
+      /*
       // ── Shelf pagination: prev / next ──
       if (data.startsWith('shelf_prev:') || data.startsWith('shelf_next:')) {
         const currentPage = parseInt(data.split(':')[1], 10);
@@ -1645,6 +1774,7 @@ async function initBot(token) {
         }
         return;
       }
+      */
 
       // ── Shop quantity buttons: shop_qty:productId:qty ──
       if (data.startsWith('shop_qty:')) {
@@ -1705,7 +1835,7 @@ async function initBot(token) {
           } catch (_) {}
         }
 
-        await bot.answerCallbackQuery(query.id, { text: `✅ ${product.name} — ${quantity} шт`, show_alert: false });
+        await bot.answerCallbackQuery(query.id, { text: `✅ ${getProductTitle(product)} — ${quantity} шт`, show_alert: false });
         return;
       }
 
@@ -1784,7 +1914,7 @@ ${lines.join('\n')}
 
 Разом: ${total} zł
 
-Натисніть ✅ Оформити або /order`);
+Натисніть ✅ Оформити`);
         return;
       }
 
@@ -1800,12 +1930,28 @@ ${lines.join('\n')}
           await bot.answerCallbackQuery(query.id);
           await bot.sendMessage(chatId, result);
           const shopSession = await getSession(chatId, 'shop');
-          const nextLabel = getShopMenuLabel(shopSession);
           const reset = Array.isArray(shopSession?.productIds) && shopSession.currentIndex >= shopSession.productIds.length - 1;
-          await setShopMenuButton(chatId, nextLabel, reset);
+          await setShopMenuButton(chatId, 'Товари', reset);
         } finally {
           orderInFlight.delete(chatId);
         }
+        return;
+      }
+
+      // ── Shop: reset current shop session ──
+      if (data === 'shop_reset') {
+        await bot.answerCallbackQuery(query.id, { text: 'Скидаю стан...', show_alert: false });
+        const shopSession = await getSession(chatId, 'shop');
+        if (shopSession?.messageId) {
+          await deleteShopMessage(chatId, shopSession.messageId);
+        }
+        if (shopSession?.menuMessageId) {
+          await deleteShopMessage(chatId, shopSession.menuMessageId);
+        }
+        await deleteSession(chatId, 'shop');
+        await PendingReaction.deleteMany({ sellerTelegramId: chatId });
+        await setShopMenuButton(chatId, 'Товари', true);
+        await sendShopProducts(chatId, 0, true);
         return;
       }
 
@@ -2077,4 +2223,5 @@ module.exports = {
   sendOrderConfirmation,
   sendAdminNotification,
   fixPendingReactionIndexes,
+  getShippingBlockPositions,
 };

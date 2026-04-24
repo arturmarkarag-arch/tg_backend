@@ -34,9 +34,9 @@ describe('Archive API', () => {
     const yesterday = new Date();
     yesterday.setDate(yesterday.getDate() - 1);
 
-    await Product.create({ name: 'Archived1', price: 10, quantity: 1, orderNumber: 0, status: 'archived', archivedAt: today });
-    await Product.create({ name: 'Archived2', price: 20, quantity: 2, orderNumber: 0, status: 'archived', archivedAt: yesterday });
-    await Product.create({ name: 'Active', price: 30, quantity: 3, orderNumber: 1, status: 'active' });
+    await Product.create({ brand: 'Archived1', price: 10, quantity: 1, orderNumber: 0, status: 'archived', archivedAt: today });
+    await Product.create({ brand: 'Archived2', price: 20, quantity: 2, orderNumber: 0, status: 'archived', archivedAt: yesterday });
+    await Product.create({ brand: 'Active', price: 30, quantity: 3, orderNumber: 1, status: 'active' });
 
     const res = await request(app).get('/api/archive');
 
@@ -44,7 +44,7 @@ describe('Archive API', () => {
     expect(res.body.total).toBe(2);
     expect(res.body.groups.length).toBeGreaterThanOrEqual(1);
     // Active product should NOT appear
-    const allNames = res.body.groups.flatMap((g) => g.items.map((i) => i.name));
+    const allNames = res.body.groups.flatMap((g) => g.items.map((i) => i.brand));
     expect(allNames).toContain('Archived1');
     expect(allNames).toContain('Archived2');
     expect(allNames).not.toContain('Active');
@@ -54,20 +54,20 @@ describe('Archive API', () => {
     const oldDate = new Date();
     oldDate.setDate(oldDate.getDate() - 31);
 
-    await Product.create({ name: 'Old', price: 10, quantity: 1, orderNumber: 0, status: 'archived', archivedAt: oldDate });
-    await Product.create({ name: 'Recent', price: 10, quantity: 1, orderNumber: 0, status: 'archived', archivedAt: new Date() });
+    await Product.create({ brand: 'Old', price: 10, quantity: 1, orderNumber: 0, status: 'archived', archivedAt: oldDate });
+    await Product.create({ brand: 'Recent', price: 10, quantity: 1, orderNumber: 0, status: 'archived', archivedAt: new Date() });
 
     const res = await request(app).get('/api/archive');
 
     expect(res.body.total).toBe(1);
-    const allNames = res.body.groups.flatMap((g) => g.items.map((i) => i.name));
+    const allNames = res.body.groups.flatMap((g) => g.items.map((i) => i.brand));
     expect(allNames).toContain('Recent');
     expect(allNames).not.toContain('Old');
   });
 
   it('paginates archived products', async () => {
     for (let i = 0; i < 5; i++) {
-      await Product.create({ name: `Prod${i}`, price: 10, quantity: 1, orderNumber: 0, status: 'archived', archivedAt: new Date() });
+      await Product.create({ brand: `Prod${i}`, price: 10, quantity: 1, orderNumber: 0, status: 'archived', archivedAt: new Date() });
     }
 
     const res = await request(app).get('/api/archive?page=1&pageSize=2');
@@ -83,7 +83,7 @@ describe('Archive API', () => {
   describe('Restore', () => {
     it('restores an archived product to active status', async () => {
       const product = await Product.create({
-        name: 'ToRestore', price: 10, quantity: 1,
+        brand: 'ToRestore', price: 10, quantity: 1,
         orderNumber: 0, status: 'archived', archivedAt: new Date(),
         originalOrderNumber: 3,
       });
@@ -98,9 +98,9 @@ describe('Archive API', () => {
     });
 
     it('restores to end of list when no originalOrderNumber', async () => {
-      await Product.create({ name: 'Existing', price: 10, quantity: 1, orderNumber: 5, status: 'active' });
+      await Product.create({ brand: 'Existing', price: 10, quantity: 1, orderNumber: 5, status: 'active' });
       const product = await Product.create({
-        name: 'NoOriginal', price: 10, quantity: 1,
+        brand: 'NoOriginal', price: 10, quantity: 1,
         orderNumber: 0, status: 'archived', archivedAt: new Date(),
         originalOrderNumber: null,
       });
@@ -119,18 +119,18 @@ describe('Archive API', () => {
     });
 
     it('returns 400 when product is not archived', async () => {
-      const product = await Product.create({ name: 'Active', price: 10, quantity: 1, orderNumber: 1, status: 'active' });
+      const product = await Product.create({ brand: 'Active', price: 10, quantity: 1, orderNumber: 1, status: 'active' });
       const res = await request(app).post(`/api/archive/${product._id}/restore`);
       expect(res.status).toBe(400);
     });
 
     it('shifts existing products when restoring to original position', async () => {
-      await Product.create({ name: 'P1', price: 10, quantity: 1, orderNumber: 1, status: 'active' });
-      await Product.create({ name: 'P2', price: 10, quantity: 1, orderNumber: 2, status: 'active' });
-      await Product.create({ name: 'P3', price: 10, quantity: 1, orderNumber: 3, status: 'active' });
+      await Product.create({ brand: 'P1', price: 10, quantity: 1, orderNumber: 1, status: 'active' });
+      await Product.create({ brand: 'P2', price: 10, quantity: 1, orderNumber: 2, status: 'active' });
+      await Product.create({ brand: 'P3', price: 10, quantity: 1, orderNumber: 3, status: 'active' });
 
       const archived = await Product.create({
-        name: 'Restored', price: 10, quantity: 1,
+        brand: 'Restored', price: 10, quantity: 1,
         orderNumber: 0, status: 'archived', archivedAt: new Date(),
         originalOrderNumber: 2,
       });
@@ -138,7 +138,7 @@ describe('Archive API', () => {
       await request(app).post(`/api/archive/${archived._id}/restore`);
 
       const all = await Product.find({ status: { $ne: 'archived' } }).sort({ orderNumber: 1 });
-      expect(all.map((p) => p.name)).toEqual(['P1', 'Restored', 'P2', 'P3']);
+      expect(all.map((p) => p.brand)).toEqual(['P1', 'Restored', 'P2', 'P3']);
       expect(all.map((p) => p.orderNumber)).toEqual([1, 2, 3, 4]);
     });
   });
@@ -146,7 +146,7 @@ describe('Archive API', () => {
   describe('Permanent delete', () => {
     it('permanently deletes an archived product', async () => {
       const product = await Product.create({
-        name: 'ToDelete', price: 10, quantity: 1,
+        brand: 'ToDelete', price: 10, quantity: 1,
         orderNumber: 0, status: 'archived', archivedAt: new Date(),
       });
 
@@ -166,7 +166,7 @@ describe('Archive API', () => {
     });
 
     it('returns 400 when product is not archived', async () => {
-      const product = await Product.create({ name: 'Active', price: 10, quantity: 1, orderNumber: 1, status: 'active' });
+      const product = await Product.create({ brand: 'Active', price: 10, quantity: 1, orderNumber: 1, status: 'active' });
       const res = await request(app).delete(`/api/archive/${product._id}`);
       expect(res.status).toBe(400);
     });

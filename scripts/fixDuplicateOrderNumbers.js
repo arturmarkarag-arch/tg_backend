@@ -23,7 +23,7 @@ async function fix() {
   for (let i = 0; i < products.length; i++) {
     const newNumber = i + 1;
     if (products[i].orderNumber !== newNumber) {
-      console.log(`  Product "${products[i].name}" (${products[i]._id}): ${products[i].orderNumber} → ${newNumber}`);
+      console.log(`  Product "${products[i].brand || products[i].model || products[i].category || `#${products[i].orderNumber}`}" (${products[i]._id}): ${products[i].orderNumber} → ${newNumber}`);
       // Use updateOne to bypass any schema hooks and directly set the number
       await Product.updateOne({ _id: products[i]._id }, { $set: { orderNumber: newNumber } });
     }
