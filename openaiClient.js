@@ -1,4 +1,41 @@
 const { OpenAI } = require('openai');
+const AppSetting = require('./models/AppSetting');
+
+const OPENAI_MODEL = process.env.OPENAI_MODEL || 'gpt-5.4-nano';
+const OPENAI_MODEL_SETTING_KEY = 'openai.defaultModel';
+
+const OPENAI_MODEL_METADATA = {
+  'gpt-5.4-nano': {
+    imageInput: true,
+    textOutput: true,
+    price: '$0.05 / 1K',
+    description: 'GPT-5.4 nano з підтримкою зображень',
+  },
+  'gpt-5-nano': {
+    imageInput: true,
+    textOutput: true,
+    price: 'unknown',
+    description: 'Мультимодальна nano модель GPT-5',
+  },
+  'gpt-4.1': {
+    imageInput: true,
+    textOutput: true,
+    price: 'unknown',
+    description: 'GPT-4.1 з підтримкою зображень',
+  },
+  'gpt-4.1-mini': {
+    imageInput: true,
+    textOutput: true,
+    price: 'unknown',
+    description: 'Менша версія GPT-4.1',
+  },
+  'gpt-3.5-turbo': {
+    imageInput: false,
+    textOutput: true,
+    price: 'unknown',
+    description: 'Текстова GPT-3.5 turbo модель',
+  },
+};
 
 let openai = null;
 let openaiStatus = {
@@ -41,6 +78,36 @@ function getOpenAIStatus() {
   };
 }
 
+function enrichOpenAIModel(model) {
+  const meta = OPENAI_MODEL_METADATA[model.id] || {};
+  return {
+    id: model.id,
+    owned_by: model.owned_by,
+    description: meta.description || model.description || '',
+    imageInput: Boolean(meta.imageInput),
+    textOutput: meta.textOutput !== false,
+    price: meta.price || 'unknown',
+  };
+}
+
+async function listOpenAIModels({ supportsImage } = {}) {
+  if (!openai) {
+    throw new Error(openaiStatus.error || 'OPENAI_API_KEY not configured');
+  }
+
+  const result = await openai.models.list();
+  let models = Array.isArray(result.data) ? result.data.map(enrichOpenAIModel) : [];
+  if (supportsImage) {
+    models = models.filter((model) => model.imageInput);
+  }
+  return models;
+}
+
+async function getSelectedOpenAIModel() {
+  const setting = await AppSetting.findOne({ key: OPENAI_MODEL_SETTING_KEY }).lean();
+  return setting?.value || OPENAI_MODEL;
+}
+
 async function verifyOpenAIConnection() {
   if (!openai) {
     throw new Error(openaiStatus.error || 'OPENAI_API_KEY not configured');
@@ -54,13 +121,14 @@ async function verifyOpenAIConnection() {
   };
 }
 
-async function createChatCompletion(prompt) {
+async function createChatCompletion(prompt, { model = null } = {}) {
   if (!openai) {
     throw new Error(openaiStatus.error || 'OPENAI_API_KEY not configured');
   }
 
+  const selectedModel = model || (await getSelectedOpenAIModel());
   const response = await openai.responses.create({
-    model: 'gpt-3.5-turbo',
+    model: selectedModel,
     input: prompt,
   });
 
@@ -77,4 +145,5 @@ module.exports = {
   verifyOpenAIConnection,
   createChatCompletion,
   getOpenAIStatus,
+  listOpenAIModels,
 };

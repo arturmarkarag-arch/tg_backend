@@ -1,5 +1,6 @@
 const express = require('express');
 const Order = require('../models/Order');
+const Product = require('../models/Product');
 const User = require('../models/User');
 const RegistrationRequest = require('../models/RegistrationRequest');
 const { sendOrderConfirmation } = require('../telegramBot');
@@ -106,11 +107,50 @@ router.post('/', async (req, res) => {
     return res.status(403).json({ error: 'not_registered', message: 'Потрібно завершити реєстрацію, перш ніж робити замовлення' });
   }
 
-  const totalPrice = items.reduce((sum, item) => sum + (item.price || 0) * item.quantity, 0);
-  const order = new Order({ buyerTelegramId: buyer.telegramId, items, shippingAddress, contactInfo, emojiType, totalPrice });
+  const productIds = items
+    .map((item) => item?.productId)
+    .filter(Boolean)
+    .map(String);
+
+  const realProducts = await Product.find({ _id: { $in: productIds } }).lean();
+  const productMap = new Map(realProducts.map((product) => [String(product._id), product]));
+
+  let totalPrice = 0;
+  const validItems = [];
+
+  for (const item of items) {
+    const productId = String(item?.productId || '');
+    const product = productMap.get(productId);
+    if (!product) continue;
+
+    const quantity = Math.max(1, parseInt(item.quantity, 10) || 1);
+    const price = Number(product.price || 0);
+
+    validItems.push({
+      productId: product._id,
+      name: product.title || product.name || 'Товар',
+      price,
+      quantity,
+    });
+
+    totalPrice += price * quantity;
+  }
+
+  if (validItems.length === 0) {
+    return res.status(400).json({ error: 'No valid items found' });
+  }
+
+  const order = new Order({
+    buyerTelegramId: buyer.telegramId,
+    items: validItems,
+    shippingAddress,
+    contactInfo,
+    emojiType,
+    totalPrice,
+  });
   await order.save();
 
-  sendOrderConfirmation(order.buyerTelegramId, items.length, totalPrice, order._id.toString()).catch((err) => {
+  sendOrderConfirmation(order.buyerTelegramId, validItems.length, totalPrice, order._id.toString()).catch((err) => {
     console.error('Failed to send order confirmation:', err?.message || err);
   });
 

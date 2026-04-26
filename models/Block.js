@@ -10,5 +10,6 @@ const BlockSchema = new mongoose.Schema(
 );
 
 BlockSchema.index({ blockId: 1 });
+BlockSchema.index({ productIds: 1 });
 
 module.exports = mongoose.model('Block', BlockSchema);

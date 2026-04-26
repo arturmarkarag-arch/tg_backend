@@ -3,9 +3,15 @@ const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
 const sharp = require('sharp');
 const crypto = require('crypto');
 const { shiftUp: shiftOrderUp } = require('./utils/shiftOrderNumbers');
+const { analyzeBarcodeImage, analyzeProductImage } = require('./openaiClient');
+const { decodeBarcodeFromImageBuffer, normalizeBarcode } = require('./utils/barcodeScanner');
 const User = require('./models/User');
 const Product = require('./models/Product');
+// WARNING: SearchProduct is a completely independent schema from Product.
+// Admin group replies that create SearchProduct records must not be treated as warehouse inventory.
+const SearchProduct = require('./models/SearchProduct');
 const Order = require('./models/Order');
+
 const PendingReaction = require('./models/PendingReaction');
 const BotSession = require('./models/BotSession');
 const BotInteractionLog = require('./models/BotInteractionLog');
@@ -82,6 +88,262 @@ function getProductTitle(product) {
   return product.brand || product.model || product.category || `#${product.orderNumber}`;
 }
 
+function escapeRegex(value) {
+  return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function isPriceLookupCaption(caption) {
+  if (!caption) return false;
+  const text = caption.trim().toLowerCase();
+  if (/^(?:ціна|цена|price|\?)+$/.test(text)) return true;
+  return /\b(?:ціна|цена|price)\b/.test(text);
+}
+
+function isBarcodeLookupCaption(caption) {
+  if (!caption) return false;
+  const text = caption.trim().toLowerCase();
+  return /(?:^|[^A-Za-z0-9_])(штрихкод|barcode|штрих-код)(?:$|[^A-Za-z0-9_])/i.test(text);
+}
+
+function isBarcodeLookupText(text) {
+  if (!text) return false;
+  const normalized = String(text).trim().toLowerCase();
+  if (/(?:^|[^A-Za-z0-9_])(штрихкод|barcode|штрих-код)(?:$|[^A-Za-z0-9_])/i.test(normalized)) return true;
+  const digits = normalized.replace(/\D/g, '');
+  return digits.length >= 8 && digits.length <= 14 && /^[0-9\s\-]+$/.test(normalized);
+}
+
+function parseAdminPriceReply(text) {
+  if (!text) return null;
+  const raw = String(text).trim();
+  if (!/^[0-9]+(?:[\.,][0-9]+)?$/.test(raw)) return null;
+  const normalized = raw.replace(',', '.');
+  const price = Number(normalized);
+  return Number.isFinite(price) && price > 0 ? price : null;
+}
+
+function validateEAN(barcode) {
+  if (!/^[0-9]+$/.test(barcode)) return false;
+  const len = barcode.length;
+  if (![8, 12, 13].includes(len)) return false;
+  const digits = barcode.split('').map(Number);
+  const check = digits.pop();
+  let sum = 0;
+  for (let i = digits.length - 1; i >= 0; i -= 1) {
+    const positionFromRight = digits.length - i;
+    const weight = positionFromRight % 2 === 0 ? 1 : 3;
+    sum += digits[i] * weight;
+  }
+  const mod = sum % 10;
+  const expected = mod === 0 ? 0 : 10 - mod;
+  return expected === check;
+}
+
+function chooseBarcodeCandidate(text) {
+  if (!text) return '';
+  const normalized = String(text).replace(/[^0-9]/g, ' ');
+  const candidates = normalized
+    .split(/\s+/)
+    .map((segment) => segment.trim())
+    .filter((segment) => segment.length >= 8 && segment.length <= 14);
+
+  if (!candidates.length) return '';
+
+  const valid = candidates.filter((candidate) => validateEAN(candidate));
+  if (valid.length) {
+    return valid.sort((a, b) => b.length - a.length)[0];
+  }
+
+  return candidates.sort((a, b) => b.length - a.length)[0] || '';
+}
+
+async function recognizeBarcodeFromBuffer(buffer) {
+  const zxingResult = await decodeBarcodeFromImageBuffer(buffer);
+  const rawText = String(zxingResult.text || '').trim();
+  const zxingFormat = String(zxingResult.format || 'UNKNOWN');
+  const isQr = /qr/i.test(zxingFormat);
+  let barcode = '';
+  let qrCode = '';
+  let recognitionSource = 'ZXing';
+  let details = `ZXing format=${zxingFormat}`;
+
+  if (rawText) {
+    if (isQr) {
+      qrCode = rawText;
+    } else {
+      barcode = normalizeBarcode(rawText);
+    }
+  }
+
+  if (!barcode && !qrCode) {
+    const result = await analyzeBarcodeImage(buffer);
+    const scannedBarcode = normalizeBarcode(result.scannedBarcode || '');
+    const digitsOnBarcode = normalizeBarcode(result.digitsOnBarcode || '');
+    const chosenBarcode = scannedBarcode || digitsOnBarcode || '';
+    barcode = chosenBarcode;
+    recognitionSource = 'OpenAI';
+    details = `OpenAI scannedBarcode=${scannedBarcode || '—'} digitsOnBarcode=${digitsOnBarcode || '—'}`;
+    return { barcode, qrCode, recognitionSource, details, rawText: result.rawText || '' };
+  }
+
+  return { barcode, qrCode, recognitionSource, details, rawText, zxingFormat };
+}
+
+async function findProductByBarcode(barcode) {
+  if (!barcode) return null;
+  const normalized = normalizeBarcode(barcode);
+  const conditions = [];
+  if (normalized) {
+    conditions.push({ barcode: { $regex: `^${escapeRegex(normalized)}$`, $options: 'i' } });
+  }
+  const rawText = String(barcode).trim();
+  if (rawText) {
+    conditions.push({ qrCode: { $regex: `^${escapeRegex(rawText)}$`, $options: 'i' } });
+  }
+  if (!conditions.length) return null;
+  const product = await Product.findOne({ $or: conditions }).lean();
+  return product;
+}
+
+function scoreProductMatch(product, data) {
+  const weight = {
+    brand: 3,
+    model: 4,
+    category: 2,
+    title: 1,
+    barcode: 5,
+    textOnImage: 1,
+  };
+  const text = [product.name, product.brand, product.model, product.category, product.textOnImage, product.barcode].join(' ').toLowerCase();
+  let score = 0;
+  if (data.brand && text.includes(data.brand.toLowerCase())) score += weight.brand;
+  if (data.model && text.includes(data.model.toLowerCase())) score += weight.model;
+  if (data.category && text.includes(data.category.toLowerCase())) score += weight.category;
+  if (data.title && text.includes(data.title.toLowerCase())) score += weight.title;
+  if (data.barcode && product.barcode && product.barcode.toLowerCase().includes(data.barcode.toLowerCase())) score += weight.barcode;
+  if (data.textOnImage && text.includes(data.textOnImage.toLowerCase())) score += weight.textOnImage;
+  return score;
+}
+
+async function findProductCandidates(gptData) {
+  const conditions = [];
+  const fields = ['brand', 'model', 'category'];
+  fields.forEach((field) => {
+    if (gptData[field]) {
+      conditions.push({ [field]: { $regex: escapeRegex(gptData[field]), $options: 'i' } });
+    }
+  });
+  if (gptData.barcode) {
+    conditions.push({ barcode: { $regex: escapeRegex(gptData.barcode), $options: 'i' } });
+  }
+  if (gptData.title) {
+    const terms = gptData.title.split(/\s+/).filter(Boolean).slice(0, 5);
+    terms.forEach((term) => conditions.push({ $or: [
+      { name: { $regex: escapeRegex(term), $options: 'i' } },
+      { brand: { $regex: escapeRegex(term), $options: 'i' } },
+      { model: { $regex: escapeRegex(term), $options: 'i' } },
+      { category: { $regex: escapeRegex(term), $options: 'i' } },
+    ] }));
+  }
+  if (!conditions.length) return [];
+  const products = await Product.find({ status: { $ne: 'archived' }, $or: conditions }).lean();
+  return products
+    .map((product) => ({
+      ...product,
+      title: getProductTitle(product),
+      imageUrl: product.imageUrls?.[0] || product.localImageUrl || '',
+      imageUrls: product.imageUrls || [],
+      additionalImageUrls: product.additionalImageUrls || [],
+      matchScore: scoreProductMatch(product, gptData),
+    }))
+    .sort((a, b) => b.matchScore - a.matchScore)
+    .slice(0, 5);
+}
+
+function getProductPhotoSources(product) {
+  const sources = [];
+  if (product.telegramFileId) sources.push(product.telegramFileId);
+  const mainSource = getPhotoUrl(product.imageUrls?.[0] || product.localImageUrl);
+  if (mainSource && !sources.includes(mainSource)) sources.push(mainSource);
+  for (const url of product.additionalImageUrls || []) {
+    const resolved = getPhotoUrl(url);
+    if (resolved && !sources.includes(resolved)) {
+      sources.push(resolved);
+    }
+    if (sources.length >= 5) break;
+  }
+  return sources;
+}
+
+async function sendProductPhotos(chatId, product) {
+  const sources = getProductPhotoSources(product);
+  if (!sources.length) return;
+
+  const safeCaption = `Фото: ${product.title || 'товар'}${product.price ? ` — ${product.price} zł` : ''}`;
+  for (let i = 0; i < sources.length; i += 1) {
+    const source = sources[i];
+    const sendOpts = { caption: i === 0 ? safeCaption : undefined };
+    try {
+      await sendPhotoWithRetry(chatId, source, sendOpts);
+      await delay(200);
+    } catch (error) {
+      console.warn('[Bot] Failed to send product photo', product._id, error?.message || error);
+    }
+  }
+}
+
+function buildProductInfoText(product) {
+  if (!product) return 'Товар не знайдено.';
+  const lines = [
+    `🔎 Знайдено товар: ${getProductTitle(product)}`,
+    `💰 Ціна: ${product.price} zł`,
+    `📦 Кількість: ${product.quantity ?? '—'}`,
+    product.brand ? `Бренд: ${product.brand}` : null,
+    product.model ? `Модель: ${product.model}` : null,
+    product.category ? `Категорія: ${product.category}` : null,
+    product.barcode ? `Штрихкод: ${product.barcode}` : null,
+  ].filter(Boolean);
+  return lines.join('\n');
+}
+
+function buildPriceLookupText(candidates, usage = {}) {
+  const header = candidates.length
+    ? `🔎 Результат пошуку:
+` 
+    : '';
+  if (!candidates.length) {
+    const notFoundText = 'Не вдалося знайти відповідний товар у базі. Спробуйте надіслати інше фото або очистити фон.';
+    return `${notFoundText}${formatUsageText(usage)}`;
+  }
+
+  const top = candidates[0];
+  const lines = [
+    `🔎 Ймовірний товар: ${top.title}`,
+    `💰 Ціна: ${top.price} zł`,
+    `📦 Кількість: ${top.quantity ?? '—'}`,
+    top.brand ? `Бренд: ${top.brand}` : null,
+    top.model ? `Модель: ${top.model}` : null,
+    top.category ? `Категорія: ${top.category}` : null,
+  ].filter(Boolean);
+  if (candidates.length > 1) {
+    lines.push('', 'Інші варіанти:');
+    candidates.slice(1).forEach((product, index) => {
+      lines.push(`${index + 1}. ${product.title} — ${product.price} zł`);
+    });
+  }
+
+  return `${lines.join('\n')}${formatUsageText(usage)}`;
+}
+
+function formatUsageText(usage = {}) {
+  const tokens = Number(usage.totalTokens || usage.total_tokens || 0);
+  if (!tokens) return '';
+  const totalCost = usage.totalCost ?? null;
+  const currency = usage.currency || 'USD';
+  const costText = totalCost != null ? `, приблизна ціна: ${currency} ${totalCost}` : '';
+  return `\n\nТокенів потрачено: ${tokens}${costText}`;
+}
+
 async function logBotInteraction(telegramId, type, action, label = '', context = {}) {
   try {
     await BotInteractionLog.create({ telegramId: String(telegramId), type, action, label, context });
@@ -129,6 +391,16 @@ async function checkBotAccess(chatId) {
   }
 }
 
+async function isChatAdmin(chatId, userId) {
+  try {
+    const member = await bot.getChatMember(chatId, userId);
+    return ['administrator', 'creator'].includes(member.status);
+  } catch (err) {
+    console.warn('Failed to check chat admin status:', err.message || err);
+    return false;
+  }
+}
+
 const SHELF_PAGE_SIZE = 5;
 const SHOP_PREFETCH_COUNT = 8;
 const SHOP_PREFETCH_THRESHOLD = 5;
@@ -140,6 +412,23 @@ const orderInFlight = new Set();
 
 const SERVER_BASE_URL = process.env.SERVER_BASE_URL || (process.env.NODE_ENV === 'production' ? null : `http://localhost:${process.env.PORT || 5000}`);
 const WEB_APP_URL = process.env.WEB_APP_URL || 'http://localhost:5173/mini-app';
+const ALLOWED_TELEGRAM_GROUP_IDS = (process.env.TELEGRAM_ALLOWED_GROUP_IDS || '')
+  .split(',')
+  .map((id) => id.trim())
+  .filter(Boolean)
+  .map((id) => Number(id));
+
+function isAuthorizedGroup(chatId) {
+  if (!ALLOWED_TELEGRAM_GROUP_IDS.length) return false;
+  return ALLOWED_TELEGRAM_GROUP_IDS.includes(Number(chatId));
+}
+
+function getMiniAppUrl(role) {
+  if (!role) return WEB_APP_URL;
+  const url = new URL(WEB_APP_URL);
+  url.searchParams.set('role', role);
+  return url.toString();
+}
 
 let bot = null;
 let status = {
@@ -175,6 +464,13 @@ const roleCommands = {
 function buildRoleHelp(role) {
   const commands = roleCommands[role] || roleCommands.admin;
   return `Доступні команди:\n${commands.join('\n')}`;
+}
+
+async function sendRegistrationApprovedMessage(chatId, role) {
+  await setRoleCommands(chatId, role);
+  const roleLabel = role === 'seller' ? 'продавець' : role === 'warehouse' ? 'склад' : role;
+  const message = `✅ Ваша заявка на реєстрацію схвалена. Ви тепер зареєстровані як ${roleLabel}.\n\n${buildRoleHelp(role)}`;
+  return sendMessageWithRetry(chatId, message);
 }
 
 const roleBotCommands = {
@@ -899,15 +1195,16 @@ async function addLabelsToImage(inputBuffer, price, quantityPerPackage) {
     .toBuffer();
 }
 
-async function uploadBufferToR2(buffer, ext) {
+async function uploadBufferToR2(buffer, ext, folder = 'products') {
   const filename = `${crypto.randomUUID()}.${ext}`;
   await r2Client.send(new PutObjectCommand({
     Bucket: process.env.R2_BUCKET_NAME,
-    Key: `products/${filename}`,
+    Key: `${folder}/${filename}`,
     Body: buffer,
     ContentType: `image/${ext === 'jpg' ? 'jpeg' : ext}`,
   }));
-  return { url: `/api/products/images/${filename}`, name: filename };
+  const path = folder === 'products' ? `/api/products/images/${filename}` : `/api/search-products/images/${filename}`;
+  return { url: path, name: filename };
 }
 
 async function uploadTelegramPhotoToR2(fileId) {
@@ -921,6 +1218,11 @@ async function uploadTelegramPhotoToR2(fileId) {
   return { buffer, ext };
 }
 
+async function uploadSearchProductPhotoToR2(fileId) {
+  const { buffer, ext } = await uploadTelegramPhotoToR2(fileId);
+  return uploadBufferToR2(buffer, ext, 'search-products');
+}
+
 async function handleReceiveStep(chatId, msg, state) {
   const msgText = msg.text?.trim() || '';
 
@@ -930,9 +1232,71 @@ async function handleReceiveStep(chatId, msg, state) {
       return;
     }
     state.photoFileId = msg.photo[msg.photo.length - 1].file_id;
+    state.step = 'await_has_barcode';
+    await setSession(chatId, 'receive', state);
+    await bot.sendMessage(chatId, 'Чи є штрихкод на товарі?', {
+      reply_markup: {
+        inline_keyboard: [
+          [
+            { text: 'Так', callback_data: 'receive_barcode_yes' },
+            { text: 'Ні, немає', callback_data: 'receive_barcode_no' },
+          ],
+        ],
+      },
+    });
+    return;
+  }
+
+  if (state.step === 'await_has_barcode') {
+    const normalized = msgText.trim().toLowerCase();
+    if (normalized === 'так' || normalized === 'yes') {
+      state.step = 'await_barcode_photo';
+      await setSession(chatId, 'receive', state);
+      await bot.sendMessage(chatId, 'Добре. Надішліть фото штрихкоду або QR-коду.');
+      return;
+    }
+
+    if (normalized === 'ні' || normalized === 'немає' || normalized === 'no') {
+      state.step = 'await_price';
+      await setSession(chatId, 'receive', state);
+      await bot.sendMessage(chatId, 'Введіть ціну товару (zł):');
+      return;
+    }
+
+    await bot.sendMessage(chatId, 'Будь ласка, оберіть одну з кнопок: Так або Ні, немає.');
+    return;
+  }
+
+  if (state.step === 'await_barcode_photo') {
+    if (!msg.photo?.length) {
+      await bot.sendMessage(chatId, 'Будь ласка, надішліть фото штрихкоду або QR-коду.');
+      return;
+    }
+
+    state.barcodePhotoFileId = msg.photo[msg.photo.length - 1].file_id;
+    await setSession(chatId, 'receive', state);
+
+    try {
+      const { buffer } = await uploadTelegramPhotoToR2(state.barcodePhotoFileId);
+      const recognition = await recognizeBarcodeFromBuffer(buffer);
+      if (recognition.barcode) {
+        state.barcode = recognition.barcode;
+        await bot.sendMessage(chatId, `Знайдено штрихкод: ${recognition.barcode}`);
+      } else if (recognition.qrCode) {
+        state.qrCode = recognition.qrCode;
+        await bot.sendMessage(chatId, `Знайдено QR-код: ${recognition.qrCode}`);
+      } else {
+        await bot.sendMessage(chatId, 'Не вдалося розпізнати код. Продовжуємо без штрихкоду.');
+      }
+      await bot.sendMessage(chatId, `Джерело розпізнавання: ${recognition.recognitionSource}. ${recognition.details}`);
+    } catch (err) {
+      console.error('barcode receive recognition error:', err);
+      await bot.sendMessage(chatId, 'Сталася помилка при розпізнаванні штрихкоду. Продовжуємо далі.');
+    }
+
     state.step = 'await_price';
     await setSession(chatId, 'receive', state);
-    await bot.sendMessage(chatId, 'Введіть ціну товару (zł):')
+    await bot.sendMessage(chatId, 'Введіть ціну товару (zł):');
     return;
   }
 
@@ -989,6 +1353,8 @@ async function handleReceiveStep(chatId, msg, state) {
         price: state.price,
         quantity: state.quantity,
         quantityPerPackage: state.quantityPerPackage,
+        barcode: state.barcode || '',
+        qrCode: state.qrCode || '',
         status: 'active',
         imageUrls: [uploaded.url],
         imageNames: [uploaded.name],
@@ -1003,6 +1369,15 @@ async function handleReceiveStep(chatId, msg, state) {
         caption: `✅ Товар збережено!\nЦіна: ${state.price} zł\nКількість на складі: ${state.quantity}\nКількість в упаковці: ${state.quantityPerPackage} шт`,
         filename: 'preview.jpg',
       });
+
+      const scanResult = await scanAndUpdateProduct(product, rawBuffer, {
+        barcodeHint: state.barcode || '',
+        qrCodeHint: state.qrCode || '',
+      });
+      const scanText = buildScanResultText(scanResult.parsed);
+      await bot.sendMessage(chatId,
+        `📌 Автоматичне сканування завершено.\n\n${scanText}${formatUsageText(scanResult.usage)}`
+      );
     } catch (err) {
       console.error('receiveProduct error:', err);
       await bot.sendMessage(chatId, 'Сталася помилка при збереженні товару. Спробуйте ще раз: /receive');
@@ -1055,6 +1430,47 @@ async function getShippingBlockPositions(productIds) {
   }
 
   return positions;
+}
+
+async function ensureBlocks() {
+  const count = await Block.countDocuments();
+  if (count >= 120) return;
+  const existing = await Block.find({}, 'blockId').lean();
+  const existingNumbers = new Set(existing.map((b) => b.blockId));
+  const toCreate = [];
+  for (let i = 1; i <= 120; i += 1) {
+    if (!existingNumbers.has(i)) toCreate.push({ blockId: i, productIds: [] });
+  }
+  if (toCreate.length) {
+    await Block.insertMany(toCreate);
+  }
+}
+
+async function scanAndUpdateProduct(product, imageBuffer, options = {}) {
+  const result = await analyzeProductImage(imageBuffer, options);
+  const parsed = result.parsed || {};
+  if (parsed.title) product.name = parsed.title;
+  if (parsed.brand) product.brand = parsed.brand;
+  if (parsed.model) product.model = parsed.model;
+  if (parsed.category) product.category = parsed.category;
+  if (parsed.barcode) product.barcode = parsed.barcode;
+  if (parsed.qrCode) product.qrCode = parsed.qrCode;
+  if (parsed.description !== undefined) product.description = parsed.description;
+  if (parsed.textOnImage !== undefined) product.textOnImage = parsed.textOnImage;
+  await product.save();
+  return { parsed, usage: result.usage || {} };
+}
+
+function buildScanResultText(parsed) {
+  const lines = [];
+  if (parsed.title) lines.push(`Назва: ${parsed.title}`);
+  if (parsed.brand) lines.push(`Бренд: ${parsed.brand}`);
+  if (parsed.model) lines.push(`Модель: ${parsed.model}`);
+  if (parsed.category) lines.push(`Категорія: ${parsed.category}`);
+  if (parsed.description) lines.push(`Опис: ${parsed.description}`);
+  if (parsed.textOnImage) lines.push(`Текст на фото: ${parsed.textOnImage}`);
+  if (!lines.length) lines.push('OpenAI не зміг визначити атрибути товару.');
+  return lines.join('\n');
 }
 
 async function shipOrders(chatId) {
@@ -1161,11 +1577,19 @@ async function initBot(token) {
     return;
   }
 
+  if (bot) {
+    console.warn('Telegram bot is already initialized');
+    return;
+  }
+
+  let pollingRestartAttempts = 0;
+  const MAX_POLLING_RESTARTS = 10;
+
   try {
     bot = new TelegramBot(token, {
       polling: {
         params: {
-          allowed_updates: ['message', 'message_reaction', 'callback_query', 'my_chat_member'],
+          allowed_updates: ['message', 'callback_query', 'my_chat_member'],
         },
       },
     });
@@ -1179,6 +1603,7 @@ async function initBot(token) {
     bot.on('message', async (msg) => {
       try {
       const chatId = String(msg.chat.id);
+      const isGroupChat = ['group', 'supergroup'].includes(msg.chat.type);
       const rawText = msg.text?.trim() || '';
       const text = (rawText.match(/^\/\S+/)?.[0] || '').split('@')[0].toLowerCase();
       const messageText = rawText.toLowerCase();
@@ -1187,6 +1612,56 @@ async function initBot(token) {
         updateUserBotActivity(chatId).catch(() => {});
         if (messageText === 'товари' || messageText === 'продовжити замовлення') {
           await logBotInteraction(chatId, 'reply', messageText, messageText);
+        }
+      }
+
+      if (isGroupChat && !isAuthorizedGroup(chatId)) {
+        if (msg.photo?.length && (isPriceLookupCaption(msg.caption || '') || isBarcodeLookupCaption(msg.caption || ''))) {
+          await bot.sendMessage(chatId, 'Цей груповий чат не авторизовано. Зверніться до адміністратора для підключення бота.');
+        }
+        return;
+      }
+
+      if (isGroupChat && msg.reply_to_message && msg.reply_to_message.photo?.length && msg.text) {
+        const fromId = String(msg.from?.id || '');
+        const isAdmin = await isChatAdmin(chatId, fromId);
+        const price = parseAdminPriceReply(msg.text);
+        if (isAdmin && price !== null) {
+          const captionText = String(msg.reply_to_message.caption || msg.reply_to_message.text || '');
+          const barcodeMatch = captionText.match(/штрихкод[:\s]*([0-9\-\s]{8,20})/i) || captionText.match(/barcode[:\s]*([0-9\-\s]{8,20})/i);
+          const barcodeValue = barcodeMatch
+            ? barcodeMatch[1].replace(/[^0-9]/g, '')
+            : chooseBarcodeCandidate(captionText);
+          if (barcodeValue) {
+            try {
+              const photoFileId = msg.reply_to_message.photo[msg.reply_to_message.photo.length - 1].file_id;
+              const uploadResult = await uploadSearchProductPhotoToR2(photoFileId);
+              const normalizedBarcode = normalizeBarcode(barcodeValue);
+              await SearchProduct.findOneAndUpdate(
+                { barcode: normalizedBarcode, groupChatId: chatId, status: 'active' },
+                {
+                  barcode: normalizedBarcode,
+                  price,
+                  title: captionText.substring(0, 200),
+                  caption: captionText,
+                  imageUrl: uploadResult.url,
+                  imageName: uploadResult.name,
+                  telegramPhotoFileId: photoFileId,
+                  telegramMessageId: String(msg.reply_to_message.message_id),
+                  groupChatId: chatId,
+                  adminTelegramId: fromId,
+                  adminName: `${msg.from.first_name || ''} ${msg.from.last_name || ''}`.trim(),
+                  source: 'group_search',
+                  status: 'active',
+                },
+                { upsert: true, new: true, setDefaultsOnInsert: true }
+              );
+              await bot.sendMessage(chatId, `Ціна ${price} zł для штрихкоду ${barcodeValue} збережена.`);
+              return;
+            } catch (err) {
+              console.error('Failed to save search product from admin reply:', err);
+            }
+          }
         }
       }
 
@@ -1201,7 +1676,112 @@ async function initBot(token) {
         await deleteSession(chatId, 'receive');
       }
 
+      if (msg.photo?.length && isBarcodeLookupCaption(msg.caption || '')) {
+        try {
+          const photoFileId = msg.photo[msg.photo.length - 1].file_id;
+          const { buffer } = await uploadTelegramPhotoToR2(photoFileId);
+          const zxingResult = await decodeBarcodeFromImageBuffer(buffer);
+          const zxingText = String(zxingResult.text || '').trim();
+          const zxingFormat = String(zxingResult.format || 'UNKNOWN');
+          let barcode = '';
+          let recognitionSource = 'ZXing';
+          let recognitionDetails = `Формат ZXing: ${zxingFormat}`;
+
+          if (zxingText) {
+            const normalized = normalizeBarcode(zxingText);
+            if (normalized) {
+              barcode = normalized;
+            }
+          }
+
+          if (!barcode) {
+            const result = await analyzeBarcodeImage(buffer);
+            const scannedBarcode = normalizeBarcode(result.scannedBarcode || '');
+            const digitsOnBarcode = normalizeBarcode(result.digitsOnBarcode || '');
+            const chosen = scannedBarcode || digitsOnBarcode || '';
+            barcode = chosen;
+            recognitionSource = 'OpenAI';
+            recognitionDetails = `OpenAI: scannedBarcode=${scannedBarcode || '—'}, digitsOnBarcode=${digitsOnBarcode || '—'}`;
+            if (scannedBarcode || digitsOnBarcode) {
+              const usedVariant = scannedBarcode ? 'Зісканований' : 'Цифри прочитав';
+              const details = `Використано: ${usedVariant}\nЗісканований штрихкод: ${scannedBarcode || '—'}\nЦифри на штрихкоді: ${digitsOnBarcode || '—'}`;
+              await bot.sendMessage(chatId, details);
+            }
+          }
+
+          if (!barcode) {
+            await bot.sendMessage(chatId, 'Не вдалося розпізнати штрихкод. Спробуйте надіслати чітке фото штрихкоду з підписом "штрихкод".');
+            return;
+          }
+
+          const product = await findProductByBarcode(barcode);
+          if (!product) {
+            await bot.sendMessage(chatId, `Товар зі штрихкодом ${barcode} не знайдено. (розпізнано через ${recognitionSource})`);
+            return;
+          }
+
+          const reply = `${recognitionSource === 'ZXing' ? `✅ Штрихкод розпізнано бібліотекою ZXing. (${recognitionDetails})` : `✅ Штрихкод розпізнано через OpenAI. (${recognitionDetails})`}
+${buildProductInfoText(product)}`;
+          await bot.sendMessage(chatId, reply);
+          await sendProductPhotos(chatId, product);
+        } catch (err) {
+          console.error('[Bot] Barcode lookup error:', err);
+          await bot.sendMessage(chatId, 'Не вдалося обробити фото. Спробуйте надіслати інше фото або зверніться до адміністратора.');
+        }
+        return;
+      }
+
+      if (msg.text && isBarcodeLookupText(rawText)) {
+        try {
+          const barcode = chooseBarcodeCandidate(rawText);
+          if (!barcode) {
+            await bot.sendMessage(chatId, 'Будь ласка, надішліть штрихкод цифрами або з підписом "штрихкод".');
+            return;
+          }
+
+          const product = await findProductByBarcode(barcode);
+          if (!product) {
+            await bot.sendMessage(chatId, `Товар зі штрихкодом ${barcode} не знайдено.`);
+            return;
+          }
+
+          const reply = buildProductInfoText(product);
+          await bot.sendMessage(chatId, reply);
+          await sendProductPhotos(chatId, product);
+        } catch (err) {
+          console.error('[Bot] Barcode lookup error:', err);
+          await bot.sendMessage(chatId, 'Не вдалося обробити штрихкод. Спробуйте надіслати інше повідомлення або зверніться до адміністратора.');
+        }
+        return;
+      }
+
+      if (msg.photo?.length && isPriceLookupCaption(msg.caption || '')) {
+        try {
+          const photoFileId = msg.photo[msg.photo.length - 1].file_id;
+          const { buffer } = await uploadTelegramPhotoToR2(photoFileId);
+          const result = await analyzeProductImage(buffer);
+          const candidates = await findProductCandidates(result.parsed || {});
+          const reply = buildPriceLookupText(candidates, result.usage);
+          await bot.sendMessage(chatId, reply);
+          if (candidates.length) {
+            await sendProductPhotos(chatId, candidates[0]);
+          }
+        } catch (err) {
+          console.error('[Bot] Price lookup error:', err);
+          await bot.sendMessage(chatId, 'Не вдалося обробити фото. Спробуйте надіслати інше фото або зверніться до адміністратора.');
+        }
+        return;
+      }
+
       if (text === '/start') {
+        if (isGroupChat) {
+          const groupMessage = isAuthorizedGroup(chatId)
+            ? 'Бот активовано для цього групового чату. Надішліть фото з підписом "PRICE", щоб знайти товар за базою.'
+            : 'Цей груповий чат не підключено. Зверніться до адміністратора для авторизації.';
+          await bot.sendMessage(chatId, groupMessage);
+          return;
+        }
+
         if (!user) {
           const message = 'Вас не знайдено в системі. Натисніть кнопку, щоб зареєструватися через Mini App.';
           if (WEB_APP_URL.startsWith('https://')) {
@@ -1254,16 +1834,19 @@ async function initBot(token) {
           return;
         }
 
+        const miniAppUrl = getMiniAppUrl(user.role);
+        const buttonText = user.role === 'warehouse' ? 'Відкрити склад' : 'Відкрити товари';
+
         if (WEB_APP_URL.startsWith('https://')) {
           await bot.sendMessage(chatId, 'Відкрийте Mini App:', {
             reply_markup: {
-              inline_keyboard: [[{ text: user.role === 'warehouse' ? 'Відкрити склад' : 'Відкрити товари', web_app: { url: WEB_APP_URL } }]],
+              inline_keyboard: [[{ text: buttonText, web_app: { url: miniAppUrl } }]],
             },
           });
           return;
         }
 
-        await bot.sendMessage(chatId, `Відкрийте Mini App: ${WEB_APP_URL}`);
+        await bot.sendMessage(chatId, `Відкрийте Mini App: ${miniAppUrl}`);
         return;
       }
 
@@ -1298,66 +1881,6 @@ async function initBot(token) {
         await sendShopProducts(chatId);
         return;
       }
-
-      /*
-      if (text === '/orders' || text === '/mylist') {
-        if (!user) {
-          await bot.sendMessage(chatId, getUnknownUserMessage());
-          return;
-        }
-
-        if (user.role !== 'seller') {
-          await bot.sendMessage(chatId, 'Ця команда доступна лише продавцю. Використайте /help, щоб побачити доступні команди.');
-          return;
-        }
-
-        const pending = await PendingReaction.find({ sellerTelegramId: chatId }).populate('productId');
-        if (!pending.length) {
-          await bot.sendMessage(chatId, 'У вас поки немає обраних товарів. Поставте реакцію (лайк) на товар, щоб додати.');
-          return;
-        }
-
-        const lines = pending
-          .filter((p) => p.productId)
-          .map((p, i) => `${i + 1}. ${p.productId.name} — ${p.productId.price} zł x${p.quantity || 1}`);
-        const total = pending.filter((p) => p.productId).reduce((sum, p) => sum + p.productId.price * (p.quantity || 1), 0);
-
-        await bot.sendMessage(chatId, `Ваші обрані товари:\n\n${lines.join('\n')}\n\nРазом: ${total} zł\n\nНадішліть /order щоб оформити замовлення.`);
-        return;
-      }
-      */
-
-      /*
-      if (text === '/order') {
-        if (!user) {
-          await bot.sendMessage(chatId, getUnknownUserMessage());
-          return;
-        }
-
-        if (user.role !== 'seller') {
-          await bot.sendMessage(chatId, 'Ця команда доступна лише продавцю.');
-          return;
-        }
-
-        if (orderInFlight.has(chatId)) {
-          await bot.sendMessage(chatId, 'Ваше замовлення вже обробляється, зачекайте...');
-          return;
-        }
-        orderInFlight.add(chatId);
-        try {
-          const result = await finalizeOrder(chatId);
-          await bot.sendMessage(chatId, result);
-          const shopSession = await getSession(chatId, 'shop');
-          const reset = Array.isArray(shopSession?.productIds) && shopSession.currentIndex >= shopSession.productIds.length - 1;
-          await setShopMenuButton(chatId, 'Товари', reset);
-        } finally {
-          orderInFlight.delete(chatId);
-        }
-        return;
-      }
-      */
-
-      // ...видалено старий блок /receive для продавця...
 
       if (text === '/receive') {
         if (!user) {
@@ -1406,6 +1929,7 @@ async function initBot(token) {
       }
 
       if (!user) {
+        if (isGroupChat) return;
         await bot.sendMessage(chatId, getUnknownUserMessage());
         return;
       }
@@ -1513,59 +2037,25 @@ async function initBot(token) {
         return;
       }
 
-      if (user.role === 'seller' && msg.reply_to_message && rawText) {
-        const repliedMessageId = String(msg.reply_to_message.message_id);
-        const numericMessageId = Number(repliedMessageId);
-        const product = await Product.findOne({
-          telegramMessageIds: {
-            $in: [repliedMessageId, Number.isFinite(numericMessageId) ? numericMessageId : repliedMessageId],
-          },
-        });
-
-        if (product) {
-          const likesOnly = rawText.trim() === '👍' || rawText.trim().toLowerCase() === 'like';
-          const quantity = likesOnly ? 1 : parseInt(rawText, 10);
-
-          if (!likesOnly && (!Number.isInteger(quantity) || quantity <= 0)) {
-            await bot.sendMessage(chatId, 'Будь ласка, відповідайте лише числом більше 0 або лайком (👍).');
-            return;
-          }
-
-          await PendingReaction.findOneAndUpdate(
-            { sellerTelegramId: chatId, messageId: repliedMessageId },
-            {
-              sellerTelegramId: chatId,
-              productId: product._id,
-              messageId: repliedMessageId,
-              chatId,
-              emoji: likesOnly ? '👍' : `x${quantity}`,
-              quantity,
-            },
-            { upsert: true, new: true }
-          );
-
-          await bot.sendMessage(chatId, `✅ ${getProductTitle(product)} (${likesOnly ? '1 шт' : quantity + ' шт'}) додано до списку.\nПереглянути: /mylist\nОформити: /order`);
-          return;
-        }
-      }
-
+      // Old reaction-based seller flow removed: keep /shop inline ordering only.
       await bot.sendMessage(chatId, 'Невідома команда. Використайте /help, щоб побачити доступні команди.');
       } catch (err) {
         console.error('[Bot] Message handler error:', err);
       }
     });
 
-    // Handle emoji reactions (likes) on product messages
-    // node-telegram-bot-api@0.67 doesn't natively emit message_reaction,
-    // so we intercept raw updates via polling
-    let pollingRestartAttempts = 0;
-    const MAX_POLLING_RESTARTS = 10;
     bot.on('polling_error', async (err) => {
       console.error('Telegram polling error:', err);
-      status.error = err.message || String(err);
+      status.error = err?.message || String(err);
       status.connected = false;
 
-      pollingRestartAttempts++;
+      const retryable = ![401, 403].includes(err?.response?.body?.error_code);
+      if (!retryable) {
+        console.error('Telegram polling error is not retryable, stopping attempts.');
+        return;
+      }
+
+      pollingRestartAttempts += 1;
       if (pollingRestartAttempts > MAX_POLLING_RESTARTS) {
         console.error(`Telegram polling failed ${MAX_POLLING_RESTARTS} times, giving up.`);
         return;
@@ -1592,6 +2082,10 @@ async function initBot(token) {
       }
     });
 
+    bot.on('error', (err) => {
+      console.error('Telegram bot runtime error:', err);
+    });
+
     bot.on('callback_query', async (query) => {
       try {
       const chatId = String(query.message.chat.id);
@@ -1609,6 +2103,34 @@ async function initBot(token) {
       // Handle "noop" for already-processed buttons
       if (data === 'noop') {
         await bot.answerCallbackQuery(query.id);
+        return;
+      }
+
+      if (data === 'receive_barcode_yes' || data === 'receive_barcode_no') {
+        const state = await getSession(chatId, 'receive');
+        if (!state) {
+          await bot.answerCallbackQuery(query.id, { text: 'Сесія не знайдена або вже завершена.', show_alert: true });
+          return;
+        }
+        if (state.step !== 'await_has_barcode') {
+          await bot.answerCallbackQuery(query.id, { text: 'Ця дія вже недоступна.', show_alert: true });
+          return;
+        }
+
+        if (data === 'receive_barcode_yes') {
+          state.step = 'await_barcode_photo';
+          await setSession(chatId, 'receive', state);
+          await bot.sendMessage(chatId, 'Надішліть фото штрихкоду або QR-коду на товарі.');
+        } else {
+          state.step = 'await_price';
+          await setSession(chatId, 'receive', state);
+          await bot.sendMessage(chatId, 'Добре. Введіть ціну товару (zł):');
+        }
+
+        await bot.answerCallbackQuery(query.id);
+        try {
+          await bot.editMessageReplyMarkup({ inline_keyboard: [[{ text: '✅ Обрано', callback_data: 'noop' }]] }, { chat_id: chatId, message_id: msgId });
+        } catch (_) {}
         return;
       }
 
@@ -1659,10 +2181,7 @@ async function initBot(token) {
             }
             await RegistrationRequest.findByIdAndDelete(requestId);
             await bot.answerCallbackQuery(query.id, { text: 'Заявку схвалено', show_alert: false });
-            await sendMessageWithRetry(
-              request.telegramId,
-              `✅ Ваша заявка на реєстрацію схвалена. Ви тепер зареєстровані як ${request.role === 'seller' ? 'продавець' : 'склад'}.`
-            );
+            await sendRegistrationApprovedMessage(request.telegramId, request.role);
           }
         } else if (action === 'regreq_reject') {
           await RegistrationRequest.findByIdAndUpdate(requestId, { status: 'rejected' });
@@ -2088,55 +2607,14 @@ ${lines.join('\n')}
       });
     });
 
-    const originalProcessUpdate = bot.processUpdate.bind(bot);
-    bot.processUpdate = function (update) {
-      if (update.message_reaction) {
-        handleReaction(update.message_reaction);
-      }
-      return originalProcessUpdate(update);
-    };
-
-    async function handleReaction(reaction) {
-      try {
-        const chatId = String(reaction.chat.id);
-        const messageId = String(reaction.message_id);
-        const userId = String(reaction.user?.id || reaction.actor_chat?.id || '');
-        if (!userId) return;
-
-        const newReactions = reaction.new_reaction || [];
-
-        const user = await User.findOne({ telegramId: userId });
-        if (!user || user.role !== 'seller') return;
-
-        const product = await Product.findOne({
-          telegramMessageIds: { $in: [messageId, Number(messageId)] },
-        });
-        if (!product) return;
-
-        if (newReactions.length === 0) {
-          // Reaction removed — delete pending
-          await PendingReaction.findOneAndDelete({ sellerTelegramId: userId, messageId });
-          return;
-        }
-
-        // Reaction added or changed — upsert pending
-        const emoji = newReactions[0]?.emoji || '👍';
-        await PendingReaction.findOneAndUpdate(
-          { sellerTelegramId: userId, messageId },
-          { sellerTelegramId: userId, productId: product._id, messageId, chatId, emoji },
-          { upsert: true, new: true }
-        );
-      } catch (error) {
-        console.error('Error handling message_reaction:', error);
-      }
-    }
+    // Reaction handling by Telegram message_reaction has been disabled.
 
     async function finalizeOrder(userId) {
       const user = await User.findOne({ telegramId: userId });
       if (!user) return 'Вас не знайдено в системі.';
 
       const pending = await PendingReaction.find({ sellerTelegramId: userId }).populate('productId');
-      if (!pending.length) return 'У вас немає обраних товарів. Поставте реакцію на товар, щоб додати його до замовлення.';
+      if (!pending.length) return 'У вас немає обраних товарів. Додайте товар кнопками в /shop, щоб зібрати список.';
 
       // Merge duplicate products (same productId → sum quantities)
       const merged = new Map();
@@ -2177,18 +2655,7 @@ ${lines.join('\n')}
       });
       await order.save();
 
-      // Update product reaction stats
-      for (const p of pending) {
-        if (!p.productId) continue;
-        const product = p.productId;
-        product.reactions = product.reactions || new Map();
-        const currentCount = product.reactions.get(p.emoji) || 0;
-        product.reactions.set(p.emoji, currentCount + (p.quantity || 1));
-        product.reactionDetails.push({ userId: user.telegramId, reactionType: p.emoji, quantity: p.quantity || 1 });
-        await product.save();
-      }
-
-      // Clear pending reactions
+      // Clear pending shop selections
       await PendingReaction.deleteMany({ sellerTelegramId: userId });
 
       const itemsList = items.map((i) => `• ${i.name} — ${i.price} zł x${i.quantity}`).join('\n');
@@ -2222,6 +2689,7 @@ module.exports = {
   getBot: () => bot,
   sendOrderConfirmation,
   sendAdminNotification,
+  sendRegistrationApprovedMessage,
   fixPendingReactionIndexes,
   getShippingBlockPositions,
 };

@@ -4,7 +4,7 @@ const { DAY_SHORT } = require('../../utils/dayNames');
 const User = require('../../models/User');
 const RegistrationRequest = require('../../models/RegistrationRequest');
 const DeliveryGroup = require('../../models/DeliveryGroup');
-const { sendAdminNotification } = require('../../telegramBot');
+const { sendAdminNotification, sendRegistrationApprovedMessage } = require('../../telegramBot');
 
 const router = express.Router();
 
@@ -315,6 +315,10 @@ router.post('/register-requests/:id/approve', async (req, res) => {
     );
   }
   await RegistrationRequest.findByIdAndDelete(req.params.id);
+
+  await sendRegistrationApprovedMessage(user.telegramId, user.role).catch((err) => {
+    console.warn('Failed to send registration approval notification', err?.message || err);
+  });
 
   res.json({ message: 'User approved', telegramId: user.telegramId, role: user.role });
 });

@@ -17,13 +17,26 @@ async function ensureBlocks() {
   if (toCreate.length) await Block.insertMany(toCreate);
 }
 
-// GET /api/blocks — all blocks with product count
+// GET /api/blocks — all blocks with product count, or paginated blocks when limit/offset are supplied
 router.get('/', async (req, res) => {
   await ensureBlocks();
-  const blocks = await Block.find()
-    .sort('blockId')
+  const limit = req.query.limit ? Number(req.query.limit) : undefined;
+  const offset = req.query.offset ? Number(req.query.offset) : 0;
+  const query = Block.find().sort('blockId');
+
+  if (limit !== undefined) {
+    query.skip(offset).limit(limit);
+  }
+
+  const blocks = await query
     .populate({ path: 'productIds', match: { status: { $in: ['active', 'pending'] } } })
     .lean();
+
+  if (limit !== undefined) {
+    const total = await Block.countDocuments();
+    return res.json({ items: blocks, total });
+  }
+
   res.json(blocks);
 });
 
@@ -37,7 +50,7 @@ router.post('/', async (req, res) => {
 
     try {
       const io = getIO();
-      io.emit('blocks_updated');
+      io.emit('block_updated', created);
     } catch (_) {}
 
     res.status(201).json(created);
@@ -49,17 +62,14 @@ router.post('/', async (req, res) => {
 
 // GET /api/blocks/incoming/products — products not assigned to any block
 router.get('/incoming/products', async (req, res) => {
-  const blocks = await Block.find({}, 'productIds').lean();
-  const assignedIds = new Set();
-  for (const b of blocks) {
-    for (const pid of b.productIds) {
-      assignedIds.add(pid.toString());
-    }
-  }
-
-  const products = await Product.find({ status: { $in: ['active', 'pending'] } }).sort('-createdAt').lean();
-  const unassigned = products.filter((p) => !assignedIds.has(p._id.toString()));
-  res.json(unassigned);
+  const assignedIds = await Block.distinct('productIds');
+  const products = await Product.find({
+    status: { $in: ['active', 'pending'] },
+    _id: { $nin: assignedIds },
+  })
+    .sort('-createdAt')
+    .lean();
+  res.json(products);
 });
 
 // GET /api/blocks/search/products?q=term — search products across all blocks
@@ -111,19 +121,31 @@ router.post('/move', async (req, res) => {
       return res.status(400).json({ error: 'Product not found in source block' });
     }
     source.productIds.splice(idx, 1);
-    source.version += 1;
-
     const safeIndex = Math.min(Math.max(0, toIndex), target.productIds.length);
     target.productIds.splice(safeIndex, 0, productId);
-    target.version += 1;
 
-    await source.save();
-    if (fromBlock !== toBlock) await target.save();
+    if (fromBlock === toBlock) {
+      source.version += 1;
+      await source.save();
+    } else {
+      source.version += 1;
+      target.version += 1;
+      await source.save();
+      await target.save();
+    }
 
     const updatedSource = await Block.findOne({ blockId: fromBlock }).populate('productIds').lean();
     const updatedTarget = fromBlock === toBlock
       ? updatedSource
       : await Block.findOne({ blockId: toBlock }).populate('productIds').lean();
+
+    try {
+      const io = getIO();
+      io.emit('block_updated', updatedSource);
+      if (fromBlock !== toBlock) {
+        io.emit('block_updated', updatedTarget);
+      }
+    } catch (_) {}
 
     res.json({ source: updatedSource, target: updatedTarget });
   } catch (err) {

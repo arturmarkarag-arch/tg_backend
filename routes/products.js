@@ -4,9 +4,15 @@ const crypto = require('crypto');
 const Busboy = require('busboy');
 const { S3Client, PutObjectCommand, GetObjectCommand, HeadBucketCommand } = require('@aws-sdk/client-s3');
 const { shiftUp, shiftDown } = require('../utils/shiftOrderNumbers');
+const { normalizeBarcode } = require('../utils/barcodeScanner');
 const Block = require('../models/Block');
 const { getIO } = require('../socket');
 const Product = require('../models/Product');
+const SearchProduct = require('../models/SearchProduct');
+
+function escapeRegex(value = '') {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
 
 const s3Client = new S3Client({
   region: process.env.R2_REGION || 'auto',
@@ -40,6 +46,10 @@ function parseMultipart(req) {
       const chunks = [];
       stream.on('data', (chunk) => chunks.push(chunk));
       stream.on('end', () => {
+        if (stream.truncated) {
+          return reject(new Error('File size limit exceeded'));
+        }
+
         files.push({ buffer: Buffer.concat(chunks), originalname: info.filename, mimetype: info.mimeType });
       });
     });
@@ -91,6 +101,28 @@ router.get('/', async (req, res) => {
   const dateFilter = req.query.date_filter;
   const query = { status: { $ne: 'archived' } };
 
+  if (req.query.barcode) {
+    const barcodeValue = String(req.query.barcode).trim();
+    if (barcodeValue) {
+      query.barcode = barcodeValue;
+    }
+  }
+
+  if (req.query.search) {
+    const term = String(req.query.search).trim();
+    if (term) {
+      const escaped = escapeRegex(term);
+      const regex = new RegExp(escaped, 'i');
+      query.$or = [
+        { brand: regex },
+        { model: regex },
+        { category: regex },
+        { warehouse: regex },
+        { barcode: regex },
+      ];
+    }
+  }
+
   if (dateFilter) {
     const parsedDate = new Date(dateFilter);
     if (!Number.isNaN(parsedDate.getTime())) {
@@ -132,6 +164,36 @@ router.get('/', async (req, res) => {
   res.json(products);
 });
 
+router.get('/check', async (req, res) => {
+  const barcodeValue = String(req.query.barcode || '').trim();
+  const normalizedBarcode = normalizeBarcode(barcodeValue);
+  if (!normalizedBarcode) {
+    return res.status(400).json({ error: 'barcode query parameter is required' });
+  }
+
+  const product = await Product.findOne({ barcode: normalizedBarcode, status: { $ne: 'archived' } }).lean();
+
+  if (!product) {
+    return res.json({ found: false });
+  }
+
+  return res.json({
+    found: true,
+    product: {
+      id: product._id,
+      barcode: product.barcode,
+      title: getProductTitle(product),
+      brand: product.brand,
+      model: product.model,
+      category: product.category,
+      price: product.price,
+      quantity: product.quantity,
+      image_url: product.imageUrls?.[0] || product.localImageUrl || '',
+      status: product.status,
+    },
+  });
+});
+
 router.get('/pending', async (req, res) => {
   const products = await Product.find({ status: 'pending' }).sort({ orderNumber: 1 });
   res.json(products);
@@ -165,6 +227,83 @@ router.post('/broadcast', async (req, res) => {
     message: 'Broadcast stub executed',
     productCount: products.length,
     broadcastMessage: message || 'No message provided',
+  });
+});
+
+router.post('/report-missing', async (req, res) => {
+  const parsed = await parseMultipart(req);
+  const barcodeValue = String(parsed.fields.barcode || '').trim();
+
+  if (!barcodeValue) {
+    return res.status(400).json({ error: 'barcode field is required' });
+  }
+
+  if (!parsed.files.length) {
+    return res.status(400).json({ error: 'photo file is required' });
+  }
+
+  const file = parsed.files[0];
+  const allowedGroupIds = (process.env.TELEGRAM_ALLOWED_GROUP_IDS || '')
+    .split(',')
+    .map((id) => id.trim())
+    .filter(Boolean)
+    .map((id) => Number(id));
+
+  if (!allowedGroupIds.length) {
+    return res.status(500).json({ error: 'No allowed Telegram groups configured' });
+  }
+
+  const { getBot } = require('../telegramBot');
+  const bot = getBot();
+  if (!bot) {
+    return res.status(500).json({ error: 'Telegram bot is not initialized' });
+  }
+
+  const normalizedBarcode = normalizeBarcode(barcodeValue);
+  const caption = `Штрихкод: ${normalizedBarcode}\nЯка ціна?`;
+  const sendResults = await Promise.all(allowedGroupIds.map(async (chatId) => {
+    const groupId = String(chatId);
+    const existing = await SearchProduct.findOne({ barcode: normalizedBarcode, groupChatId: groupId, status: 'active' });
+    if (existing && existing.requestTelegramPhotoFileId) {
+      try {
+        await bot.sendPhoto(chatId, existing.requestTelegramPhotoFileId, {
+          caption: existing.requestCaption || caption,
+        });
+        return { chatId, sent: true, reused: true };
+      } catch (err) {
+        console.error('Failed to resend existing missing product photo to group', chatId, err.message || err);
+      }
+    }
+
+    try {
+      const sent = await bot.sendPhoto(chatId, file.buffer, {
+        caption,
+        filename: file.originalname || 'photo.jpg',
+      });
+      const sentPhotoFileId = String(sent.photo?.[sent.photo.length - 1]?.file_id || '');
+      await SearchProduct.findOneAndUpdate(
+        { barcode: normalizedBarcode, groupChatId: groupId, status: 'active' },
+        {
+          barcode: normalizedBarcode,
+          groupChatId: groupId,
+          requestTelegramPhotoFileId: sentPhotoFileId,
+          requestTelegramMessageId: String(sent.message_id),
+          requestCaption: caption,
+          status: 'active',
+        },
+        { upsert: true, new: true, setDefaultsOnInsert: true }
+      );
+      return { chatId, sent: true, reused: false };
+    } catch (err) {
+      console.error('Failed to send missing product photo to group', chatId, err.message || err);
+      return { chatId, sent: false, error: err.message || String(err) };
+    }
+  }));
+
+  return res.json({
+    barcode: barcodeValue,
+    caption,
+    sent: sendResults,
   });
 });
 
@@ -266,6 +405,9 @@ router.patch('/:id', async (req, res) => {
   }
   if (price !== undefined) product.price = Number(price);
   if (quantity !== undefined) product.quantity = Number(quantity);
+  if (fields.barcode !== undefined) {
+    product.barcode = String(fields.barcode || '').trim();
+  }
 
   if (files.length > 0) {
     const imageUrls = [];
@@ -301,6 +443,9 @@ router.delete('/:id', async (req, res) => {
   await shiftDown({ orderNumber: { $gt: oldOrder }, status: { $ne: 'archived' } });
 
   // Remove archived product from any blocks so it disappears from warehouse/blocks views
+  const affectedBlocks = await Block.find({ productIds: product._id }).lean();
+  const affectedBlockIds = affectedBlocks.map((block) => block.blockId);
+
   await Block.updateMany(
     { productIds: product._id },
     { $pull: { productIds: product._id }, $inc: { version: 1 } }
@@ -308,7 +453,10 @@ router.delete('/:id', async (req, res) => {
 
   try {
     const io = getIO();
-    io.emit('blocks_updated');
+    const updatedBlocks = await Block.find({ blockId: { $in: affectedBlockIds } }).populate('productIds').lean();
+    for (const updated of updatedBlocks) {
+      io.emit('block_updated', updated);
+    }
   } catch (_) {}
 
   res.json({ message: 'Product archived' });

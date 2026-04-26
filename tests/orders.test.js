@@ -3,9 +3,38 @@ const mongoose = require('mongoose');
 const { MongoMemoryServer } = require('mongodb-memory-server');
 const app = require('../app');
 const Order = require('../models/Order');
+const Product = require('../models/Product');
 const User = require('../models/User');
 
 let mongoServer;
+
+const createTestUser = async (telegramId) => User.findOneAndUpdate(
+  { telegramId },
+  {
+    telegramId,
+    firstName: 'Ivan',
+    shopName: 'Magazin',
+    shopAddress: 'Main St 1',
+    shopCity: 'Kyiv',
+  },
+  { upsert: true, new: true, setDefaultsOnInsert: true },
+);
+
+const createTestProduct = async (price = 10) => Product.create({
+  price,
+  quantity: 10,
+  orderNumber: 1,
+});
+
+const createOrderRequest = async ({ buyerTelegramId, quantity = 1, price = 10, product } = {}) => {
+  await createTestUser(buyerTelegramId);
+  const productDoc = product || await createTestProduct(price);
+  const response = await request(app).post('/api/orders').send({
+    buyerTelegramId,
+    items: [{ productId: productDoc._id.toString(), quantity, price }],
+  });
+  return { response, product: productDoc };
+};
 
 beforeAll(async () => {
   mongoServer = await MongoMemoryServer.create();
@@ -24,12 +53,7 @@ afterAll(async () => {
 
 describe('Orders API', () => {
   it('creates an order and returns it', async () => {
-    const response = await request(app)
-      .post('/api/orders')
-      .send({
-        buyerTelegramId: '12345',
-        items: [{ productId: new mongoose.Types.ObjectId().toString(), quantity: 2, price: 10 }],
-      });
+    const { response } = await createOrderRequest({ buyerTelegramId: '12345', quantity: 2, price: 10 });
 
     expect(response.status).toBe(201);
     expect(response.body.buyerTelegramId).toBe('12345');
@@ -37,14 +61,8 @@ describe('Orders API', () => {
   });
 
   it('returns orders with buyer details when user exists', async () => {
-    await User.create({ telegramId: '12345', firstName: 'Ivan', shopName: 'Magazin', shopAddress: 'Main St 1', shopCity: 'Kyiv' });
-
-    const createResponse = await request(app)
-      .post('/api/orders')
-      .send({
-        buyerTelegramId: '12345',
-        items: [{ productId: new mongoose.Types.ObjectId().toString(), quantity: 1, price: 20 }],
-      });
+    await createTestUser('12345');
+    const { response: createResponse } = await createOrderRequest({ buyerTelegramId: '12345', quantity: 1, price: 20 });
 
     expect(createResponse.status).toBe(201);
 
@@ -56,12 +74,9 @@ describe('Orders API', () => {
   });
 
   it('returns paginated response', async () => {
-    const productId = new mongoose.Types.ObjectId().toString();
+    const product = await createTestProduct(10);
     for (let i = 0; i < 5; i++) {
-      await request(app).post('/api/orders').send({
-        buyerTelegramId: '111',
-        items: [{ productId, quantity: 1, price: 10 }],
-      });
+      await createOrderRequest({ buyerTelegramId: '111', quantity: 1, price: 10, product });
     }
 
     const res = await request(app).get('/api/orders?page=1&pageSize=2');
@@ -75,12 +90,9 @@ describe('Orders API', () => {
   });
 
   it('returns second page of orders', async () => {
-    const productId = new mongoose.Types.ObjectId().toString();
+    const product = await createTestProduct(10);
     for (let i = 0; i < 5; i++) {
-      await request(app).post('/api/orders').send({
-        buyerTelegramId: '111',
-        items: [{ productId, quantity: 1, price: 10 }],
-      });
+      await createOrderRequest({ buyerTelegramId: '111', quantity: 1, price: 10, product });
     }
 
     const res = await request(app).get('/api/orders?page=2&pageSize=2');
@@ -91,17 +103,11 @@ describe('Orders API', () => {
   });
 
   it('filters orders by status', async () => {
-    const productId = new mongoose.Types.ObjectId().toString();
+    const product = await createTestProduct(10);
 
-    await request(app).post('/api/orders').send({
-      buyerTelegramId: '111',
-      items: [{ productId, quantity: 1, price: 10 }],
-    });
-    const confirmed = await request(app).post('/api/orders').send({
-      buyerTelegramId: '222',
-      items: [{ productId, quantity: 2, price: 20 }],
-    });
-    await request(app).patch(`/api/orders/${confirmed.body._id}`).send({ status: 'confirmed' });
+    await createOrderRequest({ buyerTelegramId: '111', quantity: 1, price: 10, product });
+    const confirmed = await createOrderRequest({ buyerTelegramId: '222', quantity: 2, price: 20, product });
+    await request(app).patch(`/api/orders/${confirmed.response.body._id}`).send({ status: 'confirmed' });
 
     const res = await request(app).get('/api/orders?status=confirmed');
 
@@ -111,16 +117,10 @@ describe('Orders API', () => {
   });
 
   it('filters orders by buyerTelegramId', async () => {
-    const productId = new mongoose.Types.ObjectId().toString();
+    const product = await createTestProduct(10);
 
-    await request(app).post('/api/orders').send({
-      buyerTelegramId: 'user111',
-      items: [{ productId, quantity: 1, price: 10 }],
-    });
-    await request(app).post('/api/orders').send({
-      buyerTelegramId: 'user222',
-      items: [{ productId, quantity: 2, price: 20 }],
-    });
+    await createOrderRequest({ buyerTelegramId: 'user111', quantity: 1, price: 10, product });
+    await createOrderRequest({ buyerTelegramId: 'user222', quantity: 2, price: 20, product });
 
     const res = await request(app).get('/api/orders?buyerTelegramId=user111&status=all');
 
@@ -130,17 +130,11 @@ describe('Orders API', () => {
   });
 
   it('excludes cancelled orders by default', async () => {
-    const productId = new mongoose.Types.ObjectId().toString();
+    const product = await createTestProduct(10);
 
-    await request(app).post('/api/orders').send({
-      buyerTelegramId: '111',
-      items: [{ productId, quantity: 1, price: 10 }],
-    });
-    const toCancel = await request(app).post('/api/orders').send({
-      buyerTelegramId: '222',
-      items: [{ productId, quantity: 1, price: 10 }],
-    });
-    await request(app).patch(`/api/orders/${toCancel.body._id}`).send({ status: 'cancelled' });
+    await createOrderRequest({ buyerTelegramId: '111', quantity: 1, price: 10, product });
+    const toCancel = await createOrderRequest({ buyerTelegramId: '222', quantity: 1, price: 10, product });
+    await request(app).patch(`/api/orders/${toCancel.response.body._id}`).send({ status: 'cancelled' });
 
     const res = await request(app).get('/api/orders');
 
@@ -150,17 +144,11 @@ describe('Orders API', () => {
   });
 
   it('returns all orders including cancelled with status=all', async () => {
-    const productId = new mongoose.Types.ObjectId().toString();
+    const product = await createTestProduct(10);
 
-    await request(app).post('/api/orders').send({
-      buyerTelegramId: '111',
-      items: [{ productId, quantity: 1, price: 10 }],
-    });
-    const toCancel = await request(app).post('/api/orders').send({
-      buyerTelegramId: '222',
-      items: [{ productId, quantity: 1, price: 10 }],
-    });
-    await request(app).patch(`/api/orders/${toCancel.body._id}`).send({ status: 'cancelled' });
+    await createOrderRequest({ buyerTelegramId: '111', quantity: 1, price: 10, product });
+    const toCancel = await createOrderRequest({ buyerTelegramId: '222', quantity: 1, price: 10, product });
+    await request(app).patch(`/api/orders/${toCancel.response.body._id}`).send({ status: 'cancelled' });
 
     const res = await request(app).get('/api/orders?status=all');
 
@@ -169,12 +157,9 @@ describe('Orders API', () => {
   });
 
   it('updates order status via PATCH', async () => {
-    const productId = new mongoose.Types.ObjectId().toString();
+    const product = await createTestProduct(10);
 
-    const created = await request(app).post('/api/orders').send({
-      buyerTelegramId: '111',
-      items: [{ productId, quantity: 1, price: 10 }],
-    });
+    const { response: created } = await createOrderRequest({ buyerTelegramId: '111', quantity: 1, price: 10, product });
 
     const res = await request(app)
       .patch(`/api/orders/${created.body._id}`)
@@ -194,12 +179,9 @@ describe('Orders API', () => {
   });
 
   it('gets a single order by id', async () => {
-    const productId = new mongoose.Types.ObjectId().toString();
+    const product = await createTestProduct(10);
 
-    const created = await request(app).post('/api/orders').send({
-      buyerTelegramId: '111',
-      items: [{ productId, quantity: 1, price: 10 }],
-    });
+    const { response: created } = await createOrderRequest({ buyerTelegramId: '111', quantity: 1, price: 10, product });
 
     const res = await request(app).get(`/api/orders/${created.body._id}`);
 

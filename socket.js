@@ -84,14 +84,18 @@ function initSocket(httpServer) {
         }
 
         source.productIds.splice(idx, 1);
-        source.version += 1;
-
         const safeIndex = Math.min(Math.max(0, toIndex), target.productIds.length);
         target.productIds.splice(safeIndex, 0, productId);
-        target.version += 1;
 
-        await source.save();
-        if (fromBlock !== toBlock) await target.save();
+        if (fromBlock === toBlock) {
+          source.version += 1;
+          await source.save();
+        } else {
+          source.version += 1;
+          target.version += 1;
+          await source.save();
+          await target.save();
+        }
 
         // Populate and broadcast updated blocks
         const updatedSource = await Block.findOne({ blockId: fromBlock }).populate('productIds').lean();

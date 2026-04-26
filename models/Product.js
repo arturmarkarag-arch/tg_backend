@@ -15,6 +15,7 @@ const ProductSchema = new mongoose.Schema(
     category: { type: String, default: '' },
     brand: { type: String, default: '' },
     model: { type: String, default: '' },
+    barcode: { type: String, default: '' },
     orderNumber: { type: Number, required: true, default: 1 },
     status: { type: String, enum: ['pending', 'active', 'archived'], default: 'pending' },
     localImageUrl: { type: String, default: '' },
