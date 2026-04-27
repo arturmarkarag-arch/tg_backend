@@ -35,6 +35,27 @@ app.use(cors());
 app.use(express.json());
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
+const { telegramAuth } = require('./middleware/telegramAuth');
+
+const publicApiPaths = [
+  /^\/api\/search-products(\/.*)?$/,
+  /^\/api\/products\/report-missing$/,
+  /^\/api\/v1\/telegram\/validate$/,
+  /^\/api\/v1\/telegram\/register-request$/,
+  /^\/api\/v1\/telegram\/me$/,
+  /^\/api\/v1\/telegram\/mini-app\/state$/,
+  /^\/api\/v1\/telegram\/mini-app\/reset-state$/,
+];
+
+function requireAuthForApi(req, res, next) {
+  if (!req.path.startsWith('/api')) return next();
+  const isPublic = publicApiPaths.some((pattern) => pattern.test(req.path));
+  if (isPublic) return next();
+  return telegramAuth(req, res, next);
+}
+
+app.use(requireAuthForApi);
+
 app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', environment: process.env.NODE_ENV || 'development' });
 });
