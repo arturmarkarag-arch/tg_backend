@@ -216,6 +216,7 @@ router.patch('/reorder', async (req, res) => {
   res.json({ message: 'Order updated' });
 });
 
+/*
 router.post('/broadcast', async (req, res) => {
   const { productIds, message } = req.body;
   if (!Array.isArray(productIds) || productIds.length === 0) {
@@ -229,6 +230,7 @@ router.post('/broadcast', async (req, res) => {
     broadcastMessage: message || 'No message provided',
   });
 });
+*/
 
 router.post('/report-missing', async (req, res) => {
   const parsed = await parseMultipart(req);

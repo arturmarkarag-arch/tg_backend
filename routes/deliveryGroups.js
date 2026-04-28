@@ -111,6 +111,7 @@ router.delete('/:id', telegramAuth, requireTelegramRole('admin'), async (req, re
  * POST /api/delivery-groups/:id/broadcast
  * Send all active products to all members of the specified delivery group.
  */
+/*
 router.post('/:id/broadcast', telegramAuth, requireTelegramRole('admin'), async (req, res) => {
   const group = await DeliveryGroup.findById(req.params.id);
   if (!group) return res.status(404).json({ error: 'Group not found' });
@@ -131,5 +132,6 @@ router.post('/:id/broadcast', telegramAuth, requireTelegramRole('admin'), async 
     res.status(500).json({ error: err.message });
   }
 });
+*/
 
 module.exports = router;
