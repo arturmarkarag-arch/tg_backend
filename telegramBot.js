@@ -2,7 +2,7 @@ const TelegramBot = require('node-telegram-bot-api');
 const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
 const sharp = require('sharp');
 const crypto = require('crypto');
-const { shiftUp: shiftOrderUp } = require('./utils/shiftOrderNumbers');
+const { shiftUp: shiftOrderUp, shiftDown } = require('./utils/shiftOrderNumbers');
 const { analyzeBarcodeImage, analyzeProductImage } = require('./openaiClient');
 const { decodeBarcodeFromImageBuffer, normalizeBarcode } = require('./utils/barcodeScanner');
 const User = require('./models/User');
@@ -18,6 +18,7 @@ const BotInteractionLog = require('./models/BotInteractionLog');
 const RegistrationRequest = require('./models/RegistrationRequest');
 const DeliveryGroup = require('./models/DeliveryGroup');
 const Block = require('./models/Block');
+const PickingTask = require('./models/PickingTask');
 const { getIO } = require('./socket');
 const r2Client = new S3Client({
   region: process.env.R2_REGION || 'auto',
@@ -35,7 +36,11 @@ const SESSION_TTL = {
   shelf: 2 * 60 * 60 * 1000,     // 2 hours
   shop: 2 * 60 * 60 * 1000,      // 2 hours
   ship: 4 * 60 * 60 * 1000,      // 4 hours
+  pick: 4 * 60 * 60 * 1000,      // 4 hours
+  order: 15 * 60 * 1000,         // 15 min
 };
+
+const PICK_TASK_LOCK_TIMEOUT_MS = Number(process.env.PICK_TASK_LOCK_TIMEOUT_MS || 20 * 60 * 1000);
 
 async function getSession(chatId, type, key = '') {
   const doc = await BotSession.findOne({ chatId: String(chatId), type, key }).lean();
@@ -53,6 +58,21 @@ async function setSession(chatId, type, data, key = '') {
 
 async function deleteSession(chatId, type, key = '') {
   await BotSession.deleteOne({ chatId: String(chatId), type, key });
+}
+
+async function getOrderInFlight(chatId) {
+  return getSession(chatId, 'order_in_flight');
+}
+
+async function startOrderInFlight(chatId) {
+  const existing = await getOrderInFlight(chatId);
+  if (existing) return false;
+  await setSession(chatId, 'order_in_flight', { startedAt: new Date() });
+  return true;
+}
+
+async function clearOrderInFlight(chatId) {
+  return deleteSession(chatId, 'order_in_flight');
 }
 
 async function updateUserBotActivity(chatId) {
@@ -76,6 +96,26 @@ async function persistUserBotState(chatId, state) {
       { new: true }
     );
   } catch (_) {}
+}
+
+async function getReceiveState(chatId) {
+  const user = await User.findOne({ telegramId: String(chatId) }).lean();
+  return user?.lastBotState?.receive ?? null;
+}
+
+async function setReceiveState(chatId, state) {
+  await User.findOneAndUpdate(
+    { telegramId: String(chatId) },
+    { $set: { 'lastBotState.receive': state } },
+    { new: true }
+  );
+}
+
+async function clearReceiveState(chatId) {
+  await User.findOneAndUpdate(
+    { telegramId: String(chatId) },
+    { $unset: { 'lastBotState.receive': 1 } }
+  );
 }
 
 async function markUserBotBlocked(chatId) {
@@ -407,9 +447,6 @@ const SHOP_PREFETCH_THRESHOLD = 5;
 const shopPhotoBufferCache = new Map();
 const shopPhotoBufferFetchPromises = new Map();
 
-// Guard against double-submit of /order (in-memory is fine, non-critical)
-const orderInFlight = new Set();
-
 const SERVER_BASE_URL = process.env.SERVER_BASE_URL || (process.env.NODE_ENV === 'production' ? null : `http://localhost:${process.env.PORT || 5000}`);
 const WEB_APP_URL = process.env.WEB_APP_URL || 'http://localhost:5173/mini-app';
 const ALLOWED_TELEGRAM_GROUP_IDS = (process.env.TELEGRAM_ALLOWED_GROUP_IDS || '')
@@ -451,7 +488,8 @@ const roleCommands = {
     //'/help - Показати доступні команди',
     //'/profile - Мій профіль',
     '/receive - Прийняти товар на склад',
-    '/ship - Переглянути замовлення для відвантаження',
+    //'/ship - Переглянути замовлення для відвантаження',
+    '/pick - Почати чергу підбору',
     '/miniapp - Відкрити склад',
   ],
   admin: [
@@ -480,20 +518,21 @@ const roleBotCommands = {
     { command: '/shop', description: 'Переглянути товари в телеграмі' },
     //{ command: '/mylist', description: 'Обрані товари' },
     //{ command: '/order', description: 'Оформити замовлення' },
-    { command: '/help', description: 'Показати доступні команди' },
-    { command: '/profile', description: 'Мій профіль' },
+    //{ command: '/help', description: 'Показати доступні команди' },
+    //{ command: '/profile', description: 'Мій профіль' },
   ],
   warehouse: [
     { command: '/receive', description: 'Прийняти товар на склад' },
-    { command: '/ship', description: 'Замовлення для відвантаження' },
+    //{ command: '/ship', description: 'Замовлення для відвантаження' },
+    { command: '/pick', description: 'Почати чергу підбору' },
     { command: '/miniapp', description: 'Відкрити склад' },
-    { command: '/help', description: 'Показати доступні команди' },
-    { command: '/profile', description: 'Мій профіль' },
+    //{ command: '/help', description: 'Показати доступні команди' },
+    //{ command: '/profile', description: 'Мій профіль' },
   ],
   admin: [
     { command: '/miniapp', description: 'Відкрити Адмінку' },
     //{ command: '/help', description: 'Показати доступні команди' },
-    { command: '/profile', description: 'Мій профіль' },
+    //{ command: '/profile', description: 'Мій профіль' },
   ],
 };
 
@@ -1115,7 +1154,8 @@ async function sendShopProducts(chatId, index = 0, forceIndex = false) {
 
   const totalProducts = products.length;
   const persistentShopIndex = user?.lastBotState?.shop?.currentIndex;
-  const desiredIndex = forceIndex
+  const explicitIndex = arguments.length >= 2;
+  const desiredIndex = forceIndex || explicitIndex
     ? index
     : (prev?.currentIndex != null && Number.isInteger(prev.currentIndex))
       ? prev.currentIndex
@@ -1233,7 +1273,7 @@ async function handleReceiveStep(chatId, msg, state) {
     }
     state.photoFileId = msg.photo[msg.photo.length - 1].file_id;
     state.step = 'await_has_barcode';
-    await setSession(chatId, 'receive', state);
+    await setReceiveState(chatId, state);
     await bot.sendMessage(chatId, 'Чи є штрихкод на товарі?', {
       reply_markup: {
         inline_keyboard: [
@@ -1251,14 +1291,14 @@ async function handleReceiveStep(chatId, msg, state) {
     const normalized = msgText.trim().toLowerCase();
     if (normalized === 'так' || normalized === 'yes') {
       state.step = 'await_barcode_photo';
-      await setSession(chatId, 'receive', state);
+      await setReceiveState(chatId, state);
       await bot.sendMessage(chatId, 'Добре. Надішліть фото штрихкоду або QR-коду.');
       return;
     }
 
     if (normalized === 'ні' || normalized === 'немає' || normalized === 'no') {
       state.step = 'await_price';
-      await setSession(chatId, 'receive', state);
+      await setReceiveState(chatId, state);
       await bot.sendMessage(chatId, 'Введіть ціну товару (zł):');
       return;
     }
@@ -1274,7 +1314,7 @@ async function handleReceiveStep(chatId, msg, state) {
     }
 
     state.barcodePhotoFileId = msg.photo[msg.photo.length - 1].file_id;
-    await setSession(chatId, 'receive', state);
+    await setReceiveState(chatId, state);
 
     try {
       const { buffer } = await uploadTelegramPhotoToR2(state.barcodePhotoFileId);
@@ -1295,7 +1335,7 @@ async function handleReceiveStep(chatId, msg, state) {
     }
 
     state.step = 'await_price';
-    await setSession(chatId, 'receive', state);
+    await setReceiveState(chatId, state);
     await bot.sendMessage(chatId, 'Введіть ціну товару (zł):');
     return;
   }
@@ -1308,7 +1348,7 @@ async function handleReceiveStep(chatId, msg, state) {
     }
     state.price = val;
     state.step = 'await_quantity';
-    await setSession(chatId, 'receive', state);
+    await setReceiveState(chatId, state);
     await bot.sendMessage(chatId, 'Введіть кількість на складі:');
     return;
   }
@@ -1321,7 +1361,7 @@ async function handleReceiveStep(chatId, msg, state) {
     }
     state.quantity = val;
     state.step = 'await_qty_per_package';
-    await setSession(chatId, 'receive', state);
+    await setReceiveState(chatId, state);
     await bot.sendMessage(chatId, 'Введіть кількість в упаковці (шт):');
     return;
   }
@@ -1333,7 +1373,7 @@ async function handleReceiveStep(chatId, msg, state) {
       return;
     }
     state.quantityPerPackage = val;
-    await deleteSession(chatId, 'receive');
+    await clearReceiveState(chatId);
 
     try {
       await bot.sendMessage(chatId, 'Обробляю фото та зберігаю товар, зачекайте...');
@@ -1388,21 +1428,32 @@ async function handleReceiveStep(chatId, msg, state) {
 /**
  * Build caption + keyboard for the current carousel entry.
  */
-function buildCarouselMessage(productName, position, entry, currentIndex, totalEntries) {
+function buildCarouselMessage(productName, position, entry, currentIndex, totalEntries, productId, hasRemaining) {
   const caption = [
     `📦 ${position || 'N/A'}`,
     `🏪 Магазин: ${entry.shopName}`,
     `📊 Кількість: ${entry.quantity}`,
     '',
     `${currentIndex + 1} / ${totalEntries}`,
+    '',
+    `[ID: ${productId}]`,
   ].join('\n');
 
   const navRow = [];
   if (totalEntries > 1) {
-    navRow.push({ text: `◀️ Попередній`, callback_data: `sprev:` });
-    navRow.push({ text: `Наступний ▶️`, callback_data: `snext:` });
+    navRow.push({ text: `◀️ Попередній`, callback_data: `sprev:${productId}` });
+    navRow.push({ text: `Наступний ▶️`, callback_data: `snext:${productId}` });
   }
-  const actionRow = [{ text: '📦 Спаковано', callback_data: `spack:` }];
+
+  const actionRow = [];
+  actionRow.push({
+    text: entry && entry.packed ? '✅ Спаковано' : '⬜ Спаковано',
+    callback_data: `spack:${productId}`,
+  });
+
+  if (hasRemaining) {
+    actionRow.push({ text: '❌ Закінчився', callback_data: `pick_sold_out:${productId}` });
+  }
 
   const inline_keyboard = [];
   if (navRow.length) inline_keyboard.push(navRow);
@@ -1411,18 +1462,34 @@ function buildCarouselMessage(productName, position, entry, currentIndex, totalE
   return { caption, reply_markup: { inline_keyboard } };
 }
 
+function buildSoldOutConfirmationMarkup(confirmData, cancelData) {
+  return {
+    inline_keyboard: [[
+      { text: '✅ Так, товару немає', callback_data: confirmData },
+      { text: '❌ Ні, скасувати', callback_data: cancelData },
+    ]],
+  };
+}
+
 async function getShippingBlockPositions(productIds) {
   if (!Array.isArray(productIds) || !productIds.length) return new Map();
 
   const blocks = await Block.find(
     { productIds: { $in: productIds } },
     'blockId productIds'
-  ).sort({ blockId: 1 }).lean();
+  )
+    // Populate with the same status filter the warehouse UI uses so positions match
+    // what workers physically see (archived products are excluded from the count)
+    .populate({ path: 'productIds', match: { status: { $in: ['active', 'pending'] } } })
+    .sort({ blockId: 1 })
+    .lean();
 
   const positions = new Map();
   for (const block of blocks) {
-    for (let index = 0; index < block.productIds.length; index += 1) {
-      const pid = String(block.productIds[index]);
+    // After populate+match, non-matching (archived) entries become null — skip them
+    const visibleProducts = (block.productIds || []).filter(Boolean);
+    for (let index = 0; index < visibleProducts.length; index += 1) {
+      const pid = String(visibleProducts[index]._id);
       if (!positions.has(pid)) {
         positions.set(pid, { blockId: block.blockId, index });
       }
@@ -1433,30 +1500,506 @@ async function getShippingBlockPositions(productIds) {
 }
 
 async function ensureBlocks() {
-  const count = await Block.countDocuments();
-  if (count >= 120) return;
-  const existing = await Block.find({}, 'blockId').lean();
-  const existingNumbers = new Set(existing.map((b) => b.blockId));
-  const toCreate = [];
-  for (let i = 1; i <= 120; i += 1) {
-    if (!existingNumbers.has(i)) toCreate.push({ blockId: i, productIds: [] });
+  // Blocks are managed manually through the admin/blocks API.
+  // No automatic block generation or hardcoded 120-block limit should be used.
+  return;
+}
+
+async function buildPickingTasksFromOrders() {
+  if (buildPickingTasksFromOrders._running) return;
+  buildPickingTasksFromOrders._running = true;
+  try {
+  // 1. Find already assigned order/product pairs so we don't create duplicates.
+  const activeTasks = await PickingTask.find(
+    { status: { $in: ['pending', 'locked'] } },
+    'productId items.orderId'
+  ).lean();
+
+  const assignedOrderProducts = new Set();
+  for (const task of activeTasks) {
+    const pid = String(task.productId);
+    for (const item of task.items) {
+      assignedOrderProducts.add(`${item.orderId}_${pid}`);
+    }
   }
-  if (toCreate.length) {
-    await Block.insertMany(toCreate);
+
+  // 2. Take all active orders and build missing picking tasks.
+  const orders = await Order.find({ status: { $in: ['new', 'in_progress'] } })
+    .populate('items.productId')
+    .sort({ createdAt: 1 })
+    .lean();
+  if (!orders.length) return;
+
+  const buyerIds = [...new Set(orders.map((order) => order.buyerTelegramId))];
+  const buyers = await User.find({ telegramId: { $in: buyerIds } }).lean();
+  const buyerMap = new Map(buyers.map((buyer) => [buyer.telegramId, buyer]));
+
+  const productGroups = new Map();
+  for (const order of orders) {
+    const buyer = buyerMap.get(order.buyerTelegramId);
+    for (const item of order.items) {
+      if (item.packed || item.cancelled || !item.productId) continue;
+      if (item.productId.status === 'archived') continue;
+      const productId = String(item.productId._id);
+      if (assignedOrderProducts.has(`${order._id}_${productId}`)) continue;
+
+      const group = productGroups.get(productId) || {
+        productId: item.productId._id,
+        items: [],
+      };
+      group.items.push({
+        orderId: order._id,
+        shopName: buyer?.shopName || 'невідомий магазин',
+        quantity: item.quantity || 0,
+        packed: false,
+      });
+      productGroups.set(productId, group);
+    }
   }
+
+  if (!productGroups.size) return;
+
+  const positions = await getShippingBlockPositions(Array.from(productGroups.keys()));
+  const tasks = [];
+  for (const [productId, group] of productGroups.entries()) {
+    const position = positions.get(productId);
+    tasks.push({
+      productId: group.productId,
+      // Products from incoming can be ordered before they are placed on shelves.
+      // For those we keep a valid picking task with synthetic location (blockId=0).
+      blockId: position?.blockId ?? 0,
+      positionIndex: position ? position.index + 1 : 0,
+      items: group.items,
+    });
+  }
+
+  tasks.sort((a, b) => a.blockId - b.blockId || a.positionIndex - b.positionIndex);
+  if (!tasks.length) return;
+
+  try {
+    await PickingTask.insertMany(tasks);
+  } catch (err) {
+    console.error('[Bot] PickingTask insert error:', err);
+  }
+  } finally {
+    buildPickingTasksFromOrders._running = false;
+  }
+}
+
+function buildPickTaskCaption(task) {
+  const totalQty = task.items.reduce((sum, item) => sum + (item.quantity || 0), 0);
+  const productTitle = task.productId?.name || 'Невідомий товар';
+  const locationLine = task.blockId > 0
+    ? `📍 Блок ${task.blockId}, позиція ${task.positionIndex}`
+    : '📍 Надходження (товар ще не розміщений на полиці)';
+  return [
+    locationLine,
+    `📦 Товар: ${productTitle}`,
+    `🔢 Загальна кількість: ${totalQty} шт.`,
+    '',
+    'Натисніть на магазин, щоб позначити товар як спакований.',
+  ].join('\n');
+}
+
+function buildPickTaskKeyboard(task) {
+  const rows = task.items.map((item, index) => [{
+    text: `${item.packed ? '✅' : '📦'} ${item.shopName} (${item.quantity || 0} шт)`,
+    callback_data: `pick_item:${task._id}:${index}`,
+  }] );
+
+  rows.push([
+    { text: '⏸ Відкласти', callback_data: `pick_skip:${task._id}` },
+  ]);
+
+  rows.push([
+    { text: '❌ Товар закінчився', callback_data: `pick_sold_out:${task._id}` },
+  ]);
+
+  return { inline_keyboard: rows };
+}
+
+async function getUserLockedPickingTasks(chatId) {
+  return PickingTask.find({ status: 'locked', lockedBy: String(chatId) })
+    .sort({ blockId: 1, positionIndex: 1 })
+    .populate('productId')
+    .lean();
+}
+
+async function releaseStaleOrOrphanLockedTasks() {
+  const lockDeadline = new Date(Date.now() - PICK_TASK_LOCK_TIMEOUT_MS);
+
+  // Auto-release tasks that stayed locked too long.
+  await PickingTask.updateMany(
+    {
+      status: 'locked',
+      lockedAt: { $lt: lockDeadline },
+    },
+    {
+      $set: { status: 'pending', lockedBy: null, lockedAt: null },
+    }
+  );
+
+  // Auto-release tasks locked by workers who are not on shift anymore.
+  const activeWorkers = await User.find({ role: 'warehouse', isOnShift: true }, 'telegramId').lean();
+  const activeTelegramIds = activeWorkers.map((worker) => String(worker.telegramId));
+
+  await PickingTask.updateMany(
+    {
+      status: 'locked',
+      lockedBy: { $nin: activeTelegramIds },
+    },
+    {
+      $set: { status: 'pending', lockedBy: null, lockedAt: null },
+    }
+  );
+}
+
+async function claimPickingTask(chatId, zoneStart, zoneEnd, lastBlock) {
+  await releaseStaleOrOrphanLockedTasks();
+
+  const lockUpdate = {
+    $set: {
+      status: 'locked',
+      lockedBy: String(chatId),
+      lockedAt: new Date(),
+    },
+  };
+
+  const claimValidTask = async (query) => {
+    while (true) {
+      const claimed = await PickingTask.findOneAndUpdate(
+        query,
+        lockUpdate,
+        { sort: { blockId: 1, positionIndex: 1 }, new: true }
+      );
+
+      if (!claimed) return null;
+
+      const product = await Product.findById(claimed.productId, 'status').lean();
+      if (product && product.status !== 'archived') {
+        return PickingTask.findById(claimed._id).populate('productId').lean();
+      }
+
+      // Stale task linked to archived/missing product: mark completed and try next.
+      await PickingTask.findByIdAndUpdate(claimed._id, {
+        $set: { status: 'completed', lockedBy: null, lockedAt: null },
+      });
+    }
+  };
+
+  const taskInZone = await claimValidTask({
+    blockId: { $gte: zoneStart, $lte: zoneEnd },
+    status: 'pending',
+    skippedBy: { $ne: String(chatId) },
+  });
+
+  if (taskInZone) {
+    return { task: taskInZone, wasSkipped: false };
+  }
+
+  const taskOutsideZone = await claimValidTask({
+    status: 'pending',
+    skippedBy: { $ne: String(chatId) },
+  });
+
+  if (taskOutsideZone) {
+    return { task: taskOutsideZone, wasSkipped: false };
+  }
+
+  // Anti-deadlock fallback: if all workers skipped the same task(s), still force claim
+  // so those positions get resolved within the same shift.
+  const forcedTaskInZone = await claimValidTask({
+    blockId: { $gte: zoneStart, $lte: zoneEnd },
+    status: 'pending',
+  });
+
+  if (forcedTaskInZone) {
+    return { task: forcedTaskInZone, wasSkipped: true };
+  }
+
+  const forcedTask = await claimValidTask({
+    status: 'pending',
+  });
+  return forcedTask ? { task: forcedTask, wasSkipped: true } : null;
+}
+
+async function getCurrentPickSession(chatId) {
+  return getSession(chatId, 'pick', 'current');
+}
+
+async function saveCurrentPickSession(chatId, data) {
+  return setSession(chatId, 'pick', data, 'current');
+}
+
+async function deleteCurrentPickSession(chatId) {
+  return deleteSession(chatId, 'pick', 'current');
+}
+
+async function getPickTaskById(taskId) {
+  return PickingTask.findById(taskId).populate('productId').lean();
+}
+
+async function sendPickTaskMessage(chatId, task, pickState, msgId = null) {
+  const caption = buildPickTaskCaption(task);
+  const replyMarkup = buildPickTaskKeyboard(task);
+  const photoUrl = task.productId?.telegramFileId || getPhotoUrl(task.productId?.imageUrls?.[0]);
+  const hasPhoto = Boolean(photoUrl);
+  const oldHasPhoto = Boolean(pickState?.hasPhoto);
+
+  if (msgId) {
+    try {
+      if (oldHasPhoto && hasPhoto) {
+        // Update photo and caption when both old and new messages are photo-based.
+        await bot.editMessageMedia(
+          {
+            type: 'photo',
+            media: photoUrl,
+            caption,
+          },
+          {
+            chat_id: chatId,
+            message_id: msgId,
+            reply_markup: replyMarkup,
+          }
+        );
+        return { messageId: msgId, hasPhoto };
+      }
+
+      if (!oldHasPhoto && !hasPhoto) {
+        await bot.editMessageText(caption, { chat_id: chatId, message_id: msgId, reply_markup: replyMarkup });
+        return { messageId: msgId, hasPhoto };
+      }
+
+      // If message type changes between photo and text, remove the old message and send a new one.
+      try {
+        await bot.deleteMessage(chatId, msgId);
+      } catch (_) {
+      }
+    } catch (_) {
+      // fallback to sending a new message if editing fails
+      try {
+        await bot.deleteMessage(chatId, msgId);
+      } catch (_) {
+      }
+    }
+  }
+
+  let sent;
+  if (hasPhoto) {
+    sent = await sendPhotoWithRetry(chatId, photoUrl, { caption, reply_markup: replyMarkup });
+  } else {
+    sent = await bot.sendMessage(chatId, caption, { reply_markup: replyMarkup });
+  }
+
+  return { messageId: String(sent?.message_id), hasPhoto };
+}
+
+async function claimAndSendNextPickTask(chatId, zoneStart, zoneEnd, lastBlock, currentSession) {
+  await buildPickingTasksFromOrders();
+  const result = await claimPickingTask(chatId, zoneStart, zoneEnd, lastBlock);
+  if (!result) {
+    await bot.sendMessage(chatId, 'Поки що немає вільних завдань для поточної зони. Спробуйте пізніше.');
+    return null;
+  }
+  const { task, wasSkipped } = result;
+
+  if (wasSkipped) {
+    await bot.sendMessage(
+      chatId,
+      '⚠️ Ця позиція була пропущена раніше.\nЗнайдіть товар на складі або натисніть «❌ Закінчився», якщо товару немає.'
+    );
+  }
+
+  const lockedTasks = await getUserLockedPickingTasks(chatId);
+  const currentIndex = lockedTasks.findIndex((locked) => String(locked._id) === String(task._id));
+  const session = {
+    lastBlock,
+    currentTaskId: String(task._id),
+    taskIds: lockedTasks.map((t) => String(t._id)),
+    currentTaskIndex: currentIndex >= 0 ? currentIndex : 0,
+  };
+  if (currentSession?.messageId) {
+    session.messageId = currentSession.messageId;
+    session.hasPhoto = currentSession.hasPhoto;
+  }
+
+  const sendResult = await sendPickTaskMessage(chatId, task, session, session.messageId);
+  session.messageId = sendResult.messageId;
+  session.hasPhoto = sendResult.hasPhoto;
+  await saveCurrentPickSession(chatId, session);
+  return task;
+}
+
+async function openPickWorkflow(chatId, lastBlock) {
+  const user = await User.findOne({ telegramId: chatId });
+  if (!user || user.role !== 'warehouse') {
+    await bot.sendMessage(chatId, 'Вас не знайдено або у вас немає доступу до складу.');
+    return null;
+  }
+
+  const zoneStart = Number(user.shiftZone?.startBlock || 0);
+  const zoneEnd = Number(user.shiftZone?.endBlock || 0);
+  if (!zoneStart || !zoneEnd || zoneStart > zoneEnd) {
+    await bot.sendMessage(chatId, 'Ваша зона не призначена. Зверніться до менеджера зміни.');
+    return null;
+  }
+
+  const session = await getCurrentPickSession(chatId);
+
+  // 1. Return worker to existing locked tasks if they have any.
+  const lockedTasks = await getUserLockedPickingTasks(chatId);
+  if (lockedTasks.length > 0) {
+    let taskIndex = 0;
+    if (session?.currentTaskId) {
+      const idx = lockedTasks.findIndex((t) => String(t._id) === session.currentTaskId);
+      if (idx !== -1) taskIndex = idx;
+    }
+    const task = lockedTasks[taskIndex];
+
+    const newSession = {
+      lastBlock: task.blockId,
+      currentTaskId: String(task._id),
+      taskIds: lockedTasks.map((t) => String(t._id)),
+      currentTaskIndex: taskIndex,
+      messageId: session?.messageId,
+      hasPhoto: session?.hasPhoto,
+    };
+
+    const result = await sendPickTaskMessage(chatId, task, newSession, session?.messageId);
+    newSession.messageId = result.messageId;
+    newSession.hasPhoto = result.hasPhoto;
+    await saveCurrentPickSession(chatId, newSession);
+    return task;
+  }
+
+  // 2. If there are no locked tasks, build/claim a new one.
+  const effectiveLastBlock = lastBlock && lastBlock >= zoneStart && lastBlock <= zoneEnd ? lastBlock : zoneStart;
+  const task = await claimAndSendNextPickTask(chatId, zoneStart, zoneEnd, effectiveLastBlock, session);
+  return task;
+}
+
+async function getCurrentLockedTasks(chatId) {
+  return getUserLockedPickingTasks(chatId);
+}
+
+async function navigatePickTask(chatId, direction) {
+  const session = await getCurrentPickSession(chatId);
+  const tasks = await getCurrentLockedTasks(chatId);
+  if (!tasks.length) {
+    if (session) await deleteCurrentPickSession(chatId);
+    return null;
+  }
+
+  if (!session || !Array.isArray(session.taskIds) || !session.taskIds.length) {
+    return null;
+  }
+
+  let index = tasks.findIndex((task) => String(task._id) === String(session.currentTaskId));
+  if (index === -1) {
+    index = 0;
+  }
+
+  if (direction === 'next') {
+    index = (index + 1) % tasks.length;
+  } else {
+    index = (index - 1 + tasks.length) % tasks.length;
+  }
+
+  const task = tasks[index];
+  if (!task) return null;
+
+  session.taskIds = tasks.map((t) => String(t._id));
+  session.currentTaskId = String(task._id);
+  session.currentTaskIndex = index;
+  const result = await sendPickTaskMessage(chatId, task, session, session.messageId);
+  session.messageId = result.messageId;
+  session.hasPhoto = result.hasPhoto;
+  await saveCurrentPickSession(chatId, session);
+  return task;
+}
+
+async function handlePickTaskItem(chatId, taskId, itemIndex) {
+  const task = await PickingTask.findById(taskId);
+  if (!task || task.lockedBy !== String(chatId) || task.status !== 'locked') {
+    return null;
+  }
+
+  const item = task.items[itemIndex];
+  if (!item) {
+    return null;
+  }
+
+  const toggledPacked = !item.packed;
+  item.packed = toggledPacked;
+  await task.save();
+
+  // Sync the original order item
+  const order = await Order.findById(item.orderId);
+  if (order) {
+    const orderItem = order.items.find(
+      (i) => String(i.productId) === String(task.productId)
+    );
+
+    if (orderItem) {
+      orderItem.packed = toggledPacked;
+      const allCancelled = order.items.every((i) => i.cancelled);
+      const isFullyProcessed = order.items.every((i) => i.packed || i.cancelled);
+
+      if (allCancelled) {
+        order.status = 'cancelled';
+      } else if (isFullyProcessed) {
+        order.status = 'confirmed';
+      } else if (order.items.some((i) => i.packed || i.cancelled)) {
+        order.status = 'in_progress';
+      } else {
+        order.status = 'new';
+      }
+
+      await order.save();
+    }
+  }
+
+  const allPacked = task.items.every((item) => item.packed);
+  if (allPacked) {
+    task.status = 'completed';
+    task.lockedBy = null;
+    task.lockedAt = null;
+    await task.save();
+    return { task: await getPickTaskById(taskId), completed: true, toggledPacked };
+  }
+
+  return { task: await getPickTaskById(taskId), completed: false, toggledPacked };
 }
 
 async function scanAndUpdateProduct(product, imageBuffer, options = {}) {
   const result = await analyzeProductImage(imageBuffer, options);
   const parsed = result.parsed || {};
-  if (parsed.title) product.name = parsed.title;
-  if (parsed.brand) product.brand = parsed.brand;
-  if (parsed.model) product.model = parsed.model;
-  if (parsed.category) product.category = parsed.category;
-  if (parsed.barcode) product.barcode = parsed.barcode;
-  if (parsed.qrCode) product.qrCode = parsed.qrCode;
-  if (parsed.description !== undefined) product.description = parsed.description;
-  if (parsed.textOnImage !== undefined) product.textOnImage = parsed.textOnImage;
+
+  if (parsed.title) {
+    product.name = parsed.title;
+  }
+  if (parsed.brand) {
+    product.brand = parsed.brand;
+  }
+  if (parsed.model) {
+    product.model = parsed.model;
+  }
+  if (parsed.category) {
+    product.category = parsed.category;
+  }
+  if (parsed.barcode) {
+    product.barcode = parsed.barcode;
+  }
+  if (parsed.qrCode) {
+    product.qrCode = parsed.qrCode;
+  }
+  if (parsed.description !== undefined) {
+    product.description = parsed.description;
+  }
+  if (parsed.textOnImage !== undefined) {
+    product.textOnImage = parsed.textOnImage;
+  }
+
   await product.save();
   return { parsed, usage: result.usage || {} };
 }
@@ -1474,7 +2017,23 @@ function buildScanResultText(parsed) {
 }
 
 async function shipOrders(chatId) {
-  const orders = await Order.find({ status: 'new' }).populate('items.productId').sort({ createdAt: 1 });
+  const user = await User.findOne({ telegramId: chatId });
+  if (!user || user.role !== 'warehouse') {
+    await bot.sendMessage(chatId, 'Вас не знайдено або у вас немає доступу до складу.');
+    return;
+  }
+
+  const zoneStart = Number(user.shiftZone?.startBlock || 0);
+  const zoneEnd = Number(user.shiftZone?.endBlock || 0);
+  if (!zoneStart || !zoneEnd || zoneStart > zoneEnd) {
+    await bot.sendMessage(chatId, 'Ваша зона не призначена. Зверніться до менеджера зміни.');
+    return;
+  }
+
+  // Шукаємо і нові, і ті що "в процесі"
+  const orders = await Order.find({ status: { $in: ['new', 'in_progress'] } })
+    .populate('items.productId')
+    .sort({ createdAt: 1 });
   if (!orders.length) {
     await bot.sendMessage(chatId, 'Поки що нема нових замовлень для відвантаження.');
     return;
@@ -1489,29 +2048,57 @@ async function shipOrders(chatId) {
   for (const order of orders) {
     const buyer = buyerMap.get(order.buyerTelegramId);
     for (const item of order.items) {
+      if (item.packed || item.cancelled) continue;
       const product = item.productId;
       if (!product) continue;
+      if (product.status === 'archived') continue;
       const pid = String(product._id);
       if (!productMap.has(pid)) {
         productMap.set(pid, { product, entries: [] });
       }
-      const buyerName = [buyer?.firstName, buyer?.lastName].filter(Boolean).join(' ') || order.buyerTelegramId;
-      const address = [buyer?.shopAddress, buyer?.shopCity].filter(Boolean).join(', ') || 'не вказано';
-      productMap.get(pid).entries.push({
-        orderId: String(order._id),
-        shopName: buyer?.shopName || 'не вказано',
-        buyerName,
-        address,
-        quantity: item.quantity,
-        packed: false,
-      });
+
+      const entries = productMap.get(pid).entries;
+      const existingEntry = entries.find((e) => e.buyerTelegramId === order.buyerTelegramId);
+
+      if (existingEntry) {
+        existingEntry.quantity += item.quantity;
+        if (!existingEntry.orderIds.includes(String(order._id))) {
+          existingEntry.orderIds.push(String(order._id));
+        }
+      } else {
+        const buyerName = [buyer?.firstName, buyer?.lastName].filter(Boolean).join(' ') || order.buyerTelegramId;
+        const address = [buyer?.shopAddress, buyer?.shopCity].filter(Boolean).join(', ') || 'не вказано';
+        entries.push({
+          buyerTelegramId: order.buyerTelegramId,
+          orderIds: [String(order._id)],
+          shopName: buyer?.shopName || 'не вказано',
+          buyerName,
+          address,
+          quantity: item.quantity,
+          packed: false,
+        });
+      }
     }
   }
 
   const productIds = Array.from(productMap.keys());
   const blockPositions = await getShippingBlockPositions(productIds);
 
-  const sorted = Array.from(productMap.values()).sort((a, b) => {
+  const filteredProducts = Array.from(productMap.values()).filter(({ product }) => {
+    const position = blockPositions.get(String(product._id));
+    if (!position) {
+      // Incoming products are not assigned to any block yet but should still be pickable.
+      return true;
+    }
+    return position.blockId >= zoneStart && position.blockId <= zoneEnd;
+  });
+
+  if (!filteredProducts.length) {
+    await bot.sendMessage(chatId, `У вашій зоні блоків ${zoneStart}–${zoneEnd} поки що нема товарів для пакування.`);
+    return;
+  }
+
+  const sorted = filteredProducts.sort((a, b) => {
     const aPos = blockPositions.get(String(a.product._id));
     const bPos = blockPositions.get(String(b.product._id));
 
@@ -1528,8 +2115,17 @@ async function shipOrders(chatId) {
     const positionInfo = blockPositions.get(String(product._id));
     const position = positionInfo
       ? `Блок ${positionInfo.blockId} позиція ${positionInfo.index + 1}`
-      : product.orderNumber || 'N/A';
-    const { caption, reply_markup } = buildCarouselMessage(getProductTitle(product), position, entries[0], 0, entries.length);
+      : 'Надходження (ще не на полиці)';
+    const hasRemaining = entries.some((entry) => !entry.packed);
+    const { caption, reply_markup } = buildCarouselMessage(
+      getProductTitle(product),
+      position,
+      entries[0],
+      0,
+      entries.length,
+      String(product._id),
+      hasRemaining
+    );
 
     try {
       let sent;
@@ -1568,6 +2164,37 @@ async function shipOrders(chatId) {
   }
 
   await bot.sendMessage(chatId, `📋 Відправлено ${sorted.length} позицій для пакування.\n\nЩоб позначити товар як закінчений — відповідте (reply) на повідомлення з товаром словом "Закінчився".`);
+}
+
+async function archiveProductAsSoldOut(chatId, product, carousel, repliedMsgId = null) {
+  const { archiveProduct } = require('./services/archiveProduct');
+
+  const { cancelledCount } = await archiveProduct(product, { notifyBuyers: true, bot });
+
+  if (repliedMsgId && carousel) {
+    try {
+      const doneCaption = `📦 "${getProductTitle(product)}"\n❌ Скасовано замовлень: ${cancelledCount}\nТовар переміщено в архів.`;
+      if (carousel.hasPhoto) {
+        await bot.editMessageCaption(doneCaption, {
+          chat_id: chatId,
+          message_id: repliedMsgId,
+          reply_markup: { inline_keyboard: [[{ text: '📦 Архівовано', callback_data: 'noop' }]] },
+        });
+      } else {
+        await bot.editMessageText(doneCaption, {
+          chat_id: chatId,
+          message_id: repliedMsgId,
+          reply_markup: { inline_keyboard: [[{ text: '📦 Архівовано', callback_data: 'noop' }]] },
+        });
+      }
+    } catch (_) {}
+  }
+
+  if (carousel) {
+    await deleteSession(chatId, 'ship', repliedMsgId);
+  }
+
+  await bot.sendMessage(chatId, `📦 "${getProductTitle(product)}" — скасовано замовлень: ${cancelledCount}. Товар в архіві.`);
 }
 
 async function initBot(token) {
@@ -1666,14 +2293,14 @@ async function initBot(token) {
       }
 
       // Step-by-step /receive flow takes priority (but not for other commands)
-      const rState = await getSession(chatId, 'receive');
+      const rState = user?.lastBotState?.receive ?? null;
       if (rState && !text.startsWith('/')) {
         await handleReceiveStep(chatId, msg, rState);
         return;
       }
       // Cancel receive flow if user sends any other command
       if (rState && text.startsWith('/') && text !== '/receive') {
-        await deleteSession(chatId, 'receive');
+        await clearReceiveState(chatId);
       }
 
       if (msg.photo?.length && isBarcodeLookupCaption(msg.caption || '')) {
@@ -1893,7 +2520,7 @@ ${buildProductInfoText(product)}`;
           return;
         }
 
-        await setSession(chatId, 'receive', { step: 'await_photo' });
+        await setReceiveState(chatId, { step: 'await_photo' });
         await bot.sendMessage(chatId, 'Надішліть фото нового товару:');
         return;
       }
@@ -1910,6 +2537,23 @@ ${buildProductInfoText(product)}`;
         }
 
         await shipOrders(chatId);
+        return;
+      }
+
+      if (text === '/pick') {
+        if (!user) {
+          await bot.sendMessage(chatId, getUnknownUserMessage());
+          return;
+        }
+
+        if (user.role !== 'warehouse') {
+          await bot.sendMessage(chatId, 'Ця команда доступна лише складу. Використайте /help, щоб побачити доступні команди.');
+          return;
+        }
+
+        const currentSession = await getCurrentPickSession(chatId);
+        const lastBlock = currentSession?.lastBlock || Number(user.shiftZone?.startBlock || 1);
+        await openPickWorkflow(chatId, lastBlock);
         return;
       }
 
@@ -1935,36 +2579,24 @@ ${buildProductInfoText(product)}`;
       }
 
       // ── Warehouse reply "Закінчився" to archive product ──
-      if (user.role === 'warehouse' && msg.reply_to_message && rawText && rawText.toLowerCase() === 'закінчився') {
+      if (user.role === 'warehouse' && msg.reply_to_message && rawText && rawText.trim().toLowerCase() === 'закінчився') {
         const repliedMsgId = String(msg.reply_to_message.message_id);
         const replied = msg.reply_to_message;
         const captionText = replied.caption || replied.text || '';
 
-        // 1) Try to find product from carousel session (if still alive)
         let product = null;
-        let carousel = await getSession(chatId, 'ship', repliedMsgId);
-        if (carousel) {
+        const idMatch = captionText.match(/\[ID:\s*([a-fA-F0-9]{24})\]/i);
+        if (idMatch) {
+          product = await Product.findById(idMatch[1]);
+        }
+
+        const carousel = await getSession(chatId, 'ship', repliedMsgId);
+        if (!product && carousel) {
           product = await Product.findById(carousel.productId);
         }
 
-        // 2) Fallback: extract product name from caption — "Позиція X — "ProductName""
         if (!product) {
-          const nameMatch = captionText.match(/— "(.+?)"/);
-          if (nameMatch) {
-            const displayName = nameMatch[1];
-            product = await Product.findOne({
-              status: { $ne: 'archived' },
-              $or: [
-                { brand: displayName },
-                { model: displayName },
-                { category: displayName },
-              ],
-            });
-          }
-        }
-
-        if (!product) {
-          await bot.sendMessage(chatId, 'Не вдалося визначити товар з цього повідомлення. Можливо, він вже архівований.');
+          await bot.sendMessage(chatId, '❌ Не вдалося визначити товар з цього повідомлення. Переконайтеся, що ви відповідаєте на актуальне повідомлення з [ID: ...].');
           return;
         }
 
@@ -1973,67 +2605,18 @@ ${buildProductInfoText(product)}`;
           return;
         }
 
-        // Cancel all unpacked (still new) orders for this product
-        const newOrders = await Order.find({
+        const activeOrdersCount = await Order.countDocuments({
           'items.productId': product._id,
-          status: 'new',
+          status: { $in: ['new', 'in_progress'] },
         });
 
-        const buyerIds = [...new Set(newOrders.map((o) => o.buyerTelegramId))];
-        const buyers = await User.find({ telegramId: { $in: buyerIds } });
-        const buyerMap = new Map(buyers.map((b) => [b.telegramId, b]));
+        const confirmText = `Увага! Ви впевнені, що товар "${getProductTitle(product)}" закінчився? Це скасує його у ${activeOrdersCount} активних замовленнях і перенесе в архів. Цю дію неможливо скасувати.`;
+        const confirmMarkup = buildSoldOutConfirmationMarkup(
+          `ps_ok:reply:${product._id}`,
+          `ps_no:reply:${product._id}`
+        );
 
-        let cancelledCount = 0;
-        for (const order of newOrders) {
-          order.status = 'cancelled';
-          await order.save();
-          cancelledCount++;
-          const buyer = buyerMap.get(order.buyerTelegramId);
-          const buyerName = [buyer?.firstName, buyer?.lastName].filter(Boolean).join(' ') || order.buyerTelegramId;
-          await bot.sendMessage(order.buyerTelegramId, `⛔ Товар "${getProductTitle(product)}" на складі скінчився. Замовлення для ${buyerName} не буде виконано.`).catch(() => null);
-        }
-
-        // Archive product
-        const oldOrder = product.orderNumber;
-        await Product.findByIdAndUpdate(product._id, {
-          status: 'archived',
-          archivedAt: new Date(),
-          originalOrderNumber: oldOrder,
-          orderNumber: 0,
-        });
-        const { shiftDown } = require('./utils/shiftOrderNumbers');
-        await shiftDown({ status: { $ne: 'archived' }, orderNumber: { $gt: oldOrder } });
-
-        // Remove product from warehouse block
-        const block = await Block.findOne({ productIds: product._id });
-        if (block) {
-          block.productIds = block.productIds.filter((id) => id.toString() !== String(product._id));
-          block.version += 1;
-          await block.save();
-          try {
-            const updated = await Block.findOne({ blockId: block.blockId }).populate('productIds').lean();
-            getIO().emit('block_updated', updated);
-          } catch (_) {}
-        }
-
-        // Update carousel message
-        try {
-          const doneCaption = `📦 "${getProductTitle(product)}"\n❌ Скасовано замовлень: ${cancelledCount}\nТовар переміщено в архів.`;
-          if (replied.photo) {
-            await bot.editMessageCaption(doneCaption, {
-              chat_id: chatId, message_id: repliedMsgId,
-              reply_markup: { inline_keyboard: [[{ text: '📦 Архівовано', callback_data: 'noop' }]] },
-            });
-          } else {
-            await bot.editMessageText(doneCaption, {
-              chat_id: chatId, message_id: repliedMsgId,
-              reply_markup: { inline_keyboard: [[{ text: '📦 Архівовано', callback_data: 'noop' }]] },
-            });
-          }
-        } catch (_) {}
-
-        if (carousel) await deleteSession(chatId, 'ship', repliedMsgId);
-        await bot.sendMessage(chatId, `📦 "${getProductTitle(product)}" — скасовано замовлень: ${cancelledCount}. Товар в архіві.`);
+        await bot.sendMessage(chatId, confirmText, { reply_markup: confirmMarkup });
         return;
       }
 
@@ -2106,8 +2689,271 @@ ${buildProductInfoText(product)}`;
         return;
       }
 
+      if (data.startsWith('pick_') || data.startsWith('ps_ok') || data.startsWith('ps_no')) {
+        if (!user || user.role !== 'warehouse') {
+          await bot.answerCallbackQuery(query.id, { text: 'Ця дія доступна лише складу.', show_alert: true });
+          return;
+        }
+
+        const workerZoneStart = Number(user.shiftZone?.startBlock || 0);
+        const workerZoneEnd = Number(user.shiftZone?.endBlock || 0);
+        if (!user.isOnShift || !workerZoneStart || !workerZoneEnd || workerZoneStart > workerZoneEnd) {
+          await bot.answerCallbackQuery(query.id, { text: 'Ви не на активній зміні. Оновіть /ship після призначення.', show_alert: true });
+          return;
+        }
+
+        const session = await getCurrentPickSession(chatId);
+        const zoneStart = Number(user.shiftZone?.startBlock || 0);
+        const zoneEnd = Number(user.shiftZone?.endBlock || 0);
+        const lastBlock = session?.lastBlock || zoneStart || 1;
+        const [action, payloadId, actionProductId, extra] = data.split(':');
+
+        if (action === 'pick_item') {
+          const itemIndex = Number(actionProductId);
+          const result = await handlePickTaskItem(chatId, payloadId, itemIndex);
+          if (!result || !result.task) {
+            await bot.answerCallbackQuery(query.id, { text: 'Не вдалося обробити натискання. Спробуйте ще раз.', show_alert: true });
+            return;
+          }
+
+          if (result.completed) {
+            const nextTask = await openPickWorkflow(chatId, lastBlock);
+            await bot.answerCallbackQuery(query.id, {
+              text: nextTask ? 'Завдання завершено. Отримано наступне завдання.' : 'Завдання завершено. Наразі більше завдань немає.',
+            });
+            return;
+          }
+
+          const updatedTask = await getPickTaskById(payloadId);
+          const sendRes = await sendPickTaskMessage(chatId, updatedTask, session, session?.messageId);
+          if (session) {
+            session.messageId = sendRes.messageId;
+            session.hasPhoto = sendRes.hasPhoto;
+            await saveCurrentPickSession(chatId, session);
+          }
+          const callbackText = result.toggledPacked ? 'Товар позначено як спакований.' : 'Пакування скасовано.';
+          await bot.answerCallbackQuery(query.id, { text: callbackText });
+          return;
+        }
+
+        if (action === 'pick_skip') {
+          const task = await PickingTask.findById(payloadId);
+          if (!task || task.lockedBy !== String(chatId) || task.status !== 'locked') {
+            await bot.answerCallbackQuery(query.id, { text: 'Завдання недоступне для відкладання.', show_alert: true });
+            return;
+          }
+          task.status = 'pending';
+          task.lockedBy = null;
+          task.lockedAt = null;
+          task.skippedBy = Array.isArray(task.skippedBy) ? task.skippedBy : [];
+          task.skippedBy.push(String(chatId));
+          await task.save();
+
+          const nextTask = await openPickWorkflow(chatId, lastBlock);
+          await bot.answerCallbackQuery(query.id, {
+            text: nextTask ? 'Завдання відкладено. Отримано наступне завдання.' : 'Завдання відкладено. Наразі більше завдань немає.',
+          });
+          return;
+        }
+
+        if (action === 'pick_sold_out') {
+          let product = null;
+          let shipCarousel = null;
+          const targetId = actionProductId || payloadId;
+
+          if (targetId) {
+            product = await Product.findById(targetId);
+          }
+
+          if (!product) {
+            shipCarousel = await getSession(chatId, 'ship', msgId);
+            if (shipCarousel) {
+              product = await Product.findById(shipCarousel.productId);
+            }
+          }
+
+          if (!product && payloadId && payloadId !== 'reply') {
+            const task = await getPickTaskById(payloadId);
+            if (task?.productId) {
+              product = await Product.findById(task.productId._id || task.productId);
+            }
+          }
+
+          if (!product) {
+            const pickSession = await getCurrentPickSession(chatId);
+            if (pickSession?.currentTaskId) {
+              const task = await getPickTaskById(pickSession.currentTaskId);
+              if (task?.productId) {
+                product = await Product.findById(task.productId._id || task.productId);
+              }
+            }
+          }
+
+          if (!product) {
+            await bot.answerCallbackQuery(query.id, { text: 'Товар не знайдено.', show_alert: true });
+            return;
+          }
+
+          if (product.status === 'archived') {
+            await bot.answerCallbackQuery(query.id, { text: `"${getProductTitle(product)}" вже в архіві.`, show_alert: true });
+            return;
+          }
+
+          const activeOrdersCount = await Order.countDocuments({
+            'items.productId': product._id,
+            status: { $in: ['new', 'in_progress'] },
+          });
+
+          const confirmText = `Увага! Ви впевнені, що товар "${getProductTitle(product)}" закінчився? Це скасує його у ${activeOrdersCount} активних замовленнях і перенесе в архів. Цю дію неможливо скасувати.`;
+          const confirmMarkup = buildSoldOutConfirmationMarkup(
+            `ps_ok:${payloadId}:${product._id}`,
+            `ps_no:${payloadId}:${product._id}`
+          );
+
+          try {
+            if (query.message.photo) {
+              await bot.editMessageCaption(confirmText, {
+                chat_id: chatId,
+                message_id: msgId,
+                reply_markup: confirmMarkup,
+              });
+            } else {
+              await bot.editMessageText(confirmText, {
+                chat_id: chatId,
+                message_id: msgId,
+                reply_markup: confirmMarkup,
+              });
+            }
+          } catch (_) {
+            await bot.sendMessage(chatId, confirmText, { reply_markup: confirmMarkup });
+          }
+
+          await bot.answerCallbackQuery(query.id);
+          return;
+        }
+
+        if (action === 'ps_ok') {
+          let product = null;
+          let shipCarousel = null;
+          const targetId = actionProductId || payloadId;
+
+          if (targetId) {
+            product = await Product.findById(targetId);
+          }
+
+          if (!product) {
+            shipCarousel = await getSession(chatId, 'ship', msgId);
+            if (shipCarousel) {
+              product = await Product.findById(shipCarousel.productId);
+            }
+          }
+
+          if (!product && payloadId && payloadId !== 'reply') {
+            const task = await getPickTaskById(payloadId);
+            if (task?.productId) {
+              product = await Product.findById(task.productId._id || task.productId);
+            }
+          }
+
+          if (!product) {
+            await bot.answerCallbackQuery(query.id, { text: 'Товар не знайдено.', show_alert: true });
+            return;
+          }
+
+          if (product.status === 'archived') {
+            await bot.answerCallbackQuery(query.id, { text: `"${getProductTitle(product)}" вже в архіві.`, show_alert: true });
+            return;
+          }
+
+          await archiveProductAsSoldOut(chatId, product, shipCarousel, msgId);
+
+          if (!shipCarousel) {
+            try {
+              const doneCaption = `❌ Товар "${getProductTitle(product)}" закінчився та переміщено в архів.`;
+              if (query.message.photo) {
+                await bot.editMessageCaption(doneCaption, {
+                  chat_id: chatId,
+                  message_id: msgId,
+                  reply_markup: { inline_keyboard: [[{ text: '📦 Архівовано', callback_data: 'noop' }]] },
+                });
+              } else {
+                await bot.editMessageText(doneCaption, {
+                  chat_id: chatId,
+                  message_id: msgId,
+                  reply_markup: { inline_keyboard: [[{ text: '📦 Архівовано', callback_data: 'noop' }]] },
+                });
+              }
+            } catch (_) {}
+            await deleteCurrentPickSession(chatId);
+          }
+
+          await bot.answerCallbackQuery(query.id, { text: 'Товар позначено як закінчився і заархівовано.', show_alert: false });
+          return;
+        }
+
+        if (action === 'ps_no') {
+          const task = await getPickTaskById(payloadId);
+          const pickSession = await getCurrentPickSession(chatId);
+          const shipCarousel = await getSession(chatId, 'ship', msgId);
+
+          if (payloadId === 'reply' || extra === 'reply') {
+            try {
+              await bot.editMessageText('❌ Дія скасована. Товар не буде архівовано.', {
+                chat_id: chatId,
+                message_id: msgId,
+                reply_markup: { inline_keyboard: [[{ text: 'OK', callback_data: 'noop' }]] },
+              });
+            } catch (_) {}
+          } else if (task && pickSession && String(task._id) === String(pickSession.currentTaskId)) {
+            const sendRes = await sendPickTaskMessage(chatId, task, pickSession, pickSession.messageId);
+            pickSession.messageId = sendRes.messageId;
+            pickSession.hasPhoto = sendRes.hasPhoto;
+            await saveCurrentPickSession(chatId, pickSession);
+          } else if (shipCarousel) {
+            const { caption, reply_markup } = buildCarouselMessage(
+              shipCarousel.productName,
+              shipCarousel.position,
+              shipCarousel.entries[shipCarousel.currentIndex] || shipCarousel.entries[0],
+              shipCarousel.currentIndex || 0,
+              shipCarousel.entries.length,
+              String(shipCarousel.productId),
+              shipCarousel.entries.some((entry) => !entry.packed)
+            );
+            try {
+              if (query.message.photo) {
+                await bot.editMessageCaption(caption, {
+                  chat_id: chatId,
+                  message_id: msgId,
+                  reply_markup,
+                });
+              } else {
+                await bot.editMessageText(caption, {
+                  chat_id: chatId,
+                  message_id: msgId,
+                  reply_markup,
+                });
+              }
+            } catch (_) {}
+          }
+
+          await bot.answerCallbackQuery(query.id, { text: 'Дія скасована.', show_alert: false });
+          return;
+        }
+
+        if (action === 'pick_prev' || action === 'pick_next') {
+          const direction = action === 'pick_next' ? 'next' : 'prev';
+          const task = await navigatePickTask(chatId, direction);
+          if (!task) {
+            await bot.answerCallbackQuery(query.id, { text: 'Немає заблокованих завдань для навігації.', show_alert: true });
+            return;
+          }
+          await bot.answerCallbackQuery(query.id, { text: 'Завдання оновлено.' });
+          return;
+        }
+      }
+
       if (data === 'receive_barcode_yes' || data === 'receive_barcode_no') {
-        const state = await getSession(chatId, 'receive');
+        const state = await getReceiveState(chatId);
         if (!state) {
           await bot.answerCallbackQuery(query.id, { text: 'Сесія не знайдена або вже завершена.', show_alert: true });
           return;
@@ -2119,11 +2965,11 @@ ${buildProductInfoText(product)}`;
 
         if (data === 'receive_barcode_yes') {
           state.step = 'await_barcode_photo';
-          await setSession(chatId, 'receive', state);
+          await setReceiveState(chatId, state);
           await bot.sendMessage(chatId, 'Надішліть фото штрихкоду або QR-коду на товарі.');
         } else {
           state.step = 'await_price';
-          await setSession(chatId, 'receive', state);
+          await setReceiveState(chatId, state);
           await bot.sendMessage(chatId, 'Добре. Введіть ціну товару (zł):');
         }
 
@@ -2439,11 +3285,11 @@ ${lines.join('\n')}
 
       // ── Shop: place order ──
       if (data === 'shop_order') {
-        if (orderInFlight.has(chatId)) {
+        const started = await startOrderInFlight(chatId);
+        if (!started) {
           await bot.answerCallbackQuery(query.id, { text: 'Замовлення вже обробляється...', show_alert: false });
           return;
         }
-        orderInFlight.add(chatId);
         try {
           const result = await finalizeOrder(chatId);
           await bot.answerCallbackQuery(query.id);
@@ -2452,13 +3298,27 @@ ${lines.join('\n')}
           const reset = Array.isArray(shopSession?.productIds) && shopSession.currentIndex >= shopSession.productIds.length - 1;
           await setShopMenuButton(chatId, 'Товари', reset);
         } finally {
-          orderInFlight.delete(chatId);
+          await clearOrderInFlight(chatId);
         }
         return;
       }
 
       // ── Shop: reset current shop session ──
       if (data === 'shop_reset') {
+        const pendingCount = await PendingReaction.countDocuments({ sellerTelegramId: chatId });
+        if (pendingCount > 0) {
+          await bot.answerCallbackQuery(query.id, { text: 'Підтвердіть скидання списку.', show_alert: false });
+          try {
+            await bot.editMessageReplyMarkup({
+              inline_keyboard: [[
+                { text: 'Так, скинути', callback_data: 'shop_reset_confirm' },
+                { text: 'Ні, залишити', callback_data: 'noop' },
+              ]],
+            }, { chat_id: chatId, message_id: msgId });
+          } catch (_) {}
+          return;
+        }
+
         await bot.answerCallbackQuery(query.id, { text: 'Скидаю стан...', show_alert: false });
         const shopSession = await getSession(chatId, 'shop');
         if (shopSession?.messageId) {
@@ -2474,25 +3334,64 @@ ${lines.join('\n')}
         return;
       }
 
+      if (data === 'shop_reset_confirm') {
+        await bot.answerCallbackQuery(query.id, { text: 'Скидаю стан...', show_alert: false });
+        const shopSession = await getSession(chatId, 'shop');
+        if (shopSession?.messageId) {
+          await deleteShopMessage(chatId, shopSession.messageId);
+        }
+        if (shopSession?.menuMessageId) {
+          await deleteShopMessage(chatId, shopSession.menuMessageId);
+        }
+        await deleteSession(chatId, 'shop');
+        await PendingReaction.deleteMany({ sellerTelegramId: chatId });
+        await setShopMenuButton(chatId, 'Товари', true);
+        await sendShopProducts(chatId, 0, true);
+        return;
+      }
+
+      const [action, actionProductId] = data.split(':');
       const carousel = await getSession(chatId, 'ship', msgId);
 
+      const isShipCarouselAction = action === 'sprev' || action === 'snext' || action === 'spack';
+      if (isShipCarouselAction) {
+        if (!user || user.role !== 'warehouse') {
+          await bot.answerCallbackQuery(query.id, { text: 'Ця дія доступна лише складу.', show_alert: true });
+          return;
+        }
+
+        const zoneStart = Number(user.shiftZone?.startBlock || 0);
+        const zoneEnd = Number(user.shiftZone?.endBlock || 0);
+        if (!user.isOnShift || !zoneStart || !zoneEnd || zoneStart > zoneEnd) {
+          await bot.answerCallbackQuery(query.id, { text: 'Ви не на активній зміні. Оновіть /ship після призначення.', show_alert: true });
+          return;
+        }
+      }
+
       // ── ◀️ PREV / ▶️ NEXT: navigate carousel ──
-      if (data === 'sprev:' || data === 'snext:') {
-        if (!carousel) {
+      if (action === 'sprev' || action === 'snext') {
+        if (!carousel || (actionProductId && String(carousel.productId) !== actionProductId)) {
           await bot.answerCallbackQuery(query.id, { text: 'Сесія не знайдена. Натисніть /ship знову.', show_alert: true });
           return;
         }
 
         const total = carousel.entries.length;
-        if (data === 'snext:') {
+        if (action === 'snext') {
           carousel.currentIndex = (carousel.currentIndex + 1) % total;
         } else {
           carousel.currentIndex = (carousel.currentIndex - 1 + total) % total;
         }
 
         const entry = carousel.entries[carousel.currentIndex];
+        const hasRemaining = carousel.entries.some((e) => !e.packed);
         const { caption, reply_markup } = buildCarouselMessage(
-          carousel.productName, carousel.position, entry, carousel.currentIndex, total
+          carousel.productName,
+          carousel.position,
+          entry,
+          carousel.currentIndex,
+          total,
+          carousel.productId,
+          hasRemaining
         );
 
         try {
@@ -2517,79 +3416,127 @@ ${lines.join('\n')}
       }
 
       // ── ✅ SPACK: confirm current order in carousel ──
-      if (data === 'spack:') {
-        if (!carousel) {
+      if (action === 'spack') {
+        if (!carousel || (actionProductId && String(carousel.productId) !== actionProductId)) {
           await bot.answerCallbackQuery(query.id, { text: 'Сесія не знайдена. Натисніть /ship знову.', show_alert: true });
           return;
         }
 
         const entry = carousel.entries[carousel.currentIndex];
-        if (entry.packed) {
-          await bot.answerCallbackQuery(query.id, { text: 'Це замовлення вже спаковано.', show_alert: false });
-          return;
-        }
+        const wasPacked = Boolean(entry.packed);
+        const nextPacked = !wasPacked;
 
-        // Mark packed BEFORE any async work to prevent double-click race condition
-        entry.packed = true;
+        const orderIdsToConfirm = entry.orderIds || (entry.orderId ? [entry.orderId] : []);
+        let anyUpdated = false;
 
-        // Confirm order in DB
-        const order = await Order.findById(entry.orderId);
-        if (order && order.status === 'new') {
-          order.status = 'confirmed';
+        for (const oid of orderIdsToConfirm) {
+          const order = await Order.findOneAndUpdate(
+            {
+              _id: oid,
+              status: { $in: ['new', 'in_progress', 'confirmed'] },
+              items: { $elemMatch: { productId: carousel.productId, packed: wasPacked, cancelled: false } },
+            },
+            { $set: { 'items.$.packed': nextPacked } },
+            { new: true }
+          );
+
+          if (!order) continue;
+          anyUpdated = true;
+
+          const isFullyProcessed = order.items.every((i) => i.packed || i.cancelled);
+          const allCancelled = order.items.every((i) => i.cancelled);
+          if (isFullyProcessed) {
+            order.status = allCancelled ? 'cancelled' : 'confirmed';
+          } else {
+            order.status = 'in_progress';
+          }
           await order.save();
         }
 
-        // Check if all entries are packed
-        const allPacked = carousel.entries.every((e) => e.packed);
-        if (allPacked) {
-          // All done — update message to show completion
-          try {
-            const doneCaption = `✅ Позиція ${carousel.position} — "${carousel.productName}"\nУсі ${carousel.entries.length} замовлень спаковано!\n\nЯкщо товар закінчився — відповідте "Закінчився"`;
-            if (carousel.hasPhoto) {
-              await bot.editMessageCaption(doneCaption, {
-                chat_id: chatId, message_id: msgId,
-                reply_markup: { inline_keyboard: [[{ text: '✅ Усе спаковано', callback_data: 'noop' }]] },
-              });
-            } else {
-              await bot.editMessageText(doneCaption, {
-                chat_id: chatId, message_id: msgId,
-                reply_markup: { inline_keyboard: [[{ text: '✅ Усе спаковано', callback_data: 'noop' }]] },
-              });
-            }
-          } catch (_) {}
-          carousel.allPacked = true;
-          await setSession(chatId, 'ship', carousel, msgId);
-          await bot.answerCallbackQuery(query.id, { text: '✅ Усі замовлення спаковано!', show_alert: false });
+        if (!anyUpdated) {
+          await bot.answerCallbackQuery(query.id, { text: 'Це замовлення вже оброблене або не доступне.', show_alert: false });
           return;
         }
 
-        // Auto-advance to next unpacked
-        let nextIdx = (carousel.currentIndex + 1) % carousel.entries.length;
-        while (carousel.entries[nextIdx].packed && nextIdx !== carousel.currentIndex) {
-          nextIdx = (nextIdx + 1) % carousel.entries.length;
+        entry.packed = nextPacked;
+
+        // Sync picking tasks for toggled order items
+        const affectedTasks = await PickingTask.find({
+          productId: carousel.productId,
+          status: { $in: ['pending', 'locked', 'completed'] },
+          'items.orderId': { $in: orderIdsToConfirm },
+        });
+
+        for (const task of affectedTasks) {
+          let taskUpdated = false;
+          task.items.forEach((taskItem) => {
+            if (orderIdsToConfirm.includes(String(taskItem.orderId))) {
+              taskItem.packed = nextPacked;
+              taskUpdated = true;
+            }
+          });
+
+          if (taskUpdated) {
+            const allTaskItemsPacked = task.items.every((i) => i.packed);
+            if (allTaskItemsPacked) {
+              task.status = 'completed';
+              task.lockedBy = null;
+              task.lockedAt = null;
+            } else {
+              task.status = 'pending';
+              task.lockedBy = null;
+              task.lockedAt = null;
+            }
+            await task.save();
+          }
         }
-        carousel.currentIndex = nextIdx;
+
+        const allPacked = carousel.entries.every((e) => e.packed);
+
+        // Auto-advance only when marking as packed and there are still unpacked entries
+        if (nextPacked && !allPacked) {
+          let nextIdx = (carousel.currentIndex + 1) % carousel.entries.length;
+          while (carousel.entries[nextIdx].packed && nextIdx !== carousel.currentIndex) {
+            nextIdx = (nextIdx + 1) % carousel.entries.length;
+          }
+          carousel.currentIndex = nextIdx;
+        }
 
         const nextEntry = carousel.entries[carousel.currentIndex];
         const remaining = carousel.entries.filter((e) => !e.packed).length;
+        const hasRemaining = carousel.entries.some((e) => !e.packed);
         const { caption, reply_markup } = buildCarouselMessage(
-          carousel.productName, carousel.position, nextEntry, carousel.currentIndex, carousel.entries.length
+          carousel.productName,
+          carousel.position,
+          nextEntry,
+          carousel.currentIndex,
+          carousel.entries.length,
+          carousel.productId,
+          hasRemaining
         );
 
         try {
+          const statusLine = allPacked
+            ? `\n\n✅ Усі ${carousel.entries.length} замовлень для цієї позиції спаковано.`
+            : `\n\n⏳ Залишилось: ${remaining}`;
           if (carousel.hasPhoto) {
-            await bot.editMessageCaption(`${caption}\n\n⏳ Залишилось: ${remaining}`, {
+            await bot.editMessageCaption(`${caption}${statusLine}`, {
               chat_id: chatId, message_id: msgId, reply_markup,
             });
           } else {
-            await bot.editMessageText(`${caption}\n\n⏳ Залишилось: ${remaining}`, {
+            await bot.editMessageText(`${caption}${statusLine}`, {
               chat_id: chatId, message_id: msgId, reply_markup,
             });
           }
         } catch (_) {}
 
+        carousel.allPacked = allPacked;
         await setSession(chatId, 'ship', carousel, msgId);
-        await bot.answerCallbackQuery(query.id, { text: `✅ Спаковано для ${entry.shopName}`, show_alert: false });
+        if (nextPacked) {
+          await bot.answerCallbackQuery(query.id, { text: allPacked ? '✅ Усі замовлення для позиції спаковано' : `✅ Спаковано для ${entry.shopName}`, show_alert: false });
+        } else {
+          await bot.answerCallbackQuery(query.id, { text: `↩️ Пакування скасовано для ${entry.shopName}`, show_alert: false });
+        }
         return;
       }
 
@@ -2646,14 +3593,41 @@ ${lines.join('\n')}
         .filter(Boolean)
         .join(' | ');
 
-      const order = new Order({
+      const threeDaysAgo = new Date();
+      threeDaysAgo.setDate(threeDaysAgo.getDate() - 3);
+
+      let order = await Order.findOne({
         buyerTelegramId: user.telegramId,
-        items,
-        shippingAddress,
-        contactInfo,
-        totalPrice,
+        status: { $in: ['new', 'in_progress'] },
+        createdAt: { $gte: threeDaysAgo },
       });
-      await order.save();
+
+      if (order) {
+        for (const newItem of items) {
+          const sameItem = order.items.find((i) => String(i.productId) === String(newItem.productId));
+          if (sameItem) {
+            sameItem.quantity += newItem.quantity;
+            sameItem.packed = false;
+            sameItem.cancelled = false;
+          } else {
+            order.items.push(newItem);
+          }
+        }
+        order.totalPrice = (order.totalPrice || 0) + totalPrice;
+        if (order.status === 'new' || order.status === 'in_progress') {
+          order.status = 'in_progress';
+        }
+        await order.save();
+      } else {
+        order = new Order({
+          buyerTelegramId: user.telegramId,
+          items,
+          shippingAddress,
+          contactInfo,
+          totalPrice,
+        });
+        await order.save();
+      }
 
       // Clear pending shop selections
       await PendingReaction.deleteMany({ sellerTelegramId: userId });
@@ -2688,6 +3662,7 @@ module.exports = {
   getBotStatus,
   getBot: () => bot,
   sendOrderConfirmation,
+  sendMessageWithRetry,
   sendAdminNotification,
   sendRegistrationApprovedMessage,
   fixPendingReactionIndexes,

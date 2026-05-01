@@ -117,16 +117,16 @@ describe('Users API', () => {
     expect(res.status).toBe(404);
   });
 
-  it('syncs delivery group when creating user with warehouseZone', async () => {
-    await DeliveryGroup.create({ name: 'TestGroup', dayOfWeek: 1 });
+  it('syncs delivery group when creating user with deliveryGroupId', async () => {
+    const group = await DeliveryGroup.create({ name: 'TestGroup', dayOfWeek: 1 });
 
     await request(app)
       .post('/api/users')
       .set('x-telegram-initdata', adminHeader)
-      .send({ telegramId: '500', role: 'seller', warehouseZone: 'TestGroup' });
+      .send({ telegramId: '500', role: 'seller', deliveryGroupId: group._id.toString() });
 
-    const group = await DeliveryGroup.findOne({ name: 'TestGroup' });
-    expect(group.members).toContain('500');
+    const updatedGroup = await DeliveryGroup.findById(group._id);
+    expect(updatedGroup.members).toContain('500');
   });
 
   it('removes user from delivery group on delete', async () => {

@@ -6,7 +6,7 @@ const BotSessionSchema = new mongoose.Schema(
     type: {
       type: String,
       required: true,
-      enum: ['receive', 'shelf', 'ship', 'shop'],
+      enum: ['receive', 'shelf', 'ship', 'shop', 'pick'],
       index: true,
     },
     key: { type: String, default: '' },  // extra key (e.g. messageId for ship carousels)

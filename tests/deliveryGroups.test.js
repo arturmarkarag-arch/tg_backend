@@ -86,6 +86,17 @@ describe('Delivery Groups API', () => {
     expect(res.body).toHaveLength(2);
   });
 
+  it('returns public delivery group summaries without members', async () => {
+    await DeliveryGroup.create({ name: 'G1', dayOfWeek: 1, members: ['user1'] });
+
+    const res = await request(app).get('/api/delivery-groups/summary');
+
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveLength(1);
+    expect(res.body[0]).toMatchObject({ name: 'G1', dayOfWeek: 1 });
+    expect(res.body[0].members).toBeUndefined();
+  });
+
   it('updates a delivery group', async () => {
     const group = await DeliveryGroup.create({ name: 'Old', dayOfWeek: 1 });
 
@@ -129,7 +140,7 @@ describe('Delivery Groups API', () => {
   });
 
   describe('User <-> Group sync', () => {
-    it('syncs user warehouseZone when adding members to group', async () => {
+    it('syncs user deliveryGroupId when adding members to group', async () => {
       const user = await User.create({ telegramId: '111', role: 'seller' });
       const group = await DeliveryGroup.create({ name: 'Sync Group', dayOfWeek: 1 });
 
@@ -139,12 +150,12 @@ describe('Delivery Groups API', () => {
         .send({ members: ['111'] });
 
       const updated = await User.findOne({ telegramId: '111' });
-      expect(updated.warehouseZone).toBe('Sync Group');
+      expect(updated.deliveryGroupId).toBe(group._id.toString());
     });
 
-    it('clears user warehouseZone when removed from group', async () => {
-      const user = await User.create({ telegramId: '222', role: 'seller', warehouseZone: 'G1' });
+    it('clears user deliveryGroupId when removed from group', async () => {
       const group = await DeliveryGroup.create({ name: 'G1', dayOfWeek: 1, members: ['222'] });
+      const user = await User.create({ telegramId: '222', role: 'seller', deliveryGroupId: group._id.toString() });
 
       await request(app)
         .patch(`/api/delivery-groups/${group._id}`)
@@ -152,29 +163,29 @@ describe('Delivery Groups API', () => {
         .send({ members: [] });
 
       const updated = await User.findOne({ telegramId: '222' });
-      expect(updated.warehouseZone).toBe('');
+      expect(updated.deliveryGroupId).toBe('');
     });
 
-    it('clears user warehouseZone when group is deleted', async () => {
-      await User.create({ telegramId: '333', role: 'seller', warehouseZone: 'DelGroup' });
+    it('clears user deliveryGroupId when group is deleted', async () => {
       const group = await DeliveryGroup.create({ name: 'DelGroup', dayOfWeek: 2, members: ['333'] });
+      await User.create({ telegramId: '333', role: 'seller', deliveryGroupId: group._id.toString() });
 
       await request(app).delete(`/api/delivery-groups/${group._id}`).set('x-telegram-initdata', adminHeader);
 
       const updated = await User.findOne({ telegramId: '333' });
-      expect(updated.warehouseZone).toBe('');
+      expect(updated.deliveryGroupId).toBe('');
     });
 
-    it('syncs group members when user is created with warehouseZone', async () => {
-      await DeliveryGroup.create({ name: 'UserSync', dayOfWeek: 3 });
+    it('syncs group members when user is created with deliveryGroupId', async () => {
+      const group = await DeliveryGroup.create({ name: 'UserSync', dayOfWeek: 3 });
 
       await request(app)
         .post('/api/users')
         .set('x-telegram-initdata', adminHeader)
-        .send({ telegramId: '444', role: 'seller', warehouseZone: 'UserSync' });
+        .send({ telegramId: '444', role: 'seller', deliveryGroupId: group._id.toString() });
 
-      const group = await DeliveryGroup.findOne({ name: 'UserSync' });
-      expect(group.members).toContain('444');
+      const updatedGroup = await DeliveryGroup.findById(group._id);
+      expect(updatedGroup.members).toContain('444');
     });
 
     it('removes user from group members when user is deleted', async () => {
@@ -187,15 +198,15 @@ describe('Delivery Groups API', () => {
       expect(updated.members).not.toContain('555');
     });
 
-    it('moves user between groups when warehouseZone changes', async () => {
+    it('moves user between groups when deliveryGroupId changes', async () => {
       const g1 = await DeliveryGroup.create({ name: 'From', dayOfWeek: 1, members: ['666'] });
       const g2 = await DeliveryGroup.create({ name: 'To', dayOfWeek: 2 });
-      await User.create({ telegramId: '666', role: 'seller', warehouseZone: 'From' });
+      await User.create({ telegramId: '666', role: 'seller', deliveryGroupId: g1._id.toString() });
 
       await request(app)
         .post('/api/users')
         .set('x-telegram-initdata', adminHeader)
-        .send({ telegramId: '666', warehouseZone: 'To' });
+        .send({ telegramId: '666', deliveryGroupId: g2._id.toString() });
 
       const updatedG1 = await DeliveryGroup.findById(g1._id);
       const updatedG2 = await DeliveryGroup.findById(g2._id);

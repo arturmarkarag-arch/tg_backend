@@ -9,6 +9,9 @@ const Block = require('../models/Block');
 const { getIO } = require('../socket');
 const Product = require('../models/Product');
 const SearchProduct = require('../models/SearchProduct');
+const { requireTelegramRoles } = require('../middleware/telegramAuth');
+
+const staffOnly = requireTelegramRoles(['admin', 'warehouse']);
 
 function escapeRegex(value = '') {
   return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -199,7 +202,7 @@ router.get('/pending', async (req, res) => {
   res.json(products);
 });
 
-router.patch('/reorder', async (req, res) => {
+router.patch('/reorder', staffOnly, async (req, res) => {
   const { order } = req.body;
   if (!Array.isArray(order)) {
     return res.status(400).json({ error: 'Order must be an array of product ids' });
@@ -315,7 +318,7 @@ router.get('/:id', async (req, res) => {
   res.json(product);
 });
 
-router.post('/', async (req, res) => {
+router.post('/', staffOnly, async (req, res) => {
   let fields, files = [];
 
   if (req.is('multipart/form-data')) {
@@ -363,7 +366,7 @@ router.post('/', async (req, res) => {
   res.status(201).json(product);
 });
 
-router.patch('/:id', async (req, res) => {
+router.patch('/:id', staffOnly, async (req, res) => {
   const product = await Product.findById(req.params.id);
   if (!product) return res.status(404).json({ error: 'Product not found' });
 
@@ -429,37 +432,12 @@ router.patch('/:id', async (req, res) => {
   res.json(product);
 });
 
-router.delete('/:id', async (req, res) => {
+router.delete('/:id', staffOnly, async (req, res) => {
   const product = await Product.findById(req.params.id);
   if (!product) return res.status(404).json({ error: 'Product not found' });
 
-  // Soft-delete: move to archive instead of permanent removal
-  product.status = 'archived';
-  product.archivedAt = new Date();
-  product.originalOrderNumber = product.orderNumber;
-  const oldOrder = product.orderNumber;
-  product.orderNumber = 0; // archived products don't occupy a position
-  await product.save();
-
-  // Shift remaining active/pending products down
-  await shiftDown({ orderNumber: { $gt: oldOrder }, status: { $ne: 'archived' } });
-
-  // Remove archived product from any blocks so it disappears from warehouse/blocks views
-  const affectedBlocks = await Block.find({ productIds: product._id }).lean();
-  const affectedBlockIds = affectedBlocks.map((block) => block.blockId);
-
-  await Block.updateMany(
-    { productIds: product._id },
-    { $pull: { productIds: product._id }, $inc: { version: 1 } }
-  );
-
-  try {
-    const io = getIO();
-    const updatedBlocks = await Block.find({ blockId: { $in: affectedBlockIds } }).populate('productIds').lean();
-    for (const updated of updatedBlocks) {
-      io.emit('block_updated', updated);
-    }
-  } catch (_) {}
+  const { archiveProduct } = require('../services/archiveProduct');
+  await archiveProduct(product, { notifyBuyers: false });
 
   res.json({ message: 'Product archived' });
 });

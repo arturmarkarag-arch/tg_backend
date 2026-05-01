@@ -5,20 +5,31 @@ const { telegramAuth, requireTelegramRole } = require('../middleware/telegramAut
 
 const router = express.Router();
 
-async function syncUsersWarehouseZone(group) {
-  // Set warehouseZone for current members
+async function syncUsersDeliveryGroupId(group) {
+  // Set deliveryGroupId for current members
   if (group.members?.length) {
     await User.updateMany(
       { telegramId: { $in: group.members } },
-      { warehouseZone: group.name }
+      { deliveryGroupId: group._id, warehouseZone: group.name }
     );
   }
-  // Clear warehouseZone for users removed from this group
+  // Clear deliveryGroupId for users removed from this group
   await User.updateMany(
-    { warehouseZone: group.name, telegramId: { $nin: group.members || [] } },
-    { warehouseZone: '' }
+    { deliveryGroupId: group._id, telegramId: { $nin: group.members || [] } },
+    { deliveryGroupId: '', warehouseZone: '' }
   );
 }
+
+router.get('/summary', async (req, res) => {
+  const groups = await DeliveryGroup.find().select('name dayOfWeek').lean();
+  groups.sort((a, b) => {
+    const orderA = a.dayOfWeek === 0 ? 7 : a.dayOfWeek;
+    const orderB = b.dayOfWeek === 0 ? 7 : b.dayOfWeek;
+    if (orderA !== orderB) return orderA - orderB;
+    return String(a.name || '').localeCompare(String(b.name || ''));
+  });
+  res.json(groups);
+});
 
 router.get('/', async (req, res) => {
   const groups = await DeliveryGroup.find().lean();
@@ -56,7 +67,7 @@ router.post('/', telegramAuth, requireTelegramRole('admin'), async (req, res) =>
     members: validMembers,
   });
   await group.save();
-  await syncUsersWarehouseZone(group);
+  await syncUsersDeliveryGroupId(group);
   res.status(201).json(group);
 });
 
@@ -86,11 +97,11 @@ router.patch('/:id', telegramAuth, requireTelegramRole('admin'), async (req, res
   const removedMembers = (oldGroup.members || []).filter((m) => !(group.members || []).includes(m));
   if (removedMembers.length) {
     await User.updateMany(
-      { telegramId: { $in: removedMembers }, warehouseZone: oldGroup.name },
-      { warehouseZone: '' }
+      { telegramId: { $in: removedMembers }, deliveryGroupId: oldGroup._id },
+      { deliveryGroupId: '', warehouseZone: '' }
     );
   }
-  await syncUsersWarehouseZone(group);
+  await syncUsersDeliveryGroupId(group);
   res.json(group);
 });
 
@@ -100,8 +111,8 @@ router.delete('/:id', telegramAuth, requireTelegramRole('admin'), async (req, re
   // Clear warehouseZone for all members of this group
   if (group.members?.length) {
     await User.updateMany(
-      { telegramId: { $in: group.members }, warehouseZone: group.name },
-      { warehouseZone: '' }
+      { telegramId: { $in: group.members }, deliveryGroupId: group._id },
+      { deliveryGroupId: '', warehouseZone: '' }
     );
   }
   res.json({ message: 'Group deleted' });

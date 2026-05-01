@@ -8,7 +8,7 @@ const RegistrationRequestSchema = new mongoose.Schema(
     shopName: { type: String, default: '' },
     deliveryGroupId: { type: String, default: '' },
     role: { type: String, enum: ['seller', 'warehouse'], default: 'seller' },
-    status: { type: String, enum: ['pending', 'approved', 'rejected'], default: 'pending' },
+    status: { type: String, enum: ['pending', 'approved', 'rejected', 'blocked'], default: 'pending' },
     meta: { type: mongoose.Schema.Types.Mixed, default: {} },
   },
   { timestamps: true }

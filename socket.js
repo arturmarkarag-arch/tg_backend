@@ -1,5 +1,8 @@
 const { Server } = require('socket.io');
+const mongoose = require('mongoose');
 const Block = require('./models/Block');
+const User = require('./models/User');
+const { validateTelegramInitData } = require('./utils/validateTelegramInitData');
 
 let io = null;
 
@@ -15,8 +18,41 @@ function initSocket(httpServer) {
     cors: { origin: '*', methods: ['GET', 'POST'] },
   });
 
+  // Auth middleware — verify initData on every socket connection
+  io.use(async (socket, next) => {
+    const initData = socket.handshake.auth?.initData;
+    if (!initData) {
+      return next(new Error('Unauthorized: initData is required'));
+    }
+    const { valid, error } = validateTelegramInitData(initData, process.env.TELEGRAM_BOT_TOKEN);
+    if (!valid) {
+      return next(new Error(`Unauthorized: ${error || 'Invalid initData'}`));
+    }
+    const params = new URLSearchParams(initData);
+    let telegramId = '';
+    try {
+      const user = JSON.parse(params.get('user') || '{}');
+      telegramId = String(user.id || '');
+    } catch {
+      return next(new Error('Unauthorized: Could not parse user from initData'));
+    }
+    if (!telegramId) {
+      return next(new Error('Unauthorized: Missing telegramId'));
+    }
+    const dbUser = await User.findOne({ telegramId }).lean();
+    if (!dbUser) {
+      return next(new Error('Unauthorized: User not registered'));
+    }
+    if (!['admin', 'warehouse'].includes(dbUser.role)) {
+      return next(new Error('Forbidden: Insufficient role'));
+    }
+    socket.telegramId = telegramId;
+    socket.userRole = dbUser.role;
+    next();
+  });
+
   io.on('connection', (socket) => {
-    console.log(`[Socket] Client connected: ${socket.id}`);
+    console.log(`[Socket] Client connected: ${socket.id} (telegramId=${socket.telegramId})`);
 
     // Join a block room to receive updates for that block
     socket.on('join_block', (blockNumber) => {
@@ -28,7 +64,9 @@ function initSocket(httpServer) {
     });
 
     // Lock an item — prevents others from selecting it
-    socket.on('lock_item', ({ productId, userId, userName }) => {
+    // userId is taken from authenticated socket.telegramId, not from client payload
+    socket.on('lock_item', ({ productId, userName }) => {
+      const userId = socket.telegramId;
       if (lockedItems.has(productId)) {
         const existing = lockedItems.get(productId);
         if (existing.userId !== userId) {
@@ -54,7 +92,9 @@ function initSocket(httpServer) {
     });
 
     // Unlock an item
-    socket.on('unlock_item', ({ productId, userId }) => {
+    // userId is taken from authenticated socket.telegramId, not from client payload
+    socket.on('unlock_item', ({ productId }) => {
+      const userId = socket.telegramId;
       const existing = lockedItems.get(productId);
       if (existing && existing.userId === userId) {
         lockedItems.delete(productId);
@@ -64,37 +104,46 @@ function initSocket(httpServer) {
 
     // Move item between blocks
     socket.on('move_item', async ({ productId, fromBlock, toBlock, toIndex, userId }) => {
+      if (!['admin', 'warehouse'].includes(socket.userRole)) {
+        socket.emit('move_error', { error: 'Forbidden: insufficient role' });
+        return;
+      }
       try {
         console.log(`[Socket] move_item: product=${productId} from=${fromBlock} to=${toBlock} idx=${toIndex}`);
 
-        const source = await Block.findOne({ blockId: fromBlock });
-        const target = fromBlock === toBlock ? source : await Block.findOne({ blockId: toBlock });
+        const session = await mongoose.connection.startSession();
+        try {
+          await session.withTransaction(async () => {
+            const source = await Block.findOne({ blockId: fromBlock }).session(session);
+            const target = fromBlock === toBlock
+              ? source
+              : await Block.findOne({ blockId: toBlock }).session(session);
 
-        if (!source || !target) {
-          console.log('[Socket] move_item: Block not found', { fromBlock, toBlock });
-          socket.emit('move_error', { error: 'Block not found' });
-          return;
-        }
+            if (!source || !target) {
+              throw Object.assign(new Error('Block not found'), { code: 'BLOCK_NOT_FOUND' });
+            }
 
-        const idx = source.productIds.findIndex((id) => id.toString() === productId);
-        if (idx === -1) {
-          console.log('[Socket] move_item: Product not in source block');
-          socket.emit('move_error', { error: 'Product not in source block' });
-          return;
-        }
+            const idx = source.productIds.findIndex((id) => id.toString() === productId);
+            if (idx === -1) {
+              throw Object.assign(new Error('Product not in source block'), { code: 'PRODUCT_NOT_FOUND_IN_SOURCE' });
+            }
 
-        source.productIds.splice(idx, 1);
-        const safeIndex = Math.min(Math.max(0, toIndex), target.productIds.length);
-        target.productIds.splice(safeIndex, 0, productId);
+            source.productIds.splice(idx, 1);
+            const safeIndex = Math.min(Math.max(0, toIndex), target.productIds.length);
+            target.productIds.splice(safeIndex, 0, productId);
 
-        if (fromBlock === toBlock) {
-          source.version += 1;
-          await source.save();
-        } else {
-          source.version += 1;
-          target.version += 1;
-          await source.save();
-          await target.save();
+            if (fromBlock === toBlock) {
+              source.version += 1;
+              await source.save({ session });
+            } else {
+              source.version += 1;
+              target.version += 1;
+              await source.save({ session });
+              await target.save({ session });
+            }
+          });
+        } finally {
+          await session.endSession();
         }
 
         // Populate and broadcast updated blocks
@@ -117,7 +166,7 @@ function initSocket(httpServer) {
         socket.emit('move_success', { source: updatedSource, target: updatedTarget });
       } catch (err) {
         console.error('[Socket] move_item error:', err);
-        socket.emit('move_error', { error: err.message });
+        socket.emit('move_error', { error: err.message || 'Move failed' });
       }
     });
 

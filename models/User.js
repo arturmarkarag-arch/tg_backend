@@ -14,19 +14,80 @@ const UserSchema = new mongoose.Schema(
     shopCity: { type: String, default: '' },
     deliveryGroupId: { type: String, default: '' },
     warehouseZone: { type: String, default: '' },
+    isWarehouseManager: { type: Boolean, default: false },
+    isOnShift: { type: Boolean, default: false },
+    shiftZone: {
+      startBlock: { type: Number, default: null },
+      endBlock: { type: Number, default: null },
+    },
     botBlocked: { type: Boolean, default: false },
     botLastActivityAt: { type: Date, default: null },
     botLastSessionAt: { type: Date, default: null },
     lastBotState: {
-      shop: {
-        productIds: [{ type: String }],
-        currentIndex: { type: Number, default: 0 },
-        updatedAt: { type: Date, default: null },
-      },
-      shelf: {
-        page: { type: Number, default: 0 },
-        updatedAt: { type: Date, default: null },
-      },
+      type: new mongoose.Schema(
+        {
+          shop: {
+            type: new mongoose.Schema(
+              {
+                currentIndex: { type: Number, default: 0 },
+                messageId: { type: String, default: '' },
+                hasPhoto: { type: Boolean, default: false },
+              },
+              { _id: false }
+            ),
+            default: {},
+          },
+          shelf: {
+            type: new mongoose.Schema(
+              {
+                page: { type: Number, default: 0 },
+                messageIds: { type: [String], default: [] },
+              },
+              { _id: false }
+            ),
+            default: {},
+          },
+          receive: {
+            type: new mongoose.Schema(
+              {
+                step: { type: String, enum: ['await_photo', 'await_has_barcode', 'await_barcode_photo', 'await_price', 'await_quantity', 'await_qty_per_package', null], default: null },
+                photoFileId: { type: String, default: '' },
+                barcodePhotoFileId: { type: String, default: '' },
+                barcode: { type: String, default: '' },
+                qrCode: { type: String, default: '' },
+                price: { type: Number, default: null },
+                quantity: { type: Number, default: null },
+                quantityPerPackage: { type: Number, default: null },
+              },
+              { _id: false }
+            ),
+            default: {},
+          },
+          pick: {
+            type: new mongoose.Schema(
+              {
+                currentTaskId: { type: String, default: '' },
+                messageId: { type: String, default: '' },
+                hasPhoto: { type: Boolean, default: false },
+              },
+              { _id: false }
+            ),
+            default: {},
+          },
+          ship: {
+            type: new mongoose.Schema(
+              {
+                currentProductId: { type: String, default: '' },
+                currentIndex: { type: Number, default: 0 },
+              },
+              { _id: false }
+            ),
+            default: {},
+          },
+        },
+        { _id: false }
+      ),
+      default: {},
     },
     miniAppState: {
       lastViewedProductId: { type: String, default: '' },
@@ -36,6 +97,10 @@ const UserSchema = new mongoose.Schema(
         type: Map,
         of: Number,
         default: {},
+      },
+      orderItemIds: {
+        type: [String],
+        default: [],
       },
       viewMode: { type: String, enum: ['carousel', 'grid'], default: 'carousel' },
       updatedAt: { type: Date, default: null },
@@ -65,5 +130,7 @@ UserSchema.post('deleteOne', { document: true, query: false }, async function ()
     await removeFromDeliveryGroups(this.telegramId);
   }
 });
+
+UserSchema.index({ 'lastBotState.receive.step': 1 });
 
 module.exports = mongoose.model('User', UserSchema);

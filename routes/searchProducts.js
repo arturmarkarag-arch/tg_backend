@@ -25,6 +25,23 @@ const s3Client = new S3Client({
 
 const router = express.Router();
 
+// Rate limiter: max 3 resend requests per barcode per 3 hours
+const RESEND_LIMIT = 3;
+const RESEND_WINDOW_MS = 3 * 60 * 60 * 1000;
+const resendRateLimitMap = new Map(); // barcode -> [timestamp, ...]
+
+function checkResendRateLimit(barcode) {
+  const now = Date.now();
+  const cutoff = now - RESEND_WINDOW_MS;
+  const timestamps = (resendRateLimitMap.get(barcode) || []).filter((t) => t > cutoff);
+  if (timestamps.length >= RESEND_LIMIT) {
+    return false;
+  }
+  timestamps.push(now);
+  resendRateLimitMap.set(barcode, timestamps);
+  return true;
+}
+
 // WARNING: Routes under /api/search-products operate on a separate store-only schema.
 // This is NOT the same data as /api/products and should remain isolated.
 router.get('/images/:filename', async (req, res) => {
@@ -98,6 +115,10 @@ router.post('/resend', async (req, res) => {
   const normalizedBarcode = normalizeBarcode(barcodeValue);
   if (!normalizedBarcode) {
     return res.status(400).json({ error: 'barcode field is required' });
+  }
+
+  if (!checkResendRateLimit(normalizedBarcode)) {
+    return res.status(429).json({ error: 'Too many resend requests for this barcode. Try again later.' });
   }
 
   const record = await SearchProduct.findOne({ barcode: normalizedBarcode, status: 'active' }).sort({ updatedAt: -1 }).lean();
