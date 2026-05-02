@@ -45,9 +45,11 @@ router.get('/', async (req, res) => {
 });
 
 async function getNextBlockId() {
+  const maxBlock = await Block.findOne({}, 'blockId').sort({ blockId: -1 }).lean();
+  const maxBlockId = maxBlock ? maxBlock.blockId : 0;
   const counter = await Counter.findOneAndUpdate(
     { name: 'blockId' },
-    { $inc: { seq: 1 } },
+    { $max: { seq: maxBlockId }, $inc: { seq: 1 } },
     { new: true, upsert: true, setDefaultsOnInsert: true }
   ).lean();
   return counter.seq;
@@ -55,24 +57,32 @@ async function getNextBlockId() {
 
 // POST /api/blocks — create a new block with the next sequential blockId
 router.post('/', staffOnly, async (req, res) => {
-  try {
-    const nextBlockId = await getNextBlockId();
-    const block = await Block.create({ blockId: nextBlockId, productIds: [] });
-    const created = block.toObject();
-
+  const MAX_RETRIES = 5;
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt += 1) {
     try {
-      const io = getIO();
-      io.emit('block_updated', slimBlock(created));
-    } catch (_) {}
+      const nextBlockId = await getNextBlockId();
+      const block = await Block.create({ blockId: nextBlockId, productIds: [] });
+      const created = block.toObject();
 
-    res.status(201).json(created);
-  } catch (err) {
-    console.error('[blocks/create] Error:', err);
-    if (err.code === 11000) {
-      return res.status(409).json({ error: 'Block ID conflict, please retry' });
+      try {
+        const io = getIO();
+        io.emit('block_updated', slimBlock(created));
+      } catch (_) {}
+
+      return res.status(201).json(created);
+    } catch (err) {
+      if (err.code === 11000 && attempt < MAX_RETRIES) {
+        continue;
+      }
+      console.error('[blocks/create] Error:', err);
+      if (err.code === 11000) {
+        return res.status(409).json({ error: 'Block ID conflict, please retry' });
+      }
+      return res.status(500).json({ error: err.message });
     }
-    res.status(500).json({ error: err.message });
   }
+
+  res.status(409).json({ error: 'Block ID conflict, please retry' });
 });
 
 // GET /api/blocks/incoming/products — products not assigned to any block
