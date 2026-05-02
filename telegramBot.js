@@ -1803,13 +1803,6 @@ async function claimAndSendNextPickTask(chatId, zoneStart, zoneEnd, lastBlock, c
   }
   const { task, wasSkipped } = result;
 
-  if (wasSkipped) {
-    await bot.sendMessage(
-      chatId,
-      '⚠️ Ця позиція була пропущена раніше.\nЗнайдіть товар на складі або натисніть «❌ Закінчився», якщо товару немає.'
-    );
-  }
-
   const lockedTasks = await getUserLockedPickingTasks(chatId);
   const currentIndex = lockedTasks.findIndex((locked) => String(locked._id) === String(task._id));
   const session = {
@@ -1827,6 +1820,14 @@ async function claimAndSendNextPickTask(chatId, zoneStart, zoneEnd, lastBlock, c
   session.messageId = sendResult.messageId;
   session.hasPhoto = sendResult.hasPhoto;
   await saveCurrentPickSession(chatId, session);
+
+  if (wasSkipped) {
+    await bot.sendMessage(
+      chatId,
+      '⚠️ Ця позиція була пропущена раніше.\nЗнайдіть товар на складі або натисніть «❌ Закінчився», якщо товару немає.'
+    );
+  }
+
   return task;
 }
 
@@ -2865,6 +2866,9 @@ ${buildProductInfoText(product)}`;
             return;
           }
 
+          const pickSessionBeforeArchive = await getCurrentPickSession(chatId);
+          const lastBlockBeforeArchive = pickSessionBeforeArchive?.lastBlock;
+
           await archiveProductAsSoldOut(chatId, product, shipCarousel, msgId);
 
           if (!shipCarousel) {
@@ -2885,6 +2889,9 @@ ${buildProductInfoText(product)}`;
               }
             } catch (_) {}
             await deleteCurrentPickSession(chatId);
+            await bot.answerCallbackQuery(query.id, { text: 'Товар позначено як закінчився і заархівовано.', show_alert: false });
+            await openPickWorkflow(chatId, lastBlockBeforeArchive);
+            return;
           }
 
           await bot.answerCallbackQuery(query.id, { text: 'Товар позначено як закінчився і заархівовано.', show_alert: false });

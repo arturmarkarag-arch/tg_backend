@@ -47,12 +47,39 @@ router.get('/', async (req, res) => {
 async function getNextBlockId() {
   const maxBlock = await Block.findOne({}, 'blockId').sort({ blockId: -1 }).lean();
   const maxBlockId = maxBlock ? maxBlock.blockId : 0;
-  const counter = await Counter.findOneAndUpdate(
-    { name: 'blockId' },
-    { $max: { seq: maxBlockId }, $inc: { seq: 1 } },
-    { new: true, upsert: true, setDefaultsOnInsert: true }
-  ).lean();
-  return counter.seq;
+
+  while (true) {
+    const counter = await Counter.findOne({ name: 'blockId' }).lean();
+    if (!counter) {
+      try {
+        const created = await Counter.create({ name: 'blockId', seq: maxBlockId + 1 });
+        return created.seq;
+      } catch (err) {
+        if (err.code === 11000) {
+          continue;
+        }
+        throw err;
+      }
+    }
+
+    if (counter.seq < maxBlockId) {
+      const updated = await Counter.findOneAndUpdate(
+        { name: 'blockId', seq: counter.seq },
+        { $set: { seq: maxBlockId } },
+        { new: true }
+      ).lean();
+      if (!updated) {
+        continue;
+      }
+    }
+
+    const updatedCounter = await Counter.findOneAndUpdate(
+      { name: 'blockId' },
+      { $inc: { seq: 1 } },
+      { new: true }
+    ).lean();
+    return updatedCounter.seq;
+  }
 }
 
 // POST /api/blocks — create a new block with the next sequential blockId
