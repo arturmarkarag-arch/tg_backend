@@ -10,6 +10,19 @@ let io = null;
 // Map<productId, { userId, userName, timestamp }>
 const lockedItems = new Map();
 
+/**
+ * Returns a lightweight block payload for socket broadcasts.
+ * Sends only IDs instead of full populated product objects,
+ * reducing per-event payload from ~15 KB to ~700 bytes.
+ */
+function slimBlock(block) {
+  return {
+    blockId: block.blockId,
+    version: block.version,
+    productIds: (block.productIds || []).map((id) => String(id._id || id)),
+  };
+}
+
 // Auto-unlock after 60 seconds
 const LOCK_TIMEOUT_MS = 60_000;
 
@@ -146,24 +159,23 @@ function initSocket(httpServer) {
           await session.endSession();
         }
 
-        // Populate and broadcast updated blocks
-        const updatedSource = await Block.findOne({ blockId: fromBlock }).populate('productIds').lean();
+        // Broadcast slim block updates to all clients
+        const updatedSource = await Block.findOne({ blockId: fromBlock }).lean();
         const updatedTarget = fromBlock === toBlock
           ? updatedSource
-          : await Block.findOne({ blockId: toBlock }).populate('productIds').lean();
+          : await Block.findOne({ blockId: toBlock }).lean();
 
-        // Broadcast to ALL clients so every board updates in real time
-        io.emit('block_updated', updatedSource);
+        io.emit('block_updated', slimBlock(updatedSource));
         if (fromBlock !== toBlock) {
-          io.emit('block_updated', updatedTarget);
+          io.emit('block_updated', slimBlock(updatedTarget));
         }
 
         // Unlock the moved item
         lockedItems.delete(productId);
         io.emit('item_unlocked', { productId });
 
-        // Notify the mover specifically
-        socket.emit('move_success', { source: updatedSource, target: updatedTarget });
+        // Notify the mover — only blockIds needed, data arrives via block_updated
+        socket.emit('move_success', { source: { blockId: fromBlock }, target: { blockId: toBlock } });
       } catch (err) {
         console.error('[Socket] move_item error:', err);
         socket.emit('move_error', { error: err.message || 'Move failed' });

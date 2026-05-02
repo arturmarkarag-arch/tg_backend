@@ -1,6 +1,5 @@
 const express = require('express');
-const { Readable } = require('stream');
-const { S3Client, GetObjectCommand, HeadBucketCommand } = require('@aws-sdk/client-s3');
+const { S3Client, HeadBucketCommand } = require('@aws-sdk/client-s3');
 const { normalizeBarcode } = require('../utils/barcodeScanner');
 const SearchProduct = require('../models/SearchProduct');
 
@@ -44,20 +43,11 @@ function checkResendRateLimit(barcode) {
 
 // WARNING: Routes under /api/search-products operate on a separate store-only schema.
 // This is NOT the same data as /api/products and should remain isolated.
-router.get('/images/:filename', async (req, res) => {
-  try {
-    const result = await s3Client.send(new GetObjectCommand({
-      Bucket: process.env.R2_BUCKET_NAME,
-      Key: `search-products/${req.params.filename}`,
-    }));
-    res.setHeader('Content-Type', result.ContentType || 'image/jpeg');
-    res.setHeader('Cache-Control', 'public, max-age=86400');
-    const nodeStream = result.Body instanceof Readable ? result.Body : Readable.fromWeb(result.Body);
-    nodeStream.pipe(res);
-  } catch (err) {
-    console.error('SearchProduct image proxy error:', err.message);
-    res.status(404).json({ error: 'Image not found' });
-  }
+router.get('/images/:filename', (req, res) => {
+  const publicUrl = process.env.R2_PUBLIC_URL;
+  if (!publicUrl) return res.status(503).json({ error: 'R2_PUBLIC_URL not configured' });
+  const filename = req.params.filename.replace(/[^a-zA-Z0-9._-]/g, '');
+  res.redirect(302, `${publicUrl}/search-products/${filename}`);
 });
 
 router.get('/check', async (req, res) => {

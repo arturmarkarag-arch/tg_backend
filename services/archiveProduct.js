@@ -96,11 +96,13 @@ async function archiveProduct(product, { notifyBuyers = false, bot = null } = {}
 
     try {
       const io = getIO();
-      const updatedBlocks = await Block.find({ blockId: { $in: affectedBlockIds } })
-        .populate('productIds')
-        .lean();
+      const updatedBlocks = await Block.find({ blockId: { $in: affectedBlockIds } }).lean();
       for (const updated of updatedBlocks) {
-        io.emit('block_updated', updated);
+        io.emit('block_updated', {
+          blockId: updated.blockId,
+          version: updated.version,
+          productIds: (updated.productIds || []).map(String),
+        });
       }
     } catch (_) {}
   }

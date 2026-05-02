@@ -1,8 +1,7 @@
 const express = require('express');
-const { Readable } = require('stream');
 const crypto = require('crypto');
 const Busboy = require('busboy');
-const { S3Client, PutObjectCommand, GetObjectCommand, HeadBucketCommand } = require('@aws-sdk/client-s3');
+const { S3Client, PutObjectCommand, HeadBucketCommand } = require('@aws-sdk/client-s3');
 const { shiftUp, shiftDown } = require('../utils/shiftOrderNumbers');
 const { normalizeBarcode } = require('../utils/barcodeScanner');
 const Block = require('../models/Block');
@@ -82,20 +81,11 @@ function getProductTitle(product) {
 
 const router = express.Router();
 
-router.get('/images/:filename', async (req, res) => {
-  try {
-    const result = await s3Client.send(new GetObjectCommand({
-      Bucket: process.env.R2_BUCKET_NAME,
-      Key: `products/${req.params.filename}`,
-    }));
-    res.setHeader('Content-Type', result.ContentType || 'image/jpeg');
-    res.setHeader('Cache-Control', 'public, max-age=86400');
-    const nodeStream = result.Body instanceof Readable ? result.Body : Readable.fromWeb(result.Body);
-    nodeStream.pipe(res);
-  } catch (err) {
-    console.error('Image proxy error:', err.message);
-    res.status(404).json({ error: 'Image not found' });
-  }
+router.get('/images/:filename', (req, res) => {
+  const publicUrl = process.env.R2_PUBLIC_URL;
+  if (!publicUrl) return res.status(503).json({ error: 'R2_PUBLIC_URL not configured' });
+  const filename = req.params.filename.replace(/[^a-zA-Z0-9._-]/g, '');
+  res.redirect(302, `${publicUrl}/products/${filename}`);
 });
 
 router.get('/', async (req, res) => {

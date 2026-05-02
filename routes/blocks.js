@@ -7,6 +7,14 @@ const Product = require('../models/Product');
 const { getIO } = require('../socket');
 const { requireTelegramRoles } = require('../middleware/telegramAuth');
 
+function slimBlock(block) {
+  return {
+    blockId: block.blockId,
+    version: block.version,
+    productIds: (block.productIds || []).map((id) => String(id._id || id)),
+  };
+}
+
 const staffOnly = requireTelegramRoles(['admin', 'warehouse']);
 
 // GET /api/blocks — all blocks with product count, or paginated blocks when limit/offset are supplied
@@ -50,12 +58,11 @@ router.post('/', staffOnly, async (req, res) => {
   try {
     const nextBlockId = await getNextBlockId();
     const block = await Block.create({ blockId: nextBlockId, productIds: [] });
-    await block.populate('productIds');
     const created = block.toObject();
 
     try {
       const io = getIO();
-      io.emit('block_updated', created);
+      io.emit('block_updated', slimBlock(created));
     } catch (_) {}
 
     res.status(201).json(created);
@@ -184,9 +191,9 @@ router.post('/move', staffOnly, async (req, res) => {
 
     try {
       const io = getIO();
-      io.emit('block_updated', updatedSource);
+      io.emit('block_updated', slimBlock(updatedSource));
       if (fromBlockId !== toBlockId) {
-        io.emit('block_updated', updatedTarget);
+        io.emit('block_updated', slimBlock(updatedTarget));
       }
     } catch (_) {}
 
@@ -217,7 +224,7 @@ router.post('/:number/add', staffOnly, async (req, res) => {
   // Broadcast to all clients so they see the update in real time
   try {
     const io = getIO();
-    io.emit('block_updated', updated);
+    io.emit('block_updated', slimBlock(updated));
   } catch (_) { /* socket not initialized yet */ }
 
   res.json(updated);
