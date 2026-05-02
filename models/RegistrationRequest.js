@@ -6,6 +6,7 @@ const RegistrationRequestSchema = new mongoose.Schema(
     firstName: { type: String, required: true },
     lastName: { type: String, required: true },
     shopName: { type: String, default: '' },
+    shopCity: { type: String, default: '' },
     deliveryGroupId: { type: String, default: '' },
     role: { type: String, enum: ['seller', 'warehouse'], default: 'seller' },
     status: { type: String, enum: ['pending', 'approved', 'rejected', 'blocked'], default: 'pending' },

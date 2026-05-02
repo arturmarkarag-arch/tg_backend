@@ -3015,6 +3015,7 @@ ${buildProductInfoText(product)}`;
               firstName: request.firstName,
               lastName: request.lastName,
               shopName: request.role === 'seller' ? request.shopName : '',
+              shopCity: request.role === 'seller' ? request.shopCity : '',
               deliveryGroupId: request.role === 'seller' ? request.deliveryGroupId || '' : '',
             });
             await user.save();

@@ -210,7 +210,7 @@ router.post('/mini-app/reset-state', async (req, res) => {
 
 // POST /api/v1/telegram/register-request — заявка на реєстрацію нового користувача
 router.post('/register-request', async (req, res) => {
-  const { initData, firstName, lastName, shopName, deliveryGroupId, role } = req.body;
+  const { initData, firstName, lastName, shopName, shopCity, deliveryGroupId, role } = req.body;
   if (!initData) {
     return res.status(400).json({ error: 'initData is required' });
   }
@@ -233,6 +233,9 @@ router.post('/register-request', async (req, res) => {
   if (role === 'seller') {
     if (!shopName) {
       return res.status(400).json({ error: 'Назва магазину є обов’язковою для продавця' });
+    }
+    if (!shopCity) {
+      return res.status(400).json({ error: 'Місто є обов’язковим для продавця' });
     }
     if (!deliveryGroupId) {
       return res.status(400).json({ error: 'Група доставки є обов’язковою для продавця' });
@@ -268,6 +271,7 @@ router.post('/register-request', async (req, res) => {
     firstName,
     lastName,
     shopName: role === 'seller' ? shopName : '',
+    shopCity: role === 'seller' ? shopCity : '',
     deliveryGroupId: role === 'seller' ? deliveryGroupId : '',
     role,
     status: 'pending',
@@ -281,6 +285,7 @@ router.post('/register-request', async (req, res) => {
     `Прізвище: ${lastName}\n` +
     `Роль: ${roleLabel}\n` +
     `Назва магазину: ${role === 'seller' ? shopName : 'не вказано'}\n` +
+    `Місто: ${role === 'seller' ? shopCity : 'не вказано'}\n` +
     `Група доставки: ${role === 'seller' ? `${group.name} (${DAY_SHORT[group.dayOfWeek] || 'День'})` : 'не вказано'}\n` +
     `Запит створено: ${new Date().toLocaleString()}`;
 
@@ -352,6 +357,7 @@ router.post('/register-requests/:id/approve', async (req, res) => {
     firstName: request.firstName,
     lastName: request.lastName,
     shopName: request.shopName,
+    shopCity: request.shopCity,
     deliveryGroupId: request.role === 'seller' ? request.deliveryGroupId || '' : '',
   });
   await user.save();
