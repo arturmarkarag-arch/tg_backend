@@ -557,7 +557,7 @@ function buildProfileMessage(user) {
 
   if (user.role === 'seller') {
     lines.push(`Магазин: ${user.shopName || 'не вказано'}`);
-    lines.push(`Номер магазину: ${user.shopNumber || 'не вказано'}`);
+    //lines.push(`Номер магазину: ${user.shopNumber || 'не вказано'}`);
     lines.push(`Місто: ${user.shopCity || 'не вказано'}`);
   }
 
