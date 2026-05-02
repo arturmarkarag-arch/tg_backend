@@ -7,16 +7,23 @@ const router = express.Router();
 router.use(telegramAuth);
 router.use(requireTelegramRole('admin'));
 
-async function syncDeliveryGroupMembership(telegramId, groupId) {
+async function syncDeliveryGroupMembership(telegramId, groupId, groupId2) {
   // Remove user from all groups first
   await DeliveryGroup.updateMany(
     { members: telegramId },
     { $pull: { members: telegramId } }
   );
-  // Add to the selected group if any
+  // Add to the first group if any
   if (groupId) {
     await DeliveryGroup.updateOne(
       { _id: groupId },
+      { $addToSet: { members: telegramId } }
+    );
+  }
+  // Add to the second group if any (and it's different from the first)
+  if (groupId2 && groupId2 !== groupId) {
+    await DeliveryGroup.updateOne(
+      { _id: groupId2 },
       { $addToSet: { members: telegramId } }
     );
   }
@@ -35,6 +42,7 @@ function sanitizeUserPayload(payload, existing = null) {
     shopAddress: payload.shopAddress,
     shopCity: payload.shopCity,
     deliveryGroupId: payload.deliveryGroupId,
+    deliveryGroupId2: payload.deliveryGroupId2 || '',
     warehouseZone: payload.warehouseZone,
     botBlocked: payload.botBlocked,
   };
@@ -70,7 +78,7 @@ router.post('/', async (req, res) => {
     await user.save();
   }
 
-  await syncDeliveryGroupMembership(user.telegramId, user.deliveryGroupId);
+  await syncDeliveryGroupMembership(user.telegramId, user.deliveryGroupId, user.deliveryGroupId2);
   res.status(existing ? 200 : 201).json(user);
 });
 
