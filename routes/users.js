@@ -1,5 +1,6 @@
 const express = require('express');
 const User = require('../models/User');
+const Order = require('../models/Order');
 const DeliveryGroup = require('../models/DeliveryGroup');
 const { telegramAuth, requireTelegramRole } = require('../middleware/telegramAuth');
 
@@ -7,23 +8,16 @@ const router = express.Router();
 router.use(telegramAuth);
 router.use(requireTelegramRole('admin'));
 
-async function syncDeliveryGroupMembership(telegramId, groupId, groupId2) {
+async function syncDeliveryGroupMembership(telegramId, groupId) {
   // Remove user from all groups first
   await DeliveryGroup.updateMany(
     { members: telegramId },
     { $pull: { members: telegramId } }
   );
-  // Add to the first group if any
+  // Add to the selected group if any
   if (groupId) {
     await DeliveryGroup.updateOne(
       { _id: groupId },
-      { $addToSet: { members: telegramId } }
-    );
-  }
-  // Add to the second group if any (and it's different from the first)
-  if (groupId2 && groupId2 !== groupId) {
-    await DeliveryGroup.updateOne(
-      { _id: groupId2 },
       { $addToSet: { members: telegramId } }
     );
   }
@@ -42,7 +36,6 @@ function sanitizeUserPayload(payload, existing = null) {
     shopAddress: payload.shopAddress,
     shopCity: payload.shopCity,
     deliveryGroupId: payload.deliveryGroupId,
-    deliveryGroupId2: payload.deliveryGroupId2 || '',
     warehouseZone: payload.warehouseZone,
     botBlocked: payload.botBlocked,
   };
@@ -57,8 +50,19 @@ function sanitizeUserPayload(payload, existing = null) {
 }
 
 router.get('/', async (req, res) => {
-  const users = await User.find().sort({ createdAt: -1 });
-  res.json(users);
+  const users = await User.find().sort({ createdAt: -1 }).lean();
+  const telegramIds = users.map((user) => user.telegramId).filter(Boolean);
+  const lastOrders = await Order.aggregate([
+    { $match: { buyerTelegramId: { $in: telegramIds } } },
+    { $sort: { createdAt: -1 } },
+    { $group: { _id: '$buyerTelegramId', lastOrderAt: { $first: '$createdAt' } } },
+  ]);
+  const lastOrderMap = new Map(lastOrders.map((item) => [item._id, item.lastOrderAt]));
+  const usersWithLastOrder = users.map((user) => ({
+    ...user,
+    lastOrderAt: lastOrderMap.get(user.telegramId) || null,
+  }));
+  res.json(usersWithLastOrder);
 });
 
 router.get('/:telegramId', async (req, res) => {
@@ -78,7 +82,7 @@ router.post('/', async (req, res) => {
     await user.save();
   }
 
-  await syncDeliveryGroupMembership(user.telegramId, user.deliveryGroupId, user.deliveryGroupId2);
+  await syncDeliveryGroupMembership(user.telegramId, user.deliveryGroupId);
   res.status(existing ? 200 : 201).json(user);
 });
 

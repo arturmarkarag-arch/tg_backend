@@ -102,17 +102,20 @@ router.get('/', async (req, res) => {
   }
 
   if (req.query.search) {
-    const term = String(req.query.search).trim();
-    if (term) {
-      const escaped = escapeRegex(term);
-      const regex = new RegExp(escaped, 'i');
-      query.$or = [
-        { brand: regex },
-        { model: regex },
-        { category: regex },
-        { warehouse: regex },
-        { barcode: regex },
-      ];
+    const rawSearch = String(req.query.search).trim();
+    if (rawSearch) {
+      const terms = rawSearch.split(/\s+/).map(escapeRegex).filter(Boolean);
+      if (terms.length) {
+        query.$and = terms.map((term) => ({
+          $or: [
+            { brand: new RegExp(term, 'i') },
+            { model: new RegExp(term, 'i') },
+            { category: new RegExp(term, 'i') },
+            { warehouse: new RegExp(term, 'i') },
+            { barcode: new RegExp(term, 'i') },
+          ],
+        }));
+      }
     }
   }
 
@@ -170,6 +173,8 @@ router.get('/check', async (req, res) => {
     return res.json({ found: false });
   }
 
+  const block = await Block.findOne({ productIds: product._id }).lean();
+
   return res.json({
     found: true,
     product: {
@@ -184,6 +189,7 @@ router.get('/check', async (req, res) => {
       image_url: product.imageUrls?.[0] || product.localImageUrl || '',
       status: product.status,
     },
+    blockId: block ? block.blockId : null,
   });
 });
 

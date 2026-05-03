@@ -166,14 +166,20 @@ describe('Delivery Groups API', () => {
       expect(updated.deliveryGroupId).toBe('');
     });
 
-    it('clears user deliveryGroupId when group is deleted', async () => {
+    it('rejects deletion when group has members', async () => {
       const group = await DeliveryGroup.create({ name: 'DelGroup', dayOfWeek: 2, members: ['333'] });
       await User.create({ telegramId: '333', role: 'seller', deliveryGroupId: group._id.toString() });
 
-      await request(app).delete(`/api/delivery-groups/${group._id}`).set('x-telegram-initdata', adminHeader);
+      const res = await request(app).delete(`/api/delivery-groups/${group._id}`).set('x-telegram-initdata', adminHeader);
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toMatch(/cannot delete|не можна/i);
+
+      const stillExists = await DeliveryGroup.findById(group._id);
+      expect(stillExists).not.toBeNull();
 
       const updated = await User.findOne({ telegramId: '333' });
-      expect(updated.deliveryGroupId).toBe('');
+      expect(updated.deliveryGroupId).toBe(group._id.toString());
     });
 
     it('syncs group members when user is created with deliveryGroupId', async () => {

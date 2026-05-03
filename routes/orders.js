@@ -1,13 +1,15 @@
 const express = require('express');
 const Order = require('../models/Order');
 const Product = require('../models/Product');
+const Receipt = require('../models/Receipt');
 const User = require('../models/User');
 const RegistrationRequest = require('../models/RegistrationRequest');
 const { sendOrderConfirmation } = require('../telegramBot');
 const { getTelegramAuth } = require('../utils/validateTelegramInitData');
-const { telegramAuth } = require('../middleware/telegramAuth');
+const { telegramAuth, requireTelegramRoles } = require('../middleware/telegramAuth');
 
 const router = express.Router();
+const staffOnly = requireTelegramRoles(['admin', 'warehouse']);
 
 // POST / has custom registration-check logic so handles its own auth
 router.use((req, res, next) => {
@@ -111,6 +113,48 @@ router.get('/', async (req, res) => {
     pageSize,
     pageCount: pageSize > 0 ? Math.ceil(total / pageSize) : 1,
   });
+});
+
+router.get('/transit/active', staffOnly, async (req, res) => {
+  try {
+    const orders = await Order.find({
+      orderType: 'direct_allocation',
+      status: { $nin: ['fulfilled', 'cancelled'] },
+    })
+      .populate('items.productId')
+      .populate('receiptId', 'receiptNumber')
+      .sort({ createdAt: -1 })
+      .lean();
+
+    const buyerIds = [...new Set(orders.map((o) => o.buyerTelegramId))];
+    const buyers = await User.find({ telegramId: { $in: buyerIds } }).lean();
+    const buyerMap = buyers.reduce((acc, buyer) => ({ ...acc, [buyer.telegramId]: buyer }), {});
+
+    const enrichedOrders = orders.map((o) => ({
+      ...o,
+      buyerDetails: buyerMap[o.buyerTelegramId] || {},
+      receiptNumber: o.receiptId?.receiptNumber || '',
+    }));
+
+    res.json(enrichedOrders);
+  } catch (error) {
+    console.error('[orders.transit.active] Error:', error);
+    res.status(500).json({ error: 'Failed to fetch transit orders' });
+  }
+});
+
+router.post('/:id/fulfill', telegramAuth, staffOnly, async (req, res) => {
+  try {
+    const order = await Order.findById(req.params.id);
+    if (!order) return res.status(404).json({ error: 'Not found' });
+
+    order.status = 'fulfilled';
+    await order.save();
+    res.json(order);
+  } catch (error) {
+    console.error('[orders.fulfill] Error:', error);
+    res.status(500).json({ error: 'Failed to fulfill order' });
+  }
 });
 
 router.get('/:id', async (req, res) => {

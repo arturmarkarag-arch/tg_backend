@@ -21,14 +21,20 @@ async function syncUsersDeliveryGroupId(group) {
 }
 
 router.get('/summary', async (req, res) => {
-  const groups = await DeliveryGroup.find().select('name dayOfWeek').lean();
-  groups.sort((a, b) => {
+  const groups = await DeliveryGroup.find().select('name dayOfWeek members').lean();
+  const result = groups.map((g) => ({
+    _id: g._id,
+    name: g.name,
+    dayOfWeek: g.dayOfWeek,
+    shopCount: g.members?.length || 0,
+  }));
+  result.sort((a, b) => {
     const orderA = a.dayOfWeek === 0 ? 7 : a.dayOfWeek;
     const orderB = b.dayOfWeek === 0 ? 7 : b.dayOfWeek;
     if (orderA !== orderB) return orderA - orderB;
     return String(a.name || '').localeCompare(String(b.name || ''));
   });
-  res.json(groups);
+  res.json(result);
 });
 
 router.get('/', async (req, res) => {
@@ -106,15 +112,13 @@ router.patch('/:id', telegramAuth, requireTelegramRole('admin'), async (req, res
 });
 
 router.delete('/:id', telegramAuth, requireTelegramRole('admin'), async (req, res) => {
-  const group = await DeliveryGroup.findByIdAndDelete(req.params.id);
+  const group = await DeliveryGroup.findById(req.params.id);
   if (!group) return res.status(404).json({ error: 'Group not found' });
-  // Clear warehouseZone for all members of this group
   if (group.members?.length) {
-    await User.updateMany(
-      { telegramId: { $in: group.members }, deliveryGroupId: group._id },
-      { deliveryGroupId: '', warehouseZone: '' }
-    );
+    return res.status(400).json({ error: 'Cannot delete a delivery group with members' });
   }
+
+  await DeliveryGroup.findByIdAndDelete(req.params.id);
   res.json({ message: 'Group deleted' });
 });
 

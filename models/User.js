@@ -13,7 +13,6 @@ const UserSchema = new mongoose.Schema(
     shopAddress: { type: String, default: '' },
     shopCity: { type: String, default: '' },
     deliveryGroupId: { type: String, default: '' },
-    deliveryGroupId2: { type: String, default: '' },
     warehouseZone: { type: String, default: '' },
     isWarehouseManager: { type: Boolean, default: false },
     isOnShift: { type: Boolean, default: false },

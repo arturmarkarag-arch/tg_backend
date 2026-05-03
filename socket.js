@@ -10,6 +10,9 @@ let io = null;
 // Map<productId, { userId, userName, timestamp }>
 const lockedItems = new Map();
 
+// Tracks users in receipt rooms: Map<receiptId, Map<telegramId, { telegramId, name }>>
+const receiptParticipants = new Map();
+
 /**
  * Returns a lightweight block payload for socket broadcasts.
  * Sends only IDs instead of full populated product objects,
@@ -46,6 +49,7 @@ function initSocket(httpServer) {
     try {
       const user = JSON.parse(params.get('user') || '{}');
       telegramId = String(user.id || '');
+      socket.userName = [user.first_name, user.last_name].filter(Boolean).join(' ').trim() || telegramId;
     } catch {
       return next(new Error('Unauthorized: Could not parse user from initData'));
     }
@@ -65,6 +69,7 @@ function initSocket(httpServer) {
   });
 
   io.on('connection', (socket) => {
+    socket.receiptIds = new Set();
     console.log(`[Socket] Client connected: ${socket.id} (telegramId=${socket.telegramId})`);
 
     // Join a block room to receive updates for that block
@@ -74,6 +79,37 @@ function initSocket(httpServer) {
 
     socket.on('leave_block', (blockNumber) => {
       socket.leave(`block_${blockNumber}`);
+    });
+
+    socket.on('join_receipt', (receiptId) => {
+      const room = `receipt_${receiptId}`;
+      socket.join(room);
+      socket.receiptIds.add(receiptId);
+
+      const participants = receiptParticipants.get(receiptId) || new Map();
+      participants.set(socket.telegramId, {
+        telegramId: socket.telegramId,
+        name: socket.userName || socket.telegramId,
+      });
+      receiptParticipants.set(receiptId, participants);
+      io.to(room).emit('receipt_users_updated', Array.from(participants.values()));
+    });
+
+    socket.on('leave_receipt', (receiptId) => {
+      const room = `receipt_${receiptId}`;
+      socket.leave(room);
+      socket.receiptIds.delete(receiptId);
+
+      const participants = receiptParticipants.get(receiptId);
+      if (participants) {
+        participants.delete(socket.telegramId);
+        if (participants.size === 0) {
+          receiptParticipants.delete(receiptId);
+        } else {
+          receiptParticipants.set(receiptId, participants);
+        }
+        io.to(room).emit('receipt_users_updated', Array.from(participants.values()));
+      }
     });
 
     // Lock an item — prevents others from selecting it
@@ -194,11 +230,24 @@ function initSocket(httpServer) {
     // Cleanup on disconnect
     socket.on('disconnect', () => {
       console.log(`[Socket] Client disconnected: ${socket.id}`);
-      // Release all locks held by this socket
       for (const [productId, data] of lockedItems) {
         if (data.socketId === socket.id) {
           lockedItems.delete(productId);
           io.emit('item_unlocked', { productId });
+        }
+      }
+
+      for (const receiptId of socket.receiptIds || []) {
+        const room = `receipt_${receiptId}`;
+        const participants = receiptParticipants.get(receiptId);
+        if (participants) {
+          participants.delete(socket.telegramId);
+          if (participants.size === 0) {
+            receiptParticipants.delete(receiptId);
+          } else {
+            receiptParticipants.set(receiptId, participants);
+          }
+          io.to(room).emit('receipt_users_updated', Array.from(participants.values()));
         }
       }
     });

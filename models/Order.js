@@ -15,10 +15,12 @@ const OrderSchema = new mongoose.Schema(
     items: { type: [OrderItemSchema], required: true },
     status: { type: String, enum: ['new', 'in_progress', 'confirmed', 'fulfilled', 'cancelled'], default: 'new' },
     totalPrice: { type: Number, default: 0 },
+    orderType: { type: String, enum: ['manual', 'direct_allocation'], default: 'manual' },
+    receiptId: { type: mongoose.Schema.Types.ObjectId, ref: 'Receipt', default: null },
     emojiType: { type: String, default: '' },
     shippingAddress: { type: String, default: '' },
     contactInfo: { type: String, default: '' },
-    idempotencyKey: { type: String, default: null },
+    idempotencyKey: { type: String },
   },
   { timestamps: true }
 );
