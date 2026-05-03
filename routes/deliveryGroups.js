@@ -22,11 +22,20 @@ async function syncUsersDeliveryGroupId(group) {
 
 router.get('/summary', async (req, res) => {
   const groups = await DeliveryGroup.find().select('name dayOfWeek members').lean();
+
+  // Count actual registered sellers per group (same query the commit route uses)
+  const sellerCounts = await User.aggregate([
+    { $match: { role: 'seller', deliveryGroupId: { $ne: '' } } },
+    { $group: { _id: '$deliveryGroupId', count: { $sum: 1 } } },
+  ]);
+  const sellerCountMap = Object.fromEntries(sellerCounts.map(({ _id, count }) => [String(_id), count]));
+
   const result = groups.map((g) => ({
     _id: g._id,
     name: g.name,
     dayOfWeek: g.dayOfWeek,
     shopCount: g.members?.length || 0,
+    sellerCount: sellerCountMap[String(g._id)] || 0,
   }));
   result.sort((a, b) => {
     const orderA = a.dayOfWeek === 0 ? 7 : a.dayOfWeek;

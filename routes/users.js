@@ -31,19 +31,32 @@ function sanitizeUserPayload(payload, existing = null) {
     firstName: payload.firstName,
     lastName: payload.lastName,
     phoneNumber: payload.phoneNumber,
-    shopNumber: payload.shopNumber,
-    shopName: payload.shopName,
-    shopAddress: payload.shopAddress,
-    shopCity: payload.shopCity,
-    deliveryGroupId: payload.deliveryGroupId,
-    warehouseZone: payload.warehouseZone,
     botBlocked: payload.botBlocked,
   };
 
+  // Seller-specific fields — clear when role is not seller
+  if (role === 'seller') {
+    data.shopNumber = payload.shopNumber;
+    data.shopName = payload.shopName;
+    data.shopAddress = payload.shopAddress;
+    data.shopCity = payload.shopCity;
+    data.deliveryGroupId = payload.deliveryGroupId;
+  } else {
+    data.shopNumber = '';
+    data.shopName = '';
+    data.shopAddress = '';
+    data.shopCity = '';
+    data.deliveryGroupId = '';
+  }
+
+  // Warehouse-specific fields — clear when role is not warehouse
   if (role === 'warehouse') {
     data.isWarehouseManager = Boolean(payload.isWarehouseManager);
+    data.warehouseZone = payload.warehouseZone;
   } else {
     data.isWarehouseManager = false;
+    data.isOnShift = false;
+    data.shiftZone = { startBlock: null, endBlock: null };
   }
 
   return data;
@@ -84,6 +97,25 @@ router.post('/', async (req, res) => {
 
   await syncDeliveryGroupMembership(user.telegramId, user.deliveryGroupId);
   res.status(existing ? 200 : 201).json(user);
+});
+
+router.patch('/:telegramId', async (req, res) => {
+  try {
+    const existing = await User.findOne({ telegramId: req.params.telegramId });
+    if (!existing) return res.status(404).json({ error: 'User not found' });
+
+    const payload = sanitizeUserPayload(req.body, existing);
+    const user = await User.findOneAndUpdate(
+      { telegramId: req.params.telegramId },
+      payload,
+      { new: true, runValidators: true }
+    );
+    await syncDeliveryGroupMembership(user.telegramId, user.deliveryGroupId);
+    res.json(user);
+  } catch (err) {
+    console.error('[PATCH /users/:telegramId]', err);
+    res.status(500).json({ error: err.message });
+  }
 });
 
 router.delete('/:telegramId', async (req, res) => {

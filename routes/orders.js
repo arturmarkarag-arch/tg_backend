@@ -7,6 +7,7 @@ const RegistrationRequest = require('../models/RegistrationRequest');
 const { sendOrderConfirmation } = require('../telegramBot');
 const { getTelegramAuth } = require('../utils/validateTelegramInitData');
 const { telegramAuth, requireTelegramRoles } = require('../middleware/telegramAuth');
+const { getIO } = require('../socket');
 
 const router = express.Router();
 const staffOnly = requireTelegramRoles(['admin', 'warehouse']);
@@ -301,6 +302,18 @@ router.post('/', async (req, res) => {
         ...(sanitizedKey ? { idempotencyKey: sanitizedKey } : {}),
       });
       await order.save();
+    }
+
+    try {
+      const io = getIO();
+      if (io) {
+        io.emit('user_order_updated', {
+          buyerTelegramId: buyer.telegramId,
+          lastOrderAt: order.createdAt,
+        });
+      }
+    } catch (emitError) {
+      console.warn('[orders] user_order_updated emit failed:', emitError?.message || emitError);
     }
   } catch (error) {
     throw error;

@@ -1080,12 +1080,35 @@ async function sendShopMedia(chatId, product, caption, replyMarkup) {
     sendOpts.filename = 'shop.jpg';
   }
 
-  const sent = await bot.sendPhoto(chatId, media.media, sendOpts);
-  if (sent?.photo?.length && !product.telegramFileId) {
-    const fileId = sent.photo[sent.photo.length - 1].file_id;
-    await Product.findByIdAndUpdate(product._id, { telegramFileId: fileId }).catch(() => {});
+  try {
+    const sent = await bot.sendPhoto(chatId, media.media, sendOpts);
+    if (sent?.photo?.length && !product.telegramFileId) {
+      const fileId = sent.photo[sent.photo.length - 1].file_id;
+      await Product.findByIdAndUpdate(product._id, { telegramFileId: fileId }).catch(() => {});
+    }
+    return sent;
+  } catch (error) {
+    const isBadFileIdentifier = error?.response?.body?.description?.toLowerCase().includes('wrong file identifier')
+      || error?.response?.body?.description?.toLowerCase().includes('wrong file identifier/http url specified');
+
+    if (isBadFileIdentifier && product.telegramFileId) {
+      console.warn('[Bot] Invalid Telegram file_id, clearing product.telegramFileId and retrying', product._id, product.telegramFileId);
+      await Product.findByIdAndUpdate(product._id, { $unset: { telegramFileId: '' } }).catch(() => {});
+      const fallbackMedia = await makeProductMedia({ ...product, telegramFileId: '' }, caption);
+      if (fallbackMedia) {
+        const fallbackOpts = { caption, reply_markup: replyMarkup };
+        if (fallbackMedia.isBuffer) fallbackOpts.filename = 'shop.jpg';
+        const sent = await bot.sendPhoto(chatId, fallbackMedia.media, fallbackOpts);
+        if (sent?.photo?.length) {
+          const fileId = sent.photo[sent.photo.length - 1].file_id;
+          await Product.findByIdAndUpdate(product._id, { telegramFileId: fileId }).catch(() => {});
+        }
+        return sent;
+      }
+    }
+
+    throw error;
   }
-  return sent;
 }
 
 async function updateShopMessage(chatId, msgId, product, caption, replyMarkup) {
