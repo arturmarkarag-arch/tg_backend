@@ -5,7 +5,7 @@ const receiptItemLogSchema = new mongoose.Schema(
     receiptId: { type: mongoose.Schema.Types.ObjectId, ref: 'Receipt', required: true, index: true },
     itemId: { type: mongoose.Schema.Types.ObjectId, ref: 'ReceiptItem' },
     itemName: { type: String, default: '' },
-    action: { type: String, enum: ['create', 'update', 'move_to_block', 'receipt_create', 'receipt_complete'], required: true },
+    action: { type: String, enum: ['create', 'update', 'move_to_block', 'receipt_create', 'receipt_complete', 'resolve_pending'], required: true },
     actor: {
       telegramId: { type: String, default: '' },
       firstName: { type: String, default: '' },

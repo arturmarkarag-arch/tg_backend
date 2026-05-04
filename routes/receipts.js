@@ -211,6 +211,7 @@ router.post('/:id/items', staffOnly, async (req, res) => {
     const parsed = await parseMultipart(req);
     const file = parsed.files?.[0];
     const existingProductId = parsed.fields.existingProductId ? String(parsed.fields.existingProductId).trim() : null;
+    const isWarehousePending = parsed.fields.warehousePending === 'true';
     const deliveryGroupIds = safeParseArray(parsed.fields.deliveryGroupIds);
     if (deliveryGroupIds === null) {
       return res.status(400).json({ error: 'Invalid deliveryGroupIds format' });
@@ -240,6 +241,7 @@ router.post('/:id/items', staffOnly, async (req, res) => {
       photoName = file.originalname || filename;
     }
 
+    // Pull photo from existingProduct if item has no photo
     if (!photoUrl && existingProductId) {
       const existingProduct = await Product.findById(existingProductId).lean();
       if (existingProduct) {
@@ -251,7 +253,7 @@ router.post('/:id/items', staffOnly, async (req, res) => {
     const receiptItem = new ReceiptItem({
       receiptId: receipt._id,
       photoUrl: photoUrl || '',
-      photoName: photoName || 'photo.jpg',
+      photoName: photoName || '',
       totalQty,
       transitQty: transitQty || 0,
       deliveryGroupIds: Array.isArray(deliveryGroupIds) ? deliveryGroupIds : [],
@@ -262,6 +264,7 @@ router.post('/:id/items', staffOnly, async (req, res) => {
       qtyPerPackage: parsed.fields.qtyPerPackage ? Number(parsed.fields.qtyPerPackage) : 1,
       barcode: String(parsed.fields.barcode || '').trim(),
       existingProductId: existingProductId || null,
+      warehousePending: isWarehousePending,
     });
 
     await receiptItem.save();
@@ -488,6 +491,14 @@ router.post('/:id/commit', staffOnly, async (req, res) => {
     return res.status(400).json({ error: 'Не всі товари повністю описані' });
   }
 
+  // Guard: unresolved warehouse-pending items
+  const pendingItem = items.find((item) => item.warehousePending);
+  if (pendingItem) {
+    return res.status(422).json({
+      error: `Позиція "${pendingItem.name || 'без назви'}" ще не прив'язана до складу. Знайдіть товар або оформіть як новий.`,
+    });
+  }
+
   // Guard: transit without delivery groups
   const orphanTransit = items.find(
     (item) => item.transitQty > 0 && (!item.deliveryGroupIds || item.deliveryGroupIds.length === 0),
@@ -635,6 +646,76 @@ router.post('/:id/commit', staffOnly, async (req, res) => {
     session.endSession();
     console.error('[receipts.commit] Error:', err);
     res.status(500).json({ error: err.message || 'Failed to commit receipt' });
+  }
+});
+
+// ── RESOLVE WAREHOUSE-PENDING ─────────────────────────────────────────────
+// Link a warehousePending item to an existing product, or mark it as a brand-new product.
+router.patch('/:id/items/:itemId/link', staffOnly, async (req, res) => {
+  try {
+    const { existingProductId, markAsNew, keepNewPhoto } = req.body || {};
+    const item = await ReceiptItem.findOne({ _id: req.params.itemId, receiptId: req.params.id });
+    if (!item) return res.status(404).json({ error: 'Item not found' });
+
+    if (existingProductId) {
+      item.existingProductId = existingProductId;
+      const prod = await Product.findById(existingProductId);
+      if (prod) {
+        if (item.photoUrl && keepNewPhoto === true) {
+          // User chose the NEW photo — update the product record so it shows everywhere
+          prod.imageUrls = [item.photoUrl, ...(prod.imageUrls || []).filter((u) => u !== item.photoUrl)];
+          if (item.photoName) {
+            prod.imageNames = [item.photoName, ...(prod.imageNames || []).filter((n) => n !== item.photoName)];
+          }
+          await prod.save();
+        } else if (!item.photoUrl || keepNewPhoto === false) {
+          // User chose the OLD photo (or item had no photo) — pull from product
+          item.photoUrl = prod.imageUrls?.[0] || prod.localImageUrl || '';
+          item.photoName = prod.imageNames?.[0] || '';
+        }
+        if (!item.name || item.name === 'Без назви') {
+          item.name = prod.brand || prod.model || item.name;
+        }
+        if (item.price == null && prod.price != null) {
+          item.price = prod.price;
+        }
+      }
+    }
+    item.warehousePending = false;
+    await item.save();
+
+    ReceiptItemLog.create({
+      receiptId: req.params.id,
+      itemId: item._id,
+      itemName: item.name,
+      action: 'resolve_pending',
+      actor: getActor(req),
+      meta: { existingProductId: existingProductId || null, markAsNew: !!markAsNew },
+    }).catch((e) => console.error('[ReceiptItemLog] resolve_pending error:', e));
+
+    // Return enriched item (same as GET /:id/items enrichment)
+    const productId = item.existingProductId || item.createdProductId;
+    let enriched = item.toObject();
+    if (productId) {
+      const [prod, block] = await Promise.all([
+        Product.findById(productId, 'quantity status barcodeChecked barcode price').lean(),
+        Block.findOne({ productIds: productId }, 'blockId').lean(),
+      ]);
+      enriched.currentLocation = { blockId: block?.blockId ?? null, status: prod?.status ?? null };
+      enriched.productCurrentQty = prod?.quantity ?? null;
+      enriched.barcodeChecked = prod?.barcodeChecked ?? false;
+    } else {
+      enriched.currentLocation = { blockId: null, status: null };
+      enriched.productCurrentQty = null;
+    }
+
+    const io = getIO();
+    if (io) io.to(`receipt_${req.params.id}`).emit('receipt_item_updated', enriched);
+
+    res.json(enriched);
+  } catch (err) {
+    console.error('[receipts.items.link] Error:', err);
+    res.status(500).json({ error: err.message || 'Failed to link item' });
   }
 });
 

@@ -3,8 +3,8 @@ const mongoose = require('mongoose');
 const ReceiptItemSchema = new mongoose.Schema(
   {
     receiptId: { type: mongoose.Schema.Types.ObjectId, ref: 'Receipt', required: true },
-    photoUrl: { type: String, required: true },
-    photoName: { type: String, required: true },
+    photoUrl: { type: String, default: '' },
+    photoName: { type: String, default: '' },
     totalQty: { type: Number, required: true, min: 1 },
     transitQty: { type: Number, default: 0 },
     deliveryGroupIds: [{ type: String }],
@@ -16,6 +16,7 @@ const ReceiptItemSchema = new mongoose.Schema(
     barcode: { type: String, default: '' },
     existingProductId: { type: mongoose.Schema.Types.ObjectId, ref: 'Product', default: null },
     createdProductId: { type: mongoose.Schema.Types.ObjectId, ref: 'Product', default: null },
+    warehousePending: { type: Boolean, default: false },
   },
   { timestamps: true }
 );
