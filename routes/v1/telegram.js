@@ -294,6 +294,51 @@ router.post('/register-request', async (req, res) => {
   res.status(201).json({ requestId: request._id, status: 'pending' });
 });
 
+// PATCH /api/v1/telegram/me/shop — продавець самостійно оновлює дані свого магазину
+router.patch('/me/shop', async (req, res) => {
+  const { valid, telegramId, error } = getTelegramAuth(req, process.env.TELEGRAM_BOT_TOKEN);
+  if (!valid) return res.status(401).json({ error: error || 'Invalid initData' });
+  if (!telegramId) return res.status(400).json({ error: 'Telegram user id is missing' });
+
+  const user = await User.findOne({ telegramId });
+  if (!user) return res.status(404).json({ error: 'User not found' });
+  if (user.role !== 'seller') return res.status(403).json({ error: 'Only sellers can update shop data' });
+
+  const { shopName, shopCity, deliveryGroupId } = req.body;
+
+  if (shopName !== undefined) user.shopName = String(shopName).trim();
+  if (shopCity !== undefined) user.shopCity = String(shopCity).trim();
+
+  if (deliveryGroupId !== undefined) {
+    const newGroupId = String(deliveryGroupId).trim();
+    if (newGroupId) {
+      const group = await DeliveryGroup.findById(newGroupId).lean();
+      if (!group) return res.status(400).json({ error: 'Групу доставки не знайдено' });
+      user.deliveryGroupId = newGroupId;
+      user.warehouseZone = group.name;
+    } else {
+      user.deliveryGroupId = '';
+      user.warehouseZone = '';
+    }
+    // Re-sync group membership
+    await DeliveryGroup.updateMany({ members: telegramId }, { $pull: { members: telegramId } });
+    if (user.deliveryGroupId) {
+      await DeliveryGroup.updateOne({ _id: user.deliveryGroupId }, { $addToSet: { members: telegramId } });
+    }
+  }
+
+  await user.save();
+
+  res.json({
+    telegramId: user.telegramId,
+    shopName: user.shopName,
+    shopCity: user.shopCity,
+    shopAddress: user.shopAddress,
+    deliveryGroupId: user.deliveryGroupId || '',
+    warehouseZone: user.warehouseZone || '',
+  });
+});
+
 function getInitData(req) {
   return getInitDataFromRequest(req);
 }

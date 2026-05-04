@@ -3698,4 +3698,5 @@ module.exports = {
   sendRegistrationApprovedMessage,
   fixPendingReactionIndexes,
   getShippingBlockPositions,
+  buildPickingTasksFromOrders,
 };

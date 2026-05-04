@@ -14,6 +14,7 @@ const PickingTaskSchema = new mongoose.Schema(
         orderId: { type: mongoose.Schema.Types.ObjectId, ref: 'Order' },
         shopName: { type: String, default: '' },
         quantity: { type: Number, default: 0 },
+        packedQuantity: { type: Number, default: null },
         packed: { type: Boolean, default: false },
       },
     ],

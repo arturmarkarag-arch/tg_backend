@@ -9,6 +9,13 @@ const OrderItemSchema = new mongoose.Schema({
   cancelled: { type: Boolean, default: false },
 });
 
+const BuyerSnapshotSchema = new mongoose.Schema({
+  shopName: { type: String, default: '' },
+  shopCity: { type: String, default: '' },
+  shopAddress: { type: String, default: '' },
+  deliveryGroupId: { type: String, default: '' },
+}, { _id: false });
+
 const OrderSchema = new mongoose.Schema(
   {
     buyerTelegramId: { type: String, required: true },
@@ -21,6 +28,7 @@ const OrderSchema = new mongoose.Schema(
     shippingAddress: { type: String, default: '' },
     contactInfo: { type: String, default: '' },
     idempotencyKey: { type: String },
+    buyerSnapshot: { type: BuyerSnapshotSchema, default: null },
   },
   { timestamps: true }
 );

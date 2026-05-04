@@ -16,6 +16,7 @@ const searchProductsRouter = require('./routes/searchProducts');
 const { getBotStatus } = require('./telegramBot');
 const { verifyOpenAIConnection } = require('./openaiClient');
 const receiptsRouter = require('./routes/receipts');
+const pickingRouter = require('./routes/picking');
 
 let broadcastInitialized = false;
 
@@ -90,6 +91,7 @@ app.use('/api/archive', archiveRouter);
 app.use('/api/blocks', blocksRouter);
 app.use('/api/search-products', searchProductsRouter);
 app.use('/api/receipts', receiptsRouter);
+app.use('/api/picking', pickingRouter);
 app.use('/api/admin', adminRouter);
 app.use('/api/v1/telegram', telegramV1Router);
 

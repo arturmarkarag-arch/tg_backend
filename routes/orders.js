@@ -78,6 +78,7 @@ router.get('/', async (req, res) => {
   const total = await Order.countDocuments(filter);
   const orderQuery = Order.find(filter)
     .populate('items.productId')
+    .populate('receiptId', 'receiptNumber')
     .sort({ createdAt: -1 });
 
   if (pageSize > 0) {
@@ -92,18 +93,18 @@ router.get('/', async (req, res) => {
 
   const items = orders.map((order) => {
     const obj = order.toObject();
+    obj.receiptNumber = order.receiptId?.receiptNumber || '';
     const buyer = buyerMap.get(order.buyerTelegramId);
-    if (buyer) {
-      obj.buyer = {
-        telegramId: buyer.telegramId,
-        shopName: buyer.shopName,
-        shopAddress: buyer.shopAddress,
-        shopCity: buyer.shopCity,
-        firstName: buyer.firstName,
-        lastName: buyer.lastName,
-        phoneNumber: buyer.phoneNumber,
-      };
-    }
+    const snap = order.buyerSnapshot;
+    obj.buyer = {
+      telegramId: order.buyerTelegramId,
+      shopName: snap?.shopName ?? buyer?.shopName ?? '',
+      shopAddress: snap?.shopAddress ?? buyer?.shopAddress ?? '',
+      shopCity: snap?.shopCity ?? buyer?.shopCity ?? '',
+      firstName: buyer?.firstName ?? '',
+      lastName: buyer?.lastName ?? '',
+      phoneNumber: buyer?.phoneNumber ?? '',
+    };
     return obj;
   });
 
@@ -170,17 +171,16 @@ router.get('/:id', async (req, res) => {
 
   const buyer = await User.findOne({ telegramId: order.buyerTelegramId });
   const obj = order.toObject();
-  if (buyer) {
-    obj.buyer = {
-      telegramId: buyer.telegramId,
-      shopName: buyer.shopName,
-      shopAddress: buyer.shopAddress,
-      shopCity: buyer.shopCity,
-      firstName: buyer.firstName,
-      lastName: buyer.lastName,
-      phoneNumber: buyer.phoneNumber,
-    };
-  }
+  const snap = obj.buyerSnapshot;
+  obj.buyer = {
+    telegramId: order.buyerTelegramId,
+    shopName: snap?.shopName ?? buyer?.shopName ?? '',
+    shopAddress: snap?.shopAddress ?? buyer?.shopAddress ?? '',
+    shopCity: snap?.shopCity ?? buyer?.shopCity ?? '',
+    firstName: buyer?.firstName ?? '',
+    lastName: buyer?.lastName ?? '',
+    phoneNumber: buyer?.phoneNumber ?? '',
+  };
   res.json(obj);
 });
 
@@ -270,10 +270,17 @@ router.post('/', async (req, res) => {
     createdAt: { $gte: threeDaysAgo },
   });
 
+  // Якщо продавець змінив магазин — не мерджити в старий заказ
+  const shopChanged = existingOrder && (
+    (existingOrder.buyerSnapshot?.shopName || '') !== (buyer.shopName || '') ||
+    (existingOrder.buyerSnapshot?.deliveryGroupId || '') !== (buyer.deliveryGroupId || '')
+  );
+  const shouldMerge = existingOrder && !shopChanged;
+
   let order;
 
   try {
-    if (existingOrder) {
+    if (shouldMerge) {
       for (const newItem of validItems) {
         const sameItem = existingOrder.items.find((i) => String(i.productId) === String(newItem.productId));
         if (sameItem) {
@@ -299,6 +306,12 @@ router.post('/', async (req, res) => {
         contactInfo,
         emojiType,
         totalPrice,
+        buyerSnapshot: {
+          shopName: buyer.shopName || '',
+          shopCity: buyer.shopCity || '',
+          shopAddress: buyer.shopAddress || '',
+          deliveryGroupId: buyer.deliveryGroupId || '',
+        },
         ...(sanitizedKey ? { idempotencyKey: sanitizedKey } : {}),
       });
       await order.save();
