@@ -4,10 +4,12 @@ const Product = require('../models/Product');
 const Receipt = require('../models/Receipt');
 const User = require('../models/User');
 const RegistrationRequest = require('../models/RegistrationRequest');
+const DeliveryGroup = require('../models/DeliveryGroup');
 const { sendOrderConfirmation } = require('../telegramBot');
 const { getTelegramAuth } = require('../utils/validateTelegramInitData');
 const { telegramAuth, requireTelegramRoles } = require('../middleware/telegramAuth');
 const { getIO } = require('../socket');
+const { isOrderingOpen } = require('../utils/orderingSchedule');
 
 const router = express.Router();
 const staffOnly = requireTelegramRoles(['admin', 'warehouse']);
@@ -220,6 +222,23 @@ router.post('/', async (req, res) => {
     const existingByKey = await Order.findOne({ idempotencyKey: sanitizedKey });
     if (existingByKey) {
       return res.status(200).json(existingByKey);
+    }
+  }
+
+  // Check ordering window — only for sellers, admin/warehouse are unrestricted
+  if (buyer.role === 'seller') {
+    if (!buyer.deliveryGroupId) {
+      return res.status(403).json({
+        error: 'no_delivery_group',
+        message: 'Вас не призначено до жодної групи доставки. Зверніться до адміністратора.',
+      });
+    }
+    const group = await DeliveryGroup.findById(buyer.deliveryGroupId).lean();
+    if (group) {
+      const { isOpen, message } = isOrderingOpen(group.dayOfWeek);
+      if (!isOpen) {
+        return res.status(403).json({ error: 'ordering_closed', message });
+      }
     }
   }
 

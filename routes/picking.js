@@ -1,6 +1,7 @@
 const express = require('express');
 const PickingTask = require('../models/PickingTask');
 const Product = require('../models/Product');
+const Order = require('../models/Order');
 const User = require('../models/User');
 const { requireTelegramRoles } = require('../middleware/telegramAuth');
 const { getProductTitle } = require('../services/archiveProduct');
@@ -12,7 +13,30 @@ const router = express.Router();
 // Helpers
 // ---------------------------------------------------------------------------
 
-async function buildTaskResponse(task) {
+/**
+ * Mark Order items as packed and auto-fulfil the Order if all items are done.
+ * Call after a PickingTask is completed or out-of-stocked.
+ */
+async function markOrderItemsPacked(taskItems, productId) {
+  const orderIds = [...new Set(taskItems.map((i) => String(i.orderId)))];
+  await Promise.allSettled(
+    orderIds.map(async (orderId) => {
+      await Order.updateOne(
+        { _id: orderId, 'items.productId': productId },
+        { $set: { 'items.$.packed': true } },
+      );
+      // Auto-fulfil if every non-cancelled item is now packed
+      const order = await Order.findById(orderId).lean();
+      if (!order) return;
+      const allDone = order.items.every((item) => item.packed || item.cancelled);
+      if (allDone && ['new', 'in_progress'].includes(order.status)) {
+        await Order.findByIdAndUpdate(orderId, { $set: { status: 'fulfilled' } });
+      }
+    })
+  );
+}
+
+async function buildTaskResponse(task, { wrappedAround = false, isSecondChance = false } = {}) {
   if (!task) return null;
   const product = await Product.findById(task.productId).lean();
   if (!product) return null;
@@ -31,6 +55,8 @@ async function buildTaskResponse(task) {
     positionIndex: task.positionIndex,
     status: task.status,
     lockedBy: task.lockedBy,
+    wrappedAround,
+    isSecondChance,
     items: (task.items || []).map((item) => ({
       orderId: String(item.orderId),
       shopName: item.shopName || '',
@@ -47,10 +73,9 @@ async function buildTaskResponse(task) {
  * Normal flow (ignores tasks this worker already skipped):
  *   Pass 1: fromBlock → end of warehouse
  *   Pass 2: wrap-around 1 → fromBlock-1
- *
- * Second-chance flow (only skipped-by-this-worker tasks remain):
- *   Pass 3: fromBlock → end  (including skipped)
- *   Pass 4: wrap-around 1 → fromBlock-1  (including skipped)
+ */
+/**
+ * @returns {{ task: object|null, wrappedAround: boolean }}
  */
 async function findAndLockNext(userTelegramId, fromBlock) {
   const lock = { $set: { status: 'locked', lockedBy: userTelegramId, lockedAt: new Date() } };
@@ -62,32 +87,17 @@ async function findAndLockNext(userTelegramId, fromBlock) {
   let task = await PickingTask.findOneAndUpdate(
     { ...fresh, blockId: { $gte: fromBlock } }, lock, opts,
   );
+  if (task) return { task, wrappedAround: false };
 
   // Pass 2: fresh tasks wrap-around
-  if (!task && fromBlock > 1) {
+  if (fromBlock > 1) {
     task = await PickingTask.findOneAndUpdate(
       { ...fresh, blockId: { $gte: 1, $lt: fromBlock } }, lock, opts,
     );
+    if (task) return { task, wrappedAround: true };
   }
 
-  // ── Second-chance: all fresh tasks exhausted, show previously-skipped ones to ALL workers ──
-  if (!task) {
-    const anyPending = { status: 'pending' };
-
-    // Pass 3: any pending task fromBlock onwards (ignoring skippedBy)
-    task = await PickingTask.findOneAndUpdate(
-      { ...anyPending, blockId: { $gte: fromBlock } }, lock, opts,
-    );
-
-    // Pass 4: any pending task wrap-around
-    if (!task && fromBlock > 1) {
-      task = await PickingTask.findOneAndUpdate(
-        { ...anyPending, blockId: { $gte: 1, $lt: fromBlock } }, lock, opts,
-      );
-    }
-  }
-
-  return task || null;
+  return { task: null, wrappedAround: false };
 }
 
 // ---------------------------------------------------------------------------
@@ -108,18 +118,24 @@ router.get('/next-task', requireTelegramRoles(['warehouse', 'admin']), async (re
     { $set: { status: 'pending', lockedBy: null, lockedAt: null } },
   );
 
-  const task = await findAndLockNext(user.telegramId, currentBlock);
+  const { task, wrappedAround } = await findAndLockNext(user.telegramId, currentBlock);
   if (!task) {
-    return res.json({ task: null, message: 'Немає задач для збирання' });
+    const pendingCount = await PickingTask.countDocuments({ status: 'pending' });
+    return res.json({
+      task: null,
+      reviewMode: pendingCount > 0,
+      message: pendingCount > 0 ? 'Залишились пропущені задачі' : 'Немає задач для збирання',
+    });
   }
 
-  const taskData = await buildTaskResponse(task);
+  const taskData = await buildTaskResponse(task, { wrappedAround });
   if (!taskData) {
     // Product archived — release and return empty
     await PickingTask.findByIdAndUpdate(task._id, {
       $set: { status: 'pending', lockedBy: null, lockedAt: null },
     });
-    return res.json({ task: null, message: 'Немає задач для збирання' });
+    const pendingCount = await PickingTask.countDocuments({ status: 'pending' });
+    return res.json({ task: null, reviewMode: pendingCount > 0, message: 'Немає задач для збирання' });
   }
 
   res.json({ task: taskData });
@@ -155,9 +171,12 @@ router.post('/tasks/:taskId/complete', requireTelegramRoles(['warehouse', 'admin
   task.lockedAt = null;
   await task.save();
 
+  // Mark Order items as packed and auto-fulfil fully-packed orders
+  await markOrderItemsPacked(task.items, task.productId);
+
   const fromBlock = typeof nextBlock === 'number' ? nextBlock : task.blockId;
-  const nextTask = await findAndLockNext(user.telegramId, fromBlock);
-  const nextTaskData = await buildTaskResponse(nextTask);
+  const { task: nextTask, wrappedAround: nwa } = await findAndLockNext(user.telegramId, fromBlock);
+  const nextTaskData = await buildTaskResponse(nextTask, { wrappedAround: nwa });
 
   res.json({ message: 'Task completed', nextTask: nextTaskData });
 });
@@ -187,10 +206,43 @@ router.post('/tasks/:taskId/skip', requireTelegramRoles(['warehouse', 'admin']),
   await task.save();
 
   // skippedBy now includes this user → findAndLockNext will skip this task
-  const nextTask = await findAndLockNext(user.telegramId, fromBlock);
-  const nextTaskData = await buildTaskResponse(nextTask);
+  const { task: nextTask, wrappedAround: nwa } = await findAndLockNext(user.telegramId, fromBlock);
+  const nextTaskData = await buildTaskResponse(nextTask, { wrappedAround: nwa });
 
   res.json({ message: 'Task skipped', nextTask: nextTaskData });
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/picking/review-list  — all pending tasks (no locking), for the review screen
+// ---------------------------------------------------------------------------
+router.get('/review-list', requireTelegramRoles(['warehouse', 'admin']), async (req, res) => {
+  const tasks = await PickingTask.find({ status: 'pending' })
+    .sort({ blockId: 1, positionIndex: 1 })
+    .lean();
+
+  const results = await Promise.all(tasks.map((t) => buildTaskResponse(t)));
+  res.json({ tasks: results.filter(Boolean) });
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/picking/tasks/:taskId/claim  — atomically lock a task from the review list
+// ---------------------------------------------------------------------------
+router.post('/tasks/:taskId/claim', requireTelegramRoles(['warehouse', 'admin']), async (req, res) => {
+  const user = req.telegramUser;
+
+  const claimed = await PickingTask.findOneAndUpdate(
+    { _id: req.params.taskId, status: 'pending' },
+    { $set: { status: 'locked', lockedBy: user.telegramId, lockedAt: new Date() } },
+    { new: true },
+  );
+  if (!claimed) return res.status(409).json({ error: 'Task is no longer available' });
+
+  const taskData = await buildTaskResponse(claimed);
+  if (!taskData) {
+    await PickingTask.findByIdAndUpdate(claimed._id, { $set: { status: 'pending', lockedBy: null, lockedAt: null } });
+    return res.status(404).json({ error: 'Product not found' });
+  }
+  res.json({ task: taskData });
 });
 
 // ---------------------------------------------------------------------------
@@ -201,11 +253,23 @@ router.post('/tasks/:taskId/out-of-stock', requireTelegramRoles(['warehouse', 'a
   const user = req.telegramUser;
   const { nextBlock, packedOrderIds = [] } = req.body;
 
-  const task = await PickingTask.findById(req.params.taskId).populate('productId');
+  let task = await PickingTask.findById(req.params.taskId);
   if (!task) return res.status(404).json({ error: 'Task not found' });
-  if (task.lockedBy !== user.telegramId) {
+
+  // Auto-claim if called from review list (task still pending)
+  if (task.status === 'pending') {
+    const claimed = await PickingTask.findOneAndUpdate(
+      { _id: task._id, status: 'pending' },
+      { $set: { status: 'locked', lockedBy: user.telegramId, lockedAt: new Date() } },
+      { new: true },
+    );
+    if (!claimed) return res.status(409).json({ error: 'Task was claimed by another worker' });
+    task = claimed;
+  } else if (task.lockedBy !== user.telegramId) {
     return res.status(403).json({ error: 'Task is not locked by you' });
   }
+
+  await task.populate('productId');
 
   const productTitle = getProductTitle(task.productId) || 'Невідомий товар';
   const blockId = task.blockId;
@@ -226,6 +290,9 @@ router.post('/tasks/:taskId/out-of-stock', requireTelegramRoles(['warehouse', 'a
   task.lockedBy = null;
   task.lockedAt = null;
   await task.save();
+
+  // Mark Order items as packed and auto-fulfil fully-packed orders
+  await markOrderItemsPacked(task.items, task.productId);
 
   // Notify managers & admins
   const workerName =
@@ -250,8 +317,8 @@ router.post('/tasks/:taskId/out-of-stock', requireTelegramRoles(['warehouse', 'a
   }
 
   const fromBlock = typeof nextBlock === 'number' ? nextBlock : blockId;
-  const nextTask = await findAndLockNext(user.telegramId, fromBlock);
-  const nextTaskData = await buildTaskResponse(nextTask);
+  const { task: nextTask, wrappedAround: nwa } = await findAndLockNext(user.telegramId, fromBlock);
+  const nextTaskData = await buildTaskResponse(nextTask, { wrappedAround: nwa });
 
   res.json({ message: 'Out-of-stock recorded, managers notified', nextTask: nextTaskData });
 });

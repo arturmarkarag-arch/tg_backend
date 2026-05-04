@@ -1600,9 +1600,13 @@ async function buildPickingTasksFromOrders() {
   if (!tasks.length) return;
 
   try {
-    await PickingTask.insertMany(tasks);
+    // ordered:false — if two workers trigger this simultaneously, duplicate key errors
+    // from the partial unique index on productId are silently skipped; valid new tasks still insert.
+    await PickingTask.insertMany(tasks, { ordered: false });
   } catch (err) {
-    console.error('[Bot] PickingTask insert error:', err);
+    if (err?.code !== 11000 && err?.name !== 'BulkWriteError') {
+      console.error('[Bot] PickingTask insert error:', err);
+    }
   }
   } finally {
     buildPickingTasksFromOrders._running = false;

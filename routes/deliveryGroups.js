@@ -2,6 +2,7 @@ const express = require('express');
 const DeliveryGroup = require('../models/DeliveryGroup');
 const User = require('../models/User');
 const { telegramAuth, requireTelegramRole } = require('../middleware/telegramAuth');
+const { isOrderingOpen, getWindowDescription } = require('../utils/orderingSchedule');
 
 const router = express.Router();
 
@@ -19,6 +20,38 @@ async function syncUsersDeliveryGroupId(group) {
     { deliveryGroupId: '', warehouseZone: '' }
   );
 }
+
+/**
+ * GET /api/delivery-groups/ordering-status
+ * Returns ordering window status for the current user's delivery group.
+ * Admin/warehouse always get isOpen: true.
+ */
+router.get('/ordering-status', telegramAuth, async (req, res) => {
+  const user = req.telegramUser;
+
+  if (user.role === 'admin' || user.role === 'warehouse') {
+    return res.json({ isOpen: true, message: 'Персонал складу — без обмежень' });
+  }
+
+  if (!user.deliveryGroupId) {
+    return res.json({
+      isOpen: false,
+      message: 'Вас не призначено до жодної групи доставки. Зверніться до адміністратора.',
+    });
+  }
+
+  const group = await DeliveryGroup.findById(user.deliveryGroupId).lean();
+  if (!group) {
+    return res.json({
+      isOpen: false,
+      message: 'Групу доставки не знайдено. Зверніться до адміністратора.',
+    });
+  }
+
+  const status = isOrderingOpen(group.dayOfWeek);
+  const window = getWindowDescription(group.dayOfWeek);
+  return res.json({ ...status, groupName: group.name, window });
+});
 
 router.get('/summary', async (req, res) => {
   const groups = await DeliveryGroup.find().select('name dayOfWeek members').lean();

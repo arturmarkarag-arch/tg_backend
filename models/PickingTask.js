@@ -25,4 +25,11 @@ const PickingTaskSchema = new mongoose.Schema(
 PickingTaskSchema.index({ status: 1, blockId: 1, positionIndex: 1 });
 PickingTaskSchema.index({ productId: 1, blockId: 1 });
 
+// Only one active (pending/locked) task per product at a time.
+// Prevents race-condition duplicates from concurrent buildPickingTasksFromOrders calls.
+PickingTaskSchema.index(
+  { productId: 1 },
+  { unique: true, partialFilterExpression: { status: { $in: ['pending', 'locked'] } } }
+);
+
 module.exports = mongoose.model('PickingTask', PickingTaskSchema);
