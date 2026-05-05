@@ -2331,21 +2331,11 @@ function getBotStatus() {
   };
 }
 
-async function sendOrderConfirmation(telegramId, itemCount, totalPrice, orderId) {
-  if (!bot || !telegramId) return;
-  try {
-    const text = `✅ Замовлення #${orderId} оформлено!\n\nТоварів: ${itemCount}\nСума: ${totalPrice} zł`;
-    await sendMessageWithRetry(String(telegramId), text);
-  } catch (err) {
-    console.warn('[Bot] sendOrderConfirmation failed:', err.message);
-  }
-}
 
 module.exports = {
   initBot,
   getBotStatus,
   getBot: () => bot,
-  sendOrderConfirmation,
   sendMessageWithRetry,
   sendAdminNotification,
   sendRegistrationApprovedMessage,

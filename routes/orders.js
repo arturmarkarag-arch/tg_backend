@@ -5,7 +5,6 @@ const Receipt = require('../models/Receipt');
 const User = require('../models/User');
 const RegistrationRequest = require('../models/RegistrationRequest');
 const DeliveryGroup = require('../models/DeliveryGroup');
-const { sendOrderConfirmation } = require('../telegramBot');
 const { getTelegramAuth } = require('../utils/validateTelegramInitData');
 const { telegramAuth, requireTelegramRoles } = require('../middleware/telegramAuth');
 const { getIO } = require('../socket');
@@ -377,10 +376,6 @@ router.post('/', async (req, res) => {
   } catch (error) {
     throw error;
   }
-
-  sendOrderConfirmation(order.buyerTelegramId, validItems.length, totalPrice, order._id.toString()).catch((err) => {
-    console.error('Failed to send order confirmation:', err?.message || err);
-  });
 
   const responseBody = order.toObject ? order.toObject() : order;
   if (archivedItems.length > 0) {

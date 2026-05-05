@@ -5,7 +5,7 @@ const Order = require('../models/Order');
 const User = require('../models/User');
 const { requireTelegramRoles } = require('../middleware/telegramAuth');
 const { archiveProduct, getProductTitle } = require('../services/archiveProduct');
-const { sendMessageWithRetry, buildPickingTasksFromOrders } = require('../telegramBot');
+const { buildPickingTasksFromOrders } = require('../telegramBot');
 
 const router = express.Router();
 
@@ -18,7 +18,9 @@ const router = express.Router();
  * Call after a PickingTask is completed or out-of-stocked.
  */
 async function markOrderItemsPacked(taskItems, productId) {
-  const orderIds = [...new Set(taskItems.map((i) => String(i.orderId)))];
+  // Only mark packed for items that were actually packed by the worker.
+  // Items with packed=false are left untouched so archiveProduct can cancel them.
+  const orderIds = [...new Set(taskItems.filter((i) => i.packed).map((i) => String(i.orderId)))];
   await Promise.all(
     orderIds.map(async (orderId) => {
       // Step 1: mark this product's item as packed
@@ -287,7 +289,7 @@ router.post('/tasks/:taskId/out-of-stock', requireTelegramRoles(['warehouse', 'a
   for (const item of task.items) {
     const wasPacked = packedSet.has(String(item.orderId));
     item.packedQuantity = wasPacked ? item.quantity : 0;
-    item.packed = true;
+    item.packed = wasPacked;
     if (wasPacked) packedShops.push(item.shopName || String(item.orderId));
     else missedShops.push(item.shopName || String(item.orderId));
   }
@@ -300,39 +302,17 @@ router.post('/tasks/:taskId/out-of-stock', requireTelegramRoles(['warehouse', 'a
   // Mark Order items as packed and auto-fulfil fully-packed orders
   await markOrderItemsPacked(task.items, task.productId);
 
-  // Archive the product — removes it from blocks, cancels remaining orders, notifies buyers
+  // Archive the product — removes it from blocks and cancels remaining orders.
   const productDoc = await Product.findById(task.productId._id || task.productId);
   if (productDoc && productDoc.status !== 'archived') {
-    await archiveProduct(productDoc, { notifyBuyers: true, bot: null });
-  }
-
-  // Notify managers & admins
-  const workerName =
-    [user.firstName, user.lastName].filter(Boolean).join(' ') || String(user.telegramId);
-
-  let alertMsg = `⚠️ Товар закінчився на складі!`;
-  if (packedShops.length > 0) {
-    alertMsg += `\n\n✅ Отримали (${packedShops.length}):\n` + packedShops.map((s) => `  • ${s}`).join('\n');
-  }
-  if (missedShops.length > 0) {
-    alertMsg += `\n\n❌ Не вистачило (${missedShops.length}):\n` + missedShops.map((s) => `  • ${s}`).join('\n');
-  }
-
-  try {
-    const recipients = await User.find({
-      $or: [{ role: 'admin' }, { role: 'warehouse', isWarehouseManager: true }],
-      botBlocked: { $ne: true },
-    }).lean();
-    await Promise.allSettled(recipients.map((r) => sendMessageWithRetry(r.telegramId, alertMsg)));
-  } catch (err) {
-    console.warn('[Picking] Failed to notify about out-of-stock:', err?.message || err);
+    await archiveProduct(productDoc, { notifyBuyers: false, bot: null });
   }
 
   const fromBlock = typeof nextBlock === 'number' ? nextBlock : blockId;
   const { task: nextTask, wrappedAround: nwa } = await findAndLockNext(user.telegramId, fromBlock);
   const nextTaskData = await buildTaskResponse(nextTask, { wrappedAround: nwa });
 
-  res.json({ message: 'Out-of-stock recorded, managers notified', nextTask: nextTaskData });
+  res.json({ message: 'Out-of-stock recorded', nextTask: nextTaskData });
 });
 
 module.exports = router;

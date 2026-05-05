@@ -60,7 +60,7 @@ function initSocket(httpServer) {
     if (!dbUser) {
       return next(new Error('Unauthorized: User not registered'));
     }
-    if (!['admin', 'warehouse'].includes(dbUser.role)) {
+    if (!['admin', 'warehouse', 'seller'].includes(dbUser.role)) {
       return next(new Error('Forbidden: Insufficient role'));
     }
     socket.telegramId = telegramId;
@@ -115,6 +115,10 @@ function initSocket(httpServer) {
     // Lock an item — prevents others from selecting it
     // userId is taken from authenticated socket.telegramId, not from client payload
     socket.on('lock_item', ({ productId, userName }) => {
+      if (!['admin', 'warehouse'].includes(socket.userRole)) {
+        socket.emit('lock_denied', { productId, lockedBy: 'Forbidden' });
+        return;
+      }
       const userId = socket.telegramId;
       if (lockedItems.has(productId)) {
         const existing = lockedItems.get(productId);
@@ -143,6 +147,9 @@ function initSocket(httpServer) {
     // Unlock an item
     // userId is taken from authenticated socket.telegramId, not from client payload
     socket.on('unlock_item', ({ productId }) => {
+      if (!['admin', 'warehouse'].includes(socket.userRole)) {
+        return;
+      }
       const userId = socket.telegramId;
       const existing = lockedItems.get(productId);
       if (existing && existing.userId === userId) {

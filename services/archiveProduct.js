@@ -29,7 +29,6 @@ async function archiveProduct(product, { notifyBuyers = false, bot = null } = {}
   // ── 1. Reconcile active orders ─────────────────────────────────────────────
   const activeOrders = await Order.find({
     'items.productId': product._id,
-    status: { $in: ['new', 'in_progress'] },
   });
 
   let cancelledCount = 0;
@@ -55,6 +54,14 @@ async function archiveProduct(product, { notifyBuyers = false, bot = null } = {}
     }
 
     await order.save();
+
+    try {
+      const io = getIO();
+      io.emit('order_updated', {
+        orderId: String(order._id),
+        buyerTelegramId: order.buyerTelegramId,
+      });
+    } catch (_) {}
 
     if (notifyBuyers && bot) {
       await bot
