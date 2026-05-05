@@ -2,6 +2,7 @@ const express = require('express');
 const { S3Client, DeleteObjectCommand } = require('@aws-sdk/client-s3');
 const Product = require('../models/Product');
 const { shiftUp } = require('../utils/shiftOrderNumbers');
+const { getIO } = require('../socket');
 const { telegramAuth, requireTelegramRoles } = require('../middleware/telegramAuth');
 
 const router = express.Router();
@@ -104,6 +105,8 @@ router.post('/:id/restore', async (req, res) => {
   product.restoredFromArchive = true;
   product.orderNumber = restoreOrder;
   await product.save();
+
+  try { getIO().emit('incoming_updated'); } catch (_) {}
 
   res.json(product);
 });

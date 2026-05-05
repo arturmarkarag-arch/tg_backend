@@ -81,6 +81,12 @@ async function archiveProduct(product, { notifyBuyers = false, bot = null } = {}
   product.orderNumber = 0;
   await product.save();
 
+  // Notify all clients that the product catalogue changed
+  try {
+    const io = getIO();
+    io.emit('product_archived', { productId: String(product._id) });
+  } catch (_) {}
+
   // ── 4. Shift remaining products down ──────────────────────────────────────
   await shiftDown({ status: { $ne: 'archived' }, orderNumber: { $gt: oldOrderNumber } });
 

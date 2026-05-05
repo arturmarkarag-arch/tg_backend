@@ -134,11 +134,23 @@ router.get('/transit/active', staffOnly, async (req, res) => {
     const buyers = await User.find({ telegramId: { $in: buyerIds } }).lean();
     const buyerMap = buyers.reduce((acc, buyer) => ({ ...acc, [buyer.telegramId]: buyer }), {});
 
-    const enrichedOrders = orders.map((o) => ({
-      ...o,
-      buyerDetails: buyerMap[o.buyerTelegramId] || {},
-      receiptNumber: o.receiptId?.receiptNumber || '',
-    }));
+    const enrichedOrders = orders.map((o) => {
+      const buyer = buyerMap[o.buyerTelegramId] || {};
+      const snap = o.buyerSnapshot;
+      return {
+        ...o,
+        buyerDetails: {
+          telegramId: o.buyerTelegramId,
+          shopName: snap?.shopName ?? buyer.shopName ?? '',
+          shopAddress: snap?.shopAddress ?? buyer.shopAddress ?? '',
+          shopCity: snap?.shopCity ?? buyer.shopCity ?? '',
+          firstName: buyer.firstName ?? '',
+          lastName: buyer.lastName ?? '',
+          phoneNumber: buyer.phoneNumber ?? '',
+        },
+        receiptNumber: o.receiptId?.receiptNumber || '',
+      };
+    });
 
     res.json(enrichedOrders);
   } catch (error) {
@@ -252,12 +264,19 @@ router.post('/', async (req, res) => {
 
   let totalPrice = 0;
   const validItems = [];
+  const archivedItems = []; // items that exist but are already archived
 
   for (const item of items) {
     const productId = String(item?.productId || '');
     const product = productMap.get(productId);
     if (!product) continue;
-    if (!isProductAvailable(product)) continue;
+    if (!isProductAvailable(product)) {
+      archivedItems.push({
+        productId,
+        name: buildProductLabel(product),
+      });
+      continue;
+    }
 
     const quantity = Math.min(1000, Math.max(1, parseInt(item.quantity, 10) || 1));
     if (quantity <= 0) continue;
@@ -266,7 +285,7 @@ router.post('/', async (req, res) => {
 
     validItems.push({
       productId: product._id,
-      name: product.title || product.name || 'Товар',
+      name: product.brand || product.model || product.category || `#${product.orderNumber}`,
       price,
       quantity,
       packed: false,
@@ -310,6 +329,14 @@ router.post('/', async (req, res) => {
           existingOrder.items.push(newItem);
         }
       }
+
+      // Keep snapshot in sync with current buyer profile on every merge
+      existingOrder.buyerSnapshot = {
+        shopName: buyer.shopName || '',
+        shopCity: buyer.shopCity || '',
+        shopAddress: buyer.shopAddress || '',
+        deliveryGroupId: buyer.deliveryGroupId || '',
+      };
 
       existingOrder.totalPrice = existingOrder.items.reduce((sum, item) => sum + (Number(item.price || 0) * Number(item.quantity || 0)), 0);
       if (existingOrder.status === 'new' || existingOrder.status === 'in_progress') {
@@ -355,7 +382,12 @@ router.post('/', async (req, res) => {
     console.error('Failed to send order confirmation:', err?.message || err);
   });
 
-  res.status(201).json(order);
+  const responseBody = order.toObject ? order.toObject() : order;
+  if (archivedItems.length > 0) {
+    responseBody.archivedItems = archivedItems;
+  }
+
+  res.status(201).json(responseBody);
 });
 
 router.patch('/:id', async (req, res) => {

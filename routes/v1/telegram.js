@@ -205,7 +205,7 @@ router.post('/mini-app/reset-state', async (req, res) => {
     return res.status(403).json({ error: 'User not found' });
   }
 
-  res.json({ miniAppState: normalizeMiniAppState(user.miniAppState), lastBotState: user.lastBotState || null });
+  res.json({ miniAppState: normalizeMiniAppState(user.miniAppState) });
 });
 
 // POST /api/v1/telegram/register-request — заявка на реєстрацію нового користувача

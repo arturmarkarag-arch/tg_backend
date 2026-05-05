@@ -4,7 +4,7 @@ const Product = require('../models/Product');
 const Order = require('../models/Order');
 const User = require('../models/User');
 const { requireTelegramRoles } = require('../middleware/telegramAuth');
-const { getProductTitle } = require('../services/archiveProduct');
+const { archiveProduct, getProductTitle } = require('../services/archiveProduct');
 const { sendMessageWithRetry, buildPickingTasksFromOrders } = require('../telegramBot');
 
 const router = express.Router();
@@ -19,19 +19,25 @@ const router = express.Router();
  */
 async function markOrderItemsPacked(taskItems, productId) {
   const orderIds = [...new Set(taskItems.map((i) => String(i.orderId)))];
-  await Promise.allSettled(
+  await Promise.all(
     orderIds.map(async (orderId) => {
-      await Order.updateOne(
+      // Step 1: mark this product's item as packed
+      const result = await Order.updateOne(
         { _id: orderId, 'items.productId': productId },
         { $set: { 'items.$.packed': true } },
       );
-      // Auto-fulfil if every non-cancelled item is now packed
-      const order = await Order.findById(orderId).lean();
-      if (!order) return;
-      const allDone = order.items.every((item) => item.packed || item.cancelled);
-      if (allDone && ['new', 'in_progress'].includes(order.status)) {
-        await Order.findByIdAndUpdate(orderId, { $set: { status: 'fulfilled' } });
-      }
+      if (result.matchedCount === 0) return;
+
+      // Step 2: atomically fulfil if every non-cancelled item is now packed.
+      // The filter condition is evaluated by MongoDB in one operation — no race.
+      await Order.updateOne(
+        {
+          _id: orderId,
+          status: { $in: ['new', 'in_progress'] },
+          'items': { $not: { $elemMatch: { packed: false, cancelled: false } } },
+        },
+        { $set: { status: 'fulfilled' } },
+      );
     })
   );
 }
@@ -294,11 +300,17 @@ router.post('/tasks/:taskId/out-of-stock', requireTelegramRoles(['warehouse', 'a
   // Mark Order items as packed and auto-fulfil fully-packed orders
   await markOrderItemsPacked(task.items, task.productId);
 
+  // Archive the product — removes it from blocks, cancels remaining orders, notifies buyers
+  const productDoc = await Product.findById(task.productId._id || task.productId);
+  if (productDoc && productDoc.status !== 'archived') {
+    await archiveProduct(productDoc, { notifyBuyers: true, bot: null });
+  }
+
   // Notify managers & admins
   const workerName =
     [user.firstName, user.lastName].filter(Boolean).join(' ') || String(user.telegramId);
 
-  let alertMsg = `⚠️ Товар закінчився на складі!\n\nТовар: ${productTitle}\nБлок: #${blockId}\nПовідомив: ${workerName}`;
+  let alertMsg = `⚠️ Товар закінчився на складі!`;
   if (packedShops.length > 0) {
     alertMsg += `\n\n✅ Отримали (${packedShops.length}):\n` + packedShops.map((s) => `  • ${s}`).join('\n');
   }

@@ -12,6 +12,7 @@ const User = require('../models/User');
 const Order = require('../models/Order');
 const Block = require('../models/Block');
 const ReceiptItemLog = require('../models/ReceiptItemLog');
+const DeliveryGroup = require('../models/DeliveryGroup');
 const { getIO } = require('../socket');
 
 const staffOnly = requireTelegramRoles(['admin', 'warehouse']);
@@ -216,6 +217,12 @@ router.post('/:id/items', staffOnly, async (req, res) => {
     if (deliveryGroupIds === null) {
       return res.status(400).json({ error: 'Invalid deliveryGroupIds format' });
     }
+    if (deliveryGroupIds.length > 0) {
+      const existingCount = await DeliveryGroup.countDocuments({ _id: { $in: deliveryGroupIds } });
+      if (existingCount !== deliveryGroupIds.length) {
+        return res.status(400).json({ error: 'One or more deliveryGroupIds do not exist' });
+      }
+    }
     const qtyPerShop = parseIntField(parsed.fields.qtyPerShop);
 
     if (!file && !existingProductId) {
@@ -361,9 +368,19 @@ router.patch('/:id/items/:itemId', staffOnly, async (req, res) => {
     if (shelfQty < 0) return res.status(400).json({ error: 'transitQty cannot exceed totalQty' });
 
     const existingProductId = parsed.fields.existingProductId ? String(parsed.fields.existingProductId).trim() : null;
+    if (existingProductId) {
+      const exists = await Product.exists({ _id: existingProductId });
+      if (!exists) return res.status(400).json({ error: 'existingProductId does not exist' });
+    }
     const deliveryGroupIds = safeParseArray(parsed.fields.deliveryGroupIds);
     if (deliveryGroupIds === null) {
       return res.status(400).json({ error: 'Invalid deliveryGroupIds format' });
+    }
+    if (deliveryGroupIds.length > 0) {
+      const existingCount = await DeliveryGroup.countDocuments({ _id: { $in: deliveryGroupIds } });
+      if (existingCount !== deliveryGroupIds.length) {
+        return res.status(400).json({ error: 'One or more deliveryGroupIds do not exist' });
+      }
     }
     const qtyPerShop = parseIntField(parsed.fields.qtyPerShop);
 
@@ -640,6 +657,10 @@ router.post('/:id/commit', staffOnly, async (req, res) => {
       action: 'receipt_complete',
       actor: getActor(req),
     }).catch((e) => console.error('[ReceiptItemLog] receipt_complete error:', e));
+
+    // Notify warehouse board that new products are available in the incoming strip
+    try { getIO().emit('incoming_updated'); } catch (_) {}
+
     res.json({ receipt, createdProductsCount: createdProducts.length });
   } catch (err) {
     await session.abortTransaction();

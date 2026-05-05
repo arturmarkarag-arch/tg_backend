@@ -10,7 +10,7 @@ if (process.env.NODE_ENV !== 'production') {
 const http = require('http');
 const mongoose = require('mongoose');
 const app = require('./app');
-const { initBot, fixPendingReactionIndexes } = require('./telegramBot');
+const { initBot } = require('./telegramBot');
 const { initOpenAI } = require('./openaiClient');
 const { runArchiveCleanup } = require('./routes/archive');
 const { initSocket } = require('./socket');
@@ -28,7 +28,6 @@ async function startServer() {
     await mongoose.connect(MONGODB_URI, { useNewUrlParser: true, useUnifiedTopology: true });
     console.log('Connected to MongoDB');
 
-    await fixPendingReactionIndexes();
     initOpenAI(OPENAI_API_KEY);
     initBot(TELEGRAM_BOT_TOKEN);
 

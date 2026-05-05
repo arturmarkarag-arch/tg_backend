@@ -1,4 +1,4 @@
-const TelegramBot = require('node-telegram-bot-api');
+﻿const TelegramBot = require('node-telegram-bot-api');
 const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
 const sharp = require('sharp');
 const crypto = require('crypto');
@@ -12,7 +12,6 @@ const Product = require('./models/Product');
 const SearchProduct = require('./models/SearchProduct');
 const Order = require('./models/Order');
 
-const PendingReaction = require('./models/PendingReaction');
 const BotSession = require('./models/BotSession');
 const BotInteractionLog = require('./models/BotInteractionLog');
 const RegistrationRequest = require('./models/RegistrationRequest');
@@ -60,21 +59,6 @@ async function deleteSession(chatId, type, key = '') {
   await BotSession.deleteOne({ chatId: String(chatId), type, key });
 }
 
-async function getOrderInFlight(chatId) {
-  return getSession(chatId, 'order_in_flight');
-}
-
-async function startOrderInFlight(chatId) {
-  const existing = await getOrderInFlight(chatId);
-  if (existing) return false;
-  await setSession(chatId, 'order_in_flight', { startedAt: new Date() });
-  return true;
-}
-
-async function clearOrderInFlight(chatId) {
-  return deleteSession(chatId, 'order_in_flight');
-}
-
 async function updateUserBotActivity(chatId) {
   try {
     await User.findOneAndUpdate(
@@ -88,34 +72,16 @@ async function updateUserBotActivity(chatId) {
   } catch (_) {}
 }
 
-async function persistUserBotState(chatId, state) {
-  try {
-    await User.findOneAndUpdate(
-      { telegramId: String(chatId) },
-      { $set: state },
-      { new: true }
-    );
-  } catch (_) {}
-}
-
 async function getReceiveState(chatId) {
-  const user = await User.findOne({ telegramId: String(chatId) }).lean();
-  return user?.lastBotState?.receive ?? null;
+  return getSession(chatId, 'receive');
 }
 
 async function setReceiveState(chatId, state) {
-  await User.findOneAndUpdate(
-    { telegramId: String(chatId) },
-    { $set: { 'lastBotState.receive': state } },
-    { new: true }
-  );
+  await setSession(chatId, 'receive', state);
 }
 
 async function clearReceiveState(chatId) {
-  await User.findOneAndUpdate(
-    { telegramId: String(chatId) },
-    { $unset: { 'lastBotState.receive': 1 } }
-  );
+  await deleteSession(chatId, 'receive');
 }
 
 async function markUserBotBlocked(chatId) {
@@ -398,7 +364,7 @@ async function handleMyChatMemberUpdate(update) {
     if (!chatId || !newStatus) return;
 
     if (newStatus === 'kicked') {
-      await markUserBotBlocked(chatId);
+      await handleBotBlocked(chatId);
       await logBotInteraction(chatId, 'system', 'my_chat_member', 'kicked', { payload });
       return;
     }
@@ -441,12 +407,6 @@ async function isChatAdmin(chatId, userId) {
   }
 }
 
-const SHELF_PAGE_SIZE = 5;
-const SHOP_PREFETCH_COUNT = 8;
-const SHOP_PREFETCH_THRESHOLD = 5;
-const shopPhotoBufferCache = new Map();
-const shopPhotoBufferFetchPromises = new Map();
-
 const SERVER_BASE_URL = process.env.SERVER_BASE_URL || (process.env.NODE_ENV === 'production' ? null : `http://localhost:${process.env.PORT || 5000}`);
 const WEB_APP_URL = process.env.WEB_APP_URL || 'http://localhost:5173/mini-app';
 const ALLOWED_TELEGRAM_GROUP_IDS = (process.env.TELEGRAM_ALLOWED_GROUP_IDS || '')
@@ -476,20 +436,9 @@ let status = {
 
 const roleCommands = {
   seller: [
-    //'/help - Показати доступні команди',
-    '/profile - Мій профіль',
-    '/miniapp - Відкрити товари',
-    // '/shelf - Переглянути товари у вигляді списку',
-    '/shop - Переглянути товари в одному товарі з навігацією',
-    // '/mylist - Переглянути обрані товари',
-    // '/order - Оформити замовлення з обраних товарів',
+    '/miniapp - Відкрити товари та зробити замовлення',
   ],
   warehouse: [
-    //'/help - Показати доступні команди',
-    //'/profile - Мій профіль',
-    '/receive - Прийняти товар на склад',
-    //'/ship - Переглянути замовлення для відвантаження',
-    '/pick - Почати чергу підбору',
     '/miniapp - Відкрити склад',
   ],
   admin: [
@@ -513,21 +462,10 @@ async function sendRegistrationApprovedMessage(chatId, role) {
 
 const roleBotCommands = {
   seller: [
-    //{ command: '/shelf', description: 'Переглянути товари' },
-    { command: '/miniapp', description: 'Відкрити товари в додатку' },
-    { command: '/shop', description: 'Переглянути товари в телеграмі' },
-    //{ command: '/mylist', description: 'Обрані товари' },
-    //{ command: '/order', description: 'Оформити замовлення' },
-    //{ command: '/help', description: 'Показати доступні команди' },
-    //{ command: '/profile', description: 'Мій профіль' },
+    { command: '/miniapp', description: 'Товари та замовлення' },
   ],
   warehouse: [
-    { command: '/receive', description: 'Прийняти товар на склад' },
-    //{ command: '/ship', description: 'Замовлення для відвантаження' },
-    { command: '/pick', description: 'Почати чергу підбору' },
     { command: '/miniapp', description: 'Відкрити склад' },
-    //{ command: '/help', description: 'Показати доступні команди' },
-    //{ command: '/profile', description: 'Мій профіль' },
   ],
   admin: [
     { command: '/miniapp', description: 'Відкрити Адмінку' },
@@ -587,635 +525,83 @@ function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function trimShopPhotoCache() {
-  while (shopPhotoBufferCache.size > SHOP_PREFETCH_COUNT) {
-    const oldestKey = shopPhotoBufferCache.keys().next().value;
-    shopPhotoBufferCache.delete(oldestKey);
-  }
-}
-
-async function cacheShopPhotoBuffer(product) {
-  if (!product || product.telegramFileId) return null;
-  const photoUrl = getPhotoUrl(product.imageUrls?.[0]);
-  if (!photoUrl) return null;
-
-  const productId = String(product._id);
-  if (shopPhotoBufferCache.has(productId)) {
-    return shopPhotoBufferCache.get(productId);
-  }
-  if (shopPhotoBufferFetchPromises.has(productId)) {
-    return shopPhotoBufferFetchPromises.get(productId);
-  }
-
-  const promise = (async () => {
-    try {
-      const buffer = await fetchPhotoBuffer(photoUrl);
-      shopPhotoBufferCache.set(productId, buffer);
-      trimShopPhotoCache();
-      return buffer;
-    } catch (error) {
-      return null;
-    } finally {
-      shopPhotoBufferFetchPromises.delete(productId);
-    }
-  })();
-
-  shopPhotoBufferFetchPromises.set(productId, promise);
-  return promise;
-}
-
-function countCachedShopPhotos(productIds = [], currentIndex = 0) {
-  if (!Array.isArray(productIds) || !productIds.length) return 0;
-
-  const start = currentIndex + 1;
-  const end = Math.min(productIds.length, start + SHOP_PREFETCH_COUNT);
-  let count = 0;
-
-  for (let i = start; i < end; i += 1) {
-    const id = productIds[i];
-    if (id && shopPhotoBufferCache.has(String(id))) {
-      count += 1;
-    }
-  }
-
-  return count;
-}
-
-async function preloadShopPhotos(productIds = [], currentIndex = 0) {
-  if (!Array.isArray(productIds) || !productIds.length) return;
-
-  const start = currentIndex + 1;
-  const end = Math.min(productIds.length, start + SHOP_PREFETCH_COUNT);
-  const idsToLoad = [];
-  for (let i = start; i < end; i += 1) {
-    const id = productIds[i];
-    if (!id || shopPhotoBufferCache.has(String(id))) continue;
-    idsToLoad.push(String(id));
-  }
-
-  if (!idsToLoad.length) return;
-
-  const products = await Product.find({ _id: { $in: idsToLoad } }).lean();
-  const productsById = new Map(products.map((p) => [String(p._id), p]));
-
-  await Promise.allSettled(
-    idsToLoad.map((id) => cacheShopPhotoBuffer(productsById.get(id)))
+function isBotBlockedError(error) {
+  const code = error?.response?.statusCode || error?.response?.body?.error_code;
+  const desc = String(error?.response?.body?.description || error?.message || '').toLowerCase();
+  return (
+    code === 403 ||
+    desc.includes('bot was blocked') ||
+    desc.includes('user is deactivated') ||
+    desc.includes('chat not found')
   );
-}
-
-async function ensureShopPhotoBuffer(productIds = [], currentIndex = 0) {
-  if (!Array.isArray(productIds) || !productIds.length) return;
-
-  const start = currentIndex + 1;
-  const end = Math.min(productIds.length, start + SHOP_PREFETCH_COUNT);
-  const totalWindow = Math.max(0, end - start);
-  const cachedAhead = countCachedShopPhotos(productIds, currentIndex);
-
-  if (cachedAhead < totalWindow || cachedAhead <= SHOP_PREFETCH_THRESHOLD) {
-    await preloadShopPhotos(productIds, currentIndex);
-  }
-}
-
-function isLocalUrl(photoUrl) {
-  try {
-    const parsed = new URL(photoUrl);
-    return ['localhost', '127.0.0.1', '::1'].includes(parsed.hostname);
-  } catch {
-    return false;
-  }
-}
-
-async function fetchPhotoBuffer(photoUrl) {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 5000);
-
-  try {
-    const response = await fetch(photoUrl, { signal: controller.signal });
-    if (!response.ok) {
-      throw new Error(`Failed to fetch image: ${response.statusText}`);
-    }
-    const arrayBuffer = await response.arrayBuffer();
-    return Buffer.from(arrayBuffer);
-  } catch (error) {
-    if (error.name === 'AbortError') {
-      throw new Error('Local image fetch timed out');
-    }
-    throw error;
-  } finally {
-    clearTimeout(timeout);
-  }
 }
 
 async function sendMessageWithRetry(chatId, text, options = {}, attempts = 3) {
   try {
-    const result = await bot.sendMessage(chatId, text, options);
-    await updateUserBotActivity(chatId);
-    return result;
+    return await bot.sendMessage(chatId, text, options);
   } catch (error) {
-    const errCode = error?.response?.body?.error_code;
-    const description = error?.response?.body?.description || '';
-    if (errCode === 403 && description.toLowerCase().includes('blocked')) {
-      await markUserBotBlocked(chatId);
-    }
-    const retryAfter = Number(error?.response?.body?.parameters?.retry_after || 0);
-    if (attempts > 0 && errCode === 429) {
-      const delayMs = (retryAfter || 2) * 1000;
-      console.warn(`Telegram 429 on sendMessage, retrying after ${delayMs}ms (${attempts - 1} attempts left)`);
-      await delay(delayMs);
+    const code = error?.response?.statusCode || error?.code;
+    if (attempts > 1 && (code === 429 || code === 'ETELEGRAM') && !isBotBlockedError(error)) {
+      const retryAfter = error?.response?.body?.parameters?.retry_after || 5;
+      await delay(retryAfter * 1000);
       return sendMessageWithRetry(chatId, text, options, attempts - 1);
     }
-    throw error;
-  }
-}
-
-async function sendAdminNotification(message, requestId) {
-  try {
-    const admins = await User.find({ role: 'admin' }).lean();
-    if (!admins.length) {
-      console.warn('[Bot] No admins found to notify about registration request');
-      return;
+    if (isBotBlockedError(error)) {
+      handleBotBlocked(String(chatId)).catch((err) => {
+        console.error('[Bot] handleBotBlocked threw unexpectedly:', err.message);
+      });
     }
-
-    const replyMarkup = requestId
-      ? {
-          inline_keyboard: [[
-            { text: '✅ Підтвердити', callback_data: `regreq_approve:${requestId}` },
-            { text: '❌ Відхилити', callback_data: `regreq_reject:${requestId}` },
-          ]],
-        }
-      : undefined;
-
-    await Promise.all(
-      admins.map(async (admin) => {
-        if (!admin.telegramId) return;
-        try {
-          await sendMessageWithRetry(admin.telegramId, message, replyMarkup ? { reply_markup: replyMarkup } : {});
-        } catch (error) {
-          console.warn('[Bot] Failed to notify admin', admin.telegramId, error.message || error);
-        }
-      })
-    );
-  } catch (error) {
-    console.error('[Bot] sendAdminNotification failed:', error.message || error);
-  }
-}
-
-async function sendOrderConfirmation(chatId, itemCount, totalPrice, orderId) {
-  if (!chatId) return null;
-
-  const message = 'Замовлення сформовано!';
-
-  try {
-    return await sendMessageWithRetry(chatId, message);
-  } catch (err) {
-    console.warn('Не вдалося надіслати підтвердження замовлення:', err?.message || err);
-    return null;
+    throw error;
   }
 }
 
 async function sendPhotoWithRetry(chatId, photo, options = {}, attempts = 3) {
   try {
-    const result = await bot.sendPhoto(chatId, photo, options);
-    await updateUserBotActivity(chatId);
-    return result;
+    return await bot.sendPhoto(chatId, photo, options);
   } catch (error) {
-    const errCode = error?.response?.body?.error_code;
-    const description = error?.response?.body?.description || '';
-    if (errCode === 403 && description.toLowerCase().includes('blocked')) {
-      await markUserBotBlocked(chatId);
-    }
-    const retryAfter = Number(error?.response?.body?.parameters?.retry_after || 0);
-    if (attempts > 0 && errCode === 429) {
-      const delayMs = (retryAfter || 2) * 1000;
-      console.warn(`Telegram 429 on sendPhoto, retrying after ${delayMs}ms (${attempts - 1} attempts left)`);
-      await delay(delayMs);
+    const code = error?.response?.statusCode || error?.code;
+    if (attempts > 1 && (code === 429 || code === 'ETELEGRAM')) {
+      const retryAfter = error?.response?.body?.parameters?.retry_after || 5;
+      await delay(retryAfter * 1000);
       return sendPhotoWithRetry(chatId, photo, options, attempts - 1);
     }
     throw error;
   }
 }
 
-async function sendShelfProducts(chatId, page = 0) {
-  let products = await Product.find({ status: 'active' }).sort({ orderNumber: 1 }).lean();
-  products = products.map((product) => ({
-    ...product,
-    name: product.brand || product.model || product.category || `#${product.orderNumber}`,
-  }));
-  if (!products.length) {
-    await bot.sendMessage(chatId, 'Активних товарів на складі поки що немає.');
-    return;
+async function handleBotBlocked(telegramId) {
+  try {
+    await User.findOneAndUpdate({ telegramId: String(telegramId) }, { botBlocked: true });
+    const blockedUser = await User.findOne({ telegramId: String(telegramId) }).lean();
+    const name = [blockedUser?.firstName, blockedUser?.lastName].filter(Boolean).join(' ') || telegramId;
+    const roleLabels = { seller: 'Продавець', warehouse: 'Склад', admin: 'Адмін' };
+    const roleLabel = roleLabels[blockedUser?.role] || blockedUser?.role || 'Невідома роль';
+    const shopParts = [blockedUser?.shopName, blockedUser?.shopCity].filter(Boolean);
+    const lines = [`⛔ БОТ ЗАБЛОКОВАНО!`, `${roleLabel}: ${name}`];
+    if (shopParts.length) lines.push(`Магазин: ${shopParts.join(', ')}`);
+    lines.push(`заблокував бота.`);
+    const admins = await User.find({ role: 'admin' }, 'telegramId').lean();
+    const adminIds = admins.map((a) => a.telegramId).filter(Boolean);
+    console.log(`[Bot] Bot blocked by ${telegramId} (${name}). Notifying admins: [${adminIds.join(', ')}]`);
+    await sendAdminNotification(lines.join('\n'));
+    console.log(`[Bot] Admin notification sent for blocked user ${telegramId}`);
+  } catch (err) {
+    console.error('[Bot] handleBotBlocked failed:', err.message, err.stack);
   }
+}
 
-  const user = await User.findOne({ telegramId: chatId });
-  const persistentShelfPage = user?.lastBotState?.shelf?.page;
-  const effectivePage = arguments.length === 0 && Number.isInteger(persistentShelfPage)
-    ? persistentShelfPage
-    : page;
-
-  // Delete previous shelf messages first
-  const prev = await getSession(chatId, 'shelf');
-  if (prev?.messageIds?.length) {
-    await deleteShelfMessages(chatId, prev.messageIds);
-  }
-
-  const totalPages = Math.ceil(products.length / SHELF_PAGE_SIZE);
-  const safePage = Math.max(0, Math.min(effectivePage, totalPages - 1));
-  const pageProducts = products.slice(safePage * SHELF_PAGE_SIZE, (safePage + 1) * SHELF_PAGE_SIZE);
-
-  const sentIds = [];
-
-  for (const product of pageProducts) {
-    const caption = `📦 #${product.orderNumber} — ${getProductTitle(product)}\n💰 ${product.price} zł | 📦 ${product.quantityPerPackage || '?'} шт/уп`;
-    const photoUrl = getPhotoUrl(product.imageUrls?.[0]);
-
-    const qtyButtons = [
-      { text: '1️⃣', callback_data: `sq:${product._id}:1` },
-      { text: '2️⃣', callback_data: `sq:${product._id}:2` },
-      { text: '3️⃣', callback_data: `sq:${product._id}:3` },
-      { text: '4️⃣', callback_data: `sq:${product._id}:4` },
-      { text: '5️⃣', callback_data: `sq:${product._id}:5` },
-    ];
-    const replyMarkup = { inline_keyboard: [qtyButtons] };
-
+async function sendAdminNotification(text) {
+  const admins = await User.find({ role: 'admin' }, 'telegramId').lean();
+  const adminIds = admins.map((a) => a.telegramId).filter(Boolean);
+  for (const adminId of adminIds) {
     try {
-      let sent;
-      if (photoUrl) {
-        const sendOpts = { caption, filename: 'photo.jpg', reply_markup: replyMarkup };
-        if (isLocalUrl(photoUrl)) {
-          const buffer = await fetchPhotoBuffer(photoUrl);
-          const labeled = await addLabelsToImage(buffer, product.price, product.quantityPerPackage);
-          sent = await sendPhotoWithRetry(chatId, labeled, sendOpts);
-        } else {
-          const res = await fetch(photoUrl, { signal: AbortSignal.timeout(10000) });
-          if (!res.ok) throw new Error(`Failed to fetch image: ${res.statusText}`);
-          const buffer = Buffer.from(await res.arrayBuffer());
-          const labeled = await addLabelsToImage(buffer, product.price, product.quantityPerPackage);
-          sent = await sendPhotoWithRetry(chatId, labeled, sendOpts);
-        }
-      } else {
-        sent = await bot.sendMessage(chatId, caption, { reply_markup: replyMarkup });
-      }
-
-      if (sent?.message_id) {
-        sentIds.push(sent.message_id);
-        // Save message ID for reply-to matching
-        await Product.findByIdAndUpdate(product._id, {
-          $addToSet: { telegramMessageIds: String(sent.message_id) },
-        });
-      }
-
-      await delay(300);
-    } catch (error) {
-      console.error('Failed to send shelf product', product._id, error);
+      await bot.sendMessage(adminId, text);
+    } catch (err) {
+      console.warn('[Bot] sendAdminNotification failed for', adminId, err.message);
     }
   }
-
-  // Send navigation bar
-  const navButtons = [];
-  if (safePage > 0) navButtons.push({ text: '◀️ Назад', callback_data: `shelf_prev:${safePage}` });
-  navButtons.push({ text: `${safePage + 1} / ${totalPages}`, callback_data: 'noop' });
-  if (safePage < totalPages - 1) navButtons.push({ text: 'Далі ▶️', callback_data: `shelf_next:${safePage}` });
-
-  const bottomButtons = [];
-  bottomButtons.push(navButtons);
-  // shelf action buttons disabled
-
-  const navMsg = await bot.sendMessage(chatId, `Товари ${safePage * SHELF_PAGE_SIZE + 1}–${safePage * SHELF_PAGE_SIZE + pageProducts.length} з ${products.length}`, {
-    reply_markup: { inline_keyboard: bottomButtons },
-  });
-  sentIds.push(navMsg.message_id);
-
-  await setSession(chatId, 'shelf', {
-    page: safePage,
-    messageIds: sentIds,
-  });
-  await persistUserBotState(chatId, {
-    'lastBotState.shelf': {
-      page: safePage,
-      updatedAt: new Date(),
-    },
-  });
 }
 
-async function deleteShelfMessages(chatId, messageIds) {
-  for (const msgId of messageIds) {
-    try {
-      await bot.deleteMessage(chatId, msgId);
-    } catch (_) { /* message may already be deleted */ }
-  }
-}
-
-function buildShopCaption(product, currentIndex, totalProducts) {
-  return [
-    `📦 #${product.orderNumber || 'N/A'} — ${getProductTitle(product)}`,
-    `💰 ${product.price || 0} zł`,
-    `📦 В упаковці: ${product.quantityPerPackage || '?'} шт`,
-    '',
-    `${currentIndex + 1} / ${totalProducts}`,
-  ].join('\n');
-}
-
-function buildShopKeyboard(productId, currentIndex, totalPages, selectedQty = 0, pendingCount = 0) {
-  const qtyLabels = ['1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣'];
-  const qtyRow = qtyLabels.map((label, idx) => {
-    const qty = idx + 1;
-    return {
-      text: qty === selectedQty ? `✅ ${label}` : label,
-      callback_data: `shop_qty:${productId}:${qty}`,
-    };
-  });
-
-  const navRow = [];
-  if (currentIndex > 0) navRow.push({ text: '◀️ Назад', callback_data: `shop_prev:${currentIndex}` });
-  navRow.push({ text: `${currentIndex + 1}/${totalPages}`, callback_data: 'noop' });
-  if (currentIndex < totalPages - 1) navRow.push({ text: 'Далі ▶️', callback_data: `shop_next:${currentIndex}` });
-
-  const actionRow = [
-    { text: `🛒 Мій список (${pendingCount})`, callback_data: 'shop_mylist' },
-    { text: '✅ Оформити', callback_data: 'shop_order' },
-  ];
-
-  const resetRow = [
-    { text: '🔄 Скинути стан', callback_data: 'shop_reset' },
-  ];
-
-  const keyboard = [qtyRow];
-  if (navRow.length) keyboard.push(navRow);
-  if (actionRow.length) keyboard.push(actionRow);
-  keyboard.push(resetRow);
-  return { inline_keyboard: keyboard };
-}
-
-async function deleteShopMessage(chatId, messageId) {
-  try {
-    await bot.deleteMessage(chatId, messageId);
-  } catch (_) { /* message may already be deleted */ }
-}
-
-async function setShopMenuButton(chatId, label = 'Товари', resetSession = false) {
-  const prev = await getSession(chatId, 'shop');
-  if (prev?.menuMessageId) {
-    await deleteShopMessage(chatId, prev.menuMessageId);
-  }
-
-  if (prev) {
-    const newSession = { ...prev };
-    delete newSession.menuMessageId;
-    delete newSession.menuLabel;
-    if (Object.keys(newSession).length === 0) {
-      await deleteSession(chatId, 'shop');
-    } else {
-      await setSession(chatId, 'shop', newSession);
-    }
-  }
-
-  if (resetSession) {
-    await persistUserBotState(chatId, { 'lastBotState.shop': null });
-  }
-
-  return null;
-}
-
-async function deleteShopMenuMessage(chatId, session) {
-  if (!session?.menuMessageId) return;
-  await deleteShopMessage(chatId, session.menuMessageId);
-}
-
-async function upsertPendingReaction(chatId, messageId, productId, quantity) {
-  const doc = {
-    sellerTelegramId: chatId,
-    productId,
-    messageId,
-    chatId,
-    emoji: `x${quantity}`,
-    quantity,
-  };
-
-  try {
-    return await PendingReaction.findOneAndUpdate(
-      { sellerTelegramId: chatId, productId },
-      doc,
-      { upsert: true, new: true, setDefaultsOnInsert: true }
-    );
-  } catch (error) {
-    if (error.code === 11000) {
-      return await PendingReaction.findOneAndUpdate(
-        { sellerTelegramId: chatId, productId },
-        doc,
-        { upsert: true, new: true, setDefaultsOnInsert: true }
-      );
-    }
-    throw error;
-  }
-}
-
-async function fixPendingReactionIndexes() {
-  try {
-    const collection = PendingReaction.collection;
-    const indexes = await collection.indexes();
-    const oldIndex = indexes.find((idx) => idx.name === 'sellerTelegramId_1_messageId_1');
-    if (oldIndex) {
-      await collection.dropIndex(oldIndex.name);
-      console.log('[Bot] Dropped legacy PendingReaction index:', oldIndex.name);
-    }
-
-    const duplicates = await collection.aggregate([
-      {
-        $group: {
-          _id: { sellerTelegramId: '$sellerTelegramId', productId: '$productId' },
-          ids: { $push: { id: '$_id', updatedAt: '$updatedAt' } },
-          count: { $sum: 1 },
-        },
-      },
-      { $match: { count: { $gt: 1 } } },
-    ]).toArray();
-
-    for (const dup of duplicates) {
-      dup.ids.sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
-      const removeIds = dup.ids.slice(1).map((item) => item.id);
-      if (removeIds.length) {
-        await collection.deleteMany({ _id: { $in: removeIds } });
-        console.log('[Bot] Removed duplicate PendingReaction docs for', dup._id);
-      }
-    }
-
-    await collection.createIndex({ sellerTelegramId: 1, productId: 1 }, { unique: true });
-    console.log('[Bot] Ensured PendingReaction index: sellerTelegramId_1_productId_1');
-  } catch (error) {
-    console.warn('[Bot] Failed to fix PendingReaction indexes:', error?.message || error);
-  }
-}
-
-async function getPendingQuantity(chatId, productId) {
-  if (!productId) return 0;
-  const pending = await PendingReaction.findOne({ sellerTelegramId: chatId, productId });
-  return pending?.quantity || 0;
-}
-
-async function makeProductMedia(product, caption) {
-  const photoUrl = getPhotoUrl(product.imageUrls?.[0]);
-  if (product.telegramFileId) {
-    return { type: 'photo', media: product.telegramFileId, caption, isBuffer: false };
-  }
-  if (!photoUrl) {
-    return null;
-  }
-
-  const buffer = await cacheShopPhotoBuffer(product);
-  if (buffer) {
-    return { type: 'photo', media: buffer, caption, isBuffer: true };
-  }
-
-  return { type: 'photo', media: photoUrl, caption, isBuffer: false };
-}
-
-async function sendShopMedia(chatId, product, caption, replyMarkup) {
-  const media = await makeProductMedia(product, caption);
-  if (!media) {
-    return await bot.sendMessage(chatId, caption, { reply_markup: replyMarkup });
-  }
-
-  const sendOpts = { caption, reply_markup: replyMarkup };
-  if (media.isBuffer) {
-    sendOpts.filename = 'shop.jpg';
-  }
-
-  try {
-    const sent = await bot.sendPhoto(chatId, media.media, sendOpts);
-    if (sent?.photo?.length && !product.telegramFileId) {
-      const fileId = sent.photo[sent.photo.length - 1].file_id;
-      await Product.findByIdAndUpdate(product._id, { telegramFileId: fileId }).catch(() => {});
-    }
-    return sent;
-  } catch (error) {
-    const isBadFileIdentifier = error?.response?.body?.description?.toLowerCase().includes('wrong file identifier')
-      || error?.response?.body?.description?.toLowerCase().includes('wrong file identifier/http url specified');
-
-    if (isBadFileIdentifier && product.telegramFileId) {
-      console.warn('[Bot] Invalid Telegram file_id, clearing product.telegramFileId and retrying', product._id, product.telegramFileId);
-      await Product.findByIdAndUpdate(product._id, { $unset: { telegramFileId: '' } }).catch(() => {});
-      const fallbackMedia = await makeProductMedia({ ...product, telegramFileId: '' }, caption);
-      if (fallbackMedia) {
-        const fallbackOpts = { caption, reply_markup: replyMarkup };
-        if (fallbackMedia.isBuffer) fallbackOpts.filename = 'shop.jpg';
-        const sent = await bot.sendPhoto(chatId, fallbackMedia.media, fallbackOpts);
-        if (sent?.photo?.length) {
-          const fileId = sent.photo[sent.photo.length - 1].file_id;
-          await Product.findByIdAndUpdate(product._id, { telegramFileId: fileId }).catch(() => {});
-        }
-        return sent;
-      }
-    }
-
-    throw error;
-  }
-}
-
-async function updateShopMessage(chatId, msgId, product, caption, replyMarkup) {
-  const media = await makeProductMedia(product, caption);
-  if (!media) {
-    return await bot.editMessageText(caption, { chat_id: chatId, message_id: msgId, reply_markup: replyMarkup });
-  }
-
-  if (media.isBuffer) {
-    const attachName = 'photo';
-    const [formData] = bot._formatSendData(attachName, media.media, { filename: 'shop.jpg', contentType: 'image/jpeg' });
-    const payload = { type: 'photo', media: `attach://${attachName}`, caption: media.caption };
-    const opts = {
-      qs: {
-        chat_id: chatId,
-        message_id: msgId,
-        reply_markup: JSON.stringify(replyMarkup),
-        media: JSON.stringify(payload),
-      },
-      formData,
-    };
-
-    try {
-      const updated = await bot._request('editMessageMedia', opts);
-      if (updated?.photo?.length && !product.telegramFileId) {
-        const fileId = updated.photo[updated.photo.length - 1].file_id;
-        await Product.findByIdAndUpdate(product._id, { telegramFileId: fileId }).catch(() => {});
-      }
-      return updated;
-    } catch (error) {
-      console.warn('editMessageMedia buffer failed, falling back to sendPhoto', error?.message || error);
-      const sent = await bot.sendPhoto(chatId, media.media, { caption: media.caption, reply_markup: replyMarkup, filename: 'shop.jpg' });
-      if (sent?.photo?.length && !product.telegramFileId) {
-        const fileId = sent.photo[sent.photo.length - 1].file_id;
-        await Product.findByIdAndUpdate(product._id, { telegramFileId: fileId }).catch(() => {});
-      }
-      try {
-        await bot.deleteMessage(chatId, msgId);
-      } catch (_) {}
-      return sent;
-    }
-  }
-
-  return await bot.editMessageMedia(media, { chat_id: chatId, message_id: msgId, reply_markup: replyMarkup });
-}
-
-async function sendShopProducts(chatId, index = 0, forceIndex = false) {
-  let products = await Product.find({ status: 'active' }).sort({ orderNumber: 1 }).lean();
-  products = products.map((product) => ({
-    ...product,
-    name: product.brand || product.model || product.category || `#${product.orderNumber}`,
-  }));
-  if (!products.length) {
-    await bot.sendMessage(chatId, 'Активних товарів на складі поки що немає.');
-    return;
-  }
-
-  const prev = await getSession(chatId, 'shop');
-  const user = await User.findOne({ telegramId: chatId });
-  if (prev?.messageId) {
-    await deleteShopMessage(chatId, prev.messageId);
-  }
-  if (prev?.menuMessageId) {
-    await deleteShopMessage(chatId, prev.menuMessageId);
-  }
-
-  const totalProducts = products.length;
-  const persistentShopIndex = user?.lastBotState?.shop?.currentIndex;
-  const explicitIndex = arguments.length >= 2;
-  const desiredIndex = forceIndex || explicitIndex
-    ? index
-    : (prev?.currentIndex != null && Number.isInteger(prev.currentIndex))
-      ? prev.currentIndex
-      : (Number.isInteger(persistentShopIndex) ? persistentShopIndex : index);
-  const safeIndex = Math.max(0, Math.min(desiredIndex, totalProducts - 1));
-  const product = products[safeIndex];
-  const caption = buildShopCaption(product, safeIndex, totalProducts);
-  const photoUrl = getPhotoUrl(product.imageUrls?.[0]);
-  const pendingCount = await PendingReaction.countDocuments({ sellerTelegramId: chatId });
-  const selectedQty = await getPendingQuantity(chatId, product._id);
-  const replyMarkup = buildShopKeyboard(String(product._id), safeIndex, totalProducts, selectedQty, pendingCount);
-
-  try {
-    const productIds = products.map((p) => String(p._id));
-    const preloadPromise = ensureShopPhotoBuffer(productIds, safeIndex);
-    const sent = await sendShopMedia(chatId, product, caption, replyMarkup);
-    if (sent?.message_id) {
-      await setSession(chatId, 'shop', {
-        productIds,
-        currentIndex: safeIndex,
-        messageId: String(sent.message_id),
-        hasPhoto: Boolean(product.telegramFileId || photoUrl),
-      });
-      await persistUserBotState(chatId, {
-        'lastBotState.shop': {
-          productIds,
-          currentIndex: safeIndex,
-          updatedAt: new Date(),
-        },
-      });
-      await setShopMenuButton(chatId, 'Товари');
-    }
-    preloadPromise.catch(() => {});
-  } catch (error) {
-    console.error('Failed to send shop message', product._id, error);
-  }
-}
 
 async function addLabelsToImage(inputBuffer, price, quantityPerPackage) {
   const meta = await sharp(inputBuffer).metadata();
@@ -1411,8 +797,6 @@ async function handleReceiveStep(chatId, msg, state) {
 
       const product = new Product({
         orderNumber: nextOrderNumber,
-        name: `Новий товар #${nextOrderNumber}`,
-        description: '',
         price: state.price,
         quantity: state.quantity,
         quantityPerPackage: state.quantityPerPackage,
@@ -1572,7 +956,7 @@ async function buildPickingTasksFromOrders() {
       };
       group.items.push({
         orderId: order._id,
-        shopName: buyer?.shopName || 'невідомий магазин',
+        shopName: order.buyerSnapshot?.shopName || buyer?.shopName || 'невідомий магазин',
         quantity: item.quantity || 0,
         packed: false,
       });
@@ -2086,7 +1470,10 @@ async function shipOrders(chatId) {
       }
 
       const entries = productMap.get(pid).entries;
-      const existingEntry = entries.find((e) => e.buyerTelegramId === order.buyerTelegramId);
+      const snapshotShopName = order.buyerSnapshot?.shopName || buyer?.shopName || 'не вказано';
+      const existingEntry = entries.find(
+        (e) => e.buyerTelegramId === order.buyerTelegramId && e.shopName === snapshotShopName
+      );
 
       if (existingEntry) {
         existingEntry.quantity += item.quantity;
@@ -2099,7 +1486,7 @@ async function shipOrders(chatId) {
         entries.push({
           buyerTelegramId: order.buyerTelegramId,
           orderIds: [String(order._id)],
-          shopName: buyer?.shopName || 'не вказано',
+          shopName: snapshotShopName,
           buyerName,
           address,
           quantity: item.quantity,
@@ -2265,9 +1652,6 @@ async function initBot(token) {
       const user = await User.findOne({ telegramId: chatId });
       if (user) {
         updateUserBotActivity(chatId).catch(() => {});
-        if (messageText === 'товари' || messageText === 'продовжити замовлення') {
-          await logBotInteraction(chatId, 'reply', messageText, messageText);
-        }
       }
 
       if (isGroupChat && !isAuthorizedGroup(chatId)) {
@@ -2318,17 +1702,6 @@ async function initBot(token) {
             }
           }
         }
-      }
-
-      // Step-by-step /receive flow takes priority (but not for other commands)
-      const rState = user?.lastBotState?.receive ?? null;
-      if (rState && !text.startsWith('/')) {
-        await handleReceiveStep(chatId, msg, rState);
-        return;
-      }
-      // Cancel receive flow if user sends any other command
-      if (rState && text.startsWith('/') && text !== '/receive') {
-        await clearReceiveState(chatId);
       }
 
       if (msg.photo?.length && isBarcodeLookupCaption(msg.caption || '')) {
@@ -2458,28 +1831,6 @@ ${buildProductInfoText(product)}`;
           chatId,
           `Привіт, ${user.firstName || 'користувачу'}! Ви зайшли як ${user.role}.\n\n${buildRoleHelp(user.role)}`
         );
-        await setShopMenuButton(chatId, user.role === 'warehouse' ? 'Склад' : 'Товари');
-        return;
-      }
-
-      if (text === '/help') {
-        if (!user) {
-          await bot.sendMessage(chatId, getUnknownUserMessage());
-          return;
-        }
-
-        await bot.sendMessage(chatId, buildRoleHelp(user.role));
-        await setShopMenuButton(chatId, user.role === 'warehouse' ? 'Склад' : 'Товари');
-        return;
-      }
-
-      if (text === '/profile') {
-        if (!user) {
-          await bot.sendMessage(chatId, getUnknownUserMessage());
-          return;
-        }
-
-        await bot.sendMessage(chatId, buildProfileMessage(user));
         return;
       }
 
@@ -2505,100 +1856,7 @@ ${buildProductInfoText(product)}`;
         return;
       }
 
-      /*
-      if (text === '/shelf') {
-        if (!user) {
-          await bot.sendMessage(chatId, getUnknownUserMessage());
-          return;
-        }
 
-        if (user.role !== 'seller') {
-          await bot.sendMessage(chatId, 'Ця команда доступна лише продавцю. Використайте /help, щоб побачити доступні команди.');
-          return;
-        }
-
-        await sendShelfProducts(chatId);
-        return;
-      }
-      */
-
-      if (text === '/shop' || messageText === 'товари' || messageText === 'продовжити замовлення') {
-        if (!user) {
-          await bot.sendMessage(chatId, getUnknownUserMessage());
-          return;
-        }
-
-        if (user.role !== 'seller') {
-          await bot.sendMessage(chatId, 'Ця команда доступна лише продавцю. Використайте /help, щоб побачити доступні команди.');
-          return;
-        }
-
-        await sendShopProducts(chatId);
-        return;
-      }
-
-      if (text === '/receive') {
-        if (!user) {
-          await bot.sendMessage(chatId, getUnknownUserMessage());
-          return;
-        }
-
-        if (user.role !== 'warehouse') {
-          await bot.sendMessage(chatId, 'Ця команда доступна лише складу. Використайте /help, щоб побачити доступні команди.');
-          return;
-        }
-
-        await setReceiveState(chatId, { step: 'await_photo' });
-        await bot.sendMessage(chatId, 'Надішліть фото нового товару:');
-        return;
-      }
-
-      if (text === '/ship') {
-        if (!user) {
-          await bot.sendMessage(chatId, getUnknownUserMessage());
-          return;
-        }
-
-        if (user.role !== 'warehouse') {
-          await bot.sendMessage(chatId, 'Ця команда доступна лише складу. Використайте /help, щоб побачити доступні команди.');
-          return;
-        }
-
-        await shipOrders(chatId);
-        return;
-      }
-
-      if (text === '/pick') {
-        if (!user) {
-          await bot.sendMessage(chatId, getUnknownUserMessage());
-          return;
-        }
-
-        if (user.role !== 'warehouse') {
-          await bot.sendMessage(chatId, 'Ця команда доступна лише складу. Використайте /help, щоб побачити доступні команди.');
-          return;
-        }
-
-        const currentSession = await getCurrentPickSession(chatId);
-        const lastBlock = currentSession?.lastBlock || Number(user.shiftZone?.startBlock || 1);
-        await openPickWorkflow(chatId, lastBlock);
-        return;
-      }
-
-      if (text === '/warehouse') {
-        if (!user) {
-          await bot.sendMessage(chatId, getUnknownUserMessage());
-          return;
-        }
-
-        if (user.role !== 'warehouse') {
-          await bot.sendMessage(chatId, 'Ця команда доступна лише складу. Використайте /help, щоб побачити доступні команди.');
-          return;
-        }
-
-        await bot.sendMessage(chatId, 'Складські команди поки що не реалізовано.');
-        return;
-      }
 
       if (!user) {
         if (isGroupChat) return;
@@ -2717,171 +1975,17 @@ ${buildProductInfoText(product)}`;
         return;
       }
 
-      if (data.startsWith('pick_') || data.startsWith('ps_ok') || data.startsWith('ps_no')) {
+      if (data.startsWith('ps_ok') || data.startsWith('ps_no')) {
         if (!user || user.role !== 'warehouse') {
           await bot.answerCallbackQuery(query.id, { text: 'Ця дія доступна лише складу.', show_alert: true });
           return;
         }
 
-        const workerZoneStart = Number(user.shiftZone?.startBlock || 0);
-        const workerZoneEnd = Number(user.shiftZone?.endBlock || 0);
-        if (!user.isOnShift || !workerZoneStart || !workerZoneEnd || workerZoneStart > workerZoneEnd) {
-          await bot.answerCallbackQuery(query.id, { text: 'Ви не на активній зміні. Оновіть /ship після призначення.', show_alert: true });
-          return;
-        }
-
-        const session = await getCurrentPickSession(chatId);
-        const zoneStart = Number(user.shiftZone?.startBlock || 0);
-        const zoneEnd = Number(user.shiftZone?.endBlock || 0);
-        const lastBlock = session?.lastBlock || zoneStart || 1;
-        const [action, payloadId, actionProductId, extra] = data.split(':');
-
-        if (action === 'pick_item') {
-          const itemIndex = Number(actionProductId);
-          const result = await handlePickTaskItem(chatId, payloadId, itemIndex);
-          if (!result || !result.task) {
-            await bot.answerCallbackQuery(query.id, { text: 'Не вдалося обробити натискання. Спробуйте ще раз.', show_alert: true });
-            return;
-          }
-
-          if (result.completed) {
-            const nextTask = await openPickWorkflow(chatId, lastBlock);
-            await bot.answerCallbackQuery(query.id, {
-              text: nextTask ? 'Завдання завершено. Отримано наступне завдання.' : 'Завдання завершено. Наразі більше завдань немає.',
-            });
-            return;
-          }
-
-          const updatedTask = await getPickTaskById(payloadId);
-          const sendRes = await sendPickTaskMessage(chatId, updatedTask, session, session?.messageId);
-          if (session) {
-            session.messageId = sendRes.messageId;
-            session.hasPhoto = sendRes.hasPhoto;
-            await saveCurrentPickSession(chatId, session);
-          }
-          const callbackText = result.toggledPacked ? 'Товар позначено як спакований.' : 'Пакування скасовано.';
-          await bot.answerCallbackQuery(query.id, { text: callbackText });
-          return;
-        }
-
-        if (action === 'pick_skip') {
-          const task = await PickingTask.findById(payloadId);
-          if (!task || task.lockedBy !== String(chatId) || task.status !== 'locked') {
-            await bot.answerCallbackQuery(query.id, { text: 'Завдання недоступне для відкладання.', show_alert: true });
-            return;
-          }
-          task.status = 'pending';
-          task.lockedBy = null;
-          task.lockedAt = null;
-          task.skippedBy = Array.isArray(task.skippedBy) ? task.skippedBy : [];
-          task.skippedBy.push(String(chatId));
-          await task.save();
-
-          const nextTask = await openPickWorkflow(chatId, lastBlock);
-          await bot.answerCallbackQuery(query.id, {
-            text: nextTask ? 'Завдання відкладено. Отримано наступне завдання.' : 'Завдання відкладено. Наразі більше завдань немає.',
-          });
-          return;
-        }
-
-        if (action === 'pick_sold_out') {
-          let product = null;
-          let shipCarousel = null;
-          const targetId = actionProductId || payloadId;
-
-          if (targetId) {
-            product = await Product.findById(targetId);
-          }
-
-          if (!product) {
-            shipCarousel = await getSession(chatId, 'ship', msgId);
-            if (shipCarousel) {
-              product = await Product.findById(shipCarousel.productId);
-            }
-          }
-
-          if (!product && payloadId && payloadId !== 'reply') {
-            const task = await getPickTaskById(payloadId);
-            if (task?.productId) {
-              product = await Product.findById(task.productId._id || task.productId);
-            }
-          }
-
-          if (!product) {
-            const pickSession = await getCurrentPickSession(chatId);
-            if (pickSession?.currentTaskId) {
-              const task = await getPickTaskById(pickSession.currentTaskId);
-              if (task?.productId) {
-                product = await Product.findById(task.productId._id || task.productId);
-              }
-            }
-          }
-
-          if (!product) {
-            await bot.answerCallbackQuery(query.id, { text: 'Товар не знайдено.', show_alert: true });
-            return;
-          }
-
-          if (product.status === 'archived') {
-            await bot.answerCallbackQuery(query.id, { text: `"${getProductTitle(product)}" вже в архіві.`, show_alert: true });
-            return;
-          }
-
-          const activeOrdersCount = await Order.countDocuments({
-            'items.productId': product._id,
-            status: { $in: ['new', 'in_progress'] },
-          });
-
-          const confirmText = `Увага! Ви впевнені, що товар "${getProductTitle(product)}" закінчився? Це скасує його у ${activeOrdersCount} активних замовленнях і перенесе в архів. Цю дію неможливо скасувати.`;
-          const confirmMarkup = buildSoldOutConfirmationMarkup(
-            `ps_ok:${payloadId}:${product._id}`,
-            `ps_no:${payloadId}:${product._id}`
-          );
-
-          try {
-            if (query.message.photo) {
-              await bot.editMessageCaption(confirmText, {
-                chat_id: chatId,
-                message_id: msgId,
-                reply_markup: confirmMarkup,
-              });
-            } else {
-              await bot.editMessageText(confirmText, {
-                chat_id: chatId,
-                message_id: msgId,
-                reply_markup: confirmMarkup,
-              });
-            }
-          } catch (_) {
-            await bot.sendMessage(chatId, confirmText, { reply_markup: confirmMarkup });
-          }
-
-          await bot.answerCallbackQuery(query.id);
-          return;
-        }
+        const [action, payloadId, actionProductId] = data.split(':');
 
         if (action === 'ps_ok') {
-          let product = null;
-          let shipCarousel = null;
           const targetId = actionProductId || payloadId;
-
-          if (targetId) {
-            product = await Product.findById(targetId);
-          }
-
-          if (!product) {
-            shipCarousel = await getSession(chatId, 'ship', msgId);
-            if (shipCarousel) {
-              product = await Product.findById(shipCarousel.productId);
-            }
-          }
-
-          if (!product && payloadId && payloadId !== 'reply') {
-            const task = await getPickTaskById(payloadId);
-            if (task?.productId) {
-              product = await Product.findById(task.productId._id || task.productId);
-            }
-          }
+          const product = targetId ? await Product.findById(targetId) : null;
 
           if (!product) {
             await bot.answerCallbackQuery(query.id, { text: 'Товар не знайдено.', show_alert: true });
@@ -2893,125 +1997,40 @@ ${buildProductInfoText(product)}`;
             return;
           }
 
-          const pickSessionBeforeArchive = await getCurrentPickSession(chatId);
-          const lastBlockBeforeArchive = pickSessionBeforeArchive?.lastBlock;
+          await archiveProductAsSoldOut(chatId, product, null, msgId);
 
-          await archiveProductAsSoldOut(chatId, product, shipCarousel, msgId);
-
-          if (!shipCarousel) {
-            try {
-              const doneCaption = `❌ Товар "${getProductTitle(product)}" закінчився та переміщено в архів.`;
-              if (query.message.photo) {
-                await bot.editMessageCaption(doneCaption, {
-                  chat_id: chatId,
-                  message_id: msgId,
-                  reply_markup: { inline_keyboard: [[{ text: '📦 Архівовано', callback_data: 'noop' }]] },
-                });
-              } else {
-                await bot.editMessageText(doneCaption, {
-                  chat_id: chatId,
-                  message_id: msgId,
-                  reply_markup: { inline_keyboard: [[{ text: '📦 Архівовано', callback_data: 'noop' }]] },
-                });
-              }
-            } catch (_) {}
-            await deleteCurrentPickSession(chatId);
-            await bot.answerCallbackQuery(query.id, { text: 'Товар позначено як закінчився і заархівовано.', show_alert: false });
-            await openPickWorkflow(chatId, lastBlockBeforeArchive);
-            return;
-          }
+          try {
+            const doneCaption = `❌ Товар "${getProductTitle(product)}" закінчився та переміщено в архів.`;
+            if (query.message.photo) {
+              await bot.editMessageCaption(doneCaption, {
+                chat_id: chatId,
+                message_id: msgId,
+                reply_markup: { inline_keyboard: [[{ text: '📦 Архівовано', callback_data: 'noop' }]] },
+              });
+            } else {
+              await bot.editMessageText(doneCaption, {
+                chat_id: chatId,
+                message_id: msgId,
+                reply_markup: { inline_keyboard: [[{ text: '📦 Архівовано', callback_data: 'noop' }]] },
+              });
+            }
+          } catch (_) {}
 
           await bot.answerCallbackQuery(query.id, { text: 'Товар позначено як закінчився і заархівовано.', show_alert: false });
           return;
         }
 
         if (action === 'ps_no') {
-          const task = await getPickTaskById(payloadId);
-          const pickSession = await getCurrentPickSession(chatId);
-          const shipCarousel = await getSession(chatId, 'ship', msgId);
-
-          if (payloadId === 'reply' || extra === 'reply') {
-            try {
-              await bot.editMessageText('❌ Дія скасована. Товар не буде архівовано.', {
-                chat_id: chatId,
-                message_id: msgId,
-                reply_markup: { inline_keyboard: [[{ text: 'OK', callback_data: 'noop' }]] },
-              });
-            } catch (_) {}
-          } else if (task && pickSession && String(task._id) === String(pickSession.currentTaskId)) {
-            const sendRes = await sendPickTaskMessage(chatId, task, pickSession, pickSession.messageId);
-            pickSession.messageId = sendRes.messageId;
-            pickSession.hasPhoto = sendRes.hasPhoto;
-            await saveCurrentPickSession(chatId, pickSession);
-          } else if (shipCarousel) {
-            const { caption, reply_markup } = buildCarouselMessage(
-              shipCarousel.productName,
-              shipCarousel.position,
-              shipCarousel.entries[shipCarousel.currentIndex] || shipCarousel.entries[0],
-              shipCarousel.currentIndex || 0,
-              shipCarousel.entries.length,
-              String(shipCarousel.productId),
-              shipCarousel.entries.some((entry) => !entry.packed)
-            );
-            try {
-              if (query.message.photo) {
-                await bot.editMessageCaption(caption, {
-                  chat_id: chatId,
-                  message_id: msgId,
-                  reply_markup,
-                });
-              } else {
-                await bot.editMessageText(caption, {
-                  chat_id: chatId,
-                  message_id: msgId,
-                  reply_markup,
-                });
-              }
-            } catch (_) {}
-          }
-
+          try {
+            await bot.editMessageText('❌ Дія скасована. Товар не буде архівовано.', {
+              chat_id: chatId,
+              message_id: msgId,
+              reply_markup: { inline_keyboard: [[{ text: 'OK', callback_data: 'noop' }]] },
+            });
+          } catch (_) {}
           await bot.answerCallbackQuery(query.id, { text: 'Дія скасована.', show_alert: false });
           return;
         }
-
-        if (action === 'pick_prev' || action === 'pick_next') {
-          const direction = action === 'pick_next' ? 'next' : 'prev';
-          const task = await navigatePickTask(chatId, direction);
-          if (!task) {
-            await bot.answerCallbackQuery(query.id, { text: 'Немає заблокованих завдань для навігації.', show_alert: true });
-            return;
-          }
-          await bot.answerCallbackQuery(query.id, { text: 'Завдання оновлено.' });
-          return;
-        }
-      }
-
-      if (data === 'receive_barcode_yes' || data === 'receive_barcode_no') {
-        const state = await getReceiveState(chatId);
-        if (!state) {
-          await bot.answerCallbackQuery(query.id, { text: 'Сесія не знайдена або вже завершена.', show_alert: true });
-          return;
-        }
-        if (state.step !== 'await_has_barcode') {
-          await bot.answerCallbackQuery(query.id, { text: 'Ця дія вже недоступна.', show_alert: true });
-          return;
-        }
-
-        if (data === 'receive_barcode_yes') {
-          state.step = 'await_barcode_photo';
-          await setReceiveState(chatId, state);
-          await bot.sendMessage(chatId, 'Надішліть фото штрихкоду або QR-коду на товарі.');
-        } else {
-          state.step = 'await_price';
-          await setReceiveState(chatId, state);
-          await bot.sendMessage(chatId, 'Добре. Введіть ціну товару (zł):');
-        }
-
-        await bot.answerCallbackQuery(query.id);
-        try {
-          await bot.editMessageReplyMarkup({ inline_keyboard: [[{ text: '✅ Обрано', callback_data: 'noop' }]] }, { chat_id: chatId, message_id: msgId });
-        } catch (_) {}
-        return;
       }
 
       // ── Registration request review buttons ──
@@ -3054,11 +2073,14 @@ ${buildProductInfoText(product)}`;
             });
             await user.save();
             if (request.role === 'seller' && request.deliveryGroupId) {
-              await DeliveryGroup.findByIdAndUpdate(
+              const deliveryGroup = await DeliveryGroup.findByIdAndUpdate(
                 request.deliveryGroupId,
                 { $addToSet: { members: request.telegramId } },
                 { new: true }
               );
+              if (deliveryGroup?.name) {
+                await User.findByIdAndUpdate(user._id, { warehouseZone: deliveryGroup.name });
+              }
             }
             await RegistrationRequest.findByIdAndDelete(requestId);
             await bot.answerCallbackQuery(query.id, { text: 'Заявку схвалено', show_alert: false });
@@ -3079,309 +2101,6 @@ ${buildProductInfoText(product)}`;
             { chat_id: chatId, message_id: msgId }
           );
         } catch (_) {}
-        return;
-      }
-
-      // ── Shelf quantity buttons: sq:productId:qty ──
-      if (data.startsWith('sq:')) {
-        const parts = data.split(':');
-        const productId = parts[1];
-        const quantity = parseInt(parts[2], 10);
-        if (!productId || !quantity) {
-          await bot.answerCallbackQuery(query.id);
-          return;
-        }
-
-        const product = await Product.findById(productId);
-        if (!product) {
-          await bot.answerCallbackQuery(query.id, { text: 'Товар не знайдено', show_alert: true });
-          return;
-        }
-
-        await PendingReaction.findOneAndUpdate(
-          { sellerTelegramId: chatId, productId: product._id },
-          {
-            sellerTelegramId: chatId,
-            productId: product._id,
-            messageId: msgId,
-            chatId,
-            emoji: `x${quantity}`,
-            quantity,
-          },
-          { upsert: true, new: true }
-        );
-
-        // Update the button row to show selected quantity
-        const qtyLabels = ['1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣'];
-        const updatedButtons = [];
-        for (let i = 1; i <= 5; i++) {
-          updatedButtons.push({
-            text: i === quantity ? `✅ ${qtyLabels[i - 1]}` : qtyLabels[i - 1],
-            callback_data: `sq:${productId}:${i}`,
-          });
-        }
-
-        try {
-          await bot.editMessageReplyMarkup(
-            { inline_keyboard: [updatedButtons] },
-            { chat_id: chatId, message_id: msgId }
-          );
-        } catch (_) { /* message too old or unchanged */ }
-
-        await bot.answerCallbackQuery(query.id, { text: `✅ ${getProductTitle(product)} — ${quantity} шт`, show_alert: false });
-        return;
-      }
-
-      /*
-      // ── Shelf pagination: prev / next ──
-      if (data.startsWith('shelf_prev:') || data.startsWith('shelf_next:')) {
-        const currentPage = parseInt(data.split(':')[1], 10);
-        const newPage = data.startsWith('shelf_next:') ? currentPage + 1 : currentPage - 1;
-        await bot.answerCallbackQuery(query.id);
-        await sendShelfProducts(chatId, newPage);
-        return;
-      }
-
-      // ── Shelf: show my list ──
-      if (data === 'shelf_mylist') {
-        const pending = await PendingReaction.find({ sellerTelegramId: chatId }).populate('productId');
-        if (!pending.length) {
-          await bot.answerCallbackQuery(query.id, { text: 'Список порожній', show_alert: true });
-          return;
-        }
-        const lines = pending
-          .filter((p) => p.productId)
-          .map((p, i) => `${i + 1}. ${p.productId.name} — ${p.productId.price} zł x${p.quantity || 1}`);
-        const total = pending.filter((p) => p.productId).reduce((sum, p) => sum + p.productId.price * (p.quantity || 1), 0);
-        await bot.answerCallbackQuery(query.id);
-        await bot.sendMessage(chatId, `🛒 Ваш список:\n\n${lines.join('\n')}\n\nРазом: ${total} zł\n\nНатисніть ✅ Оформити або /order`);
-        return;
-      }
-
-      // ── Shelf: place order ──
-      if (data === 'shelf_order') {
-        if (orderInFlight.has(chatId)) {
-          await bot.answerCallbackQuery(query.id, { text: 'Замовлення вже обробляється...', show_alert: false });
-          return;
-        }
-        orderInFlight.add(chatId);
-        try {
-          const result = await finalizeOrder(chatId);
-          await bot.answerCallbackQuery(query.id);
-          await bot.sendMessage(chatId, result);
-        } finally {
-          orderInFlight.delete(chatId);
-        }
-        return;
-      }
-      */
-
-      // ── Shop quantity buttons: shop_qty:productId:qty ──
-      if (data.startsWith('shop_qty:')) {
-        const parts = data.split(':');
-        const productId = parts[1];
-        const quantity = parseInt(parts[2], 10);
-        if (!productId || !quantity) {
-          await bot.answerCallbackQuery(query.id);
-          return;
-        }
-
-        const product = await Product.findById(productId);
-        if (!product) {
-          await bot.answerCallbackQuery(query.id, { text: 'Товар не знайдено', show_alert: true });
-          return;
-        }
-
-        await upsertPendingReaction(chatId, msgId, product._id, quantity);
-
-        const shopSession = await getSession(chatId, 'shop');
-        const totalProducts = shopSession?.productIds?.length || 0;
-        const currentIndex = shopSession?.currentIndex || 0;
-        const nextIndex = Math.min(currentIndex + 1, totalProducts - 1);
-
-        const nextProductId = shopSession?.productIds?.[nextIndex];
-        const nextProduct = nextProductId ? await Product.findById(nextProductId) : null;
-        const pendingCount = await PendingReaction.countDocuments({ sellerTelegramId: chatId });
-
-        if (nextProduct && nextIndex !== currentIndex) {
-          const caption = buildShopCaption(nextProduct, nextIndex, totalProducts);
-          const selectedQty = await getPendingQuantity(chatId, nextProduct._id);
-          const replyMarkup = buildShopKeyboard(String(nextProduct._id), nextIndex, totalProducts, selectedQty, pendingCount);
-
-          try {
-            const preloadPromise = ensureShopPhotoBuffer(shopSession?.productIds || [], nextIndex);
-            const updated = await updateShopMessage(chatId, msgId, nextProduct, caption, replyMarkup);
-            await setSession(chatId, 'shop', {
-              ...shopSession,
-              currentIndex: nextIndex,
-              hasPhoto: Boolean(updated?.photo || nextProduct.telegramFileId || getPhotoUrl(nextProduct.imageUrls?.[0])),
-              messageId: String(updated?.message_id || shopSession.messageId),
-            });
-          await persistUserBotState(chatId, {
-            'lastBotState.shop': {
-              productIds: shopSession.productIds,
-              currentIndex: nextIndex,
-              updatedAt: new Date(),
-            },
-          });
-            preloadPromise.catch(() => {});
-          } catch (error) {
-            console.error('Failed to advance shop message', error);
-          }
-        } else {
-          const replyMarkup = buildShopKeyboard(String(product._id), currentIndex, totalProducts, quantity, pendingCount);
-          try {
-            await bot.editMessageReplyMarkup(replyMarkup, { chat_id: chatId, message_id: msgId });
-          } catch (_) {}
-        }
-
-        await bot.answerCallbackQuery(query.id, { text: `✅ ${getProductTitle(product)} — ${quantity} шт`, show_alert: false });
-        return;
-      }
-
-      // ── Shop navigation: prev / next ──
-      if (data.startsWith('shop_prev:') || data.startsWith('shop_next:')) {
-        const shopSession = await getSession(chatId, 'shop');
-        if (!shopSession) {
-          await bot.answerCallbackQuery(query.id, { text: 'Сесія не знайдена. Натисніть /shop знову.', show_alert: true });
-          return;
-        }
-
-        const currentPage = parseInt(data.split(':')[1], 10);
-        let newIndex = currentPage;
-        if (data.startsWith('shop_next:')) {
-          newIndex = currentPage + 1;
-        } else {
-          newIndex = currentPage - 1;
-        }
-
-        const totalProducts = shopSession.productIds?.length || 0;
-        if (newIndex < 0) newIndex = 0;
-        if (newIndex >= totalProducts) newIndex = totalProducts - 1;
-
-        const productId = shopSession.productIds?.[newIndex];
-        const product = productId ? await Product.findById(productId) : null;
-        if (!product) {
-          await bot.answerCallbackQuery(query.id, { text: 'Товар не знайдено', show_alert: true });
-          return;
-        }
-
-        const caption = buildShopCaption(product, newIndex, totalProducts);
-        const pendingCount = await PendingReaction.countDocuments({ sellerTelegramId: chatId });
-        const selectedQty = await getPendingQuantity(chatId, product._id);
-        const replyMarkup = buildShopKeyboard(String(product._id), newIndex, totalProducts, selectedQty, pendingCount);
-
-        try {
-          const preloadPromise = ensureShopPhotoBuffer(shopSession?.productIds || [], newIndex);
-          const updated = await updateShopMessage(chatId, msgId, product, caption, replyMarkup);
-          await setSession(chatId, 'shop', {
-            ...shopSession,
-            currentIndex: newIndex,
-            hasPhoto: Boolean(updated?.photo || product.telegramFileId || getPhotoUrl(product.imageUrls?.[0])),
-            messageId: String(updated?.message_id || shopSession.messageId),
-          });
-          await persistUserBotState(chatId, {
-            'lastBotState.shop': {
-              productIds: shopSession.productIds,
-              currentIndex: newIndex,
-              updatedAt: new Date(),
-            },
-          });
-          preloadPromise.catch(() => {});
-        } catch (error) {
-          console.error('Failed to update shop message', error);
-        }
-
-        await bot.answerCallbackQuery(query.id);
-        return;
-      }
-
-      // ── Shop: show my list ──
-      if (data === 'shop_mylist') {
-        const pending = await PendingReaction.find({ sellerTelegramId: chatId }).populate('productId');
-        if (!pending.length) {
-          await bot.answerCallbackQuery(query.id, { text: 'Список порожній', show_alert: true });
-          return;
-        }
-        const lines = pending
-          .filter((p) => p.productId)
-          .map((p, i) => `${i + 1}. ${p.productId.name} — ${p.productId.price} zł x${p.quantity || 1}`);
-        const total = pending.filter((p) => p.productId).reduce((sum, p) => sum + p.productId.price * (p.quantity || 1), 0);
-        await bot.answerCallbackQuery(query.id);
-        await bot.sendMessage(chatId, `🛒 Ваш список:
-
-${lines.join('\n')}
-
-Разом: ${total} zł
-
-Натисніть ✅ Оформити`);
-        return;
-      }
-
-      // ── Shop: place order ──
-      if (data === 'shop_order') {
-        const started = await startOrderInFlight(chatId);
-        if (!started) {
-          await bot.answerCallbackQuery(query.id, { text: 'Замовлення вже обробляється...', show_alert: false });
-          return;
-        }
-        try {
-          const result = await finalizeOrder(chatId);
-          await bot.answerCallbackQuery(query.id);
-          await bot.sendMessage(chatId, result);
-          const shopSession = await getSession(chatId, 'shop');
-          const reset = Array.isArray(shopSession?.productIds) && shopSession.currentIndex >= shopSession.productIds.length - 1;
-          await setShopMenuButton(chatId, 'Товари', reset);
-        } finally {
-          await clearOrderInFlight(chatId);
-        }
-        return;
-      }
-
-      // ── Shop: reset current shop session ──
-      if (data === 'shop_reset') {
-        const pendingCount = await PendingReaction.countDocuments({ sellerTelegramId: chatId });
-        if (pendingCount > 0) {
-          await bot.answerCallbackQuery(query.id, { text: 'Підтвердіть скидання списку.', show_alert: false });
-          try {
-            await bot.editMessageReplyMarkup({
-              inline_keyboard: [[
-                { text: 'Так, скинути', callback_data: 'shop_reset_confirm' },
-                { text: 'Ні, залишити', callback_data: 'noop' },
-              ]],
-            }, { chat_id: chatId, message_id: msgId });
-          } catch (_) {}
-          return;
-        }
-
-        await bot.answerCallbackQuery(query.id, { text: 'Скидаю стан...', show_alert: false });
-        const shopSession = await getSession(chatId, 'shop');
-        if (shopSession?.messageId) {
-          await deleteShopMessage(chatId, shopSession.messageId);
-        }
-        if (shopSession?.menuMessageId) {
-          await deleteShopMessage(chatId, shopSession.menuMessageId);
-        }
-        await deleteSession(chatId, 'shop');
-        await PendingReaction.deleteMany({ sellerTelegramId: chatId });
-        await setShopMenuButton(chatId, 'Товари', true);
-        await sendShopProducts(chatId, 0, true);
-        return;
-      }
-
-      if (data === 'shop_reset_confirm') {
-        await bot.answerCallbackQuery(query.id, { text: 'Скидаю стан...', show_alert: false });
-        const shopSession = await getSession(chatId, 'shop');
-        if (shopSession?.messageId) {
-          await deleteShopMessage(chatId, shopSession.messageId);
-        }
-        if (shopSession?.menuMessageId) {
-          await deleteShopMessage(chatId, shopSession.menuMessageId);
-        }
-        await deleteSession(chatId, 'shop');
-        await PendingReaction.deleteMany({ sellerTelegramId: chatId });
-        await setShopMenuButton(chatId, 'Товари', true);
-        await sendShopProducts(chatId, 0, true);
         return;
       }
 
@@ -3591,86 +2310,6 @@ ${lines.join('\n')}
 
     // Reaction handling by Telegram message_reaction has been disabled.
 
-    async function finalizeOrder(userId) {
-      const user = await User.findOne({ telegramId: userId });
-      if (!user) return 'Вас не знайдено в системі.';
-
-      const pending = await PendingReaction.find({ sellerTelegramId: userId }).populate('productId');
-      if (!pending.length) return 'У вас немає обраних товарів. Додайте товар кнопками в /shop, щоб зібрати список.';
-
-      // Merge duplicate products (same productId → sum quantities)
-      const merged = new Map();
-      for (const p of pending) {
-        if (!p.productId) continue;
-        const pid = String(p.productId._id);
-        if (merged.has(pid)) {
-          merged.get(pid).quantity += (p.quantity || 1);
-        } else {
-          merged.set(pid, {
-            productId: p.productId._id,
-            name: p.productId.name,
-            price: p.productId.price,
-            quantity: p.quantity || 1,
-          });
-        }
-      }
-
-      const items = Array.from(merged.values());
-
-      if (!items.length) {
-        await PendingReaction.deleteMany({ sellerTelegramId: userId });
-        return 'Товари не знайдено. Можливо, вони були видалені.';
-      }
-
-      const totalPrice = items.reduce((sum, i) => sum + i.price * i.quantity, 0);
-      const shippingAddress = [user.shopAddress, user.shopCity].filter(Boolean).join(', ');
-      const contactInfo = [user.shopName, [user.firstName, user.lastName].filter(Boolean).join(' '), user.phoneNumber]
-        .filter(Boolean)
-        .join(' | ');
-
-      const threeDaysAgo = new Date();
-      threeDaysAgo.setDate(threeDaysAgo.getDate() - 3);
-
-      let order = await Order.findOne({
-        buyerTelegramId: user.telegramId,
-        status: { $in: ['new', 'in_progress'] },
-        createdAt: { $gte: threeDaysAgo },
-      });
-
-      if (order) {
-        for (const newItem of items) {
-          const sameItem = order.items.find((i) => String(i.productId) === String(newItem.productId));
-          if (sameItem) {
-            sameItem.quantity += newItem.quantity;
-            sameItem.packed = false;
-            sameItem.cancelled = false;
-          } else {
-            order.items.push(newItem);
-          }
-        }
-        order.totalPrice = (order.totalPrice || 0) + totalPrice;
-        if (order.status === 'new' || order.status === 'in_progress') {
-          order.status = 'in_progress';
-        }
-        await order.save();
-      } else {
-        order = new Order({
-          buyerTelegramId: user.telegramId,
-          items,
-          shippingAddress,
-          contactInfo,
-          totalPrice,
-        });
-        await order.save();
-      }
-
-      // Clear pending shop selections
-      await PendingReaction.deleteMany({ sellerTelegramId: userId });
-
-      const itemsList = items.map((i) => `• ${i.name} — ${i.price} zł x${i.quantity}`).join('\n');
-      return `✅ Замовлення оформлено!\n\n${itemsList}\n\nРазом: ${totalPrice} zł`;
-    }
-
     console.log('Telegram bot started');
   } catch (error) {
     status.error = error.message || String(error);
@@ -3692,6 +2331,16 @@ function getBotStatus() {
   };
 }
 
+async function sendOrderConfirmation(telegramId, itemCount, totalPrice, orderId) {
+  if (!bot || !telegramId) return;
+  try {
+    const text = `✅ Замовлення #${orderId} оформлено!\n\nТоварів: ${itemCount}\nСума: ${totalPrice} zł`;
+    await sendMessageWithRetry(String(telegramId), text);
+  } catch (err) {
+    console.warn('[Bot] sendOrderConfirmation failed:', err.message);
+  }
+}
+
 module.exports = {
   initBot,
   getBotStatus,
@@ -3700,7 +2349,6 @@ module.exports = {
   sendMessageWithRetry,
   sendAdminNotification,
   sendRegistrationApprovedMessage,
-  fixPendingReactionIndexes,
   getShippingBlockPositions,
   buildPickingTasksFromOrders,
 };

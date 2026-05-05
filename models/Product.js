@@ -1,16 +1,11 @@
 const mongoose = require('mongoose');
 
-const ReactionDetailSchema = new mongoose.Schema({
-  userId: { type: String, required: true },
-  reactionType: { type: String, required: true },
-  quantity: { type: Number, default: 1 },
-  createdAt: { type: Date, default: Date.now },
-});
-
 const ProductSchema = new mongoose.Schema(
   {
     price: { type: Number, required: true, default: 0 },
     quantity: { type: Number, required: true, default: 0 },
+    name: { type: String, default: '' },
+    qrCode: { type: String, default: '' },
     warehouse: { type: String, default: '' },
     category: { type: String, default: '' },
     brand: { type: String, default: '' },
@@ -30,9 +25,6 @@ const ProductSchema = new mongoose.Schema(
     archivedAt: { type: Date, default: null },
     originalOrderNumber: { type: Number, default: null },
     restoredFromArchive: { type: Boolean, default: false },
-    totalReserved: { type: Number, default: 0 },
-    reactions: { type: Map, of: Number, default: {} },
-    reactionDetails: [ReactionDetailSchema],
   },
   { timestamps: true }
 );

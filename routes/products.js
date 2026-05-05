@@ -128,14 +128,21 @@ router.get('/', async (req, res) => {
     }
   }
 
+  const isV1 = String(req.baseUrl || '').includes('/api/v1') || String(req.originalUrl || '').startsWith('/api/v1');
+
+  // For the seller-facing catalogue (v1), show only products that are placed in blocks.
+  // Products in "incoming" (not yet shelved) should not be orderable.
+  if (isV1) {
+    const assignedIds = await Block.distinct('productIds');
+    query._id = { $in: assignedIds };
+  }
+
   const total = await Product.countDocuments(query);
   const products = await Product.find(query)
     .sort({ orderNumber: 1, createdAt: -1 })
     .skip(offset)
     .limit(limit)
     .lean();
-
-  const isV1 = String(req.baseUrl || '').includes('/api/v1') || String(req.originalUrl || '').startsWith('/api/v1');
   if (isV1) {
     const items = products.map((product) => ({
       id: product._id,
