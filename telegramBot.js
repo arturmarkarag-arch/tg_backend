@@ -919,7 +919,7 @@ async function buildPickingTasksFromOrders() {
   // 1. Find already assigned order/product pairs so we don't create duplicates.
   const activeTasks = await PickingTask.find(
     { status: { $in: ['pending', 'locked'] } },
-    'productId items.orderId'
+    'productId items.orderId blockId positionIndex'
   ).lean();
 
   const assignedOrderProducts = new Set();
@@ -935,10 +935,9 @@ async function buildPickingTasksFromOrders() {
     .populate('items.productId')
     .sort({ createdAt: 1 })
     .lean();
-  if (!orders.length) return;
 
-  const buyerIds = [...new Set(orders.map((order) => order.buyerTelegramId))];
-  const buyers = await User.find({ telegramId: { $in: buyerIds } }).lean();
+  const buyerIds = orders.length ? [...new Set(orders.map((order) => order.buyerTelegramId))] : [];
+  const buyers = buyerIds.length ? await User.find({ telegramId: { $in: buyerIds } }).lean() : [];
   const buyerMap = new Map(buyers.map((buyer) => [buyer.telegramId, buyer]));
 
   const productGroups = new Map();
@@ -962,6 +961,26 @@ async function buildPickingTasksFromOrders() {
       });
       productGroups.set(productId, group);
     }
+  }
+
+  // Refresh location of existing pending/locked tasks in case products were moved between blocks.
+  if (activeTasks.length) {
+    const existingPositions = await getShippingBlockPositions(
+      activeTasks.map((t) => String(t.productId))
+    );
+    await Promise.all(
+      activeTasks.map(async (t) => {
+        const pos = existingPositions.get(String(t.productId));
+        if (!pos) return;
+        const newBlockId = pos.blockId;
+        const newPosIdx = pos.index + 1;
+        if (t.blockId === newBlockId && t.positionIndex === newPosIdx) return;
+        await PickingTask.updateOne(
+          { _id: t._id },
+          { $set: { blockId: newBlockId, positionIndex: newPosIdx } }
+        );
+      })
+    );
   }
 
   if (!productGroups.size) return;

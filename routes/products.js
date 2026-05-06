@@ -1,6 +1,7 @@
 const express = require('express');
 const crypto = require('crypto');
 const Busboy = require('busboy');
+const sharp = require('sharp');
 const { S3Client, PutObjectCommand, HeadBucketCommand } = require('@aws-sdk/client-s3');
 const { shiftUp, shiftDown } = require('../utils/shiftOrderNumbers');
 const { normalizeBarcode } = require('../utils/barcodeScanner');
@@ -62,15 +63,28 @@ function parseMultipart(req) {
   });
 }
 
+// Compress raster images to JPEG ≤200 KB before storing on R2.
+// GIFs are stored as-is to preserve animation.
+async function compressImage(buffer, contentType) {
+  if (/^image\/gif$/i.test(contentType)) {
+    return { buffer, contentType };
+  }
+  const compressed = await sharp(buffer)
+    .resize({ width: 1200, height: 1200, fit: 'inside', withoutEnlargement: true })
+    .jpeg({ quality: 78, mozjpeg: true })
+    .toBuffer();
+  return { buffer: compressed, contentType: 'image/jpeg' };
+}
+
 async function uploadToR2(fileBuffer, filename, contentType) {
-  const extension = filename.split('.').pop() || 'jpg';
-  const safeBase = crypto.randomUUID();
-  const safeFilename = `${safeBase}.${extension.replace(/[^a-zA-Z0-9]/g, '')}`;
+  const { buffer, contentType: finalContentType } = await compressImage(fileBuffer, contentType);
+  const ext = /^image\/gif$/i.test(contentType) ? (filename.split('.').pop() || 'gif') : 'jpg';
+  const safeFilename = `${crypto.randomUUID()}.${ext.replace(/[^a-zA-Z0-9]/g, '')}`;
   await s3Client.send(new PutObjectCommand({
     Bucket: process.env.R2_BUCKET_NAME,
     Key: `products/${safeFilename}`,
-    Body: fileBuffer,
-    ContentType: contentType,
+    Body: buffer,
+    ContentType: finalContentType,
   }));
   return safeFilename;
 }
@@ -319,6 +333,70 @@ router.get('/:id', async (req, res) => {
   const product = await Product.findById(req.params.id);
   if (!product) return res.status(404).json({ error: 'Product not found' });
   res.json(product);
+});
+
+// POST /api/products/block-upload-photos
+// Each uploaded photo creates a new product (no name/price/category) and appends
+// it to the specified block, preserving the exact selection order.
+router.post('/block-upload-photos', staffOnly, async (req, res) => {
+  const { fields, files } = await parseMultipart(req);
+  const blockId = Number(fields.blockId);
+
+  if (!blockId || blockId < 1) {
+    return res.status(400).json({ error: 'Invalid blockId' });
+  }
+  if (!files.length) {
+    return res.status(400).json({ error: 'No files provided' });
+  }
+
+  const block = await Block.findOne({ blockId });
+  if (!block) return res.status(404).json({ error: 'Block not found' });
+
+  // Reserve a contiguous range of orderNumbers by finding the current max
+  const maxProduct = await Product.findOne({}, 'orderNumber').sort({ orderNumber: -1 }).lean();
+  let nextOrderNumber = (maxProduct?.orderNumber ?? 0) + 1;
+
+  const results = [];
+
+  for (const file of files) {
+    const filename = await uploadToR2(file.buffer, file.originalname, file.mimetype);
+    const imageUrl = `/api/products/images/${filename}`;
+
+    const product = new Product({
+      orderNumber: nextOrderNumber,
+      price: 0,
+      quantity: 0,
+      status: 'pending',
+      imageUrls: [imageUrl],
+      imageNames: [filename],
+    });
+    await product.save();
+
+    block.productIds.push(product._id);
+    nextOrderNumber += 1;
+
+    results.push({ productId: String(product._id), imageUrl, index: results.length });
+  }
+
+  block.version += 1;
+  await block.save();
+
+  try {
+    const io = getIO();
+    if (io) {
+      io.emit('block_updated', {
+        blockId: block.blockId,
+        version: block.version,
+        productIds: block.productIds.map(String),
+      });
+    }
+  } catch (_) {}
+
+  res.json({
+    uploaded: results.length,
+    total: files.length,
+    results,
+  });
 });
 
 router.post('/', staffOnly, async (req, res) => {
