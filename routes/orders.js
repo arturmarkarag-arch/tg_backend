@@ -245,11 +245,15 @@ router.post('/', async (req, res) => {
       });
     }
     const group = await DeliveryGroup.findById(buyer.deliveryGroupId).lean();
-    if (group) {
-      const { isOpen, message } = isOrderingOpen(group.dayOfWeek);
-      if (!isOpen) {
-        return res.status(403).json({ error: 'ordering_closed', message });
-      }
+    if (!group) {
+      return res.status(403).json({
+        error: 'delivery_group_not_found',
+        message: 'Групу доставки не знайдено. Зверніться до адміністратора.',
+      });
+    }
+    const { isOpen, message } = isOrderingOpen(group.dayOfWeek);
+    if (!isOpen) {
+      return res.status(403).json({ error: 'ordering_closed', message });
     }
   }
 
@@ -359,7 +363,20 @@ router.post('/', async (req, res) => {
         },
         ...(sanitizedKey ? { idempotencyKey: sanitizedKey } : {}),
       });
-      await order.save();
+      try {
+        await order.save();
+      } catch (saveError) {
+        // Race condition: another concurrent request already saved an order with the same
+        // idempotency key (duplicate key on unique index). Return the existing order instead
+        // of propagating a 500.
+        if (saveError.code === 11000 && sanitizedKey) {
+          const existing = await Order.findOne({ idempotencyKey: sanitizedKey }).lean();
+          if (existing) {
+            return res.status(200).json(existing);
+          }
+        }
+        throw saveError;
+      }
     }
 
     try {

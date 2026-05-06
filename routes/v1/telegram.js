@@ -20,6 +20,12 @@ function normalizeMiniAppState(miniAppState) {
   return normalized;
 }
 
+async function resolveWarehouseZone(user) {
+  if (!user?.deliveryGroupId) return '';
+  const group = await DeliveryGroup.findById(user.deliveryGroupId).lean();
+  return group?.name || '';
+}
+
 // POST /api/v1/telegram/validate — перевірити підпис initData
 router.post('/validate', (req, res) => {
   const { initData } = req.body;
@@ -95,7 +101,7 @@ router.post('/me', async (req, res) => {
     shopNumber: user.shopNumber,
     shopCity: user.shopCity,
     deliveryGroupId: user.deliveryGroupId || '',
-    warehouseZone: user.warehouseZone || '',
+    warehouseZone: await resolveWarehouseZone(user),
     isWarehouseManager: user.isWarehouseManager || false,
     isOnShift: user.isOnShift || false,
     shiftZone: user.shiftZone || { startBlock: null, endBlock: null },
@@ -407,11 +413,14 @@ router.post('/register-requests/:id/approve', async (req, res) => {
   });
   await user.save();
   if (request.role === 'seller' && request.deliveryGroupId) {
-    await DeliveryGroup.findByIdAndUpdate(
+    const deliveryGroup = await DeliveryGroup.findByIdAndUpdate(
       request.deliveryGroupId,
       { $addToSet: { members: request.telegramId } },
       { new: true }
-    );
+    ).lean();
+    if (deliveryGroup?.name) {
+      await User.findByIdAndUpdate(user._id, { warehouseZone: deliveryGroup.name });
+    }
   }
   await RegistrationRequest.findByIdAndDelete(req.params.id);
 

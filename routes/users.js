@@ -23,6 +23,17 @@ async function syncDeliveryGroupMembership(telegramId, groupId) {
   }
 }
 
+async function syncUserWarehouseZone(user) {
+  if (user.role === 'seller') {
+    const group = user.deliveryGroupId ? await DeliveryGroup.findById(user.deliveryGroupId).lean() : null;
+    return await User.findByIdAndUpdate(user._id, { warehouseZone: group?.name || '' }, { new: true });
+  }
+  if (user.role !== 'warehouse') {
+    return await User.findByIdAndUpdate(user._id, { warehouseZone: '' }, { new: true });
+  }
+  return user;
+}
+
 function sanitizeUserPayload(payload, existing = null) {
   const role = payload.role ?? existing?.role ?? 'seller';
   const data = {
@@ -96,6 +107,7 @@ router.post('/', async (req, res) => {
   }
 
   await syncDeliveryGroupMembership(user.telegramId, user.deliveryGroupId);
+  user = await syncUserWarehouseZone(user);
   res.status(existing ? 200 : 201).json(user);
 });
 
@@ -111,7 +123,8 @@ router.patch('/:telegramId', async (req, res) => {
       { new: true, runValidators: true }
     );
     await syncDeliveryGroupMembership(user.telegramId, user.deliveryGroupId);
-    res.json(user);
+    const updatedUser = await syncUserWarehouseZone(user);
+    res.json(updatedUser);
   } catch (err) {
     console.error('[PATCH /users/:telegramId]', err);
     res.status(500).json({ error: err.message });
