@@ -3,6 +3,14 @@ const DeliveryGroup = require('../models/DeliveryGroup');
 const User = require('../models/User');
 const { telegramAuth, requireTelegramRole } = require('../middleware/telegramAuth');
 const { isOrderingOpen, getWindowDescription } = require('../utils/orderingSchedule');
+const AppSetting = require('../models/AppSetting');
+
+const ORDERING_SCHEDULE_KEY = 'ordering.schedule';
+const ORDERING_SCHEDULE_DEFAULTS = { openHour: 16, openMinute: 0, closeHour: 7, closeMinute: 30 };
+async function getOrderingSchedule() {
+  const saved = await AppSetting.findOne({ key: ORDERING_SCHEDULE_KEY }).lean();
+  return { ...ORDERING_SCHEDULE_DEFAULTS, ...(saved?.value || {}) };
+}
 
 const router = express.Router();
 
@@ -48,8 +56,9 @@ router.get('/ordering-status', telegramAuth, async (req, res) => {
     });
   }
 
-  const status = isOrderingOpen(group.dayOfWeek);
-  const window = getWindowDescription(group.dayOfWeek);
+  const schedule = await getOrderingSchedule();
+  const status = isOrderingOpen(group.dayOfWeek, schedule);
+  const window = getWindowDescription(group.dayOfWeek, schedule);
   return res.json({ ...status, groupName: group.name, window });
 });
 

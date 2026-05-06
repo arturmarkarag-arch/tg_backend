@@ -65,9 +65,15 @@ function fmt(h, m) {
  * Checks whether ordering is currently open for a delivery group.
  *
  * @param {number} deliveryDayOfWeek  0=Sun … 6=Sat  (the day the warehouse collects)
+ * @param {{ openHour?: number, openMinute?: number, closeHour?: number, closeMinute?: number }} [schedule]
  * @returns {{ isOpen: boolean, message: string }}
  */
-function isOrderingOpen(deliveryDayOfWeek) {
+function isOrderingOpen(deliveryDayOfWeek, schedule = {}) {
+  const openHour    = schedule.openHour    ?? OPEN_HOUR;
+  const openMinute  = schedule.openMinute  ?? OPEN_MINUTE;
+  const closeHour   = schedule.closeHour   ?? CLOSE_HOUR;
+  const closeMinute = schedule.closeMinute ?? CLOSE_MINUTE;
+
   const { dayOfWeek, hour, minute } = getWarsawNow();
 
   // Day before delivery; if that falls on Sunday (0) — use Saturday (6) instead
@@ -76,20 +82,20 @@ function isOrderingOpen(deliveryDayOfWeek) {
   const closeDay = deliveryDayOfWeek;
 
   const nowMins   = hour * 60 + minute;
-  const openMins  = OPEN_HOUR  * 60 + OPEN_MINUTE;
-  const closeMins = CLOSE_HOUR * 60 + CLOSE_MINUTE;
+  const openMins  = openHour  * 60 + openMinute;
+  const closeMins = closeHour * 60 + closeMinute;
 
   // --- same day as OPEN day ---
   if (dayOfWeek === openDay) {
     if (nowMins >= openMins) {
       return {
         isOpen: true,
-        message: `Прийом замовлень відкрито до ${DAY_SHORT_UK[closeDay]} ${fmt(CLOSE_HOUR, CLOSE_MINUTE)}`,
+        message: `Прийом замовлень відкрито до ${DAY_SHORT_UK[closeDay]} ${fmt(closeHour, closeMinute)}`,
       };
     }
     return {
       isOpen: false,
-      message: `Прийом замовлень відкриється сьогодні о ${fmt(OPEN_HOUR, OPEN_MINUTE)}`,
+      message: `Прийом замовлень відкриється сьогодні о ${fmt(openHour, openMinute)}`,
     };
   }
 
@@ -98,12 +104,12 @@ function isOrderingOpen(deliveryDayOfWeek) {
     if (nowMins < closeMins) {
       return {
         isOpen: true,
-        message: `Прийом замовлень відкрито. Закривається сьогодні о ${fmt(CLOSE_HOUR, CLOSE_MINUTE)}`,
+        message: `Прийом замовлень відкрито. Закривається сьогодні о ${fmt(closeHour, closeMinute)}`,
       };
     }
     return {
       isOpen: false,
-      message: `Прийом замовлень закрито. Наступне вікно — ${DAY_SHORT_UK[openDay]} о ${fmt(OPEN_HOUR, OPEN_MINUTE)}`,
+      message: `Прийом замовлень закрито. Наступне вікно — ${DAY_SHORT_UK[openDay]} о ${fmt(openHour, openMinute)}`,
     };
   }
 
@@ -120,28 +126,33 @@ function isOrderingOpen(deliveryDayOfWeek) {
     // We're on a day strictly inside the open window
     return {
       isOpen: true,
-      message: `Прийом замовлень відкрито. Закривається у ${DAY_SHORT_UK[closeDay]} о ${fmt(CLOSE_HOUR, CLOSE_MINUTE)}`,
+      message: `Прийом замовлень відкрито. Закривається у ${DAY_SHORT_UK[closeDay]} о ${fmt(closeHour, closeMinute)}`,
     };
   }
 
   return {
     isOpen: false,
-    message: `Прийом замовлень відкрито з ${DAY_SHORT_UK[openDay]} ${fmt(OPEN_HOUR, OPEN_MINUTE)} по ${DAY_SHORT_UK[closeDay]} ${fmt(CLOSE_HOUR, CLOSE_MINUTE)}`,
+    message: `Прийом замовлень відкрито з ${DAY_SHORT_UK[openDay]} ${fmt(openHour, openMinute)} по ${DAY_SHORT_UK[closeDay]} ${fmt(closeHour, closeMinute)}`,
   };
 }
 
 /**
  * Returns window times for display purposes.
  */
-function getWindowDescription(deliveryDayOfWeek) {
+function getWindowDescription(deliveryDayOfWeek, schedule = {}) {
+  const openHour    = schedule.openHour    ?? OPEN_HOUR;
+  const openMinute  = schedule.openMinute  ?? OPEN_MINUTE;
+  const closeHour   = schedule.closeHour   ?? CLOSE_HOUR;
+  const closeMinute = schedule.closeMinute ?? CLOSE_MINUTE;
+
   const dayBefore = (deliveryDayOfWeek - 1 + 7) % 7;
   const openDay  = dayBefore === 0 ? 6 : dayBefore;
   const closeDay = deliveryDayOfWeek;
   return {
     openDay,
     closeDay,
-    openTime:  fmt(OPEN_HOUR, OPEN_MINUTE),
-    closeTime: fmt(CLOSE_HOUR, CLOSE_MINUTE),
+    openTime:  fmt(openHour, openMinute),
+    closeTime: fmt(closeHour, closeMinute),
     openDayName:  DAY_SHORT_UK[openDay],
     closeDayName: DAY_SHORT_UK[closeDay],
     openDayNameFull:  DAY_FULL_UK[openDay],

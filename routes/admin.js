@@ -9,6 +9,8 @@ const router = express.Router();
 const reportFile = path.join(__dirname, '..', 'load-test-report.html');
 let loadTestRunning = false;
 const OPENAI_MODEL_SETTING_KEY = 'openai.defaultModel';
+const ORDERING_SCHEDULE_KEY = 'ordering.schedule';
+const ORDERING_SCHEDULE_DEFAULTS = { openHour: 16, openMinute: 0, closeHour: 7, closeMinute: 30 };
 
 async function getAppSetting(key, defaultValue = null) {
   const setting = await AppSetting.findOne({ key }).lean();
@@ -124,6 +126,36 @@ router.post('/openai/settings', telegramAuth, requireTelegramRole('admin'), asyn
   } catch (error) {
     console.error('[admin/openai/settings] error', error.message || error);
     res.status(500).json({ error: error.message || 'Unable to save OpenAI settings' });
+  }
+});
+
+router.get('/ordering-schedule', telegramAuth, requireTelegramRole('admin'), async (req, res) => {
+  try {
+    const saved = await getAppSetting(ORDERING_SCHEDULE_KEY, ORDERING_SCHEDULE_DEFAULTS);
+    res.json({ ...ORDERING_SCHEDULE_DEFAULTS, ...saved });
+  } catch (error) {
+    res.status(500).json({ error: error.message || 'Unable to read ordering schedule' });
+  }
+});
+
+router.post('/ordering-schedule', telegramAuth, requireTelegramRole('admin'), async (req, res) => {
+  try {
+    const { openHour, openMinute, closeHour, closeMinute } = req.body;
+    const toInt = (v, min, max) => {
+      const n = parseInt(v, 10);
+      if (isNaN(n) || n < min || n > max) throw new Error(`Value ${v} out of range [${min}, ${max}]`);
+      return n;
+    };
+    const schedule = {
+      openHour:    toInt(openHour,    0, 23),
+      openMinute:  toInt(openMinute,  0, 59),
+      closeHour:   toInt(closeHour,   0, 23),
+      closeMinute: toInt(closeMinute, 0, 59),
+    };
+    const saved = await setAppSetting(ORDERING_SCHEDULE_KEY, schedule);
+    res.json(saved);
+  } catch (error) {
+    res.status(400).json({ error: error.message || 'Invalid schedule data' });
   }
 });
 
