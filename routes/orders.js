@@ -424,8 +424,8 @@ router.patch('/:id', async (req, res) => {
     return res.status(403).json({ error: 'You do not have permission to modify this order' });
   }
 
-  if (isOwner && update.status && update.status !== 'cancelled') {
-    return res.status(403).json({ error: 'Buyers can only cancel their own orders' });
+  if (isOwner && !isStaff && update.status) {
+    return res.status(403).json({ error: 'Sellers cannot change order status' });
   }
 
   if (update.status === 'cancelled' && order.status !== 'cancelled') {
