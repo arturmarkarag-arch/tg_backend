@@ -232,4 +232,18 @@ function getOrderingWindowOpenAt(deliveryDayOfWeek, schedule = {}) {
   );
 }
 
-module.exports = { isOrderingOpen, getWindowDescription, getWarsawNow, getOrderingWindowOpenAt, DAY_SHORT_UK, DAY_FULL_UK };
+/**
+ * Returns a stable string ID for the current ordering session of a delivery group.
+ * Format: `<groupId>:<windowOpenAt ISO string>`
+ *
+ * @param {string} groupId
+ * @param {number} deliveryDayOfWeek  0=Sun … 6=Sat
+ * @param {{ openHour?: number, openMinute?: number }} [schedule]
+ * @returns {string}
+ */
+function getCurrentOrderingSessionId(groupId, deliveryDayOfWeek, schedule = {}) {
+  const windowOpenAt = getOrderingWindowOpenAt(deliveryDayOfWeek, schedule);
+  return `${groupId}:${windowOpenAt.toISOString()}`;
+}
+
+module.exports = { isOrderingOpen, getWindowDescription, getWarsawNow, getOrderingWindowOpenAt, getCurrentOrderingSessionId, DAY_SHORT_UK, DAY_FULL_UK };

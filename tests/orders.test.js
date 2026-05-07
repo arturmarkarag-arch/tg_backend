@@ -209,6 +209,22 @@ describe('Orders API', () => {
     expect(res.body.orders[0].buyerTelegramId).toBe('111');
   });
 
+  it('excludes expired orders by default', async () => {
+    const product = await createTestProduct(10);
+
+    await createOrderRequest({ buyerTelegramId: '111', quantity: 1, price: 10, product });
+    const toExpire = await createOrderRequest({ buyerTelegramId: '222', quantity: 1, price: 10, product });
+    await request(app)
+      .patch(`/api/orders/${toExpire.response.body._id}`)
+      .send({ initData: buildInitData('222'), status: 'expired' });
+
+    const res = await request(app).get('/api/orders').query({ initData: buildInitData('111') });
+
+    expect(res.status).toBe(200);
+    expect(res.body.orders).toHaveLength(1);
+    expect(res.body.orders[0].buyerTelegramId).toBe('111');
+  });
+
   it('returns all orders including cancelled with status=all', async () => {
     const product = await createTestProduct(10);
 

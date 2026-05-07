@@ -8,7 +8,7 @@ const DeliveryGroup = require('../models/DeliveryGroup');
 const { getTelegramAuth } = require('../utils/validateTelegramInitData');
 const { telegramAuth, requireTelegramRoles } = require('../middleware/telegramAuth');
 const { getIO } = require('../socket');
-const { isOrderingOpen, getOrderingWindowOpenAt } = require('../utils/orderingSchedule');
+const { isOrderingOpen, getOrderingWindowOpenAt, getCurrentOrderingSessionId } = require('../utils/orderingSchedule');
 const AppSetting = require('../models/AppSetting');
 
 const ORDERING_SCHEDULE_KEY = 'ordering.schedule';
@@ -320,11 +320,12 @@ router.post('/', async (req, res) => {
     buyerTelegramId: buyer.telegramId,
     status: { $in: ['new', 'in_progress'] },
   };
+  let currentSessionId = '';
   if (group && schedule) {
     // Seller: merge only within the active ordering session for their delivery group
-    const windowOpenAt = getOrderingWindowOpenAt(group.dayOfWeek, schedule);
+    currentSessionId = getCurrentOrderingSessionId(String(group._id), group.dayOfWeek, schedule);
     existingOrderQuery['buyerSnapshot.deliveryGroupId'] = String(buyer.deliveryGroupId);
-    existingOrderQuery.createdAt = { $gte: windowOpenAt };
+    existingOrderQuery.orderingSessionId = currentSessionId;
   } else {
     // Admin / warehouse: no session concept — use 3-day fallback
     const threeDaysAgo = new Date();
@@ -363,6 +364,7 @@ router.post('/', async (req, res) => {
         shopAddress: buyer.shopAddress || '',
         deliveryGroupId: buyer.deliveryGroupId || '',
       };
+      if (currentSessionId) existingOrder.orderingSessionId = currentSessionId;
 
       existingOrder.totalPrice = existingOrder.items.reduce((sum, item) => sum + (Number(item.price || 0) * Number(item.quantity || 0)), 0);
       if (existingOrder.status === 'new' || existingOrder.status === 'in_progress') {
@@ -378,6 +380,7 @@ router.post('/', async (req, res) => {
         contactInfo,
         emojiType,
         totalPrice,
+        orderingSessionId: currentSessionId,
         buyerSnapshot: {
           shopName: buyer.shopName || '',
           shopCity: buyer.shopCity || '',
@@ -423,6 +426,33 @@ router.post('/', async (req, res) => {
   }
 
   res.status(201).json(responseBody);
+});
+
+// PATCH /:id/snapshot — admin updates buyerSnapshot fields (shopName, shopCity, deliveryGroupId)
+router.patch('/:id/snapshot', staffOnly, async (req, res) => {
+  const order = await Order.findById(req.params.id);
+  if (!order) return res.status(404).json({ error: 'Order not found' });
+
+  const { shopName, shopCity, deliveryGroupId } = req.body;
+  if (!order.buyerSnapshot) order.buyerSnapshot = {};
+
+  if (shopName !== undefined) order.buyerSnapshot.shopName = String(shopName).trim();
+  if (shopCity !== undefined) order.buyerSnapshot.shopCity = String(shopCity).trim();
+
+  if (deliveryGroupId !== undefined) {
+    const newGroupId = String(deliveryGroupId).trim();
+    if (newGroupId) {
+      const group = await DeliveryGroup.findById(newGroupId).lean();
+      if (!group) return res.status(400).json({ error: 'Групу доставки не знайдено' });
+      order.buyerSnapshot.deliveryGroupId = newGroupId;
+    } else {
+      order.buyerSnapshot.deliveryGroupId = '';
+    }
+  }
+
+  order.markModified('buyerSnapshot');
+  await order.save();
+  res.json(order);
 });
 
 router.patch('/:id', async (req, res) => {

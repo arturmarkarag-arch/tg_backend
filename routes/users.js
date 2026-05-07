@@ -74,8 +74,25 @@ function sanitizeUserPayload(payload, existing = null) {
 }
 
 router.get('/', async (req, res) => {
-  const users = await User.find().sort({ createdAt: -1 }).lean();
-  const telegramIds = users.map((user) => user.telegramId).filter(Boolean);
+  const page     = Math.max(1, parseInt(req.query.page) || 1);
+  const pageSize = Math.min(100, Math.max(1, parseInt(req.query.pageSize) || 20));
+  const roleFilter  = req.query.role || null;
+  const groupFilter = req.query.deliveryGroupId || null;
+
+  const filter = {};
+  if (roleFilter && roleFilter !== 'all') filter.role = roleFilter;
+  if (groupFilter && groupFilter !== 'all') filter.deliveryGroupId = groupFilter;
+
+  const [total, users] = await Promise.all([
+    User.countDocuments(filter),
+    User.find(filter)
+      .sort({ createdAt: -1 })
+      .skip((page - 1) * pageSize)
+      .limit(pageSize)
+      .lean(),
+  ]);
+
+  const telegramIds = users.map((u) => u.telegramId).filter(Boolean);
   const lastOrders = await Order.aggregate([
     { $match: { buyerTelegramId: { $in: telegramIds } } },
     { $sort: { createdAt: -1 } },
@@ -86,7 +103,14 @@ router.get('/', async (req, res) => {
     ...user,
     lastOrderAt: lastOrderMap.get(user.telegramId) || null,
   }));
-  res.json(usersWithLastOrder);
+
+  res.json({
+    users: usersWithLastOrder,
+    total,
+    page,
+    pageSize,
+    pageCount: Math.max(1, Math.ceil(total / pageSize)),
+  });
 });
 
 router.get('/:telegramId', async (req, res) => {

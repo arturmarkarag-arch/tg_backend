@@ -912,14 +912,18 @@ async function ensureBlocks() {
   return;
 }
 
-async function buildPickingTasksFromOrders() {
+async function buildPickingTasksFromOrders(targetDeliveryGroupId = null) {
   if (buildPickingTasksFromOrders._running) return;
   buildPickingTasksFromOrders._running = true;
   try {
   // 1. Find already assigned order/product pairs so we don't create duplicates.
+  //    Scope to the target group when provided — avoids touching other groups' tasks.
+  const activeTaskFilter = { status: { $in: ['pending', 'locked'] } };
+  if (targetDeliveryGroupId !== null) activeTaskFilter.deliveryGroupId = String(targetDeliveryGroupId);
+
   const activeTasks = await PickingTask.find(
-    { status: { $in: ['pending', 'locked'] } },
-    'productId items.orderId blockId positionIndex'
+    activeTaskFilter,
+    'productId items.orderId blockId positionIndex deliveryGroupId'
   ).lean();
 
   const assignedOrderProducts = new Set();
@@ -940,17 +944,24 @@ async function buildPickingTasksFromOrders() {
   const buyers = buyerIds.length ? await User.find({ telegramId: { $in: buyerIds } }).lean() : [];
   const buyerMap = new Map(buyers.map((buyer) => [buyer.telegramId, buyer]));
 
-  const productGroups = new Map();
+  const productGroups = new Map(); // key: `${productId}::${deliveryGroupId}`
   for (const order of orders) {
     const buyer = buyerMap.get(order.buyerTelegramId);
+    const dGroupId = order.buyerSnapshot?.deliveryGroupId || '';
+
+    // If targeting a specific group, skip orders from other groups.
+    if (targetDeliveryGroupId !== null && dGroupId !== String(targetDeliveryGroupId)) continue;
+
     for (const item of order.items) {
       if (item.packed || item.cancelled || !item.productId) continue;
       if (item.productId.status === 'archived') continue;
       const productId = String(item.productId._id);
       if (assignedOrderProducts.has(`${order._id}_${productId}`)) continue;
 
-      const group = productGroups.get(productId) || {
+      const key = `${productId}::${dGroupId}`;
+      const group = productGroups.get(key) || {
         productId: item.productId._id,
+        deliveryGroupId: dGroupId,
         items: [],
       };
       group.items.push({
@@ -959,7 +970,7 @@ async function buildPickingTasksFromOrders() {
         quantity: item.quantity || 0,
         packed: false,
       });
-      productGroups.set(productId, group);
+      productGroups.set(key, group);
     }
   }
 
@@ -987,16 +998,16 @@ async function buildPickingTasksFromOrders() {
 
   // Split productGroups into: products that already have an active task (append items)
   // vs products that need a brand-new task (insert).
-  const activeTaskByProduct = new Map(activeTasks.map((t) => [String(t.productId), t]));
-  const toAppend = new Map(); // productId → { taskId, newItems[] }
-  const toInsert = new Map(); // productId → group (same shape as productGroups)
+  const activeTaskByProduct = new Map(activeTasks.map((t) => [`${String(t.productId)}::${t.deliveryGroupId || ''}`, t]));
+  const toAppend = new Map(); // key → { taskId, newItems[] }
+  const toInsert = new Map(); // key → group (same shape as productGroups)
 
-  for (const [productId, group] of productGroups.entries()) {
-    const existing = activeTaskByProduct.get(productId);
+  for (const [key, group] of productGroups.entries()) {
+    const existing = activeTaskByProduct.get(key);
     if (existing) {
-      toAppend.set(productId, { taskId: existing._id, newItems: group.items });
+      toAppend.set(key, { taskId: existing._id, newItems: group.items });
     } else {
-      toInsert.set(productId, group);
+      toInsert.set(key, group);
     }
   }
 
@@ -1014,12 +1025,14 @@ async function buildPickingTasksFromOrders() {
 
   if (!toInsert.size) return;
 
-  const positions = await getShippingBlockPositions(Array.from(toInsert.keys()));
+  const uniqueProductIds = [...new Set(Array.from(toInsert.values()).map((g) => String(g.productId)))];
+  const positions = await getShippingBlockPositions(uniqueProductIds);
   const tasks = [];
-  for (const [productId, group] of toInsert.entries()) {
-    const position = positions.get(productId);
+  for (const [, group] of toInsert.entries()) {
+    const position = positions.get(String(group.productId));
     tasks.push({
       productId: group.productId,
+      deliveryGroupId: group.deliveryGroupId,
       // Products from incoming can be ordered before they are placed on shelves.
       // For those we keep a valid picking task with synthetic location (blockId=0).
       blockId: position?.blockId ?? 0,

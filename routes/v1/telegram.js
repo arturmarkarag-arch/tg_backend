@@ -308,7 +308,7 @@ router.patch('/me/shop', async (req, res) => {
 
   const user = await User.findOne({ telegramId });
   if (!user) return res.status(404).json({ error: 'User not found' });
-  if (user.role !== 'seller') return res.status(403).json({ error: 'Only sellers can update shop data' });
+  if (user.role !== 'seller' && user.role !== 'admin') return res.status(403).json({ error: 'Only sellers can update shop data' });
 
   const { shopName, shopCity, deliveryGroupId } = req.body;
 

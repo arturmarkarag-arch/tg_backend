@@ -3,6 +3,7 @@ const mongoose = require('mongoose');
 const PickingTaskSchema = new mongoose.Schema(
   {
     productId: { type: mongoose.Schema.Types.ObjectId, ref: 'Product', required: true },
+    deliveryGroupId: { type: String, default: '' },
     blockId: { type: Number, required: true },
     positionIndex: { type: Number, required: true },
     status: { type: String, enum: ['pending', 'locked', 'completed'], default: 'pending' },
@@ -25,10 +26,9 @@ const PickingTaskSchema = new mongoose.Schema(
 PickingTaskSchema.index({ status: 1, blockId: 1, positionIndex: 1 });
 PickingTaskSchema.index({ productId: 1, blockId: 1 });
 
-// Only one active (pending/locked) task per product at a time.
-// Prevents race-condition duplicates from concurrent buildPickingTasksFromOrders calls.
+// One active (pending/locked) task per (product, deliveryGroup) at a time.
 PickingTaskSchema.index(
-  { productId: 1 },
+  { productId: 1, deliveryGroupId: 1 },
   { unique: true, partialFilterExpression: { status: { $in: ['pending', 'locked'] } } }
 );
 

@@ -2,10 +2,21 @@ const express = require('express');
 const PickingTask = require('../models/PickingTask');
 const Product = require('../models/Product');
 const Order = require('../models/Order');
+const Block = require('../models/Block');
 const User = require('../models/User');
+const DeliveryGroup = require('../models/DeliveryGroup');
+const AppSetting = require('../models/AppSetting');
 const { requireTelegramRoles } = require('../middleware/telegramAuth');
 const { archiveProduct, getProductTitle } = require('../services/archiveProduct');
 const { buildPickingTasksFromOrders } = require('../telegramBot');
+const { isOrderingOpen } = require('../utils/orderingSchedule');
+
+const ORDERING_SCHEDULE_KEY = 'ordering.schedule';
+const ORDERING_SCHEDULE_DEFAULTS = { openHour: 16, openMinute: 0, closeHour: 7, closeMinute: 30 };
+async function getOrderingSchedule() {
+  const saved = await AppSetting.findOne({ key: ORDERING_SCHEDULE_KEY }).lean();
+  return { ...ORDERING_SCHEDULE_DEFAULTS, ...(saved?.value || {}) };
+}
 
 const router = express.Router();
 
@@ -85,11 +96,12 @@ async function buildTaskResponse(task, { wrappedAround = false, isSecondChance =
 /**
  * @returns {{ task: object|null, wrappedAround: boolean }}
  */
-async function findAndLockNext(userTelegramId, fromBlock) {
+async function findAndLockNext(userTelegramId, fromBlock, deliveryGroupId = null) {
   const lock = { $set: { status: 'locked', lockedBy: userTelegramId, lockedAt: new Date() } };
   const opts = { sort: { blockId: 1, positionIndex: 1 }, new: true };
 
   const fresh = { status: 'pending', skippedBy: { $nin: [userTelegramId] } };
+  if (deliveryGroupId) fresh.deliveryGroupId = String(deliveryGroupId);
 
   // Pass 1: fresh tasks fromBlock onwards
   let task = await PickingTask.findOneAndUpdate(
@@ -109,26 +121,132 @@ async function findAndLockNext(userTelegramId, fromBlock) {
 }
 
 // ---------------------------------------------------------------------------
+// GET /api/picking/preview?deliveryGroupId=X
+// Returns a live list of products ordered for the group, without creating tasks.
+// Used when the ordering window is still open — gives warehouse workers a heads-up.
+// ---------------------------------------------------------------------------
+router.get('/preview', requireTelegramRoles(['warehouse', 'admin']), async (req, res) => {
+  const deliveryGroupId = req.query.deliveryGroupId || null;
+  const blockIdParam = req.query.blockId ? parseInt(req.query.blockId, 10) : null;
+
+  // If blockId provided, resolve which productIds are in that block
+  let blockProductIds = null;
+  if (Number.isInteger(blockIdParam) && blockIdParam >= 1) {
+    const block = await Block.findOne({ blockId: blockIdParam }, 'productIds').lean();
+    blockProductIds = block ? block.productIds.map(String) : [];
+  }
+
+  const orderFilter = { status: { $in: ['new', 'in_progress'] } };
+  if (deliveryGroupId) {
+    orderFilter['buyerSnapshot.deliveryGroupId'] = String(deliveryGroupId);
+  }
+
+  const orders = await Order.find(orderFilter)
+    .populate('items.productId', 'name description imageUrls localImageUrl status')
+    .lean();
+
+  // Aggregate by product: total quantity + list of shops
+  const productMap = new Map();
+  for (const order of orders) {
+    const shopName = order.buyerSnapshot?.shopName || '—';
+    for (const item of order.items) {
+      if (item.packed || item.cancelled || !item.productId) continue;
+      if (item.productId.status === 'archived') continue;
+      const pid = String(item.productId._id);
+      // Filter by block if specified
+      if (blockProductIds !== null && !blockProductIds.includes(pid)) continue;
+      const entry = productMap.get(pid) || { product: item.productId, totalQty: 0, shops: [] };
+      entry.totalQty += item.quantity || 0;
+      const existing = entry.shops.find((s) => s.shopName === shopName);
+      if (existing) existing.qty += item.quantity || 0;
+      else entry.shops.push({ shopName, qty: item.quantity || 0 });
+      productMap.set(pid, entry);
+    }
+  }
+
+  const items = Array.from(productMap.values()).map(({ product, totalQty, shops }) => {
+    const imageUrl =
+      (Array.isArray(product.imageUrls) && product.imageUrls[0]) ||
+      product.localImageUrl ||
+      null;
+    return {
+      productId: String(product._id),
+      productTitle: product.name || product.description || 'Без назви',
+      imageUrl,
+      totalQty,
+      shops,
+    };
+  });
+
+  res.json({ items });
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/picking/start-session
+// Body: { deliveryGroupId?: string }
+// Checks ordering window, then atomically builds picking tasks for the group.
+// Idempotent: if tasks already exist for this group, returns count without rebuilding.
+// ---------------------------------------------------------------------------
+router.post('/start-session', requireTelegramRoles(['warehouse', 'admin']), async (req, res) => {
+  const { deliveryGroupId = null } = req.body;
+
+  // 1. Window must be closed before picking can start.
+  if (deliveryGroupId) {
+    const group = await DeliveryGroup.findById(deliveryGroupId, 'dayOfWeek name').lean();
+    if (group) {
+      const schedule = await getOrderingSchedule();
+      const { isOpen, message } = isOrderingOpen(group.dayOfWeek, schedule);
+      if (isOpen) {
+        return res.json({ windowOpen: true, message });
+      }
+    }
+  }
+
+  // 2. Idempotent: if tasks already exist, return their count.
+  const activeFilter = {
+    status: { $in: ['pending', 'locked'] },
+    ...(deliveryGroupId ? { deliveryGroupId: String(deliveryGroupId) } : {}),
+  };
+  const existingCount = await PickingTask.countDocuments(activeFilter);
+  if (existingCount > 0) {
+    return res.json({ alreadyStarted: true, taskCount: existingCount });
+  }
+
+  // 3. Build picking tasks from this group's closed-window orders.
+  await buildPickingTasksFromOrders(deliveryGroupId);
+
+  // 4. Count tasks that were created.
+  const taskCount = await PickingTask.countDocuments(activeFilter);
+  if (taskCount === 0) {
+    return res.json({ noOrders: true });
+  }
+
+  res.json({ started: true, taskCount });
+});
+
+// ---------------------------------------------------------------------------
 // GET /api/picking/next-task?currentBlock=N
 // ---------------------------------------------------------------------------
 router.get('/next-task', requireTelegramRoles(['warehouse', 'admin']), async (req, res) => {
   const user = req.telegramUser;
   const currentBlock = parseInt(req.query.currentBlock, 10);
+  const deliveryGroupId = req.query.deliveryGroupId || null;
 
   if (!Number.isInteger(currentBlock) || currentBlock < 1) {
     return res.status(400).json({ error: 'currentBlock must be a positive integer' });
   }
 
-  // Auto-generate tasks from active orders (idempotent, skips duplicates)
-  await buildPickingTasksFromOrders();
+  // Release any tasks this worker had locked for this group (stale locks from previous session).
   await PickingTask.updateMany(
-    { lockedBy: user.telegramId, status: 'locked' },
+    { lockedBy: user.telegramId, status: 'locked', ...(deliveryGroupId ? { deliveryGroupId: String(deliveryGroupId) } : {}) },
     { $set: { status: 'pending', lockedBy: null, lockedAt: null } },
   );
 
-  const { task, wrappedAround } = await findAndLockNext(user.telegramId, currentBlock);
+  const { task, wrappedAround } = await findAndLockNext(user.telegramId, currentBlock, deliveryGroupId);
   if (!task) {
-    const pendingCount = await PickingTask.countDocuments({ status: 'pending' });
+    const pendingFilter = { status: 'pending' };
+    if (deliveryGroupId) pendingFilter.deliveryGroupId = String(deliveryGroupId);
+    const pendingCount = await PickingTask.countDocuments(pendingFilter);
     return res.json({
       task: null,
       reviewMode: pendingCount > 0,
@@ -142,7 +260,9 @@ router.get('/next-task', requireTelegramRoles(['warehouse', 'admin']), async (re
     await PickingTask.findByIdAndUpdate(task._id, {
       $set: { status: 'pending', lockedBy: null, lockedAt: null },
     });
-    const pendingCount = await PickingTask.countDocuments({ status: 'pending' });
+    const pendingFilter = { status: 'pending' };
+    if (deliveryGroupId) pendingFilter.deliveryGroupId = String(deliveryGroupId);
+    const pendingCount = await PickingTask.countDocuments(pendingFilter);
     return res.json({ task: null, reviewMode: pendingCount > 0, message: 'Немає задач для збирання' });
   }
 
@@ -183,7 +303,7 @@ router.post('/tasks/:taskId/complete', requireTelegramRoles(['warehouse', 'admin
   await markOrderItemsPacked(task.items, task.productId);
 
   const fromBlock = typeof nextBlock === 'number' ? nextBlock : task.blockId;
-  const { task: nextTask, wrappedAround: nwa } = await findAndLockNext(user.telegramId, fromBlock);
+  const { task: nextTask, wrappedAround: nwa } = await findAndLockNext(user.telegramId, fromBlock, task.deliveryGroupId || null);
   const nextTaskData = await buildTaskResponse(nextTask, { wrappedAround: nwa });
 
   res.json({ message: 'Task completed', nextTask: nextTaskData });
@@ -214,7 +334,7 @@ router.post('/tasks/:taskId/skip', requireTelegramRoles(['warehouse', 'admin']),
   await task.save();
 
   // skippedBy now includes this user → findAndLockNext will skip this task
-  const { task: nextTask, wrappedAround: nwa } = await findAndLockNext(user.telegramId, fromBlock);
+  const { task: nextTask, wrappedAround: nwa } = await findAndLockNext(user.telegramId, fromBlock, task.deliveryGroupId || null);
   const nextTaskData = await buildTaskResponse(nextTask, { wrappedAround: nwa });
 
   res.json({ message: 'Task skipped', nextTask: nextTaskData });
@@ -224,7 +344,10 @@ router.post('/tasks/:taskId/skip', requireTelegramRoles(['warehouse', 'admin']),
 // GET /api/picking/review-list  — all pending tasks (no locking), for the review screen
 // ---------------------------------------------------------------------------
 router.get('/review-list', requireTelegramRoles(['warehouse', 'admin']), async (req, res) => {
-  const tasks = await PickingTask.find({ status: 'pending' })
+  const deliveryGroupId = req.query.deliveryGroupId || null;
+  const filter = { status: 'pending' };
+  if (deliveryGroupId) filter.deliveryGroupId = String(deliveryGroupId);
+  const tasks = await PickingTask.find(filter)
     .sort({ blockId: 1, positionIndex: 1 })
     .lean();
 
@@ -333,7 +456,7 @@ router.post('/tasks/:taskId/out-of-stock', requireTelegramRoles(['warehouse', 'a
   }
 
   const fromBlock = typeof nextBlock === 'number' ? nextBlock : blockId;
-  const { task: nextTask, wrappedAround: nwa } = await findAndLockNext(user.telegramId, fromBlock);
+  const { task: nextTask, wrappedAround: nwa } = await findAndLockNext(user.telegramId, fromBlock, task.deliveryGroupId || null);
   const nextTaskData = await buildTaskResponse(nextTask, { wrappedAround: nwa });
 
   res.json({ message: 'Out-of-stock recorded', nextTask: nextTaskData });

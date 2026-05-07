@@ -1,8 +1,14 @@
 const express = require('express');
 const DeliveryGroup = require('../models/DeliveryGroup');
 const User = require('../models/User');
+const Order = require('../models/Order');
 const { telegramAuth, requireTelegramRole } = require('../middleware/telegramAuth');
-const { isOrderingOpen, getWindowDescription } = require('../utils/orderingSchedule');
+const {
+  isOrderingOpen,
+  getWindowDescription,
+  getCurrentOrderingSessionId,
+  getOrderingWindowOpenAt,
+} = require('../utils/orderingSchedule');
 const AppSetting = require('../models/AppSetting');
 
 const ORDERING_SCHEDULE_KEY = 'ordering.schedule';
@@ -27,6 +33,36 @@ async function syncUsersDeliveryGroupId(group) {
     { deliveryGroupId: group._id, telegramId: { $nin: group.members || [] } },
     { deliveryGroupId: '', warehouseZone: '' }
   );
+}
+
+function buildDeliveryGroupSessionSummary(group, schedule, ordersByGroup) {
+  const status = isOrderingOpen(group.dayOfWeek, schedule);
+  const currentSessionId = getCurrentOrderingSessionId(String(group._id), group.dayOfWeek, schedule);
+  const sessionOpenAt = getOrderingWindowOpenAt(group.dayOfWeek, schedule);
+  const orders = ordersByGroup[String(group._id)] || [];
+  const summary = orders.reduce(
+    (acc, order) => {
+      if (order.orderingSessionId === currentSessionId) {
+        acc.activeCount += 1;
+      } else {
+        acc.staleCount += 1;
+      }
+      return acc;
+    },
+    { activeCount: 0, staleCount: 0 }
+  );
+
+  return {
+    groupId: String(group._id),
+    groupName: group.name,
+    dayOfWeek: group.dayOfWeek,
+    isOpen: status.isOpen,
+    statusMessage: status.message,
+    sessionOpenAt: sessionOpenAt.toISOString(),
+    currentSessionId,
+    activeCount: summary.activeCount,
+    staleCount: summary.staleCount,
+  };
 }
 
 /**
@@ -88,6 +124,63 @@ router.get('/summary', async (req, res) => {
   res.json(result);
 });
 
+router.get('/session-summaries', telegramAuth, requireTelegramRole('admin'), async (req, res) => {
+  const groups = await DeliveryGroup.find().lean();
+  const schedule = await getOrderingSchedule();
+  const groupIds = groups.map((group) => String(group._id));
+
+  const orders = await Order.find({
+    'buyerSnapshot.deliveryGroupId': { $in: groupIds },
+    status: { $in: ['new', 'in_progress'] },
+  })
+    .select('buyerSnapshot.deliveryGroupId orderingSessionId')
+    .lean();
+
+  const ordersByGroup = orders.reduce((acc, order) => {
+    const groupId = String(order.buyerSnapshot.deliveryGroupId || '');
+    if (!groupId) return acc;
+    if (!acc[groupId]) acc[groupId] = [];
+    acc[groupId].push(order);
+    return acc;
+  }, {});
+
+  const summaries = groups.map((group) => buildDeliveryGroupSessionSummary(group, schedule, ordersByGroup));
+  summaries.sort((a, b) => {
+    const orderA = a.dayOfWeek === 0 ? 7 : a.dayOfWeek;
+    const orderB = b.dayOfWeek === 0 ? 7 : b.dayOfWeek;
+    if (orderA !== orderB) return orderA - orderB;
+    return String(a.groupName || '').localeCompare(String(b.groupName || ''));
+  });
+  res.json(summaries);
+});
+
+router.post('/:id/close-ordering-session', telegramAuth, requireTelegramRole('admin'), async (req, res) => {
+  const group = await DeliveryGroup.findById(req.params.id).lean();
+  if (!group) return res.status(404).json({ error: 'Group not found' });
+
+  const schedule = await getOrderingSchedule();
+  const status = isOrderingOpen(group.dayOfWeek, schedule);
+  const currentSessionId = getCurrentOrderingSessionId(String(group._id), group.dayOfWeek, schedule);
+
+  const staleOrderFilter = {
+    'buyerSnapshot.deliveryGroupId': String(group._id),
+    status: { $in: ['new', 'in_progress'] },
+  };
+  if (status.isOpen) {
+    staleOrderFilter.orderingSessionId = { $ne: currentSessionId };
+  }
+
+  const result = await Order.updateMany(staleOrderFilter, { status: 'expired' });
+  const expiredCount = result.modifiedCount ?? result.nModified ?? 0;
+
+  res.json({
+    message: expiredCount > 0
+      ? `Старі замовлення з попередньої сесії закрито: ${expiredCount}.`
+      : 'Старих замовлень для закриття не знайдено.',
+    expiredCount,
+  });
+});
+
 router.get('/', async (req, res) => {
   const groups = await DeliveryGroup.find().lean();
   groups.sort((a, b) => {
@@ -96,7 +189,12 @@ router.get('/', async (req, res) => {
     if (orderA !== orderB) return orderA - orderB;
     return String(a.name || '').localeCompare(String(b.name || ''));
   });
-  res.json(groups);
+  const schedule = await getOrderingSchedule();
+  const result = groups.map((g) => ({
+    ...g,
+    isOpen: isOrderingOpen(g.dayOfWeek, schedule).isOpen,
+  }));
+  res.json(result);
 });
 
 router.post('/', telegramAuth, requireTelegramRole('admin'), async (req, res) => {

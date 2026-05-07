@@ -20,7 +20,7 @@ const OrderSchema = new mongoose.Schema(
   {
     buyerTelegramId: { type: String, required: true },
     items: { type: [OrderItemSchema], required: true },
-    status: { type: String, enum: ['new', 'in_progress', 'confirmed', 'fulfilled', 'cancelled'], default: 'new' },
+    status: { type: String, enum: ['new', 'in_progress', 'confirmed', 'fulfilled', 'cancelled', 'expired'], default: 'new' },
     totalPrice: { type: Number, default: 0 },
     orderType: { type: String, enum: ['manual', 'direct_allocation'], default: 'manual' },
     receiptId: { type: mongoose.Schema.Types.ObjectId, ref: 'Receipt', default: null },
@@ -28,12 +28,14 @@ const OrderSchema = new mongoose.Schema(
     shippingAddress: { type: String, default: '' },
     contactInfo: { type: String, default: '' },
     idempotencyKey: { type: String },
+    orderingSessionId: { type: String, default: '' },
     buyerSnapshot: { type: BuyerSnapshotSchema, default: null },
   },
   { timestamps: true }
 );
 
 OrderSchema.index({ idempotencyKey: 1 }, { unique: true, sparse: true });
+OrderSchema.index({ orderingSessionId: 1 });
 
 function normalizeOrderItems(items = []) {
   const grouped = new Map();

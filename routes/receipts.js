@@ -122,18 +122,37 @@ const router = express.Router();
 router.get('/', staffOnly, async (req, res) => {
   try {
     const statusFilter = req.query.status;
+    const page     = Math.max(1, parseInt(req.query.page) || 1);
+    const pageSize = Math.min(100, Math.max(1, parseInt(req.query.pageSize) || 20));
+
     const query = {};
-    if (statusFilter) {
-      query.status = statusFilter;
-    }
+    if (statusFilter) query.status = statusFilter;
 
-    const receipts = await Receipt.find(query).sort({ createdAt: -1 }).lean();
-    const receiptsWithCounts = await Promise.all(receipts.map(async (receipt) => {
-      const itemsCount = await ReceiptItem.countDocuments({ receiptId: receipt._id });
-      return { ...receipt, itemsCount };
-    }));
+    const [total, receipts] = await Promise.all([
+      Receipt.countDocuments(query),
+      Receipt.find(query)
+        .sort({ createdAt: -1 })
+        .skip((page - 1) * pageSize)
+        .limit(pageSize)
+        .lean(),
+    ]);
 
-    res.json(receiptsWithCounts);
+    // Batch count items (one aggregate instead of N queries)
+    const receiptIds = receipts.map((r) => r._id);
+    const counts = await ReceiptItem.aggregate([
+      { $match: { receiptId: { $in: receiptIds } } },
+      { $group: { _id: '$receiptId', count: { $sum: 1 } } },
+    ]);
+    const countMap = new Map(counts.map((c) => [String(c._id), c.count]));
+    const receiptsWithCounts = receipts.map((r) => ({ ...r, itemsCount: countMap.get(String(r._id)) || 0 }));
+
+    res.json({
+      receipts: receiptsWithCounts,
+      total,
+      page,
+      pageSize,
+      pageCount: Math.max(1, Math.ceil(total / pageSize)),
+    });
   } catch (err) {
     console.error('[receipts.list] Error:', err);
     res.status(500).json({ error: err.message || 'Failed to fetch receipts' });
