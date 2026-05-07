@@ -8,7 +8,7 @@ const DeliveryGroup = require('../models/DeliveryGroup');
 const { getTelegramAuth } = require('../utils/validateTelegramInitData');
 const { telegramAuth, requireTelegramRoles } = require('../middleware/telegramAuth');
 const { getIO } = require('../socket');
-const { isOrderingOpen } = require('../utils/orderingSchedule');
+const { isOrderingOpen, getOrderingWindowOpenAt } = require('../utils/orderingSchedule');
 const AppSetting = require('../models/AppSetting');
 
 const ORDERING_SCHEDULE_KEY = 'ordering.schedule';
@@ -245,6 +245,9 @@ router.post('/', async (req, res) => {
   }
 
   // Check ordering window — only for sellers, admin/warehouse are unrestricted
+  // group and schedule are kept in outer scope so the merge logic can use them below
+  let group = null;
+  let schedule = null;
   if (buyer.role === 'seller') {
     if (!buyer.deliveryGroupId) {
       return res.status(403).json({
@@ -252,14 +255,14 @@ router.post('/', async (req, res) => {
         message: 'Вас не призначено до жодної групи доставки. Зверніться до адміністратора.',
       });
     }
-    const group = await DeliveryGroup.findById(buyer.deliveryGroupId).lean();
+    group = await DeliveryGroup.findById(buyer.deliveryGroupId).lean();
     if (!group) {
       return res.status(403).json({
         error: 'delivery_group_not_found',
         message: 'Групу доставки не знайдено. Зверніться до адміністратора.',
       });
     }
-    const schedule = await getOrderingSchedule();
+    schedule = await getOrderingSchedule();
     const { isOpen, message } = isOrderingOpen(group.dayOfWeek, schedule);
     if (!isOpen) {
       return res.status(403).json({ error: 'ordering_closed', message });
@@ -311,14 +314,25 @@ router.post('/', async (req, res) => {
     return res.status(400).json({ error: 'No valid items found' });
   }
 
-  const threeDaysAgo = new Date();
-  threeDaysAgo.setDate(threeDaysAgo.getDate() - 3);
-
-  const existingOrder = await Order.findOne({
+  // Build existingOrder query: sellers use the current ordering-session window,
+  // admin/warehouse fall back to a 3-day window.
+  const existingOrderQuery = {
     buyerTelegramId: buyer.telegramId,
     status: { $in: ['new', 'in_progress'] },
-    createdAt: { $gte: threeDaysAgo },
-  });
+  };
+  if (group && schedule) {
+    // Seller: merge only within the active ordering session for their delivery group
+    const windowOpenAt = getOrderingWindowOpenAt(group.dayOfWeek, schedule);
+    existingOrderQuery['buyerSnapshot.deliveryGroupId'] = String(buyer.deliveryGroupId);
+    existingOrderQuery.createdAt = { $gte: windowOpenAt };
+  } else {
+    // Admin / warehouse: no session concept — use 3-day fallback
+    const threeDaysAgo = new Date();
+    threeDaysAgo.setDate(threeDaysAgo.getDate() - 3);
+    existingOrderQuery.createdAt = { $gte: threeDaysAgo };
+  }
+
+  const existingOrder = await Order.findOne(existingOrderQuery);
 
   // Якщо продавець змінив магазин — не мерджити в старий заказ
   const shopChanged = existingOrder && (

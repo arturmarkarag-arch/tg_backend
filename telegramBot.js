@@ -985,9 +985,38 @@ async function buildPickingTasksFromOrders() {
 
   if (!productGroups.size) return;
 
-  const positions = await getShippingBlockPositions(Array.from(productGroups.keys()));
-  const tasks = [];
+  // Split productGroups into: products that already have an active task (append items)
+  // vs products that need a brand-new task (insert).
+  const activeTaskByProduct = new Map(activeTasks.map((t) => [String(t.productId), t]));
+  const toAppend = new Map(); // productId → { taskId, newItems[] }
+  const toInsert = new Map(); // productId → group (same shape as productGroups)
+
   for (const [productId, group] of productGroups.entries()) {
+    const existing = activeTaskByProduct.get(productId);
+    if (existing) {
+      toAppend.set(productId, { taskId: existing._id, newItems: group.items });
+    } else {
+      toInsert.set(productId, group);
+    }
+  }
+
+  // Append new order items to already-existing tasks (e.g. a shop ordered mid-picking)
+  if (toAppend.size) {
+    await Promise.all(
+      Array.from(toAppend.values()).map(({ taskId, newItems }) =>
+        PickingTask.updateOne(
+          { _id: taskId },
+          { $push: { items: { $each: newItems } } }
+        )
+      )
+    );
+  }
+
+  if (!toInsert.size) return;
+
+  const positions = await getShippingBlockPositions(Array.from(toInsert.keys()));
+  const tasks = [];
+  for (const [productId, group] of toInsert.entries()) {
     const position = positions.get(productId);
     tasks.push({
       productId: group.productId,
@@ -1063,20 +1092,6 @@ async function releaseStaleOrOrphanLockedTasks() {
     {
       status: 'locked',
       lockedAt: { $lt: lockDeadline },
-    },
-    {
-      $set: { status: 'pending', lockedBy: null, lockedAt: null },
-    }
-  );
-
-  // Auto-release tasks locked by workers who are not on shift anymore.
-  const activeWorkers = await User.find({ role: 'warehouse', isOnShift: true }, 'telegramId').lean();
-  const activeTelegramIds = activeWorkers.map((worker) => String(worker.telegramId));
-
-  await PickingTask.updateMany(
-    {
-      status: 'locked',
-      lockedBy: { $nin: activeTelegramIds },
     },
     {
       $set: { status: 'pending', lockedBy: null, lockedAt: null },

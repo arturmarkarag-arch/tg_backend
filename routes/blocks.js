@@ -117,7 +117,8 @@ router.get('/incoming/products', async (req, res) => {
   try {
     const assignedIds = await Block.distinct('productIds');
     const products = await Product.find({
-      status: { $in: ['active', 'pending'] },
+      status: 'active',
+      source: 'receive',
       _id: { $nin: assignedIds },
     })
       .sort('-createdAt')

@@ -2,7 +2,7 @@ const express = require('express');
 const crypto = require('crypto');
 const Busboy = require('busboy');
 const sharp = require('sharp');
-const { S3Client, PutObjectCommand, HeadBucketCommand } = require('@aws-sdk/client-s3');
+const { S3Client, PutObjectCommand, HeadBucketCommand, GetObjectCommand } = require('@aws-sdk/client-s3');
 const { shiftUp, shiftDown } = require('../utils/shiftOrderNumbers');
 const { normalizeBarcode } = require('../utils/barcodeScanner');
 const Block = require('../models/Block');
@@ -95,11 +95,32 @@ function getProductTitle(product) {
 
 const router = express.Router();
 
-router.get('/images/:filename', (req, res) => {
-  const publicUrl = process.env.R2_PUBLIC_URL;
-  if (!publicUrl) return res.status(503).json({ error: 'R2_PUBLIC_URL not configured' });
+router.get('/images/:filename', async (req, res) => {
   const filename = req.params.filename.replace(/[^a-zA-Z0-9._-]/g, '');
-  res.redirect(302, `${publicUrl}/products/${filename}`);
+  try {
+    const data = await s3Client.send(new GetObjectCommand({
+      Bucket: process.env.R2_BUCKET_NAME,
+      Key: `products/${filename}`,
+    }));
+    res.set('Content-Type', data.ContentType || 'image/jpeg');
+    res.set('Cache-Control', 'public, max-age=31536000, immutable');
+    res.set('Access-Control-Allow-Origin', '*');
+    data.Body.pipe(res);
+  } catch {
+    res.status(404).json({ error: 'Image not found' });
+  }
+});
+
+// GET /api/products/drafts — pending (unconfirmed) products
+router.get('/drafts', staffOnly, async (req, res) => {
+  try {
+    const products = await Product.find({ status: 'pending', source: 'receive' })
+      .sort('-createdAt')
+      .lean();
+    res.json(products);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 router.get('/', async (req, res) => {
@@ -399,6 +420,64 @@ router.post('/block-upload-photos', staffOnly, async (req, res) => {
   });
 });
 
+// POST /api/products/receive — save a product from the web Receive page.
+// Required: photo file, quantity.
+// Optional: price, quantityPerPackage.
+// status is set to 'active' when both price > 0 AND quantityPerPackage > 0, otherwise 'pending'.
+router.post('/receive', staffOnly, async (req, res) => {
+  try {
+    const { fields, files } = await parseMultipart(req);
+
+    if (!files.length) {
+      return res.status(400).json({ error: "Фото є обов'язковим" });
+    }
+
+    const quantity = Number(fields.quantity ?? 0);
+    if (!Number.isInteger(quantity) || quantity < 0) {
+      return res.status(400).json({ error: 'Кількість має бути цілим числом >= 0' });
+    }
+
+    const price =
+      fields.price !== undefined && fields.price !== ''
+        ? Number(fields.price)
+        : 0;
+    const quantityPerPackage =
+      fields.quantityPerPackage !== undefined && fields.quantityPerPackage !== ''
+        ? Number(fields.quantityPerPackage)
+        : 0;
+
+    const isConfirmed = price > 0 && quantityPerPackage > 0;
+
+    const maxProduct = await Product.findOne({ status: { $ne: 'archived' } })
+      .sort({ orderNumber: -1 })
+      .lean();
+    const nextOrderNumber = (maxProduct?.orderNumber ?? 0) + 1;
+
+    const file = files[0];
+    const filename = await uploadToR2(file.buffer, file.originalname, file.mimetype);
+    const imageUrl = `/api/products/images/${filename}`;
+
+    const product = new Product({
+      orderNumber: nextOrderNumber,
+      price,
+      quantity,
+      quantityPerPackage,
+      status: isConfirmed ? 'active' : 'pending',
+      source: 'receive',
+      notes: fields.notes ? String(fields.notes) : '',
+      originalImageUrl: imageUrl,
+      imageUrls: [imageUrl],
+      imageNames: [filename],
+    });
+    await product.save();
+
+    res.status(201).json(product);
+  } catch (err) {
+    console.error('[products/receive] Error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 router.post('/', staffOnly, async (req, res) => {
   let fields, files = [];
 
@@ -491,6 +570,13 @@ router.patch('/:id', staffOnly, async (req, res) => {
   }
   if (price !== undefined) product.price = Number(price);
   if (quantity !== undefined) product.quantity = Number(quantity);
+  if (fields.notes !== undefined) product.notes = String(fields.notes);
+  if (fields.labelPositions !== undefined) {
+    try { product.labelPositions = JSON.parse(fields.labelPositions); } catch {}
+  }
+  if (fields.quantityPerPackage !== undefined) {
+    product.quantityPerPackage = Number(fields.quantityPerPackage);
+  }
   if (fields.barcode !== undefined) {
     product.barcode = String(fields.barcode || '').trim();
   }

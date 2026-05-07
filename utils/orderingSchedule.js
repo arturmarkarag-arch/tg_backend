@@ -160,4 +160,76 @@ function getWindowDescription(deliveryDayOfWeek, schedule = {}) {
   };
 }
 
-module.exports = { isOrderingOpen, getWindowDescription, getWarsawNow, DAY_SHORT_UK, DAY_FULL_UK };
+/**
+ * Converts a wall-clock date/time in Warsaw timezone to a UTC Date.
+ * Uses a one-step offset approximation — accurate for all non-DST-transition moments.
+ */
+function warsawWallClockToUTC(year, month, day, hour, minute) {
+  // Estimate UTC by assuming UTC+1 (Warsaw winter time)
+  const approx = new Date(Date.UTC(year, month - 1, day, hour - 1, minute));
+
+  // Find the actual Warsaw offset for this approximate UTC moment
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: TIMEZONE,
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', hour12: false,
+  }).formatToParts(approx);
+  const g = (t) => parseInt(parts.find((p) => p.type === t)?.value ?? '0', 10);
+
+  // offsetMs = (Warsaw wall clock read as UTC) − actual UTC
+  const warsawAsUTC = Date.UTC(g('year'), g('month') - 1, g('day'), g('hour'), g('minute'));
+  const offsetMs = warsawAsUTC - approx.getTime();
+
+  // target UTC = target Warsaw wall clock (as UTC) − offset
+  return new Date(Date.UTC(year, month - 1, day, hour, minute) - offsetMs);
+}
+
+/**
+ * Returns the UTC Date when the current ordering window opened for the given group.
+ * This is the most recent past occurrence of (openDay at openHour:openMinute Warsaw time).
+ *
+ * @param {number} deliveryDayOfWeek  0=Sun … 6=Sat
+ * @param {{ openHour?: number, openMinute?: number }} [schedule]
+ * @returns {Date}
+ */
+function getOrderingWindowOpenAt(deliveryDayOfWeek, schedule = {}) {
+  const openHour   = schedule.openHour   ?? OPEN_HOUR;
+  const openMinute = schedule.openMinute ?? OPEN_MINUTE;
+
+  // Which weekday does the window open on? (day before delivery; Sunday → Saturday)
+  const dayBefore = (deliveryDayOfWeek - 1 + 7) % 7;
+  const openDay   = dayBefore === 0 ? 6 : dayBefore;
+
+  const { dayOfWeek: nowDOW, hour: nowHour, minute: nowMinute } = getWarsawNow();
+  const nowMins  = nowHour * 60 + nowMinute;
+  const openMins = openHour * 60 + openMinute;
+
+  // How many days back is the last occurrence of openDay?
+  let daysBack = (nowDOW - openDay + 7) % 7;
+  // If today IS openDay but we haven't passed openTime yet → look back a full week
+  if (daysBack === 0 && nowMins < openMins) {
+    daysBack = 7;
+  }
+
+  // Get current Warsaw calendar date
+  const now = new Date();
+  const dateParts = new Intl.DateTimeFormat('en-US', {
+    timeZone: TIMEZONE,
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour12: false,
+  }).formatToParts(now);
+  const gd = (t) => parseInt(dateParts.find((p) => p.type === t)?.value ?? '0', 10);
+
+  // Subtract daysBack; Date.UTC handles month/year rollover automatically
+  const target = new Date(Date.UTC(gd('year'), gd('month') - 1, gd('day') - daysBack));
+
+  return warsawWallClockToUTC(
+    target.getUTCFullYear(),
+    target.getUTCMonth() + 1,
+    target.getUTCDate(),
+    openHour,
+    openMinute,
+  );
+}
+
+module.exports = { isOrderingOpen, getWindowDescription, getWarsawNow, getOrderingWindowOpenAt, DAY_SHORT_UK, DAY_FULL_UK };

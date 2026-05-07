@@ -233,6 +233,30 @@ router.get('/review-list', requireTelegramRoles(['warehouse', 'admin']), async (
 });
 
 // ---------------------------------------------------------------------------
+// PATCH /api/picking/tasks/:taskId/progress
+// Body: { packedOrderIds: string[] }
+// Saves partial packed state without completing the task.
+// ---------------------------------------------------------------------------
+router.patch('/tasks/:taskId/progress', requireTelegramRoles(['warehouse', 'admin']), async (req, res) => {
+  const user = req.telegramUser;
+  const { packedOrderIds = [] } = req.body;
+
+  const task = await PickingTask.findById(req.params.taskId);
+  if (!task) return res.status(404).json({ error: 'Task not found' });
+  if (task.lockedBy !== user.telegramId) {
+    return res.status(403).json({ error: 'Task is not locked by you' });
+  }
+
+  const packedSet = new Set(packedOrderIds.map(String));
+  for (const item of task.items) {
+    item.packed = packedSet.has(String(item.orderId));
+  }
+  await task.save();
+
+  res.json({ ok: true });
+});
+
+// ---------------------------------------------------------------------------
 // POST /api/picking/tasks/:taskId/claim  — atomically lock a task from the review list
 // ---------------------------------------------------------------------------
 router.post('/tasks/:taskId/claim', requireTelegramRoles(['warehouse', 'admin']), async (req, res) => {
