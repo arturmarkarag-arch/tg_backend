@@ -9,7 +9,7 @@ const AppSetting = require('../models/AppSetting');
 const { requireTelegramRoles } = require('../middleware/telegramAuth');
 const { archiveProduct, getProductTitle } = require('../services/archiveProduct');
 const { buildPickingTasksFromOrders } = require('../telegramBot');
-const { isOrderingOpen } = require('../utils/orderingSchedule');
+const { isOrderingOpen, getWarsawNow, DAY_FULL_UK } = require('../utils/orderingSchedule');
 
 const ORDERING_SCHEDULE_KEY = 'ordering.schedule';
 const ORDERING_SCHEDULE_DEFAULTS = { openHour: 16, openMinute: 0, closeHour: 7, closeMinute: 30 };
@@ -190,7 +190,7 @@ router.get('/preview', requireTelegramRoles(['warehouse', 'admin']), async (req,
 router.post('/start-session', requireTelegramRoles(['warehouse', 'admin']), async (req, res) => {
   const { deliveryGroupId = null } = req.body;
 
-  // 1. Window must be closed before picking can start.
+  // 1. Check ordering window and delivery day.
   if (deliveryGroupId) {
     const group = await DeliveryGroup.findById(deliveryGroupId, 'dayOfWeek name').lean();
     if (group) {
@@ -198,6 +198,15 @@ router.post('/start-session', requireTelegramRoles(['warehouse', 'admin']), asyn
       const { isOpen, message } = isOrderingOpen(group.dayOfWeek, schedule);
       if (isOpen) {
         return res.json({ windowOpen: true, message });
+      }
+      // Picking is only allowed on the actual delivery day.
+      const { dayOfWeek: nowDOW } = getWarsawNow();
+      if (nowDOW !== group.dayOfWeek) {
+        return res.json({
+          wrongDay: true,
+          deliveryDayOfWeek: group.dayOfWeek,
+          deliveryDayName: DAY_FULL_UK[group.dayOfWeek],
+        });
       }
     }
   }

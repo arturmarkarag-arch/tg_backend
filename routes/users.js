@@ -3,6 +3,7 @@ const User = require('../models/User');
 const Order = require('../models/Order');
 const DeliveryGroup = require('../models/DeliveryGroup');
 const { telegramAuth, requireTelegramRole } = require('../middleware/telegramAuth');
+const { isOrderingOpen, getOrderingWindowOpenAt } = require('../utils/orderingSchedule');
 
 const router = express.Router();
 router.use(telegramAuth);
@@ -76,21 +77,93 @@ function sanitizeUserPayload(payload, existing = null) {
 router.get('/', async (req, res) => {
   const page     = Math.max(1, parseInt(req.query.page) || 1);
   const pageSize = Math.min(100, Math.max(1, parseInt(req.query.pageSize) || 20));
-  const roleFilter  = req.query.role || null;
-  const groupFilter = req.query.deliveryGroupId || null;
+  const roleFilter     = req.query.role || null;
+  const groupFilter    = req.query.deliveryGroupId || null;
+  const activityFilter = req.query.activityFilter || null; // 'no_cart' | 'no_order' | 'no_visit'
 
   const filter = {};
   if (roleFilter && roleFilter !== 'all') filter.role = roleFilter;
   if (groupFilter && groupFilter !== 'all') filter.deliveryGroupId = groupFilter;
 
-  const [total, users] = await Promise.all([
-    User.countDocuments(filter),
-    User.find(filter)
-      .sort({ createdAt: -1 })
-      .skip((page - 1) * pageSize)
-      .limit(pageSize)
-      .lean(),
-  ]);
+  // Window info — only when filtering sellers in a specific group
+  let windowIsOpen = false;
+  let windowOpenAt = null;
+  const isSellerGroupView = roleFilter === 'seller' && groupFilter && groupFilter !== 'all';
+
+  if (isSellerGroupView) {
+    const group = await DeliveryGroup.findById(groupFilter).lean();
+    if (group) {
+      const { isOpen } = isOrderingOpen(group.dayOfWeek);
+      windowIsOpen = isOpen;
+      windowOpenAt = getOrderingWindowOpenAt(group.dayOfWeek);
+    }
+  }
+
+  // Helper: compute cartItemCount from lean User doc
+  const calcCartCount = (u) =>
+    Object.values(u.miniAppState?.orderItems || {}).reduce((s, q) => s + (Number(q) || 0), 0);
+
+  let users;
+  let total;
+
+  if (activityFilter && windowIsOpen && windowOpenAt) {
+    // Load ALL matching users so we can filter before pagination
+    const allUsers = await User.find(filter).sort({ createdAt: -1 }).lean();
+    const telegramIds = allUsers.map((u) => u.telegramId).filter(Boolean);
+
+    // Sum ordered item qty during current window per buyer
+    const windowOrders = await Order.aggregate([
+      { $match: { buyerTelegramId: { $in: telegramIds }, createdAt: { $gte: windowOpenAt }, status: { $nin: ['cancelled', 'expired'] } } },
+      { $unwind: '$items' },
+      { $group: { _id: '$buyerTelegramId', totalQty: { $sum: '$items.quantity' } } },
+    ]);
+    const orderQtyMap = new Map(windowOrders.map((o) => [o._id, o.totalQty]));
+
+    const enriched = allUsers.map((u) => ({
+      ...u,
+      cartItemCount: calcCartCount(u),
+      windowOrderQty: orderQtyMap.get(u.telegramId) || 0,
+    }));
+
+    let filtered;
+    if (activityFilter === 'no_cart') {
+      filtered = enriched.filter((u) => u.cartItemCount === 0);
+    } else if (activityFilter === 'no_order') {
+      filtered = enriched.filter((u) => u.windowOrderQty === 0);
+    } else if (activityFilter === 'no_visit') {
+      filtered = enriched.filter(
+        (u) => !u.miniAppState?.updatedAt || new Date(u.miniAppState.updatedAt) < windowOpenAt,
+      );
+    } else {
+      filtered = enriched;
+    }
+
+    total = filtered.length;
+    users = filtered.slice((page - 1) * pageSize, page * pageSize);
+  } else {
+    const [countResult, pageUsers] = await Promise.all([
+      User.countDocuments(filter),
+      User.find(filter).sort({ createdAt: -1 }).skip((page - 1) * pageSize).limit(pageSize).lean(),
+    ]);
+    total = countResult;
+    users = pageUsers;
+
+    // Enrich with window data when viewing a specific seller group
+    if (isSellerGroupView && windowIsOpen && windowOpenAt) {
+      const telegramIds = users.map((u) => u.telegramId).filter(Boolean);
+      const windowOrders = await Order.aggregate([
+        { $match: { buyerTelegramId: { $in: telegramIds }, createdAt: { $gte: windowOpenAt }, status: { $nin: ['cancelled', 'expired'] } } },
+        { $unwind: '$items' },
+        { $group: { _id: '$buyerTelegramId', totalQty: { $sum: '$items.quantity' } } },
+      ]);
+      const orderQtyMap = new Map(windowOrders.map((o) => [o._id, o.totalQty]));
+      users = users.map((u) => ({
+        ...u,
+        cartItemCount: calcCartCount(u),
+        windowOrderQty: orderQtyMap.get(u.telegramId) || 0,
+      }));
+    }
+  }
 
   const telegramIds = users.map((u) => u.telegramId).filter(Boolean);
   const lastOrders = await Order.aggregate([
@@ -110,6 +183,8 @@ router.get('/', async (req, res) => {
     page,
     pageSize,
     pageCount: Math.max(1, Math.ceil(total / pageSize)),
+    windowIsOpen,
+    windowOpenAt: windowOpenAt?.toISOString() || null,
   });
 });
 
