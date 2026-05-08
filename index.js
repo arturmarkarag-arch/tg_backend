@@ -12,7 +12,6 @@ const mongoose = require('mongoose');
 const app = require('./app');
 const { initBot } = require('./telegramBot');
 const { initOpenAI } = require('./openaiClient');
-const { runArchiveCleanup } = require('./routes/archive');
 const { initSocket } = require('./socket');
 
 const PORT = Number(process.env.PORT) || 5000;
@@ -30,12 +29,6 @@ async function startServer() {
 
     initOpenAI(OPENAI_API_KEY);
     initBot(TELEGRAM_BOT_TOKEN);
-
-    // Run archive cleanup once on startup, then every 24 hours
-    runArchiveCleanup().catch((err) => console.error('Archive cleanup error:', err));
-    setInterval(() => {
-      runArchiveCleanup().catch((err) => console.error('Archive cleanup error:', err));
-    }, 24 * 60 * 60 * 1000);
 
     const server = http.createServer(app);
     initSocket(server);

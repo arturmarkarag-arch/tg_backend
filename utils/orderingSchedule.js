@@ -64,6 +64,22 @@ function fmt(h, m) {
 /**
  * Checks whether ordering is currently open for a delivery group.
  *
+ * openDay  = day before delivery (Sunday → shifted to Saturday).
+ * closeDay = delivery day.
+ * openDay and closeDay are ALWAYS different calendar days.
+ *
+ * Time comparison edge cases:
+ *   - openTime < closeTime  (e.g. 16:00 → 07:30): normal overnight window — works correctly.
+ *   - openTime > closeTime  (e.g. 05:00 → 04:00): window crosses midnight on each boundary day
+ *       but since open/close are on different calendar days this is still well-defined:
+ *       ordering opens on openDay at 05:00 and closes on closeDay at 04:00.
+ *   - openTime === closeTime: zero-length window — rejected at admin input level.
+ *
+ * Multi-day windows:
+ *   Monday delivery (dayOfWeek=1) → dayBefore=Sun → openDay=Sat (Sunday skip)
+ *   → window spans Sat 16:00 → Sun (all day) → Mon 07:30 = ~39 hours (2-day window).
+ *   The daysFromOpen/daysToClose check in the "any other day" branch covers Sunday correctly.
+ *
  * @param {number} deliveryDayOfWeek  0=Sun … 6=Sat  (the day the warehouse collects)
  * @param {{ openHour?: number, openMinute?: number, closeHour?: number, closeMinute?: number }} [schedule]
  * @returns {{ isOpen: boolean, message: string }}

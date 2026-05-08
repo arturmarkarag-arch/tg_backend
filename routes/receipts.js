@@ -263,7 +263,7 @@ router.post('/:id/items', staffOnly, async (req, res) => {
     let photoName;
     if (file) {
       const filename = await uploadToR2(file.buffer, file.originalname, file.mimetype);
-      photoUrl = `/api/products/images/${filename}`;
+      photoUrl = `/api/v1/products/images/${filename}`;
       photoName = file.originalname || filename;
     }
 
@@ -430,7 +430,7 @@ router.patch('/:id/items/:itemId', staffOnly, async (req, res) => {
     const file = parsed.files?.[0];
     if (file) {
       const filename = await uploadToR2(file.buffer, file.originalname, file.mimetype);
-      item.photoUrl = `/api/products/images/${filename}`;
+      item.photoUrl = `/api/v1/products/images/${filename}`;
       item.photoName = file.originalname || filename;
     } else if (!item.photoUrl && existingProductId) {
       const existingProduct = await Product.findById(existingProductId).lean();

@@ -4,10 +4,10 @@ const User = require('../models/User');
 const Block = require('../models/Block');
 const Product = require('../models/Product');
 const PickingTask = require('../models/PickingTask');
-const BotSession = require('../models/BotSession');
+// const BotSession = require('../models/BotSession'); // Bot-specific: /pick /ship sessions no longer used
 const { archiveProduct, getProductTitle } = require('../services/archiveProduct');
 const { requireTelegramRoles } = require('../middleware/telegramAuth');
-const { sendMessageWithRetry } = require('../telegramBot');
+// const { sendMessageWithRetry } = require('../telegramBot'); // Bot-specific: no more worker notifications via bot
 
 const router = express.Router();
 
@@ -84,20 +84,18 @@ router.post('/remove-from-shift', requireTelegramRoles(['admin', 'warehouse']), 
       worker.shiftZone = { startBlock: null, endBlock: null };
       await worker.save({ session });
 
-      await PickingTask.updateMany(
-        { lockedBy: worker.telegramId, status: 'locked' },
-        { $set: { status: 'pending', lockedBy: null, lockedAt: null, skippedBy: [] } },
-        { session }
-      );
+      // Bot-specific: PickingTask locking no longer occurs (no /pick bot command)
+      // await PickingTask.updateMany(
+      //   { lockedBy: worker.telegramId, status: 'locked' },
+      //   { $set: { status: 'pending', lockedBy: null, lockedAt: null, skippedBy: [] } },
+      //   { session }
+      // );
 
-      // Drop active pick/ship sessions so old inline buttons stop working for this worker.
-      await BotSession.deleteMany(
-        {
-          chatId: worker.telegramId,
-          type: { $in: ['pick', 'ship'] },
-        },
-        { session }
-      );
+      // Bot-specific: BotSession (/pick /ship) no longer used
+      // await BotSession.deleteMany(
+      //   { chatId: worker.telegramId, type: { $in: ['pick', 'ship'] } },
+      //   { session }
+      // );
     });
   } catch (err) {
     await session.endSession();
@@ -105,11 +103,12 @@ router.post('/remove-from-shift', requireTelegramRoles(['admin', 'warehouse']), 
   }
   await session.endSession();
 
-  try {
-    await sendMessageWithRetry(worker.telegramId, 'Менеджер завершив вашу зміну. Поточні завдання скасовано.');
-  } catch (err) {
-    console.warn(`Failed to notify worker ${worker.telegramId}:`, err?.message || err);
-  }
+  // Bot-specific: no more worker notifications via bot
+  // try {
+  //   await sendMessageWithRetry(worker.telegramId, 'Менеджер завершив вашу зміну. Поточні завдання скасовано.');
+  // } catch (err) {
+  //   console.warn(`Failed to notify worker ${worker.telegramId}:`, err?.message || err);
+  // }
 
   res.json({ message: 'Worker removed from shift and locked tasks released' });
 });
@@ -161,18 +160,18 @@ router.post('/confirm-shift', requireTelegramRoles(['admin', 'warehouse']), asyn
     };
   });
 
-  const unresolvedSkippedCount = await PickingTask.countDocuments({
-    status: 'pending',
-    'skippedBy.0': { $exists: true },
-  });
-
-  if (unresolvedSkippedCount > 0) {
-    return res.status(409).json({
-      error: 'shift_change_blocked_unresolved_skipped_tasks',
-      message: `Неможливо почати нову зміну: є ${unresolvedSkippedCount} відкладених позицій, які потрібно завершити в поточній зміні (знайти товар або позначити "Закінчився").`,
-      unresolvedSkippedCount,
-    });
-  }
+  // Bot-specific (H-1): skippedBy is populated only by bot /pick command — no longer active
+  // const unresolvedSkippedCount = await PickingTask.countDocuments({
+  //   status: 'pending',
+  //   'skippedBy.0': { $exists: true },
+  // });
+  // if (unresolvedSkippedCount > 0) {
+  //   return res.status(409).json({
+  //     error: 'shift_change_blocked_unresolved_skipped_tasks',
+  //     message: `Неможливо почати нову зміну: є ${unresolvedSkippedCount} відкладених позицій...`,
+  //     unresolvedSkippedCount,
+  //   });
+  // }
 
   const session = await mongoose.connection.startSession();
   try {
@@ -183,17 +182,15 @@ router.post('/confirm-shift', requireTelegramRoles(['admin', 'warehouse']), asyn
         { session }
       );
 
-      await BotSession.deleteMany(
-        { type: { $in: ['pick', 'ship'] } },
-        { session }
-      );
+      // Bot-specific: BotSession (/pick /ship) no longer used
+      // await BotSession.deleteMany({ type: { $in: ['pick', 'ship'] } }, { session });
 
-      // Release all currently locked tasks so they can be reassigned in the new shift.
-      await PickingTask.updateMany(
-        { status: 'locked' },
-        { $set: { status: 'pending', lockedBy: null, lockedAt: null } },
-        { session }
-      );
+      // Bot-specific: task locking via /pick command no longer occurs
+      // await PickingTask.updateMany(
+      //   { status: 'locked' },
+      //   { $set: { status: 'pending', lockedBy: null, lockedAt: null } },
+      //   { session }
+      // );
 
       for (const assignment of assignments) {
         await User.updateOne(
@@ -212,20 +209,9 @@ router.post('/confirm-shift', requireTelegramRoles(['admin', 'warehouse']), asyn
     await session.endSession();
   }
 
-  const notifyPromises = assignments.map(async (assignment) => {
-    const worker = matchedWorkers.find((w) => w.telegramId === assignment.telegramId);
-    if (!worker) return;
-    const message = `✅ Ви призначені на зміну складу.` +
-      `\nЗона: ${assignment.shiftZone.startBlock}–${assignment.shiftZone.endBlock}` +
-      `\nЯкщо ви не можете вийти на зміну, повідомте адміністратора.`;
-    try {
-      await sendMessageWithRetry(assignment.telegramId, message);
-    } catch (err) {
-      console.warn(`Failed to notify warehouse worker ${assignment.telegramId}:`, err.message || err);
-    }
-  });
-
-  await Promise.all(notifyPromises);
+  // Bot-specific (H-7): notifications via bot no longer sent
+  // const notifyPromises = assignments.map(async (assignment) => { ... });
+  // await Promise.all(notifyPromises);
 
   res.json({
     message: 'Shift confirmed for warehouse workers',
@@ -240,17 +226,17 @@ router.post('/close-shift', requireTelegramRoles(['admin', 'warehouse']), async 
     return res.status(403).json({ error: 'Only warehouse managers or admins can close shift' });
   }
 
-  const unresolvedTasksCount = await PickingTask.countDocuments({
-    status: { $in: ['pending', 'locked'] },
-  });
-
-  if (unresolvedTasksCount > 0) {
-    return res.status(409).json({
-      error: 'shift_close_blocked_unresolved_tasks',
-      message: `Неможливо завершити зміну: залишилось ${unresolvedTasksCount} невирішених позицій (pending/locked).`,
-      unresolvedTasksCount,
-    });
-  }
+  // Bot-specific (H-6): PickingTask guard relied on bot /pick locking — no longer relevant
+  // const unresolvedTasksCount = await PickingTask.countDocuments({
+  //   status: { $in: ['pending', 'locked'] },
+  // });
+  // if (unresolvedTasksCount > 0) {
+  //   return res.status(409).json({
+  //     error: 'shift_close_blocked_unresolved_tasks',
+  //     message: `Неможливо завершити зміну: залишилось ${unresolvedTasksCount} невирішених позицій (pending/locked).`,
+  //     unresolvedTasksCount,
+  //   });
+  // }
 
   const session = await mongoose.connection.startSession();
   try {
@@ -261,10 +247,8 @@ router.post('/close-shift', requireTelegramRoles(['admin', 'warehouse']), async 
         { session }
       );
 
-      await BotSession.deleteMany(
-        { type: { $in: ['pick', 'ship'] } },
-        { session }
-      );
+      // Bot-specific: BotSession (/pick /ship) no longer used
+      // await BotSession.deleteMany({ type: { $in: ['pick', 'ship'] } }, { session });
     });
   } finally {
     await session.endSession();

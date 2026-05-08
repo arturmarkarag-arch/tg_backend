@@ -381,7 +381,7 @@ router.post('/block-upload-photos', staffOnly, async (req, res) => {
 
   for (const file of files) {
     const filename = await uploadToR2(file.buffer, file.originalname, file.mimetype);
-    const imageUrl = `/api/products/images/${filename}`;
+    const imageUrl = `/api/v1/products/images/${filename}`;
 
     const product = new Product({
       orderNumber: nextOrderNumber,
@@ -455,7 +455,7 @@ router.post('/receive', staffOnly, async (req, res) => {
 
     const file = files[0];
     const filename = await uploadToR2(file.buffer, file.originalname, file.mimetype);
-    const imageUrl = `/api/products/images/${filename}`;
+    const imageUrl = `/api/v1/products/images/${filename}`;
 
     const product = new Product({
       orderNumber: nextOrderNumber,
@@ -505,7 +505,7 @@ router.post('/', staffOnly, async (req, res) => {
   let imageNames = [];
   for (const file of files) {
     const filename = await uploadToR2(file.buffer, file.originalname, file.mimetype);
-    imageUrls.push(`/api/products/images/${filename}`);
+    imageUrls.push(`/api/v1/products/images/${filename}`);
     imageNames.push(filename);
   }
 
@@ -586,7 +586,7 @@ router.patch('/:id', staffOnly, async (req, res) => {
     const imageNames = [];
     for (const file of files) {
       const filename = await uploadToR2(file.buffer, file.originalname, file.mimetype);
-      imageUrls.push(`/api/products/images/${filename}`);
+      imageUrls.push(`/api/v1/products/images/${filename}`);
       imageNames.push(filename);
     }
     product.imageUrls = imageUrls;

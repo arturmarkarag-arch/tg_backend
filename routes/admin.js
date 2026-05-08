@@ -1,13 +1,9 @@
 const express = require('express');
-const path = require('path');
-const { spawn } = require('child_process');
 const { telegramAuth, requireTelegramRole } = require('../middleware/telegramAuth');
 const AppSetting = require('../models/AppSetting');
 const { listOpenAIModels } = require('../openaiClient');
 
 const router = express.Router();
-const reportFile = path.join(__dirname, '..', 'load-test-report.html');
-let loadTestRunning = false;
 const OPENAI_MODEL_SETTING_KEY = 'openai.defaultModel';
 const ORDERING_SCHEDULE_KEY = 'ordering.schedule';
 const ORDERING_SCHEDULE_DEFAULTS = { openHour: 16, openMinute: 0, closeHour: 7, closeMinute: 30 };
@@ -25,67 +21,6 @@ async function setAppSetting(key, value) {
   ).lean();
   return setting.value;
 }
-
-router.post('/load-test', telegramAuth, requireTelegramRole('admin'), async (req, res) => {
-  if (loadTestRunning) {
-    return res.status(409).json({ error: 'Load test already running' });
-  }
-
-  loadTestRunning = true;
-  const scriptPath = path.join(__dirname, '..', 'load-test.js');
-  const child = spawn(process.execPath, [scriptPath], {
-    cwd: path.join(__dirname, '..'),
-    env: process.env,
-  });
-
-  let stdout = '';
-  let stderr = '';
-
-  child.stdout.on('data', (chunk) => {
-    stdout += chunk.toString();
-  });
-
-  child.stderr.on('data', (chunk) => {
-    stderr += chunk.toString();
-  });
-
-  child.on('close', (code) => {
-    loadTestRunning = false;
-  });
-
-  const result = await new Promise((resolve) => {
-    child.on('close', (code) => {
-      resolve({ code, stdout, stderr });
-    });
-  });
-
-  if (result.code !== 0) {
-    return res.status(500).json({
-      error: 'Load test failed',
-      code: result.code,
-      stdout: result.stdout,
-      stderr: result.stderr,
-    });
-  }
-
-  return res.json({
-    message: 'Load test completed successfully',
-    reportUrl: '/api/admin/load-test-report',
-    stdout: result.stdout,
-    stderr: result.stderr,
-  });
-});
-
-router.get('/load-test-report', telegramAuth, requireTelegramRole('admin'), (req, res) => {
-  res.download(reportFile, 'load-test-report.html', (err) => {
-    if (err) {
-      console.error('[admin/load-test-report] download error', err);
-      if (!res.headersSent) {
-        return res.status(500).json({ error: 'Unable to download report' });
-      }
-    }
-  });
-});
 
 router.get('/openai/models', telegramAuth, requireTelegramRole('admin'), async (req, res) => {
   try {
@@ -152,6 +87,14 @@ router.post('/ordering-schedule', telegramAuth, requireTelegramRole('admin'), as
       closeHour:   toInt(closeHour,   0, 23),
       closeMinute: toInt(closeMinute, 0, 59),
     };
+    // Заборонити нульове вікно: open і close однакові немає сенсу.
+    // open < close — звичайне вікно (16:00→07:30 наступного дня).
+    // open > close — вікно з переходом через північ (теж коректно, бо open/close завжди різні календарні дні).
+    const openMins  = schedule.openHour  * 60 + schedule.openMinute;
+    const closeMins = schedule.closeHour * 60 + schedule.closeMinute;
+    if (openMins === closeMins) {
+      return res.status(400).json({ error: 'Open time and close time cannot be identical — window would have zero duration' });
+    }
     const saved = await setAppSetting(ORDERING_SCHEDULE_KEY, schedule);
     res.json(saved);
   } catch (error) {

@@ -38,12 +38,16 @@ async function syncUserWarehouseZone(user) {
 function sanitizeUserPayload(payload, existing = null) {
   const role = payload.role ?? existing?.role ?? 'seller';
   const data = {
-    telegramId: payload.telegramId,
+    // telegramId — імьютабельний, не приймається тут; передається окремо тільки при створенні
     role,
     firstName: payload.firstName,
     lastName: payload.lastName,
     phoneNumber: payload.phoneNumber,
-    botBlocked: payload.botBlocked,
+    // Explicitly cast to Boolean so strings "true"/"false" or 1/0 from HTTP body never
+    // reach MongoDB as a wrong type. Skip the field entirely when not provided.
+    ...(payload.botBlocked !== undefined && payload.botBlocked !== null
+      ? { botBlocked: Boolean(payload.botBlocked === 'false' ? false : payload.botBlocked) }
+      : {}),
   };
 
   // Seller-specific fields — clear when role is not seller
@@ -106,40 +110,80 @@ router.get('/', async (req, res) => {
   let users;
   let total;
 
-  if (activityFilter && windowIsOpen && windowOpenAt) {
-    // Load ALL matching users so we can filter before pagination
-    const allUsers = await User.find(filter).sort({ createdAt: -1 }).lean();
-    const telegramIds = allUsers.map((u) => u.telegramId).filter(Boolean);
-
-    // Sum ordered item qty during current window per buyer
-    const windowOrders = await Order.aggregate([
-      { $match: { buyerTelegramId: { $in: telegramIds }, createdAt: { $gte: windowOpenAt }, status: { $nin: ['cancelled', 'expired'] } } },
+  if (activityFilter === 'no_order' && windowIsOpen && windowOpenAt) {
+    // no_order: join with orders via aggregation — never loads all users into RAM
+    const pipeline = [
+      { $match: filter },
+      {
+        $lookup: {
+          from: 'orders',
+          let: { tid: '$telegramId' },
+          pipeline: [
+            {
+              $match: {
+                $expr: { $eq: ['$buyerTelegramId', '$$tid'] },
+                createdAt: { $gte: windowOpenAt },
+                status: { $nin: ['cancelled', 'expired'] },
+              },
+            },
+            { $limit: 1 },
+          ],
+          as: '_windowOrders',
+        },
+      },
+      { $match: { _windowOrders: { $size: 0 } } },
+      { $unset: '_windowOrders' },
+      {
+        $facet: {
+          meta: [{ $count: 'count' }],
+          data: [
+            { $sort: { createdAt: -1 } },
+            { $skip: (page - 1) * pageSize },
+            { $limit: pageSize },
+          ],
+        },
+      },
+    ];
+    const [result] = await User.aggregate(pipeline);
+    total = result?.meta?.[0]?.count ?? 0;
+    users = (result?.data ?? []).map((u) => ({
+      ...u,
+      cartItemCount: calcCartCount(u),
+      windowOrderQty: 0, // by definition — these users have no window orders
+    }));
+  } else if (activityFilter && windowIsOpen && windowOpenAt) {
+    // no_cart / no_visit: push filter to MongoDB query — no in-memory scan
+    if (activityFilter === 'no_cart') {
+      // orderItemIds is kept in sync with orderItems keys by the mini-app state endpoint
+      filter['$or'] = [
+        { 'miniAppState.orderItemIds': { $exists: false } },
+        { 'miniAppState.orderItemIds': { $size: 0 } },
+      ];
+    } else if (activityFilter === 'no_visit') {
+      filter['$or'] = [
+        { 'miniAppState.updatedAt': null },
+        { 'miniAppState.updatedAt': { $lt: windowOpenAt } },
+      ];
+    }
+    const [countResult, pageUsers] = await Promise.all([
+      User.countDocuments(filter),
+      User.find(filter).sort({ createdAt: -1 }).skip((page - 1) * pageSize).limit(pageSize).lean(),
+    ]);
+    total = countResult;
+    users = pageUsers;
+    // Enrich with cart and order data for display
+    const activityTids = users.map((u) => u.telegramId).filter(Boolean);
+    const activityOrders = await Order.aggregate([
+      { $match: { buyerTelegramId: { $in: activityTids }, createdAt: { $gte: windowOpenAt }, status: { $nin: ['cancelled', 'expired'] } } },
       { $unwind: '$items' },
       { $group: { _id: '$buyerTelegramId', totalQty: { $sum: '$items.quantity' } } },
     ]);
-    const orderQtyMap = new Map(windowOrders.map((o) => [o._id, o.totalQty]));
-
-    const enriched = allUsers.map((u) => ({
+    const activityOrderQtyMap = new Map(activityOrders.map((o) => [o._id, o.totalQty]));
+    users = users.map((u) => ({
       ...u,
       cartItemCount: calcCartCount(u),
-      windowOrderQty: orderQtyMap.get(u.telegramId) || 0,
+      windowOrderQty: activityOrderQtyMap.get(u.telegramId) || 0,
     }));
-
-    let filtered;
-    if (activityFilter === 'no_cart') {
-      filtered = enriched.filter((u) => u.cartItemCount === 0);
-    } else if (activityFilter === 'no_order') {
-      filtered = enriched.filter((u) => u.windowOrderQty === 0);
-    } else if (activityFilter === 'no_visit') {
-      filtered = enriched.filter(
-        (u) => !u.miniAppState?.updatedAt || new Date(u.miniAppState.updatedAt) < windowOpenAt,
-      );
-    } else {
-      filtered = enriched;
-    }
-
-    total = filtered.length;
-    users = filtered.slice((page - 1) * pageSize, page * pageSize);
   } else {
     const [countResult, pageUsers] = await Promise.all([
       User.countDocuments(filter),
@@ -197,6 +241,8 @@ router.get('/:telegramId', async (req, res) => {
 router.post('/', async (req, res) => {
   const existing = await User.findOne({ telegramId: req.body.telegramId });
   const payload = sanitizeUserPayload(req.body, existing);
+  // telegramId береться з body тільки при створенні нового юзера
+  if (!existing) payload.telegramId = req.body.telegramId;
   let user;
   if (existing) {
     user = await User.findByIdAndUpdate(existing._id, payload, { new: true, runValidators: true });
@@ -226,7 +272,7 @@ router.patch('/:telegramId', async (req, res) => {
     res.json(updatedUser);
   } catch (err) {
     console.error('[PATCH /users/:telegramId]', err);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: 'Failed to update user' });
   }
 });
 

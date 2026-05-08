@@ -33,5 +33,11 @@ const ProductSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
+// Унікальний частковий індекс: orderNumber унікальний тільки серед не-archived
+// Захищає від race condition при одночасному restore двох товарів на одну позицію
+ProductSchema.index(
+  { orderNumber: 1 },
+  { unique: true, partialFilterExpression: { status: { $ne: 'archived' } } }
+);
 
 module.exports = mongoose.model('Product', ProductSchema);

@@ -38,7 +38,8 @@ router.post('/validate', (req, res) => {
     return res.status(401).json({ error: error || 'Invalid initData' });
   }
 
-  const telegramId = parsedData.user?.id || parsedData.id || parsedData.user?.telegram_id;
+  // Only trust parsedData.user.id — Telegram never puts id at root level
+  const telegramId = parsedData.user?.id;
   if (!telegramId) {
     return res.status(400).json({ error: 'Telegram user id is missing' });
   }
@@ -114,20 +115,10 @@ router.post('/me', async (req, res) => {
 });
 
 // POST /api/v1/telegram/mini-app/state — зберегти останній переглянутий товар у mini app
+// Захищено telegramAuth middleware — telegramId береться ТІЛЬКИ з req.telegramId
 router.post('/mini-app/state', async (req, res) => {
-  const { initData, currentIndex, currentPage, productId, orderItems, orderItemIds, viewMode, clientOrderId } = req.body;
-  if (!initData) {
-    return res.status(400).json({ error: 'initData is required' });
-  }
-
-  const { valid, telegramId, error } = getTelegramAuth(req, process.env.TELEGRAM_BOT_TOKEN);
-  if (!valid) {
-    return res.status(401).json({ error: error || 'Invalid initData' });
-  }
-
-  if (!telegramId) {
-    return res.status(400).json({ error: 'Telegram user id is missing' });
-  }
+  const { currentIndex, currentPage, productId, orderItems, orderItemIds, viewMode, clientOrderId } = req.body;
+  const telegramId = req.telegramId;
 
   if (!Number.isInteger(currentIndex) || currentIndex < 0) {
     return res.status(400).json({ error: 'currentIndex must be a non-negative integer' });
@@ -174,20 +165,11 @@ router.post('/mini-app/state', async (req, res) => {
 });
 
 // POST /api/v1/telegram/mini-app/reset-state — очистити стан mini app
+// Захищено telegramAuth middleware — telegramId береться ТІЛЬКИ з req.telegramId
+// POST /api/v1/telegram/mini-app/reset-state — очистити стан mini app
+// Захищено telegramAuth middleware — telegramId береться ТІЛЬКИ з req.telegramId
 router.post('/mini-app/reset-state', async (req, res) => {
-  const initData = getInitDataFromRequest(req);
-  if (!initData) {
-    return res.status(400).json({ error: 'initData is required' });
-  }
-
-  const { valid, telegramId, error } = getTelegramAuth(req, process.env.TELEGRAM_BOT_TOKEN);
-  if (!valid) {
-    return res.status(401).json({ error: error || 'Invalid initData' });
-  }
-
-  if (!telegramId) {
-    return res.status(400).json({ error: 'Telegram user id is missing' });
-  }
+  const telegramId = req.telegramId;
 
   const user = await User.findOneAndUpdate(
     { telegramId },
@@ -216,10 +198,7 @@ router.post('/mini-app/reset-state', async (req, res) => {
 
 // POST /api/v1/telegram/register-request — заявка на реєстрацію нового користувача
 router.post('/register-request', async (req, res) => {
-  const { initData, firstName, lastName, shopName, shopCity, deliveryGroupId, role } = req.body;
-  if (!initData) {
-    return res.status(400).json({ error: 'initData is required' });
-  }
+  const { firstName, lastName, shopName, shopCity, deliveryGroupId, role } = req.body;
 
   const { valid, parsedData, telegramId, error } = getTelegramAuth(req, process.env.TELEGRAM_BOT_TOKEN);
   if (!valid) {
@@ -345,22 +324,14 @@ router.patch('/me/shop', async (req, res) => {
   });
 });
 
-function getInitData(req) {
-  return getInitDataFromRequest(req);
-}
-
-async function ensureAdmin(initData) {
-  if (!initData) {
-    return null;
-  }
-  const { valid, telegramId } = getTelegramAuth({ body: { initData } }, process.env.TELEGRAM_BOT_TOKEN);
+async function ensureAdmin(req) {
+  const { valid, telegramId } = getTelegramAuth(req, process.env.TELEGRAM_BOT_TOKEN);
   if (!valid || !telegramId) return null;
   return await User.findOne({ telegramId, role: 'admin' }).lean();
 }
 
 router.get('/register-requests', async (req, res) => {
-  const initData = getInitData(req);
-  const admin = await ensureAdmin(initData);
+  const admin = await ensureAdmin(req);
   if (!admin) {
     return res.status(403).json({ error: 'Only admin can access registration requests' });
   }
@@ -377,8 +348,7 @@ router.get('/register-requests', async (req, res) => {
 });
 
 router.post('/register-requests/:id/approve', async (req, res) => {
-  const initData = getInitData(req);
-  const admin = await ensureAdmin(initData);
+  const admin = await ensureAdmin(req);
   if (!admin) {
     return res.status(403).json({ error: 'Only admin can approve registration requests' });
   }
@@ -402,16 +372,24 @@ router.post('/register-requests/:id/approve', async (req, res) => {
     return res.status(400).json({ error: 'Delivery group is missing for seller' });
   }
 
-  const user = new User({
-    telegramId: request.telegramId,
-    role: request.role,
-    firstName: request.firstName,
-    lastName: request.lastName,
-    shopName: request.shopName,
-    shopCity: request.shopCity,
-    deliveryGroupId: request.role === 'seller' ? request.deliveryGroupId || '' : '',
-  });
-  await user.save();
+  const user = await User.findOneAndUpdate(
+    { telegramId: request.telegramId },
+    {
+      $setOnInsert: {
+        telegramId: request.telegramId,
+        role: request.role,
+        firstName: request.firstName,
+        lastName: request.lastName,
+        shopName: request.shopName,
+        shopCity: request.shopCity,
+        deliveryGroupId: request.role === 'seller' ? request.deliveryGroupId || '' : '',
+      },
+    },
+    { upsert: true, new: true, setDefaultsOnInsert: true }
+  );
+  if (!user) {
+    return res.status(409).json({ error: 'User already registered' });
+  }
   if (request.role === 'seller' && request.deliveryGroupId) {
     const deliveryGroup = await DeliveryGroup.findByIdAndUpdate(
       request.deliveryGroupId,
@@ -432,8 +410,7 @@ router.post('/register-requests/:id/approve', async (req, res) => {
 });
 
 router.post('/register-requests/:id/reject', async (req, res) => {
-  const initData = getInitData(req);
-  const admin = await ensureAdmin(initData);
+  const admin = await ensureAdmin(req);
   if (!admin) {
     return res.status(403).json({ error: 'Only admin can reject registration requests' });
   }
@@ -448,8 +425,7 @@ router.post('/register-requests/:id/reject', async (req, res) => {
 });
 
 router.post('/register-requests/:id/block', async (req, res) => {
-  const initData = getInitData(req);
-  const admin = await ensureAdmin(initData);
+  const admin = await ensureAdmin(req);
   if (!admin) {
     return res.status(403).json({ error: 'Only admin can block registration requests' });
   }
@@ -464,8 +440,7 @@ router.post('/register-requests/:id/block', async (req, res) => {
 });
 
 router.post('/register-requests/:id/unblock', async (req, res) => {
-  const initData = getInitData(req);
-  const admin = await ensureAdmin(initData);
+  const admin = await ensureAdmin(req);
   if (!admin) {
     return res.status(403).json({ error: 'Only admin can unblock registration requests' });
   }
@@ -475,13 +450,12 @@ router.post('/register-requests/:id/unblock', async (req, res) => {
     return res.status(404).json({ error: 'Blocked registration request not found' });
   }
 
-  await RegistrationRequest.findByIdAndUpdate(req.params.id, { status: 'rejected' });
+  await RegistrationRequest.findByIdAndUpdate(req.params.id, { status: 'pending' });
   res.json({ message: 'Registration request unblocked', telegramId: request.telegramId });
 });
 
 router.delete('/register-requests/:id', async (req, res) => {
-  const initData = getInitData(req);
-  const admin = await ensureAdmin(initData);
+  const admin = await ensureAdmin(req);
   if (!admin) {
     return res.status(403).json({ error: 'Only admin can delete registration requests' });
   }

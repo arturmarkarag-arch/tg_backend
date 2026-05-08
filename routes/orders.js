@@ -21,6 +21,43 @@ async function getOrderingSchedule() {
 const router = express.Router();
 const staffOnly = requireTelegramRoles(['admin', 'warehouse']);
 
+/**
+ * Middleware: returns 423 Locked when the ordering window is closed for a seller.
+ * Staff (admin / warehouse) always pass through unchanged.
+ * Requires telegramAuth to have run first (req.telegramUser populated).
+ */
+async function requireOrderingWindowOpen(req, res, next) {
+  try {
+    const user = req.telegramUser;
+    if (!user || user.role !== 'seller') return next();
+
+    if (!user.deliveryGroupId) {
+      return res.status(403).json({
+        error: 'no_delivery_group',
+        message: 'Вас не призначено до жодної групи доставки. Зверніться до адміністратора.',
+      });
+    }
+
+    const group = await DeliveryGroup.findById(user.deliveryGroupId).lean();
+    if (!group) {
+      return res.status(403).json({
+        error: 'delivery_group_not_found',
+        message: 'Групу доставки не знайдено. Зверніться до адміністратора.',
+      });
+    }
+
+    const schedule = await getOrderingSchedule();
+    const { isOpen, message } = isOrderingOpen(group.dayOfWeek, schedule);
+    if (!isOpen) {
+      return res.status(423).json({ error: 'ordering_closed', message });
+    }
+
+    next();
+  } catch (err) {
+    next(err);
+  }
+}
+
 // POST / has custom registration-check logic so handles its own auth
 router.use((req, res, next) => {
   if (req.method === 'POST') return next();
@@ -265,7 +302,7 @@ router.post('/', async (req, res) => {
     schedule = await getOrderingSchedule();
     const { isOpen, message } = isOrderingOpen(group.dayOfWeek, schedule);
     if (!isOpen) {
-      return res.status(403).json({ error: 'ordering_closed', message });
+      return res.status(423).json({ error: 'ordering_closed', message });
     }
   }
 
@@ -455,7 +492,7 @@ router.patch('/:id/snapshot', staffOnly, async (req, res) => {
   res.json(order);
 });
 
-router.patch('/:id', async (req, res) => {
+router.patch('/:id', requireOrderingWindowOpen, async (req, res) => {
   const telegramId = req.telegramId;
   const user = req.telegramUser;
 

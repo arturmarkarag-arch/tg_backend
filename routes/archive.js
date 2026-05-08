@@ -1,4 +1,5 @@
 const express = require('express');
+const mongoose = require('mongoose');
 const { S3Client, DeleteObjectCommand } = require('@aws-sdk/client-s3');
 const Product = require('../models/Product');
 const { shiftUp } = require('../utils/shiftOrderNumbers');
@@ -10,20 +11,34 @@ const router = express.Router();
 router.use(telegramAuth);
 router.use(requireTelegramRoles(['admin', 'warehouse']));
 
-const r2Client = new S3Client({
-  region: process.env.R2_REGION || 'auto',
-  endpoint: process.env.R2_ENDPOINT,
-  credentials: {
-    accessKeyId: process.env.R2_ACCESS_KEY_ID,
-    secretAccessKey: process.env.R2_SECRET_ACCESS_KEY,
-  },
-  forcePathStyle: true,
-});
+let _r2Client = null;
+function getR2Client() {
+  if (_r2Client) return _r2Client;
+  const { R2_REGION, R2_ENDPOINT, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY } = process.env;
+  if (!R2_ENDPOINT || !R2_ACCESS_KEY_ID || !R2_SECRET_ACCESS_KEY) {
+    throw new Error('R2 credentials are not configured (R2_ENDPOINT, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY required)');
+  }
+  _r2Client = new S3Client({
+    region: R2_REGION || 'auto',
+    endpoint: R2_ENDPOINT,
+    credentials: { accessKeyId: R2_ACCESS_KEY_ID, secretAccessKey: R2_SECRET_ACCESS_KEY },
+    forcePathStyle: true,
+  });
+  return _r2Client;
+}
 
 async function deleteFromR2(imageNames = []) {
+  if (!imageNames.length) return;
+  let client;
+  try {
+    client = getR2Client();
+  } catch (err) {
+    console.error('[deleteFromR2] R2 not configured:', err.message);
+    return;
+  }
   for (const name of imageNames) {
     try {
-      await r2Client.send(new DeleteObjectCommand({
+      await client.send(new DeleteObjectCommand({
         Bucket: process.env.R2_BUCKET_NAME,
         Key: `products/${name}`,
       }));
@@ -81,30 +96,41 @@ router.get('/', async (req, res) => {
  * Restore an archived product back to active status.
  */
 router.post('/:id/restore', async (req, res) => {
-  const product = await Product.findById(req.params.id);
-  if (!product) return res.status(404).json({ error: 'Product not found' });
-  if (product.status !== 'archived') return res.status(400).json({ error: 'Product is not archived' });
+  const session = await mongoose.startSession();
+  let product;
+  try {
+    await session.withTransaction(async () => {
+      product = await Product.findById(req.params.id).session(session);
+      if (!product) throw Object.assign(new Error('Product not found'), { status: 404 });
+      if (product.status !== 'archived') throw Object.assign(new Error('Product is not archived'), { status: 400 });
 
-  // Determine restore position: original position or end of list
-  let restoreOrder;
-  if (product.originalOrderNumber) {
-    restoreOrder = product.originalOrderNumber;
-    // Shift existing products at and after this position up by 1
-    await shiftUp({ status: { $ne: 'archived' }, orderNumber: { $gte: restoreOrder } });
-  } else {
-    const maxOrder = await Product.findOne({ status: { $ne: 'archived' } })
-      .sort({ orderNumber: -1 })
-      .select('orderNumber')
-      .lean();
-    restoreOrder = (maxOrder?.orderNumber || 0) + 1;
+      let restoreOrder;
+      if (product.originalOrderNumber) {
+        restoreOrder = product.originalOrderNumber;
+        await shiftUp({ status: { $ne: 'archived' }, orderNumber: { $gte: restoreOrder } }, session);
+      } else {
+        const maxOrder = await Product.findOne({ status: { $ne: 'archived' } })
+          .sort({ orderNumber: -1 })
+          .select('orderNumber')
+          .session(session)
+          .lean();
+        restoreOrder = (maxOrder?.orderNumber || 0) + 1;
+      }
+
+      product.status = 'active';
+      product.archivedAt = null;
+      product.originalOrderNumber = null;
+      product.restoredFromArchive = true;
+      product.source = 'receive'; // повертається в надходження, не в блок
+      product.orderNumber = restoreOrder;
+      await product.save({ session });
+    });
+  } catch (err) {
+    await session.endSession();
+    if (err.status) return res.status(err.status).json({ error: err.message });
+    throw err;
   }
-
-  product.status = 'active';
-  product.archivedAt = null;
-  product.originalOrderNumber = null;
-  product.restoredFromArchive = true;
-  product.orderNumber = restoreOrder;
-  await product.save();
+  await session.endSession();
 
   try { getIO().emit('incoming_updated'); } catch (_) {}
 
@@ -126,22 +152,4 @@ router.delete('/:id', async (req, res) => {
   res.json({ message: 'Product permanently deleted' });
 });
 
-/**
- * Cleanup job: delete archived products older than 30 days
- * including their images from Cloudflare R2.
- */
-async function runArchiveCleanup() {
-  const cutoff = new Date();
-  cutoff.setDate(cutoff.getDate() - 30);
-
-  const old = await Product.find({ status: 'archived', archivedAt: { $lt: cutoff } });
-  if (!old.length) return;
-
-  console.log(`Archive cleanup: removing ${old.length} products older than 30 days`);
-  for (const product of old) {
-    await deleteFromR2(product.imageNames || []);
-    await product.deleteOne();
-  }
-}
-
-module.exports = { router, runArchiveCleanup };
+module.exports = { router };

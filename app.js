@@ -41,13 +41,11 @@ const { telegramAuth } = require('./middleware/telegramAuth');
 
 const publicApiPaths = [
   /^\/api\/search-products(\/.*)?$/,
-  /^\/api\/products\/report-missing$/,
-  /^\/api\/products\/images(\/.*)?$/,
+  /^\/api\/v1\/products\/report-missing$/,
+  /^\/api\/v1\/products\/images(\/.*)?$/,
   /^\/api\/v1\/telegram\/validate$/,
   /^\/api\/v1\/telegram\/register-request$/,
   /^\/api\/v1\/telegram\/me$/,
-  /^\/api\/v1\/telegram\/mini-app\/state$/,
-  /^\/api\/v1\/telegram\/mini-app\/reset-state$/,
   /^\/api\/delivery-groups\/summary$/,
 ];
 
@@ -77,12 +75,10 @@ app.get('/api/openai-status', async (req, res) => {
   }
 });
 
-app.use('/api/products', productsRouter);
 app.use('/api/v1/products', productsRouter);
 app.use('/api/users', usersRouter);
 app.use('/api/activity', activityRouter);
 app.use('/api/warehouse', warehouseRouter);
-app.use('/api/orders', ordersRouter);
 app.use('/api/v1/orders', ordersRouter);
 app.use('/api/delivery-groups', deliveryGroupsRouter);
 app.use('/api/archive', archiveRouter);
@@ -102,7 +98,11 @@ app.use('/api/v1/telegram', telegramV1Router);
 
 app.use((err, req, res, next) => {
   console.error(err);
-  res.status(500).json({ error: err.message || 'Internal server error' });
+  // Never expose internal error details to clients in production
+  const isDev = process.env.NODE_ENV === 'development';
+  res.status(err.status || 500).json({
+    error: isDev ? (err.message || 'Internal server error') : 'Internal server error',
+  });
 });
 
 module.exports = app;

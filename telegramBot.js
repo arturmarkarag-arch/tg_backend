@@ -652,7 +652,7 @@ async function uploadBufferToR2(buffer, ext, folder = 'products') {
     Body: buffer,
     ContentType: `image/${ext === 'jpg' ? 'jpeg' : ext}`,
   }));
-  const path = folder === 'products' ? `/api/products/images/${filename}` : `/api/search-products/images/${filename}`;
+  const path = folder === 'products' ? `/api/v1/products/images/${filename}` : `/api/search-products/images/${filename}`;
   return { url: path, name: filename };
 }
 
