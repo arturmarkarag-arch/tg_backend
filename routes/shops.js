@@ -96,14 +96,14 @@ router.post('/', telegramAuth, requireTelegramRole('admin'), async (req, res) =>
     if (!cityId) {
       return res.status(400).json({ error: 'cityId є обовʼязковим' });
     }
+    if (!deliveryGroupId) {
+      return res.status(400).json({ error: 'deliveryGroupId є обовʼязковим' });
+    }
 
     const cityDoc = await City.findById(cityId).lean();
     if (!cityDoc) return res.status(400).json({ error: 'Місто не знайдено' });
-    // Перевіряємо чи існує група доставки
-    if (deliveryGroupId) {
-      const group = await DeliveryGroup.findById(deliveryGroupId).lean();
-      if (!group) return res.status(400).json({ error: 'Групу доставки не знайдено' });
-    }
+    const group = await DeliveryGroup.findById(deliveryGroupId).lean();
+    if (!group) return res.status(400).json({ error: 'Групу доставки не знайдено' });
 
     const shop = await Shop.create({
       name: String(name).trim(),
