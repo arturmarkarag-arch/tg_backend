@@ -16,6 +16,7 @@ const BotSession = require('./models/BotSession');
 const BotInteractionLog = require('./models/BotInteractionLog');
 const RegistrationRequest = require('./models/RegistrationRequest');
 const DeliveryGroup = require('./models/DeliveryGroup');
+const Shop = require('./models/Shop');
 const Block = require('./models/Block');
 const PickingTask = require('./models/PickingTask');
 const { getIO } = require('./socket');
@@ -2109,26 +2110,36 @@ ${buildProductInfoText(product)}`;
             await RegistrationRequest.findByIdAndUpdate(requestId, { status: 'rejected' });
             await bot.answerCallbackQuery(query.id, { text: 'Користувач вже зареєстрований', show_alert: true });
           } else {
+            // Resolve shop & legacy fields
+            let shopId          = request.shopId || null;
+            let shopName        = request.shopName || '';
+            let shopCity        = request.shopCity  || '';
+            let deliveryGroupId = request.deliveryGroupId || '';
+            let warehouseZone   = '';
+            if (shopId) {
+              const shop = await Shop.findById(shopId).lean();
+              if (shop) {
+                shopName        = shop.name;
+                shopCity        = shop.city;
+                deliveryGroupId = shop.deliveryGroupId || '';
+                if (deliveryGroupId) {
+                  const grp = await DeliveryGroup.findById(deliveryGroupId).lean();
+                  warehouseZone = grp?.name || '';
+                }
+              }
+            }
             const user = new User({
               telegramId: request.telegramId,
               role: request.role,
               firstName: request.firstName,
               lastName: request.lastName,
-              shopName: request.role === 'seller' ? request.shopName : '',
-              shopCity: request.role === 'seller' ? request.shopCity : '',
-              deliveryGroupId: request.role === 'seller' ? request.deliveryGroupId || '' : '',
+              shopId:          request.role === 'seller' ? shopId          : null,
+              shopName:        request.role === 'seller' ? shopName        : '',
+              shopCity:        request.role === 'seller' ? shopCity        : '',
+              deliveryGroupId: request.role === 'seller' ? deliveryGroupId : '',
+              warehouseZone:   request.role === 'seller' ? warehouseZone   : '',
             });
             await user.save();
-            if (request.role === 'seller' && request.deliveryGroupId) {
-              const deliveryGroup = await DeliveryGroup.findByIdAndUpdate(
-                request.deliveryGroupId,
-                { $addToSet: { members: request.telegramId } },
-                { new: true }
-              );
-              if (deliveryGroup?.name) {
-                await User.findByIdAndUpdate(user._id, { warehouseZone: deliveryGroup.name });
-              }
-            }
             await RegistrationRequest.findByIdAndDelete(requestId);
             await bot.answerCallbackQuery(query.id, { text: 'Заявку схвалено', show_alert: false });
             await sendRegistrationApprovedMessage(request.telegramId, request.role);

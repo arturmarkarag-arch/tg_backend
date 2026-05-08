@@ -17,6 +17,7 @@ const { getBotStatus } = require('./telegramBot');
 const { verifyOpenAIConnection } = require('./openaiClient');
 const receiptsRouter = require('./routes/receipts');
 const pickingRouter = require('./routes/picking');
+const shopsRouter = require('./routes/shops');
 
 let broadcastInitialized = false;
 
@@ -47,6 +48,8 @@ const publicApiPaths = [
   /^\/api\/v1\/telegram\/register-request$/,
   /^\/api\/v1\/telegram\/me$/,
   /^\/api\/delivery-groups\/summary$/,
+  /^\/api\/shops\/cities$/,
+  /^\/api\/shops$/,
 ];
 
 function requireAuthForApi(req, res, next) {
@@ -89,6 +92,7 @@ app.use('/api/search-products', searchProductsRouter);
 app.use('/api/receipts', receiptsRouter);
 app.use('/api/picking', pickingRouter);
 app.use('/api/admin', adminRouter);
+app.use('/api/shops', shopsRouter);
 app.use('/api/v1/telegram', telegramV1Router);
 
 // Broadcast workers disabled for now.

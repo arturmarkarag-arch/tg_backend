@@ -447,6 +447,8 @@ router.post('/receive', staffOnly, async (req, res) => {
         : 0;
 
     const isConfirmed = price > 0 && quantityPerPackage > 0;
+    // Client can explicitly request 'pending' to prevent auto-promotion when price+qty are filled
+    const explicitPending = fields.status === 'pending';
 
     const maxProduct = await Product.findOne({ status: { $ne: 'archived' } })
       .sort({ orderNumber: -1 })
@@ -462,7 +464,7 @@ router.post('/receive', staffOnly, async (req, res) => {
       price,
       quantity,
       quantityPerPackage,
-      status: isConfirmed ? 'active' : 'pending',
+      status: explicitPending ? 'pending' : isConfirmed ? 'active' : 'pending',
       source: 'receive',
       notes: fields.notes ? String(fields.notes) : '',
       originalImageUrl: imageUrl,

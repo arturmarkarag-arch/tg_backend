@@ -2,6 +2,7 @@ const express = require('express');
 const User = require('../models/User');
 const Order = require('../models/Order');
 const DeliveryGroup = require('../models/DeliveryGroup');
+const Shop = require('../models/Shop');
 const { telegramAuth, requireTelegramRole } = require('../middleware/telegramAuth');
 const { isOrderingOpen, getOrderingWindowOpenAt } = require('../utils/orderingSchedule');
 
@@ -9,25 +10,28 @@ const router = express.Router();
 router.use(telegramAuth);
 router.use(requireTelegramRole('admin'));
 
-async function syncDeliveryGroupMembership(telegramId, groupId) {
-  // Remove user from all groups first
-  await DeliveryGroup.updateMany(
-    { members: telegramId },
-    { $pull: { members: telegramId } }
-  );
-  // Add to the selected group if any
-  if (groupId) {
-    await DeliveryGroup.updateOne(
-      { _id: groupId },
-      { $addToSet: { members: telegramId } }
-    );
-  }
+// eslint-disable-next-line no-unused-vars
+async function syncDeliveryGroupMembership(_telegramId, _groupId) {
+  // No-op: DeliveryGroup.members has been removed.
+  // Membership is now determined via User.shopId -> Shop.deliveryGroupId.
 }
 
 async function syncUserWarehouseZone(user) {
   if (user.role === 'seller') {
-    const group = user.deliveryGroupId ? await DeliveryGroup.findById(user.deliveryGroupId).lean() : null;
-    return await User.findByIdAndUpdate(user._id, { warehouseZone: group?.name || '' }, { new: true });
+    let zone = '';
+    // New architecture: derive zone from shop -> deliveryGroup
+    if (user.shopId) {
+      const shop = await Shop.findById(user.shopId).lean();
+      if (shop?.deliveryGroupId) {
+        const group = await DeliveryGroup.findById(shop.deliveryGroupId).lean();
+        zone = group?.name || '';
+      }
+    } else if (user.deliveryGroupId) {
+      // Legacy fallback
+      const group = await DeliveryGroup.findById(user.deliveryGroupId).lean();
+      zone = group?.name || '';
+    }
+    return await User.findByIdAndUpdate(user._id, { warehouseZone: zone }, { new: true });
   }
   if (user.role !== 'warehouse') {
     return await User.findByIdAndUpdate(user._id, { warehouseZone: '' }, { new: true });
@@ -52,12 +56,14 @@ function sanitizeUserPayload(payload, existing = null) {
 
   // Seller-specific fields — clear when role is not seller
   if (role === 'seller') {
+    data.shopId = payload.shopId || null;
     data.shopNumber = payload.shopNumber;
     data.shopName = payload.shopName;
     data.shopAddress = payload.shopAddress;
     data.shopCity = payload.shopCity;
     data.deliveryGroupId = payload.deliveryGroupId;
   } else {
+    data.shopId = null;
     data.shopNumber = '';
     data.shopName = '';
     data.shopAddress = '';
@@ -80,7 +86,7 @@ function sanitizeUserPayload(payload, existing = null) {
 
 router.get('/', async (req, res) => {
   const page     = Math.max(1, parseInt(req.query.page) || 1);
-  const pageSize = Math.min(100, Math.max(1, parseInt(req.query.pageSize) || 20));
+  const pageSize = Math.min(500, Math.max(1, parseInt(req.query.pageSize) || 20));
   const roleFilter     = req.query.role || null;
   const groupFilter    = req.query.deliveryGroupId || null;
   const activityFilter = req.query.activityFilter || null; // 'no_cart' | 'no_order' | 'no_visit'

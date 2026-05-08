@@ -1,6 +1,8 @@
 const express = require('express');
 const { telegramAuth, requireTelegramRole } = require('../middleware/telegramAuth');
 const AppSetting = require('../models/AppSetting');
+const City = require('../models/City');
+const Shop = require('../models/Shop');
 const { listOpenAIModels } = require('../openaiClient');
 
 const router = express.Router();
@@ -99,6 +101,43 @@ router.post('/ordering-schedule', telegramAuth, requireTelegramRole('admin'), as
     res.json(saved);
   } catch (error) {
     res.status(400).json({ error: error.message || 'Invalid schedule data' });
+  }
+});
+
+// GET /api/admin/cities — список міст з City колекції
+router.get('/cities', telegramAuth, requireTelegramRole('admin'), async (req, res) => {
+  try {
+    const cities = await City.find().sort({ name: 1 }).lean();
+    res.json(cities); // [{_id, name, country}]
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// POST /api/admin/cities — створити нове місто
+router.post('/cities', telegramAuth, requireTelegramRole('admin'), async (req, res) => {
+  try {
+    const name = String(req.body?.name || '').trim();
+    if (!name) return res.status(400).json({ error: 'name є обовʼязковим' });
+    const city = await City.create({ name, country: req.body?.country || 'PL' });
+    res.status(201).json(city);
+  } catch (err) {
+    if (err.code === 11000) return res.status(409).json({ error: `Місто "${req.body?.name}" вже існує` });
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// DELETE /api/admin/cities/:id — видалити місто (якщо немає магазинів)
+router.delete('/cities/:id', telegramAuth, requireTelegramRole('admin'), async (req, res) => {
+  try {
+    const shopCount = await Shop.countDocuments({ cityId: req.params.id });
+    if (shopCount > 0) {
+      return res.status(400).json({ error: `Не можна видалити: ${shopCount} магазин(ів) прив'язано до цього міста` });
+    }
+    await City.findByIdAndDelete(req.params.id);
+    res.json({ message: 'Місто видалено' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 

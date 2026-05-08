@@ -4,6 +4,7 @@ const { DAY_SHORT } = require('../../utils/dayNames');
 const User = require('../../models/User');
 const RegistrationRequest = require('../../models/RegistrationRequest');
 const DeliveryGroup = require('../../models/DeliveryGroup');
+const Shop = require('../../models/Shop');
 const { sendAdminNotification, sendRegistrationApprovedMessage } = require('../../telegramBot');
 
 const router = express.Router();
@@ -21,6 +22,15 @@ function normalizeMiniAppState(miniAppState) {
 }
 
 async function resolveWarehouseZone(user) {
+  // New architecture: shopId → shop → deliveryGroupId → group
+  if (user?.shopId) {
+    const shop = await Shop.findById(user.shopId).lean();
+    if (shop?.deliveryGroupId) {
+      const group = await DeliveryGroup.findById(shop.deliveryGroupId).lean();
+      return group?.name || '';
+    }
+  }
+  // Legacy fallback
   if (!user?.deliveryGroupId) return '';
   const group = await DeliveryGroup.findById(user.deliveryGroupId).lean();
   return group?.name || '';
@@ -93,15 +103,19 @@ router.post('/me', async (req, res) => {
   }
 
   // 3. Повертаємо профіль (без чутливих полів)
+  const userShop = user.shopId ? await Shop.findById(user.shopId).lean() : null;
+  const resolvedGroupId = userShop?.deliveryGroupId || user.deliveryGroupId || '';
   res.json({
     telegramId: user.telegramId,
     role: user.role,
     firstName: user.firstName,
     lastName: user.lastName,
-    shopName: user.shopName,
+    shopId: userShop ? String(userShop._id) : null,
+    shop: userShop ? { _id: userShop._id, name: userShop.name, city: userShop.city, deliveryGroupId: userShop.deliveryGroupId } : null,
+    shopName: userShop?.name || user.shopName || '',
     shopNumber: user.shopNumber,
-    shopCity: user.shopCity,
-    deliveryGroupId: user.deliveryGroupId || '',
+    shopCity: userShop?.city || user.shopCity || '',
+    deliveryGroupId: resolvedGroupId,
     warehouseZone: await resolveWarehouseZone(user),
     isWarehouseManager: user.isWarehouseManager || false,
     isOnShift: user.isOnShift || false,
@@ -112,6 +126,49 @@ router.post('/me', async (req, res) => {
       updatedAt: null,
     }),
   });
+});
+
+// PATCH /api/v1/telegram/me/shop — seller оновлює свій магазин
+router.patch('/me/shop', async (req, res) => {
+  try {
+    const user = req.telegramUser;
+    if (!user) return res.status(401).json({ error: 'Not authenticated' });
+
+    const { shopId } = req.body;
+    if (!shopId) return res.status(400).json({ error: 'shopId є обовʼязковим' });
+
+    const shop = await Shop.findById(shopId).populate('cityId', 'name').lean();
+    if (!shop) return res.status(404).json({ error: 'Магазин не знайдено' });
+
+    let warehouseZone = '';
+    if (shop.deliveryGroupId) {
+      const group = await DeliveryGroup.findById(shop.deliveryGroupId).lean();
+      warehouseZone = group?.name || '';
+    }
+
+    const shopCity = shop.cityId?.name || shop.city || '';
+    const shopName = shop.name || '';
+    const deliveryGroupId = shop.deliveryGroupId ? String(shop.deliveryGroupId) : null;
+
+    await User.findByIdAndUpdate(user._id, {
+      shopId: shop._id,
+      shopName,
+      shopCity,
+      deliveryGroupId: shop.deliveryGroupId || null,
+      warehouseZone,
+    });
+
+    res.json({
+      shopId: String(shop._id),
+      shopName,
+      shopCity,
+      deliveryGroupId,
+      warehouseZone,
+    });
+  } catch (err) {
+    console.error('[PATCH /v1/telegram/me/shop]', err.message);
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // POST /api/v1/telegram/mini-app/state — зберегти останній переглянутий товар у mini app
@@ -196,9 +253,8 @@ router.post('/mini-app/reset-state', async (req, res) => {
   res.json({ miniAppState: normalizeMiniAppState(user.miniAppState) });
 });
 
-// POST /api/v1/telegram/register-request — заявка на реєстрацію нового користувача
 router.post('/register-request', async (req, res) => {
-  const { firstName, lastName, shopName, shopCity, deliveryGroupId, role } = req.body;
+  const { firstName, lastName, shopId, role } = req.body;
 
   const { valid, parsedData, telegramId, error } = getTelegramAuth(req, process.env.TELEGRAM_BOT_TOKEN);
   if (!valid) {
@@ -215,16 +271,8 @@ router.post('/register-request', async (req, res) => {
   if (!['seller', 'warehouse'].includes(role)) {
     return res.status(400).json({ error: 'Invalid role selected' });
   }
-  if (role === 'seller') {
-    if (!shopName) {
-      return res.status(400).json({ error: 'Назва магазину є обов’язковою для продавця' });
-    }
-    if (!shopCity) {
-      return res.status(400).json({ error: 'Місто є обов’язковим для продавця' });
-    }
-    if (!deliveryGroupId) {
-      return res.status(400).json({ error: 'Група доставки є обов’язковою для продавця' });
-    }
+  if (role === 'seller' && !shopId) {
+    return res.status(400).json({ error: 'Магазин є обов’язковим для продавця' });
   }
 
   const existingUser = await User.findOne({ telegramId }).lean();
@@ -243,11 +291,19 @@ router.post('/register-request', async (req, res) => {
     return res.status(409).json({ error: 'Registration request already exists' });
   }
 
+  let shop = null;
   let group = null;
   if (role === 'seller') {
-    group = await DeliveryGroup.findById(deliveryGroupId).lean();
+    shop = await Shop.findById(shopId).lean();
+    if (!shop || !shop.isActive) {
+      return res.status(400).json({ error: 'Магазин не знайдено' });
+    }
+    if (!shop.deliveryGroupId) {
+      return res.status(400).json({ error: 'Магазин не прив’язаний до групи доставки' });
+    }
+    group = await DeliveryGroup.findById(shop.deliveryGroupId).lean();
     if (!group) {
-      return res.status(400).json({ error: 'Selected delivery group not found' });
+      return res.status(400).json({ error: 'Групу доставки магазину не знайдено' });
     }
   }
 
@@ -255,9 +311,10 @@ router.post('/register-request', async (req, res) => {
     telegramId,
     firstName,
     lastName,
-    shopName: role === 'seller' ? shopName : '',
-    shopCity: role === 'seller' ? shopCity : '',
-    deliveryGroupId: role === 'seller' ? deliveryGroupId : '',
+    shopId:          role === 'seller' ? String(shop._id) : null,
+    shopName:        role === 'seller' ? shop.name        : '',
+    shopCity:        role === 'seller' ? shop.city        : '',
+    deliveryGroupId: role === 'seller' ? shop.deliveryGroupId : '',
     role,
     status: 'pending',
     meta: { submittedAt: new Date() },
@@ -266,11 +323,11 @@ router.post('/register-request', async (req, res) => {
   const roleLabel = role === 'warehouse' ? 'Склад' : 'Продавець';
   const message = `📥 Нова заявка на реєстрацію (${roleLabel}):\n` +
     `Telegram ID: ${telegramId}\n` +
-    `Ім'я: ${firstName}\n` +
+    `Ім’я: ${firstName}\n` +
     `Прізвище: ${lastName}\n` +
     `Роль: ${roleLabel}\n` +
-    `Назва магазину: ${role === 'seller' ? shopName : 'не вказано'}\n` +
-    `Місто: ${role === 'seller' ? shopCity : 'не вказано'}\n` +
+    `Назва магазину: ${role === 'seller' ? shop.name : 'не вказано'}\n` +
+    `Місто: ${role === 'seller' ? shop.city : 'не вказано'}\n` +
     `Група доставки: ${role === 'seller' ? `${group.name} (${DAY_SHORT[group.dayOfWeek] || 'День'})` : 'не вказано'}\n` +
     `Запит створено: ${new Date().toLocaleString()}`;
 
@@ -278,57 +335,6 @@ router.post('/register-request', async (req, res) => {
 
   res.status(201).json({ requestId: request._id, status: 'pending' });
 });
-
-// PATCH /api/v1/telegram/me/shop — продавець самостійно оновлює дані свого магазину
-router.patch('/me/shop', async (req, res) => {
-  const { valid, telegramId, error } = getTelegramAuth(req, process.env.TELEGRAM_BOT_TOKEN);
-  if (!valid) return res.status(401).json({ error: error || 'Invalid initData' });
-  if (!telegramId) return res.status(400).json({ error: 'Telegram user id is missing' });
-
-  const user = await User.findOne({ telegramId });
-  if (!user) return res.status(404).json({ error: 'User not found' });
-  if (user.role !== 'seller' && user.role !== 'admin') return res.status(403).json({ error: 'Only sellers can update shop data' });
-
-  const { shopName, shopCity, deliveryGroupId } = req.body;
-
-  if (shopName !== undefined) user.shopName = String(shopName).trim();
-  if (shopCity !== undefined) user.shopCity = String(shopCity).trim();
-
-  if (deliveryGroupId !== undefined) {
-    const newGroupId = String(deliveryGroupId).trim();
-    if (newGroupId) {
-      const group = await DeliveryGroup.findById(newGroupId).lean();
-      if (!group) return res.status(400).json({ error: 'Групу доставки не знайдено' });
-      user.deliveryGroupId = newGroupId;
-      user.warehouseZone = group.name;
-    } else {
-      user.deliveryGroupId = '';
-      user.warehouseZone = '';
-    }
-    // Re-sync group membership
-    await DeliveryGroup.updateMany({ members: telegramId }, { $pull: { members: telegramId } });
-    if (user.deliveryGroupId) {
-      await DeliveryGroup.updateOne({ _id: user.deliveryGroupId }, { $addToSet: { members: telegramId } });
-    }
-  }
-
-  await user.save();
-
-  res.json({
-    telegramId: user.telegramId,
-    shopName: user.shopName,
-    shopCity: user.shopCity,
-    shopAddress: user.shopAddress,
-    deliveryGroupId: user.deliveryGroupId || '',
-    warehouseZone: user.warehouseZone || '',
-  });
-});
-
-async function ensureAdmin(req) {
-  const { valid, telegramId } = getTelegramAuth(req, process.env.TELEGRAM_BOT_TOKEN);
-  if (!valid || !telegramId) return null;
-  return await User.findOne({ telegramId, role: 'admin' }).lean();
-}
 
 router.get('/register-requests', async (req, res) => {
   const admin = await ensureAdmin(req);

@@ -2,6 +2,7 @@ const express = require('express');
 const DeliveryGroup = require('../models/DeliveryGroup');
 const User = require('../models/User');
 const Order = require('../models/Order');
+const Shop = require('../models/Shop');
 const { telegramAuth, requireTelegramRole } = require('../middleware/telegramAuth');
 const {
   isOrderingOpen,
@@ -19,21 +20,6 @@ async function getOrderingSchedule() {
 }
 
 const router = express.Router();
-
-async function syncUsersDeliveryGroupId(group) {
-  // Set deliveryGroupId for current members
-  if (group.members?.length) {
-    await User.updateMany(
-      { telegramId: { $in: group.members } },
-      { deliveryGroupId: group._id, warehouseZone: group.name }
-    );
-  }
-  // Clear deliveryGroupId for users removed from this group
-  await User.updateMany(
-    { deliveryGroupId: group._id, telegramId: { $nin: group.members || [] } },
-    { deliveryGroupId: '', warehouseZone: '' }
-  );
-}
 
 function buildDeliveryGroupSessionSummary(group, schedule, ordersByGroup) {
   const status = isOrderingOpen(group.dayOfWeek, schedule);
@@ -99,12 +85,21 @@ router.get('/ordering-status', telegramAuth, async (req, res) => {
 });
 
 router.get('/summary', async (req, res) => {
-  const groups = await DeliveryGroup.find().select('name dayOfWeek members').lean();
+  const groups = await DeliveryGroup.find().select('name dayOfWeek').lean();
 
-  // Count actual registered sellers per group (same query the commit route uses)
-  const sellerCounts = await User.aggregate([
-    { $match: { role: 'seller', deliveryGroupId: { $ne: '' } } },
+  // Кількість активних магазинів по кожній групі
+  const shopCounts = await Shop.aggregate([
+    { $match: { isActive: true } },
     { $group: { _id: '$deliveryGroupId', count: { $sum: 1 } } },
+  ]);
+  const shopCountMap = Object.fromEntries(shopCounts.map(({ _id, count }) => [String(_id), count]));
+
+  // Кількість продавців по кожній групі (через Shop)
+  const sellerCounts = await User.aggregate([
+    { $match: { role: 'seller', shopId: { $ne: null, $exists: true } } },
+    { $lookup: { from: 'shops', localField: 'shopId', foreignField: '_id', as: 'shop' } },
+    { $unwind: '$shop' },
+    { $group: { _id: '$shop.deliveryGroupId', count: { $sum: 1 } } },
   ]);
   const sellerCountMap = Object.fromEntries(sellerCounts.map(({ _id, count }) => [String(_id), count]));
 
@@ -112,7 +107,7 @@ router.get('/summary', async (req, res) => {
     _id: g._id,
     name: g.name,
     dayOfWeek: g.dayOfWeek,
-    shopCount: g.members?.length || 0,
+    shopCount: shopCountMap[String(g._id)] || 0,
     sellerCount: sellerCountMap[String(g._id)] || 0,
   }));
   result.sort((a, b) => {
@@ -190,9 +185,27 @@ router.get('/', async (req, res) => {
     return String(a.name || '').localeCompare(String(b.name || ''));
   });
   const schedule = await getOrderingSchedule();
+
+  const [shopCounts, sellerCounts] = await Promise.all([
+    Shop.aggregate([
+      { $match: { isActive: true } },
+      { $group: { _id: '$deliveryGroupId', count: { $sum: 1 } } },
+    ]),
+    User.aggregate([
+      { $match: { role: 'seller', shopId: { $ne: null, $exists: true } } },
+      { $lookup: { from: 'shops', localField: 'shopId', foreignField: '_id', as: 'shop' } },
+      { $unwind: '$shop' },
+      { $group: { _id: '$shop.deliveryGroupId', count: { $sum: 1 } } },
+    ]),
+  ]);
+  const shopCountMap = Object.fromEntries(shopCounts.map(({ _id, count }) => [String(_id), count]));
+  const sellerCountMap = Object.fromEntries(sellerCounts.map(({ _id, count }) => [String(_id), count]));
+
   const result = groups.map((g) => ({
     ...g,
     isOpen: isOrderingOpen(g.dayOfWeek, schedule).isOpen,
+    shopCount: shopCountMap[String(g._id)] || 0,
+    sellerCount: sellerCountMap[String(g._id)] || 0,
   }));
   res.json(result);
 });
@@ -203,68 +216,30 @@ router.post('/', telegramAuth, requireTelegramRole('admin'), async (req, res) =>
     return res.status(400).json({ error: 'name and dayOfWeek are required' });
   }
 
-  const members = Array.isArray(req.body.members)
-    ? req.body.members.map((id) => String(id).trim()).filter(Boolean)
-    : [];
-
-  let validMembers = [];
-  if (members.length > 0) {
-    validMembers = await User.find({ telegramId: { $in: members } }).distinct('telegramId');
-    const invalidMembers = members.filter((id) => !validMembers.includes(id));
-    if (invalidMembers.length > 0) {
-      return res.status(400).json({ error: `Invalid member telegramId(s): ${invalidMembers.join(', ')}` });
-    }
-  }
-
-  const group = new DeliveryGroup({
-    name,
-    dayOfWeek,
-    members: validMembers,
-  });
+  const group = new DeliveryGroup({ name, dayOfWeek });
   await group.save();
-  await syncUsersDeliveryGroupId(group);
   res.status(201).json(group);
 });
 
 router.patch('/:id', telegramAuth, requireTelegramRole('admin'), async (req, res) => {
-  const oldGroup = await DeliveryGroup.findById(req.params.id);
-  if (!oldGroup) return res.status(404).json({ error: 'Group not found' });
+  const group = await DeliveryGroup.findById(req.params.id);
+  if (!group) return res.status(404).json({ error: 'Group not found' });
 
-  const body = { ...req.body };
-  if (body.members !== undefined) {
-    if (!Array.isArray(body.members)) {
-      return res.status(400).json({ error: 'members must be an array of telegramId strings' });
-    }
-    const members = body.members.map((id) => String(id).trim()).filter(Boolean);
-    const validMembers = await User.find({ telegramId: { $in: members } }).distinct('telegramId');
-    const invalidMembers = members.filter((id) => !validMembers.includes(id));
-    if (invalidMembers.length > 0) {
-      return res.status(400).json({ error: `Invalid member telegramId(s): ${invalidMembers.join(', ')}` });
-    }
-    body.members = validMembers;
-  }
+  const { name, dayOfWeek } = req.body;
+  if (name !== undefined) group.name = name;
+  if (dayOfWeek !== undefined) group.dayOfWeek = dayOfWeek;
 
-  const group = await DeliveryGroup.findByIdAndUpdate(req.params.id, body, {
-    new: true,
-    runValidators: true,
-  });
-
-  const removedMembers = (oldGroup.members || []).filter((m) => !(group.members || []).includes(m));
-  if (removedMembers.length) {
-    await User.updateMany(
-      { telegramId: { $in: removedMembers }, deliveryGroupId: oldGroup._id },
-      { deliveryGroupId: '', warehouseZone: '' }
-    );
-  }
-  await syncUsersDeliveryGroupId(group);
+  await group.save();
   res.json(group);
 });
 
 router.delete('/:id', telegramAuth, requireTelegramRole('admin'), async (req, res) => {
   const group = await DeliveryGroup.findById(req.params.id);
   if (!group) return res.status(404).json({ error: 'Group not found' });
-  if (group.members?.length) {
-    return res.status(400).json({ error: 'Cannot delete a delivery group with members' });
+
+  const shopCount = await Shop.countDocuments({ deliveryGroupId: String(group._id), isActive: true });
+  if (shopCount > 0) {
+    return res.status(400).json({ error: `Не можна видалити групу: ${shopCount} магазин(ів) прив'язано` });
   }
 
   await DeliveryGroup.findByIdAndDelete(req.params.id);

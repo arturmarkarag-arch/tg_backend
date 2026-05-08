@@ -106,12 +106,12 @@ function isOrderingOpen(deliveryDayOfWeek, schedule = {}) {
     if (nowMins >= openMins) {
       return {
         isOpen: true,
-        message: `Прийом замовлень відкрито до ${DAY_SHORT_UK[closeDay]} ${fmt(closeHour, closeMinute)}`,
+        message: `Замовлення відкрито. Закривається в ${DAY_FULL_UK[closeDay]} о ${fmt(closeHour, closeMinute)}`,
       };
     }
     return {
       isOpen: false,
-      message: `Прийом замовлень відкриється сьогодні о ${fmt(openHour, openMinute)}`,
+      message: `Замовлення відкриються сьогодні о ${fmt(openHour, openMinute)}`,
     };
   }
 
@@ -120,12 +120,12 @@ function isOrderingOpen(deliveryDayOfWeek, schedule = {}) {
     if (nowMins < closeMins) {
       return {
         isOpen: true,
-        message: `Прийом замовлень відкрито. Закривається сьогодні о ${fmt(closeHour, closeMinute)}`,
+        message: `Замовлення відкрито. Закривається сьогодні о ${fmt(closeHour, closeMinute)}`,
       };
     }
     return {
       isOpen: false,
-      message: `Прийом замовлень закрито. Наступне вікно — ${DAY_SHORT_UK[openDay]} о ${fmt(openHour, openMinute)}`,
+      message: `Замовлення закрито. Наступне вікно — ${DAY_FULL_UK[openDay]} о ${fmt(openHour, openMinute)}`,
     };
   }
 
@@ -142,13 +142,13 @@ function isOrderingOpen(deliveryDayOfWeek, schedule = {}) {
     // We're on a day strictly inside the open window
     return {
       isOpen: true,
-      message: `Прийом замовлень відкрито. Закривається у ${DAY_SHORT_UK[closeDay]} о ${fmt(closeHour, closeMinute)}`,
+      message: `Замовлення відкрито. Закривається в ${DAY_FULL_UK[closeDay]} о ${fmt(closeHour, closeMinute)}`,
     };
   }
 
   return {
     isOpen: false,
-    message: `Прийом замовлень відкрито з ${DAY_SHORT_UK[openDay]} ${fmt(openHour, openMinute)} по ${DAY_SHORT_UK[closeDay]} ${fmt(closeHour, closeMinute)}`,
+    message: `Замовлення закрито. Відкриються в ${DAY_FULL_UK[openDay]} о ${fmt(openHour, openMinute)}, закриються в ${DAY_FULL_UK[closeDay]} о ${fmt(closeHour, closeMinute)}`,
   };
 }
 
