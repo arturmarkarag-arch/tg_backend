@@ -127,6 +127,24 @@ router.post('/cities', telegramAuth, requireTelegramRole('admin'), async (req, r
   }
 });
 
+// PATCH /api/admin/cities/:id — перейменувати місто
+router.patch('/cities/:id', telegramAuth, requireTelegramRole('admin'), async (req, res) => {
+  try {
+    const name = String(req.body?.name || '').trim();
+    if (!name) return res.status(400).json({ error: 'name є обовʼязковим' });
+    const city = await City.findByIdAndUpdate(
+      req.params.id,
+      { name },
+      { new: true, runValidators: true }
+    );
+    if (!city) return res.status(404).json({ error: 'Місто не знайдено' });
+    res.json(city);
+  } catch (err) {
+    if (err.code === 11000) return res.status(409).json({ error: `Місто з такою назвою вже існує` });
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // DELETE /api/admin/cities/:id — видалити місто (якщо немає магазинів)
 router.delete('/cities/:id', telegramAuth, requireTelegramRole('admin'), async (req, res) => {
   try {
