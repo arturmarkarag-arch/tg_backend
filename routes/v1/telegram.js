@@ -36,6 +36,13 @@ async function resolveWarehouseZone(user) {
   return group?.name || '';
 }
 
+// Returns admin user from request (already set by telegramAuth middleware), or null
+function ensureAdmin(req) {
+  const user = req.telegramUser;
+  if (!user || user.role !== 'admin') return null;
+  return user;
+}
+
 // POST /api/v1/telegram/validate — перевірити підпис initData
 router.post('/validate', (req, res) => {
   const { initData } = req.body;
