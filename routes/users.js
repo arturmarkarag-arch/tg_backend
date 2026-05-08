@@ -262,6 +262,36 @@ router.post('/', async (req, res) => {
   res.status(existing ? 200 : 201).json(user);
 });
 
+// Lightweight endpoint — only updates shopId + syncs deliveryGroupId from the shop
+router.patch('/:telegramId/shop', async (req, res) => {
+  try {
+    const existing = await User.findOne({ telegramId: req.params.telegramId });
+    if (!existing) return res.status(404).json({ error: 'User not found' });
+
+    const { shopId } = req.body;
+    let deliveryGroupId = existing.deliveryGroupId || null;
+
+    if (shopId) {
+      const shop = await Shop.findById(shopId).lean();
+      if (!shop) return res.status(404).json({ error: 'Shop not found' });
+      deliveryGroupId = shop.deliveryGroupId || null;
+    } else {
+      deliveryGroupId = null;
+    }
+
+    const user = await User.findOneAndUpdate(
+      { telegramId: req.params.telegramId },
+      { shopId: shopId || null, deliveryGroupId },
+      { new: true }
+    );
+    await syncDeliveryGroupMembership(user.telegramId, user.deliveryGroupId);
+    res.json(user);
+  } catch (err) {
+    console.error('[PATCH /users/:telegramId/shop]', err);
+    res.status(500).json({ error: 'Failed to update shop assignment' });
+  }
+});
+
 router.patch('/:telegramId', async (req, res) => {
   try {
     const existing = await User.findOne({ telegramId: req.params.telegramId });
