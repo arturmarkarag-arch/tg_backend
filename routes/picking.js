@@ -268,9 +268,21 @@ router.get('/next-task', requireTelegramRoles(['warehouse', 'admin']), async (re
       return res.status(400).json({ error: 'currentBlock must be a positive integer' });
     }
 
-    // Release any tasks this worker had locked for this group (stale locks from previous session).
+    // Release stale locks:
+    //  - always release this worker's own locks (from a previous request / page reload)
+    //  - release any worker's lock that is older than LOCK_TIMEOUT_MS (abandoned tasks)
+    // Does NOT touch items[].packed so partial progress is preserved for the next worker.
+    const LOCK_TIMEOUT_MS = 15 * 60 * 1000; // 15 minutes
+    const staleLockedAt = new Date(Date.now() - LOCK_TIMEOUT_MS);
     await PickingTask.updateMany(
-      { lockedBy: user.telegramId, status: 'locked', ...(deliveryGroupId ? { deliveryGroupId: String(deliveryGroupId) } : {}) },
+      {
+        status: 'locked',
+        ...(deliveryGroupId ? { deliveryGroupId: String(deliveryGroupId) } : {}),
+        $or: [
+          { lockedBy: user.telegramId },
+          { lockedAt: { $lt: staleLockedAt } },
+        ],
+      },
       { $set: { status: 'pending', lockedBy: null, lockedAt: null } },
     );
 
