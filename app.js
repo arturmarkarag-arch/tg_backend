@@ -8,7 +8,6 @@ const warehouseRouter = require('./routes/warehouse');
 const ordersRouter = require('./routes/orders');
 const deliveryGroupsRouter = require('./routes/deliveryGroups');
 const { router: archiveRouter } = require('./routes/archive');
-// const broadcastRouter = require('./routes/broadcast');
 const blocksRouter = require('./routes/blocks');
 const telegramV1Router = require('./routes/v1/telegram');
 const adminRouter = require('./routes/admin');
@@ -18,20 +17,6 @@ const { verifyOpenAIConnection } = require('./openaiClient');
 const receiptsRouter = require('./routes/receipts');
 const pickingRouter = require('./routes/picking');
 const shopsRouter = require('./routes/shops');
-
-let broadcastInitialized = false;
-
-function ensureBroadcast(app) {
-  if (broadcastInitialized) return;
-  broadcastInitialized = true;
-  try {
-    const { initBroadcast } = require('./broadcast');
-    initBroadcast(app);
-  } catch (err) {
-    console.warn('[Broadcast] Init failed (Redis not available?):', err.message);
-    broadcastInitialized = false;
-  }
-}
 
 const app = express();
 app.use(cors());
@@ -85,8 +70,6 @@ app.use('/api/warehouse', warehouseRouter);
 app.use('/api/v1/orders', ordersRouter);
 app.use('/api/delivery-groups', deliveryGroupsRouter);
 app.use('/api/archive', archiveRouter);
-// Broadcast API disabled for now.
-// app.use('/api/broadcast', broadcastRouter);
 app.use('/api/blocks', blocksRouter);
 app.use('/api/search-products', searchProductsRouter);
 app.use('/api/receipts', receiptsRouter);
@@ -95,10 +78,17 @@ app.use('/api/admin', adminRouter);
 app.use('/api/shops', shopsRouter);
 app.use('/api/v1/telegram', telegramV1Router);
 
-// Broadcast workers disabled for now.
-// if (process.env.REDIS_URL || process.env.ENABLE_BROADCAST === 'true') {
-//   ensureBroadcast(app);
-// }
+// Picking task auto-scheduler — fires at closeHour:closeMinute (Warsaw) every day
+if (process.env.REDIS_URL || process.env.NODE_ENV !== 'production') {
+  try {
+    const { initPickingScheduler } = require('./broadcast/pickingScheduler');
+    initPickingScheduler().catch((err) => {
+      console.warn('[PickingScheduler] Init failed:', err.message);
+    });
+  } catch (err) {
+    console.warn('[PickingScheduler] Load failed:', err.message);
+  }
+}
 
 app.use((err, req, res, next) => {
   console.error(err);

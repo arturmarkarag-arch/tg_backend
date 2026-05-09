@@ -591,6 +591,7 @@ router.post('/:id/commit', staffOnly, async (req, res) => {
           brand: item.name || '',
           model: '',
           status: 'pending',
+          source: 'receipt',
           imageUrls: [item.photoUrl],
           imageNames: [item.photoName],
           barcode: item.barcode || '',

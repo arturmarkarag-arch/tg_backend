@@ -9,14 +9,8 @@ const { getTelegramAuth } = require('../utils/validateTelegramInitData');
 const { telegramAuth, requireTelegramRoles } = require('../middleware/telegramAuth');
 const { getIO } = require('../socket');
 const { isOrderingOpen, getOrderingWindowOpenAt, getCurrentOrderingSessionId } = require('../utils/orderingSchedule');
-const AppSetting = require('../models/AppSetting');
 
-const ORDERING_SCHEDULE_KEY = 'ordering.schedule';
-const ORDERING_SCHEDULE_DEFAULTS = { openHour: 16, openMinute: 0, closeHour: 7, closeMinute: 30 };
-async function getOrderingSchedule() {
-  const saved = await AppSetting.findOne({ key: ORDERING_SCHEDULE_KEY }).lean();
-  return { ...ORDERING_SCHEDULE_DEFAULTS, ...(saved?.value || {}) };
-}
+const { getOrderingSchedule } = require('../utils/getOrderingSchedule');
 
 const router = express.Router();
 const staffOnly = requireTelegramRoles(['admin', 'warehouse']);

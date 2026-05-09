@@ -388,6 +388,7 @@ router.post('/block-upload-photos', staffOnly, async (req, res) => {
       price: 0,
       quantity: 0,
       status: 'pending',
+      source: 'block_photo',
       imageUrls: [imageUrl],
       imageNames: [filename],
     });

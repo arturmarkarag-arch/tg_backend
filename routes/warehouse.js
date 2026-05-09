@@ -4,10 +4,8 @@ const User = require('../models/User');
 const Block = require('../models/Block');
 const Product = require('../models/Product');
 const PickingTask = require('../models/PickingTask');
-// const BotSession = require('../models/BotSession'); // Bot-specific: /pick /ship sessions no longer used
 const { archiveProduct, getProductTitle } = require('../services/archiveProduct');
 const { requireTelegramRoles } = require('../middleware/telegramAuth');
-// const { sendMessageWithRetry } = require('../telegramBot'); // Bot-specific: no more worker notifications via bot
 
 const router = express.Router();
 
@@ -91,24 +89,12 @@ router.post('/remove-from-shift', requireTelegramRoles(['admin', 'warehouse']), 
       //   { session }
       // );
 
-      // Bot-specific: BotSession (/pick /ship) no longer used
-      // await BotSession.deleteMany(
-      //   { chatId: worker.telegramId, type: { $in: ['pick', 'ship'] } },
-      //   { session }
-      // );
     });
   } catch (err) {
     await session.endSession();
     return res.status(err.status || 500).json({ error: err.message || 'Failed to remove worker from shift' });
   }
   await session.endSession();
-
-  // Bot-specific: no more worker notifications via bot
-  // try {
-  //   await sendMessageWithRetry(worker.telegramId, 'Менеджер завершив вашу зміну. Поточні завдання скасовано.');
-  // } catch (err) {
-  //   console.warn(`Failed to notify worker ${worker.telegramId}:`, err?.message || err);
-  // }
 
   res.json({ message: 'Worker removed from shift and locked tasks released' });
 });
@@ -182,11 +168,8 @@ router.post('/confirm-shift', requireTelegramRoles(['admin', 'warehouse']), asyn
         { session }
       );
 
-      // Bot-specific: BotSession (/pick /ship) no longer used
-      // await BotSession.deleteMany({ type: { $in: ['pick', 'ship'] } }, { session });
-
       // Bot-specific: task locking via /pick command no longer occurs
-      // await PickingTask.updateMany(
+      // await PickingTask.updateMany( 
       //   { status: 'locked' },
       //   { $set: { status: 'pending', lockedBy: null, lockedAt: null } },
       //   { session }
@@ -247,8 +230,6 @@ router.post('/close-shift', requireTelegramRoles(['admin', 'warehouse']), async 
         { session }
       );
 
-      // Bot-specific: BotSession (/pick /ship) no longer used
-      // await BotSession.deleteMany({ type: { $in: ['pick', 'ship'] } }, { session });
     });
   } finally {
     await session.endSession();

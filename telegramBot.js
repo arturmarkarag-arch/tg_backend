@@ -73,18 +73,6 @@ async function updateUserBotActivity(chatId) {
   } catch (_) {}
 }
 
-async function getReceiveState(chatId) {
-  return getSession(chatId, 'receive');
-}
-
-async function setReceiveState(chatId, state) {
-  await setSession(chatId, 'receive', state);
-}
-
-async function clearReceiveState(chatId) {
-  await deleteSession(chatId, 'receive');
-}
-
 async function markUserBotBlocked(chatId) {
   try {
     await User.findOneAndUpdate({ telegramId: String(chatId) }, { botBlocked: true });
@@ -673,166 +661,6 @@ async function uploadSearchProductPhotoToR2(fileId) {
   return uploadBufferToR2(buffer, ext, 'search-products');
 }
 
-async function handleReceiveStep(chatId, msg, state) {
-  const msgText = msg.text?.trim() || '';
-
-  if (state.step === 'await_photo') {
-    if (!msg.photo?.length) {
-      await bot.sendMessage(chatId, 'Будь ласка, надішліть фото товару.');
-      return;
-    }
-    state.photoFileId = msg.photo[msg.photo.length - 1].file_id;
-    state.step = 'await_has_barcode';
-    await setReceiveState(chatId, state);
-    await bot.sendMessage(chatId, 'Чи є штрихкод на товарі?', {
-      reply_markup: {
-        inline_keyboard: [
-          [
-            { text: 'Так', callback_data: 'receive_barcode_yes' },
-            { text: 'Ні, немає', callback_data: 'receive_barcode_no' },
-          ],
-        ],
-      },
-    });
-    return;
-  }
-
-  if (state.step === 'await_has_barcode') {
-    const normalized = msgText.trim().toLowerCase();
-    if (normalized === 'так' || normalized === 'yes') {
-      state.step = 'await_barcode_photo';
-      await setReceiveState(chatId, state);
-      await bot.sendMessage(chatId, 'Добре. Надішліть фото штрихкоду або QR-коду.');
-      return;
-    }
-
-    if (normalized === 'ні' || normalized === 'немає' || normalized === 'no') {
-      state.step = 'await_price';
-      await setReceiveState(chatId, state);
-      await bot.sendMessage(chatId, 'Введіть ціну товару (zł):');
-      return;
-    }
-
-    await bot.sendMessage(chatId, 'Будь ласка, оберіть одну з кнопок: Так або Ні, немає.');
-    return;
-  }
-
-  if (state.step === 'await_barcode_photo') {
-    if (!msg.photo?.length) {
-      await bot.sendMessage(chatId, 'Будь ласка, надішліть фото штрихкоду або QR-коду.');
-      return;
-    }
-
-    state.barcodePhotoFileId = msg.photo[msg.photo.length - 1].file_id;
-    await setReceiveState(chatId, state);
-
-    try {
-      const { buffer } = await uploadTelegramPhotoToR2(state.barcodePhotoFileId);
-      const recognition = await recognizeBarcodeFromBuffer(buffer);
-      if (recognition.barcode) {
-        state.barcode = recognition.barcode;
-        await bot.sendMessage(chatId, `Знайдено штрихкод: ${recognition.barcode}`);
-      } else if (recognition.qrCode) {
-        state.qrCode = recognition.qrCode;
-        await bot.sendMessage(chatId, `Знайдено QR-код: ${recognition.qrCode}`);
-      } else {
-        await bot.sendMessage(chatId, 'Не вдалося розпізнати код. Продовжуємо без штрихкоду.');
-      }
-      await bot.sendMessage(chatId, `Джерело розпізнавання: ${recognition.recognitionSource}. ${recognition.details}`);
-    } catch (err) {
-      console.error('barcode receive recognition error:', err);
-      await bot.sendMessage(chatId, 'Сталася помилка при розпізнаванні штрихкоду. Продовжуємо далі.');
-    }
-
-    state.step = 'await_price';
-    await setReceiveState(chatId, state);
-    await bot.sendMessage(chatId, 'Введіть ціну товару (zł):');
-    return;
-  }
-
-  if (state.step === 'await_price') {
-    const val = Number(msgText);
-    if (Number.isNaN(val) || val < 0) {
-      await bot.sendMessage(chatId, 'Будь ласка, введіть коректну ціну (число >= 0).');
-      return;
-    }
-    state.price = val;
-    state.step = 'await_quantity';
-    await setReceiveState(chatId, state);
-    await bot.sendMessage(chatId, 'Введіть кількість на складі:');
-    return;
-  }
-
-  if (state.step === 'await_quantity') {
-    const val = Number(msgText);
-    if (!Number.isInteger(val) || val <= 0) {
-      await bot.sendMessage(chatId, 'Будь ласка, введіть ціле число більше 0.');
-      return;
-    }
-    state.quantity = val;
-    state.step = 'await_qty_per_package';
-    await setReceiveState(chatId, state);
-    await bot.sendMessage(chatId, 'Введіть кількість в упаковці (шт):');
-    return;
-  }
-
-  if (state.step === 'await_qty_per_package') {
-    const val = Number(msgText);
-    if (!Number.isInteger(val) || val <= 0) {
-      await bot.sendMessage(chatId, 'Будь ласка, введіть ціле число більше 0.');
-      return;
-    }
-    state.quantityPerPackage = val;
-    await clearReceiveState(chatId);
-
-    try {
-      await bot.sendMessage(chatId, 'Обробляю фото та зберігаю товар, зачекайте...');
-      const { buffer: rawBuffer, ext } = await uploadTelegramPhotoToR2(state.photoFileId);
-      // Save the ORIGINAL photo to R2 (without labels).
-      // Labels are added dynamically during broadcast/shelf send.
-      const uploaded = await uploadBufferToR2(rawBuffer, ext || 'jpg');
-
-      // Auto-assign next available orderNumber
-      const maxProduct = await Product.findOne({ status: { $ne: 'archived' } }).sort({ orderNumber: -1 }).lean();
-      const nextOrderNumber = (maxProduct?.orderNumber || 0) + 1;
-
-      const product = new Product({
-        orderNumber: nextOrderNumber,
-        price: state.price,
-        quantity: state.quantity,
-        quantityPerPackage: state.quantityPerPackage,
-        barcode: state.barcode || '',
-        qrCode: state.qrCode || '',
-        status: 'active',
-        imageUrls: [uploaded.url],
-        imageNames: [uploaded.name],
-        telegramFileId: state.photoFileId,
-        telegramMessageIds: [],
-      });
-      await product.save();
-
-      // Send rendered photo with labels as confirmation
-      const labeledBuffer = await addLabelsToImage(rawBuffer, state.price, state.quantityPerPackage);
-      await sendPhotoWithRetry(chatId, labeledBuffer, {
-        caption: `✅ Товар збережено!\nЦіна: ${state.price} zł\nКількість на складі: ${state.quantity}\nКількість в упаковці: ${state.quantityPerPackage} шт`,
-        filename: 'preview.jpg',
-      });
-
-      const scanResult = await scanAndUpdateProduct(product, rawBuffer, {
-        barcodeHint: state.barcode || '',
-        qrCodeHint: state.qrCode || '',
-      });
-      const scanText = buildScanResultText(scanResult.parsed);
-      await bot.sendMessage(chatId,
-        `📌 Автоматичне сканування завершено.\n\n${scanText}${formatUsageText(scanResult.usage)}`
-      );
-    } catch (err) {
-      console.error('receiveProduct error:', err);
-      await bot.sendMessage(chatId, 'Сталася помилка при збереженні товару. Спробуйте ще раз: /receive');
-    }
-  }
-}
-
 /**
  * Build caption + keyboard for the current carousel entry.
  */
@@ -1254,7 +1082,6 @@ async function sendPickTaskMessage(chatId, task, pickState, msgId = null) {
 }
 
 async function claimAndSendNextPickTask(chatId, zoneStart, zoneEnd, lastBlock, currentSession) {
-  await buildPickingTasksFromOrders();
   const result = await claimPickingTask(chatId, zoneStart, zoneEnd, lastBlock);
   if (!result) {
     await bot.sendMessage(chatId, 'Поки що немає вільних завдань для поточної зони. Спробуйте пізніше.');

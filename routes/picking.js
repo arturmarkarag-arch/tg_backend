@@ -5,18 +5,12 @@ const Order = require('../models/Order');
 const Block = require('../models/Block');
 const User = require('../models/User');
 const DeliveryGroup = require('../models/DeliveryGroup');
-const AppSetting = require('../models/AppSetting');
 const { requireTelegramRoles } = require('../middleware/telegramAuth');
 const { archiveProduct, getProductTitle } = require('../services/archiveProduct');
 const { buildPickingTasksFromOrders } = require('../telegramBot');
 const { isOrderingOpen, getWarsawNow, DAY_FULL_UK } = require('../utils/orderingSchedule');
 
-const ORDERING_SCHEDULE_KEY = 'ordering.schedule';
-const ORDERING_SCHEDULE_DEFAULTS = { openHour: 16, openMinute: 0, closeHour: 7, closeMinute: 30 };
-async function getOrderingSchedule() {
-  const saved = await AppSetting.findOne({ key: ORDERING_SCHEDULE_KEY }).lean();
-  return { ...ORDERING_SCHEDULE_DEFAULTS, ...(saved?.value || {}) };
-}
+const { getOrderingSchedule } = require('../utils/getOrderingSchedule');
 
 const router = express.Router();
 
@@ -188,94 +182,112 @@ router.get('/preview', requireTelegramRoles(['warehouse', 'admin']), async (req,
 // Idempotent: if tasks already exist for this group, returns count without rebuilding.
 // ---------------------------------------------------------------------------
 router.post('/start-session', requireTelegramRoles(['warehouse', 'admin']), async (req, res) => {
-  const { deliveryGroupId = null } = req.body;
+  try {
+    const { deliveryGroupId = null } = req.body;
 
-  // 1. Check ordering window and delivery day.
-  if (deliveryGroupId) {
-    const group = await DeliveryGroup.findById(deliveryGroupId, 'dayOfWeek name').lean();
-    if (group) {
-      const schedule = await getOrderingSchedule();
-      const { isOpen, message } = isOrderingOpen(group.dayOfWeek, schedule);
-      if (isOpen) {
-        return res.json({ windowOpen: true, message });
-      }
-      // Picking is only allowed on the actual delivery day.
-      const { dayOfWeek: nowDOW } = getWarsawNow();
-      if (nowDOW !== group.dayOfWeek) {
-        return res.json({
-          wrongDay: true,
-          deliveryDayOfWeek: group.dayOfWeek,
-          deliveryDayName: DAY_FULL_UK[group.dayOfWeek],
-        });
+    // 1. Check ordering window and delivery day.
+    if (deliveryGroupId) {
+      const group = await DeliveryGroup.findById(deliveryGroupId, 'dayOfWeek name').lean();
+      if (group) {
+        // getOrderingSchedule() throws if the key is absent from DB — error propagates to catch below.
+        const schedule = await getOrderingSchedule();
+        const { isOpen, message } = isOrderingOpen(group.dayOfWeek, schedule);
+        if (isOpen) {
+          return res.json({ windowOpen: true, message });
+        }
+        // Picking is only allowed on the actual delivery day.
+        const { dayOfWeek: nowDOW } = getWarsawNow();
+        if (nowDOW !== group.dayOfWeek) {
+          return res.json({
+            wrongDay: true,
+            deliveryDayOfWeek: group.dayOfWeek,
+            deliveryDayName: DAY_FULL_UK[group.dayOfWeek],
+          });
+        }
       }
     }
+
+    // 2. Idempotent: if tasks already exist, return their count.
+    const activeFilter = {
+      status: { $in: ['pending', 'locked'] },
+      ...(deliveryGroupId ? { deliveryGroupId: String(deliveryGroupId) } : {}),
+    };
+    const existingCount = await PickingTask.countDocuments(activeFilter);
+    if (existingCount > 0) {
+      return res.json({ alreadyStarted: true, taskCount: existingCount });
+    }
+
+    // 3. Build picking tasks from this group's closed-window orders.
+    await buildPickingTasksFromOrders(deliveryGroupId);
+
+    // 4. Count tasks that were created.
+    // Race guard: if another concurrent call was already building (_running still true),
+    // our call returned immediately without inserting. Wait once and recount.
+    let taskCount = await PickingTask.countDocuments(activeFilter);
+    if (taskCount === 0 && buildPickingTasksFromOrders._running) {
+      await new Promise((r) => setTimeout(r, 1500));
+      taskCount = await PickingTask.countDocuments(activeFilter);
+    }
+
+    if (taskCount === 0) {
+      return res.json({ noOrders: true });
+    }
+
+    res.json({ started: true, taskCount });
+  } catch (err) {
+    console.error('[picking/start-session]', err);
+    res.status(500).json({ error: err.message || 'Помилка запуску сесії збирання' });
   }
-
-  // 2. Idempotent: if tasks already exist, return their count.
-  const activeFilter = {
-    status: { $in: ['pending', 'locked'] },
-    ...(deliveryGroupId ? { deliveryGroupId: String(deliveryGroupId) } : {}),
-  };
-  const existingCount = await PickingTask.countDocuments(activeFilter);
-  if (existingCount > 0) {
-    return res.json({ alreadyStarted: true, taskCount: existingCount });
-  }
-
-  // 3. Build picking tasks from this group's closed-window orders.
-  await buildPickingTasksFromOrders(deliveryGroupId);
-
-  // 4. Count tasks that were created.
-  const taskCount = await PickingTask.countDocuments(activeFilter);
-  if (taskCount === 0) {
-    return res.json({ noOrders: true });
-  }
-
-  res.json({ started: true, taskCount });
 });
 
 // ---------------------------------------------------------------------------
 // GET /api/picking/next-task?currentBlock=N
 // ---------------------------------------------------------------------------
 router.get('/next-task', requireTelegramRoles(['warehouse', 'admin']), async (req, res) => {
-  const user = req.telegramUser;
-  const currentBlock = parseInt(req.query.currentBlock, 10);
-  const deliveryGroupId = req.query.deliveryGroupId || null;
+  try {
+    const user = req.telegramUser;
+    const currentBlock = parseInt(req.query.currentBlock, 10);
+    const deliveryGroupId = req.query.deliveryGroupId || null;
 
-  if (!Number.isInteger(currentBlock) || currentBlock < 1) {
-    return res.status(400).json({ error: 'currentBlock must be a positive integer' });
+    if (!Number.isInteger(currentBlock) || currentBlock < 1) {
+      return res.status(400).json({ error: 'currentBlock must be a positive integer' });
+    }
+
+    // Release any tasks this worker had locked for this group (stale locks from previous session).
+    await PickingTask.updateMany(
+      { lockedBy: user.telegramId, status: 'locked', ...(deliveryGroupId ? { deliveryGroupId: String(deliveryGroupId) } : {}) },
+      { $set: { status: 'pending', lockedBy: null, lockedAt: null } },
+    );
+
+    const { task, wrappedAround } = await findAndLockNext(user.telegramId, currentBlock, deliveryGroupId);
+    if (!task) {
+      const pendingFilter = { status: 'pending' };
+      if (deliveryGroupId) pendingFilter.deliveryGroupId = String(deliveryGroupId);
+      const pendingCount = await PickingTask.countDocuments(pendingFilter);
+      return res.json({
+        task: null,
+        reviewMode: pendingCount > 0,
+        message: pendingCount > 0 ? 'Залишились пропущені задачі' : 'Немає задач для збирання',
+      });
+    }
+
+    const taskData = await buildTaskResponse(task, { wrappedAround });
+    if (!taskData) {
+      // Product archived — release and return empty
+      await PickingTask.findByIdAndUpdate(task._id, {
+        $set: { status: 'pending', lockedBy: null, lockedAt: null },
+      });
+      const pendingFilter = { status: 'pending' };
+      if (deliveryGroupId) pendingFilter.deliveryGroupId = String(deliveryGroupId);
+      const pendingCount = await PickingTask.countDocuments(pendingFilter);
+      return res.json({ task: null, reviewMode: pendingCount > 0, message: 'Немає задач для збирання' });
+    }
+
+    res.json({ task: taskData });
+  } catch (err) {
+    console.error('[picking/next-task]', err);
+    res.status(500).json({ error: err.message || 'Помилка отримання задачі' });
   }
-
-  // Release any tasks this worker had locked for this group (stale locks from previous session).
-  await PickingTask.updateMany(
-    { lockedBy: user.telegramId, status: 'locked', ...(deliveryGroupId ? { deliveryGroupId: String(deliveryGroupId) } : {}) },
-    { $set: { status: 'pending', lockedBy: null, lockedAt: null } },
-  );
-
-  const { task, wrappedAround } = await findAndLockNext(user.telegramId, currentBlock, deliveryGroupId);
-  if (!task) {
-    const pendingFilter = { status: 'pending' };
-    if (deliveryGroupId) pendingFilter.deliveryGroupId = String(deliveryGroupId);
-    const pendingCount = await PickingTask.countDocuments(pendingFilter);
-    return res.json({
-      task: null,
-      reviewMode: pendingCount > 0,
-      message: pendingCount > 0 ? 'Залишились пропущені задачі' : 'Немає задач для збирання',
-    });
-  }
-
-  const taskData = await buildTaskResponse(task, { wrappedAround });
-  if (!taskData) {
-    // Product archived — release and return empty
-    await PickingTask.findByIdAndUpdate(task._id, {
-      $set: { status: 'pending', lockedBy: null, lockedAt: null },
-    });
-    const pendingFilter = { status: 'pending' };
-    if (deliveryGroupId) pendingFilter.deliveryGroupId = String(deliveryGroupId);
-    const pendingCount = await PickingTask.countDocuments(pendingFilter);
-    return res.json({ task: null, reviewMode: pendingCount > 0, message: 'Немає задач для збирання' });
-  }
-
-  res.json({ task: taskData });
 });
 
 // ---------------------------------------------------------------------------
@@ -283,39 +295,44 @@ router.get('/next-task', requireTelegramRoles(['warehouse', 'admin']), async (re
 // Body: { items: [{ orderId, actualQty }], nextBlock?: N }
 // ---------------------------------------------------------------------------
 router.post('/tasks/:taskId/complete', requireTelegramRoles(['warehouse', 'admin']), async (req, res) => {
-  const user = req.telegramUser;
-  const { items = [], nextBlock } = req.body;
+  try {
+    const user = req.telegramUser;
+    const { items = [], nextBlock } = req.body;
 
-  const task = await PickingTask.findById(req.params.taskId);
-  if (!task) return res.status(404).json({ error: 'Task not found' });
-  if (task.lockedBy !== user.telegramId) {
-    return res.status(403).json({ error: 'Task is not locked by you' });
-  }
-
-  // Apply actual packed quantities
-  for (const item of task.items) {
-    const input = items.find((i) => String(i.orderId) === String(item.orderId));
-    if (input !== undefined) {
-      item.packedQuantity = Math.max(0, Number(input.actualQty) || 0);
-    } else {
-      item.packedQuantity = item.quantity; // default: assume fully packed
+    const task = await PickingTask.findById(req.params.taskId);
+    if (!task) return res.status(404).json({ error: 'Task not found' });
+    if (task.lockedBy !== user.telegramId) {
+      return res.status(403).json({ error: 'Task is not locked by you' });
     }
-    item.packed = true;
+
+    // Apply actual packed quantities
+    for (const item of task.items) {
+      const input = items.find((i) => String(i.orderId) === String(item.orderId));
+      if (input !== undefined) {
+        item.packedQuantity = Math.max(0, Number(input.actualQty) || 0);
+      } else {
+        item.packedQuantity = item.quantity; // default: assume fully packed
+      }
+      item.packed = true;
+    }
+
+    task.status = 'completed';
+    task.lockedBy = null;
+    task.lockedAt = null;
+    await task.save();
+
+    // Mark Order items as packed and auto-fulfil fully-packed orders
+    await markOrderItemsPacked(task.items, task.productId);
+
+    const fromBlock = typeof nextBlock === 'number' ? nextBlock : task.blockId;
+    const { task: nextTask, wrappedAround: nwa } = await findAndLockNext(user.telegramId, fromBlock, task.deliveryGroupId || null);
+    const nextTaskData = await buildTaskResponse(nextTask, { wrappedAround: nwa });
+
+    res.json({ message: 'Task completed', nextTask: nextTaskData });
+  } catch (err) {
+    console.error('[picking/complete]', err);
+    res.status(500).json({ error: err.message || 'Помилка завершення задачі' });
   }
-
-  task.status = 'completed';
-  task.lockedBy = null;
-  task.lockedAt = null;
-  await task.save();
-
-  // Mark Order items as packed and auto-fulfil fully-packed orders
-  await markOrderItemsPacked(task.items, task.productId);
-
-  const fromBlock = typeof nextBlock === 'number' ? nextBlock : task.blockId;
-  const { task: nextTask, wrappedAround: nwa } = await findAndLockNext(user.telegramId, fromBlock, task.deliveryGroupId || null);
-  const nextTaskData = await buildTaskResponse(nextTask, { wrappedAround: nwa });
-
-  res.json({ message: 'Task completed', nextTask: nextTaskData });
 });
 
 // ---------------------------------------------------------------------------
@@ -323,45 +340,55 @@ router.post('/tasks/:taskId/complete', requireTelegramRoles(['warehouse', 'admin
 // Body: { nextBlock?: N }
 // ---------------------------------------------------------------------------
 router.post('/tasks/:taskId/skip', requireTelegramRoles(['warehouse', 'admin']), async (req, res) => {
-  const user = req.telegramUser;
-  const { nextBlock } = req.body;
+  try {
+    const user = req.telegramUser;
+    const { nextBlock } = req.body;
 
-  const task = await PickingTask.findById(req.params.taskId);
-  if (!task) return res.status(404).json({ error: 'Task not found' });
-  if (task.lockedBy !== user.telegramId) {
-    return res.status(403).json({ error: 'Task is not locked by you' });
+    const task = await PickingTask.findById(req.params.taskId);
+    if (!task) return res.status(404).json({ error: 'Task not found' });
+    if (task.lockedBy !== user.telegramId) {
+      return res.status(403).json({ error: 'Task is not locked by you' });
+    }
+
+    const fromBlock = typeof nextBlock === 'number' ? nextBlock : task.blockId;
+
+    task.status = 'pending';
+    task.lockedBy = null;
+    task.lockedAt = null;
+    if (!task.skippedBy.includes(user.telegramId)) {
+      task.skippedBy.push(user.telegramId);
+    }
+    await task.save();
+
+    // skippedBy now includes this user → findAndLockNext will skip this task
+    const { task: nextTask, wrappedAround: nwa } = await findAndLockNext(user.telegramId, fromBlock, task.deliveryGroupId || null);
+    const nextTaskData = await buildTaskResponse(nextTask, { wrappedAround: nwa });
+
+    res.json({ message: 'Task skipped', nextTask: nextTaskData });
+  } catch (err) {
+    console.error('[picking/skip]', err);
+    res.status(500).json({ error: err.message || 'Помилка пропуску задачі' });
   }
-
-  const fromBlock = typeof nextBlock === 'number' ? nextBlock : task.blockId;
-
-  task.status = 'pending';
-  task.lockedBy = null;
-  task.lockedAt = null;
-  if (!task.skippedBy.includes(user.telegramId)) {
-    task.skippedBy.push(user.telegramId);
-  }
-  await task.save();
-
-  // skippedBy now includes this user → findAndLockNext will skip this task
-  const { task: nextTask, wrappedAround: nwa } = await findAndLockNext(user.telegramId, fromBlock, task.deliveryGroupId || null);
-  const nextTaskData = await buildTaskResponse(nextTask, { wrappedAround: nwa });
-
-  res.json({ message: 'Task skipped', nextTask: nextTaskData });
 });
 
 // ---------------------------------------------------------------------------
 // GET /api/picking/review-list  — all pending tasks (no locking), for the review screen
 // ---------------------------------------------------------------------------
 router.get('/review-list', requireTelegramRoles(['warehouse', 'admin']), async (req, res) => {
-  const deliveryGroupId = req.query.deliveryGroupId || null;
-  const filter = { status: 'pending' };
-  if (deliveryGroupId) filter.deliveryGroupId = String(deliveryGroupId);
-  const tasks = await PickingTask.find(filter)
-    .sort({ blockId: 1, positionIndex: 1 })
-    .lean();
+  try {
+    const deliveryGroupId = req.query.deliveryGroupId || null;
+    const filter = { status: 'pending' };
+    if (deliveryGroupId) filter.deliveryGroupId = String(deliveryGroupId);
+    const tasks = await PickingTask.find(filter)
+      .sort({ blockId: 1, positionIndex: 1 })
+      .lean();
 
-  const results = await Promise.all(tasks.map((t) => buildTaskResponse(t)));
-  res.json({ tasks: results.filter(Boolean) });
+    const results = await Promise.all(tasks.map((t) => buildTaskResponse(t)));
+    res.json({ tasks: results.filter(Boolean) });
+  } catch (err) {
+    console.error('[picking/review-list]', err);
+    res.status(500).json({ error: err.message || 'Помилка завантаження списку' });
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -370,43 +397,53 @@ router.get('/review-list', requireTelegramRoles(['warehouse', 'admin']), async (
 // Saves partial packed state without completing the task.
 // ---------------------------------------------------------------------------
 router.patch('/tasks/:taskId/progress', requireTelegramRoles(['warehouse', 'admin']), async (req, res) => {
-  const user = req.telegramUser;
-  const { packedOrderIds = [] } = req.body;
+  try {
+    const user = req.telegramUser;
+    const { packedOrderIds = [] } = req.body;
 
-  const task = await PickingTask.findById(req.params.taskId);
-  if (!task) return res.status(404).json({ error: 'Task not found' });
-  if (task.lockedBy !== user.telegramId) {
-    return res.status(403).json({ error: 'Task is not locked by you' });
+    const task = await PickingTask.findById(req.params.taskId);
+    if (!task) return res.status(404).json({ error: 'Task not found' });
+    if (task.lockedBy !== user.telegramId) {
+      return res.status(403).json({ error: 'Task is not locked by you' });
+    }
+
+    const packedSet = new Set(packedOrderIds.map(String));
+    for (const item of task.items) {
+      item.packed = packedSet.has(String(item.orderId));
+    }
+    await task.save();
+
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[picking/progress]', err);
+    res.status(500).json({ error: err.message || 'Помилка збереження прогресу' });
   }
-
-  const packedSet = new Set(packedOrderIds.map(String));
-  for (const item of task.items) {
-    item.packed = packedSet.has(String(item.orderId));
-  }
-  await task.save();
-
-  res.json({ ok: true });
 });
 
 // ---------------------------------------------------------------------------
 // POST /api/picking/tasks/:taskId/claim  — atomically lock a task from the review list
 // ---------------------------------------------------------------------------
 router.post('/tasks/:taskId/claim', requireTelegramRoles(['warehouse', 'admin']), async (req, res) => {
-  const user = req.telegramUser;
+  try {
+    const user = req.telegramUser;
 
-  const claimed = await PickingTask.findOneAndUpdate(
-    { _id: req.params.taskId, status: 'pending' },
-    { $set: { status: 'locked', lockedBy: user.telegramId, lockedAt: new Date() } },
-    { new: true },
-  );
-  if (!claimed) return res.status(409).json({ error: 'Task is no longer available' });
+    const claimed = await PickingTask.findOneAndUpdate(
+      { _id: req.params.taskId, status: 'pending' },
+      { $set: { status: 'locked', lockedBy: user.telegramId, lockedAt: new Date() } },
+      { new: true },
+    );
+    if (!claimed) return res.status(409).json({ error: 'Task is no longer available' });
 
-  const taskData = await buildTaskResponse(claimed);
-  if (!taskData) {
-    await PickingTask.findByIdAndUpdate(claimed._id, { $set: { status: 'pending', lockedBy: null, lockedAt: null } });
-    return res.status(404).json({ error: 'Product not found' });
+    const taskData = await buildTaskResponse(claimed);
+    if (!taskData) {
+      await PickingTask.findByIdAndUpdate(claimed._id, { $set: { status: 'pending', lockedBy: null, lockedAt: null } });
+      return res.status(404).json({ error: 'Product not found' });
+    }
+    res.json({ task: taskData });
+  } catch (err) {
+    console.error('[picking/claim]', err);
+    res.status(500).json({ error: err.message || 'Помилка призначення задачі' });
   }
-  res.json({ task: taskData });
 });
 
 // ---------------------------------------------------------------------------
@@ -414,61 +451,66 @@ router.post('/tasks/:taskId/claim', requireTelegramRoles(['warehouse', 'admin'])
 // Body: { nextBlock?: N, packedOrderIds?: string[] }
 // ---------------------------------------------------------------------------
 router.post('/tasks/:taskId/out-of-stock', requireTelegramRoles(['warehouse', 'admin']), async (req, res) => {
-  const user = req.telegramUser;
-  const { nextBlock, packedOrderIds = [] } = req.body;
+  try {
+    const user = req.telegramUser;
+    const { nextBlock, packedOrderIds = [] } = req.body;
 
-  let task = await PickingTask.findById(req.params.taskId);
-  if (!task) return res.status(404).json({ error: 'Task not found' });
+    let task = await PickingTask.findById(req.params.taskId);
+    if (!task) return res.status(404).json({ error: 'Task not found' });
 
-  // Auto-claim if called from review list (task still pending)
-  if (task.status === 'pending') {
-    const claimed = await PickingTask.findOneAndUpdate(
-      { _id: task._id, status: 'pending' },
-      { $set: { status: 'locked', lockedBy: user.telegramId, lockedAt: new Date() } },
-      { new: true },
-    );
-    if (!claimed) return res.status(409).json({ error: 'Task was claimed by another worker' });
-    task = claimed;
-  } else if (task.lockedBy !== user.telegramId) {
-    return res.status(403).json({ error: 'Task is not locked by you' });
+    // Auto-claim if called from review list (task still pending)
+    if (task.status === 'pending') {
+      const claimed = await PickingTask.findOneAndUpdate(
+        { _id: task._id, status: 'pending' },
+        { $set: { status: 'locked', lockedBy: user.telegramId, lockedAt: new Date() } },
+        { new: true },
+      );
+      if (!claimed) return res.status(409).json({ error: 'Task was claimed by another worker' });
+      task = claimed;
+    } else if (task.lockedBy !== user.telegramId) {
+      return res.status(403).json({ error: 'Task is not locked by you' });
+    }
+
+    await task.populate('productId');
+
+    const productTitle = getProductTitle(task.productId) || 'Невідомий товар';
+    const blockId = task.blockId;
+    const packedSet = new Set(packedOrderIds.map(String));
+
+    const packedShops = [];
+    const missedShops = [];
+
+    for (const item of task.items) {
+      const wasPacked = packedSet.has(String(item.orderId));
+      item.packedQuantity = wasPacked ? item.quantity : 0;
+      item.packed = wasPacked;
+      if (wasPacked) packedShops.push(item.shopName || String(item.orderId));
+      else missedShops.push(item.shopName || String(item.orderId));
+    }
+
+    task.status = 'completed';
+    task.lockedBy = null;
+    task.lockedAt = null;
+    await task.save();
+
+    // Mark Order items as packed and auto-fulfil fully-packed orders
+    await markOrderItemsPacked(task.items, task.productId);
+
+    // Archive the product — removes it from blocks and cancels remaining orders.
+    const productDoc = await Product.findById(task.productId._id || task.productId);
+    if (productDoc && productDoc.status !== 'archived') {
+      await archiveProduct(productDoc, { notifyBuyers: false, bot: null });
+    }
+
+    const fromBlock = typeof nextBlock === 'number' ? nextBlock : blockId;
+    const { task: nextTask, wrappedAround: nwa } = await findAndLockNext(user.telegramId, fromBlock, task.deliveryGroupId || null);
+    const nextTaskData = await buildTaskResponse(nextTask, { wrappedAround: nwa });
+
+    res.json({ message: 'Out-of-stock recorded', nextTask: nextTaskData });
+  } catch (err) {
+    console.error('[picking/out-of-stock]', err);
+    res.status(500).json({ error: err.message || 'Помилка запису "немає на складі"' });
   }
-
-  await task.populate('productId');
-
-  const productTitle = getProductTitle(task.productId) || 'Невідомий товар';
-  const blockId = task.blockId;
-  const packedSet = new Set(packedOrderIds.map(String));
-
-  const packedShops = [];
-  const missedShops = [];
-
-  for (const item of task.items) {
-    const wasPacked = packedSet.has(String(item.orderId));
-    item.packedQuantity = wasPacked ? item.quantity : 0;
-    item.packed = wasPacked;
-    if (wasPacked) packedShops.push(item.shopName || String(item.orderId));
-    else missedShops.push(item.shopName || String(item.orderId));
-  }
-
-  task.status = 'completed';
-  task.lockedBy = null;
-  task.lockedAt = null;
-  await task.save();
-
-  // Mark Order items as packed and auto-fulfil fully-packed orders
-  await markOrderItemsPacked(task.items, task.productId);
-
-  // Archive the product — removes it from blocks and cancels remaining orders.
-  const productDoc = await Product.findById(task.productId._id || task.productId);
-  if (productDoc && productDoc.status !== 'archived') {
-    await archiveProduct(productDoc, { notifyBuyers: false, bot: null });
-  }
-
-  const fromBlock = typeof nextBlock === 'number' ? nextBlock : blockId;
-  const { task: nextTask, wrappedAround: nwa } = await findAndLockNext(user.telegramId, fromBlock, task.deliveryGroupId || null);
-  const nextTaskData = await buildTaskResponse(nextTask, { wrappedAround: nwa });
-
-  res.json({ message: 'Out-of-stock recorded', nextTask: nextTaskData });
 });
 
 module.exports = router;
