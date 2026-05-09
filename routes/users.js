@@ -39,7 +39,7 @@ async function syncUserWarehouseZone(user) {
   return user;
 }
 
-function sanitizeUserPayload(payload, existing = null) {
+async function sanitizeUserPayload(payload, existing = null) {
   const role = payload.role ?? existing?.role ?? 'seller';
   const data = {
     // telegramId — імьютабельний, не приймається тут; передається окремо тільки при створенні
@@ -61,7 +61,13 @@ function sanitizeUserPayload(payload, existing = null) {
     data.shopName = payload.shopName;
     data.shopAddress = payload.shopAddress;
     data.shopCity = payload.shopCity;
-    data.deliveryGroupId = payload.deliveryGroupId;
+    // deliveryGroupId is derived from the shop — never trust client-supplied value
+    if (data.shopId) {
+      const shop = await Shop.findById(data.shopId).lean();
+      data.deliveryGroupId = shop?.deliveryGroupId || '';
+    } else {
+      data.deliveryGroupId = '';
+    }
   } else {
     data.shopId = null;
     data.shopNumber = '';
@@ -264,7 +270,7 @@ router.get('/:telegramId', async (req, res) => {
 
 router.post('/', async (req, res) => {
   const existing = await User.findOne({ telegramId: req.body.telegramId });
-  const payload = sanitizeUserPayload(req.body, existing);
+  const payload = await sanitizeUserPayload(req.body, existing);
   // telegramId береться з body тільки при створенні нового юзера
   if (!existing) payload.telegramId = req.body.telegramId;
   let user;
@@ -315,7 +321,7 @@ router.patch('/:telegramId', async (req, res) => {
     const existing = await User.findOne({ telegramId: req.params.telegramId });
     if (!existing) return res.status(404).json({ error: 'User not found' });
 
-    const payload = sanitizeUserPayload(req.body, existing);
+    const payload = await sanitizeUserPayload(req.body, existing);
     const user = await User.findOneAndUpdate(
       { telegramId: req.params.telegramId },
       payload,

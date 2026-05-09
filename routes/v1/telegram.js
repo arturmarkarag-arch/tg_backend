@@ -118,9 +118,9 @@ router.post('/me', async (req, res) => {
   const userShop = user.shopId ? await Shop.findById(user.shopId).lean() : null;
   const resolvedGroupId = userShop?.deliveryGroupId || user.deliveryGroupId || '';
 
-  // Обчислити sessionOpenAt для продавця (для визначення нової сесії на клієнті)
+  // Обчислити sessionOpenAt для продавця та адміна з магазином (для визначення нової сесії на клієнті)
   let sessionOpenAt = null;
-  if (user.role === 'seller' && resolvedGroupId) {
+  if ((user.role === 'seller' || user.role === 'admin') && resolvedGroupId) {
     try {
       const group = await DeliveryGroup.findById(resolvedGroupId).lean();
       if (group) {

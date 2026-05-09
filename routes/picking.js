@@ -8,7 +8,7 @@ const DeliveryGroup = require('../models/DeliveryGroup');
 const { requireTelegramRoles } = require('../middleware/telegramAuth');
 const { archiveProduct, getProductTitle } = require('../services/archiveProduct');
 const { buildPickingTasksFromOrders } = require('../telegramBot');
-const { isOrderingOpen, getWarsawNow, DAY_FULL_UK } = require('../utils/orderingSchedule');
+const { isOrderingOpen, getWarsawNow, DAY_FULL_UK, getCurrentOrderingSessionId } = require('../utils/orderingSchedule');
 
 const { getOrderingSchedule } = require('../utils/getOrderingSchedule');
 
@@ -217,7 +217,26 @@ router.post('/start-session', requireTelegramRoles(['warehouse', 'admin']), asyn
       return res.json({ alreadyStarted: true, taskCount: existingCount });
     }
 
-    // 3. Build picking tasks from this group's closed-window orders.
+    // 3. Cancel stale orders from previous sessions before building tasks.
+    // This ensures orders that were never fulfilled in a past session cannot
+    // bleed into the current picking run.
+    if (deliveryGroupId) {
+      const group2 = await DeliveryGroup.findById(deliveryGroupId, 'dayOfWeek').lean();
+      if (group2) {
+        const schedule2 = await getOrderingSchedule();
+        const currentSessionId = getCurrentOrderingSessionId(String(deliveryGroupId), group2.dayOfWeek, schedule2);
+        await Order.updateMany(
+          {
+            'buyerSnapshot.deliveryGroupId': String(deliveryGroupId),
+            status: { $in: ['new', 'in_progress'] },
+            orderingSessionId: { $ne: currentSessionId },
+          },
+          { $set: { status: 'cancelled' } },
+        );
+      }
+    }
+
+    // 4. Build picking tasks from this group's closed-window orders.
     await buildPickingTasksFromOrders(deliveryGroupId);
 
     // 4. Return current count. The unique partial index on PickingTask(productId, deliveryGroupId)

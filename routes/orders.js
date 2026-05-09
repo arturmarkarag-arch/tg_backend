@@ -280,12 +280,13 @@ router.post('/', async (req, res) => {
     }
   }
 
-  // Check ordering window — only for sellers, admin/warehouse are unrestricted
+  // Check ordering window — sellers AND admins with a shopId go through the full session flow.
+  // admin without shopId and warehouse users are unrestricted (3-day fallback below).
   // shop, group and schedule are kept in outer scope so the merge logic can use them below
   let shop = null;
   let group = null;
   let schedule = null;
-  if (buyer.role === 'seller') {
+  if (buyer.role === 'seller' || (buyer.role === 'admin' && buyer.shopId)) {
     if (!buyer.shopId) {
       return res.status(403).json({
         error: 'no_shop',
@@ -488,27 +489,22 @@ router.post('/', async (req, res) => {
   res.status(201).json(responseBody);
 });
 
-// PATCH /:id/snapshot — admin updates buyerSnapshot fields (shopName, shopCity, deliveryGroupId)
+// PATCH /:id/snapshot — admin reassigns order to a different shop
 router.patch('/:id/snapshot', staffOnly, async (req, res) => {
   const order = await Order.findById(req.params.id);
   if (!order) return res.status(404).json({ error: 'Order not found' });
 
-  const { shopName, shopCity, deliveryGroupId } = req.body;
+  const { shopId } = req.body;
+  if (!shopId) return res.status(400).json({ error: 'shopId is required' });
+
+  const shop = await Shop.findById(shopId).lean();
+  if (!shop) return res.status(400).json({ error: 'Магазин не знайдено' });
+
   if (!order.buyerSnapshot) order.buyerSnapshot = {};
-
-  if (shopName !== undefined) order.buyerSnapshot.shopName = String(shopName).trim();
-  if (shopCity !== undefined) order.buyerSnapshot.shopCity = String(shopCity).trim();
-
-  if (deliveryGroupId !== undefined) {
-    const newGroupId = String(deliveryGroupId).trim();
-    if (newGroupId) {
-      const group = await DeliveryGroup.findById(newGroupId).lean();
-      if (!group) return res.status(400).json({ error: 'Групу доставки не знайдено' });
-      order.buyerSnapshot.deliveryGroupId = newGroupId;
-    } else {
-      order.buyerSnapshot.deliveryGroupId = '';
-    }
-  }
+  order.buyerSnapshot.shopId = String(shop._id);
+  order.buyerSnapshot.shopName = shop.name || '';
+  order.buyerSnapshot.shopCity = shop.city || '';
+  order.buyerSnapshot.deliveryGroupId = shop.deliveryGroupId || '';
 
   order.markModified('buyerSnapshot');
   await order.save();

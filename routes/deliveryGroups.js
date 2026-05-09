@@ -53,7 +53,9 @@ function buildDeliveryGroupSessionSummary(group, schedule, ordersByGroup) {
 router.get('/ordering-status', telegramAuth, async (req, res) => {
   const user = req.telegramUser;
 
-  if (user.role === 'admin' || user.role === 'warehouse') {
+  // Warehouse is always unrestricted. Admin without a shopId is also unrestricted.
+  // Admin WITH a shopId goes through the same ordering window check as a seller.
+  if (user.role === 'warehouse' || (user.role === 'admin' && !user.shopId)) {
     return res.json({ isOpen: true, message: 'Персонал складу — без обмежень' });
   }
 
