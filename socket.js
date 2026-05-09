@@ -81,6 +81,15 @@ function initSocket(httpServer) {
       socket.leave(`block_${blockNumber}`);
     });
 
+    // Join a picking-group room to receive real-time shop status updates
+    socket.on('join_picking_group', (groupId) => {
+      if (groupId) socket.join(`picking_group_${groupId}`);
+    });
+
+    socket.on('leave_picking_group', (groupId) => {
+      if (groupId) socket.leave(`picking_group_${groupId}`);
+    });
+
     socket.on('join_receipt', (receiptId) => {
       const room = `receipt_${receiptId}`;
       socket.join(room);

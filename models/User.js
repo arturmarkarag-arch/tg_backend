@@ -29,15 +29,6 @@ const UserSchema = new mongoose.Schema(
       lastViewedProductId: { type: String, default: '' },
       currentIndex: { type: Number, default: 0 },
       currentPage: { type: Number, default: 0 },
-      orderItems: {
-        type: Map,
-        of: Number,
-        default: {},
-      },
-      orderItemIds: {
-        type: [String],
-        default: [],
-      },
       viewMode: { type: String, enum: ['carousel', 'grid'], default: 'carousel' },
       updatedAt: { type: Date, default: null },
     },

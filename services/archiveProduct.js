@@ -15,6 +15,7 @@
  * @returns {Promise<{ cancelledCount: number }>}
  */
 
+const mongoose = require('mongoose');
 const Order = require('../models/Order');
 const PickingTask = require('../models/PickingTask');
 const Block = require('../models/Block');
@@ -26,67 +27,82 @@ function getProductTitle(product) {
 }
 
 async function archiveProduct(product, { notifyBuyers = false, bot = null } = {}) {
-  // ── 1. Reconcile active orders ─────────────────────────────────────────────
-  const activeOrders = await Order.find({
-    'items.productId': product._id,
-  });
-
+  const orderNotifications = []; // collected inside tx, emitted after commit
   let cancelledCount = 0;
+  let oldOrderNumber;
 
-  for (const order of activeOrders) {
-    const matchingItems = order.items.filter(
-      (i) => String(i.productId) === String(product._id) && !i.packed && !i.cancelled
+  const session = await mongoose.connection.startSession();
+  session.startTransaction();
+  try {
+    // ── 1. Reconcile active orders ───────────────────────────────────────────
+    const activeOrders = await Order.find({ 'items.productId': product._id }).session(session);
+
+    for (const order of activeOrders) {
+      const matchingItems = order.items.filter(
+        (i) => String(i.productId) === String(product._id) && !i.packed && !i.cancelled
+      );
+      if (!matchingItems.length) continue;
+
+      for (const item of matchingItems) {
+        order.totalPrice = Math.max(0, order.totalPrice - item.price * item.quantity);
+        item.cancelled = true;
+        cancelledCount += 1;
+      }
+
+      const isFullyProcessed = order.items.every((i) => i.packed || i.cancelled);
+      if (isFullyProcessed) {
+        const allCancelled = order.items.every((i) => i.cancelled);
+        order.status = allCancelled ? 'cancelled' : 'confirmed';
+      } else {
+        order.status = 'in_progress';
+      }
+
+      await order.save({ session });
+      orderNotifications.push({ orderId: String(order._id), buyerTelegramId: order.buyerTelegramId });
+    }
+
+    // ── 2. Close open PickingTasks ───────────────────────────────────────────
+    await PickingTask.updateMany(
+      { productId: product._id, status: { $in: ['pending', 'locked'] } },
+      { $set: { status: 'completed', lockedBy: null, lockedAt: null } },
+      { session }
     );
-    if (!matchingItems.length) continue;
 
-    for (const item of matchingItems) {
-      order.totalPrice = Math.max(0, order.totalPrice - item.price * item.quantity);
-      item.cancelled = true;
-      cancelledCount += 1;
-    }
+    // ── 3. Archive the product ───────────────────────────────────────────────
+    oldOrderNumber = product.orderNumber;
+    product.status = 'archived';
+    product.archivedAt = new Date();
+    product.originalOrderNumber = oldOrderNumber;
+    product.orderNumber = 0;
+    await product.save({ session });
 
-    const isFullyProcessed = order.items.every((i) => i.packed || i.cancelled);
-    if (isFullyProcessed) {
-      const allCancelled = order.items.every((i) => i.cancelled);
-      order.status = allCancelled ? 'cancelled' : 'confirmed';
-    } else {
-      order.status = 'in_progress';
-    }
+    // ── 4. Shift remaining products down ────────────────────────────────────
+    await shiftDown({ status: { $ne: 'archived' }, orderNumber: { $gt: oldOrderNumber } }, session);
 
-    await order.save();
+    await session.commitTransaction();
+  } catch (err) {
+    await session.abortTransaction();
+    throw err;
+  } finally {
+    session.endSession();
+  }
 
+  // ── Post-transaction: socket emissions + Telegram notifications ──────────
+  for (const { orderId, buyerTelegramId } of orderNotifications) {
     try {
       const io = getIO();
-      io.emit('order_updated', {
-        orderId: String(order._id),
-        buyerTelegramId: order.buyerTelegramId,
-      });
+      io.emit('order_updated', { orderId, buyerTelegramId });
     } catch (_) {}
 
     if (notifyBuyers && bot) {
       await bot
         .sendMessage(
-          order.buyerTelegramId,
+          buyerTelegramId,
           `⛔ Товар "${getProductTitle(product)}" на складі закінчився. Цю позицію видалено з вашого замовлення.`
         )
         .catch(() => null);
     }
   }
-
-  // ── 2. Close open PickingTasks ─────────────────────────────────────────────
-  await PickingTask.updateMany(
-    { productId: product._id, status: { $in: ['pending', 'locked'] } },
-    { $set: { status: 'completed', lockedBy: null, lockedAt: null } }
-  );
-
-  // ── 3. Archive the product ─────────────────────────────────────────────────
-  const oldOrderNumber = product.orderNumber;
-
-  product.status = 'archived';
-  product.archivedAt = new Date();
-  product.originalOrderNumber = oldOrderNumber;
-  product.orderNumber = 0;
-  await product.save();
 
   // Notify all clients that the product catalogue changed
   try {
@@ -94,10 +110,7 @@ async function archiveProduct(product, { notifyBuyers = false, bot = null } = {}
     io.emit('product_archived', { productId: String(product._id) });
   } catch (_) {}
 
-  // ── 4. Shift remaining products down ──────────────────────────────────────
-  await shiftDown({ status: { $ne: 'archived' }, orderNumber: { $gt: oldOrderNumber } });
-
-  // ── 5. Remove from blocks + broadcast ─────────────────────────────────────
+  // ── 5. Remove from blocks + broadcast ───────────────────────────────────
   const affectedBlocks = await Block.find({ productIds: product._id }).lean();
   const affectedBlockIds = affectedBlocks.map((b) => b.blockId);
 

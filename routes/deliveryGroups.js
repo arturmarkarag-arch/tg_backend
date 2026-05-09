@@ -57,14 +57,22 @@ router.get('/ordering-status', telegramAuth, async (req, res) => {
     return res.json({ isOpen: true, message: 'Персонал складу — без обмежень' });
   }
 
-  if (!user.deliveryGroupId) {
+  if (!user.shopId) {
     return res.json({
       isOpen: false,
-      message: 'Вас не призначено до жодної групи доставки. Зверніться до адміністратора.',
+      message: 'Вас не призначено до жодного магазину. Зверніться до адміністратора.',
     });
   }
 
-  const group = await DeliveryGroup.findById(user.deliveryGroupId).lean();
+  const shop = await Shop.findById(user.shopId).lean();
+  if (!shop || !shop.deliveryGroupId) {
+    return res.json({
+      isOpen: false,
+      message: 'Ваш магазин не прив\'язано до групи доставки. Зверніться до адміністратора.',
+    });
+  }
+
+  const group = await DeliveryGroup.findById(shop.deliveryGroupId).lean();
   if (!group) {
     return res.json({
       isOpen: false,
@@ -75,7 +83,8 @@ router.get('/ordering-status', telegramAuth, async (req, res) => {
   const schedule = await getOrderingSchedule();
   const status = isOrderingOpen(group.dayOfWeek, schedule);
   const window = getWindowDescription(group.dayOfWeek, schedule);
-  return res.json({ ...status, groupName: group.name, window });
+  const sessionOpenAt = getOrderingWindowOpenAt(group.dayOfWeek, schedule).toISOString();
+  return res.json({ ...status, groupName: group.name, window, sessionOpenAt });
 });
 
 router.get('/summary', async (req, res) => {
@@ -111,6 +120,64 @@ router.get('/summary', async (req, res) => {
     return String(a.name || '').localeCompare(String(b.name || ''));
   });
   res.json(result);
+});
+
+/**
+ * GET /api/delivery-groups/:groupId/shop-status
+ * Returns per-shop cart and ordered item counts for the current ordering session.
+ */
+router.get('/:groupId/shop-status', telegramAuth, requireTelegramRole('admin'), async (req, res) => {
+  const group = await DeliveryGroup.findById(req.params.groupId).lean();
+  if (!group) return res.status(404).json({ error: 'Group not found' });
+
+  const schedule = await getOrderingSchedule();
+  const status = isOrderingOpen(group.dayOfWeek, schedule);
+  const currentSessionId = getCurrentOrderingSessionId(String(group._id), group.dayOfWeek, schedule);
+
+  const shops = await Shop.find({ deliveryGroupId: String(group._id), isActive: true })
+    .select('name city cartState')
+    .lean();
+
+  const shopIds = shops.map((s) => s._id);
+
+  const orders = await Order.find({
+    'buyerSnapshot.shopId': { $in: shopIds },
+    orderingSessionId: currentSessionId,
+    status: { $in: ['new', 'in_progress'] },
+  }).select('buyerSnapshot.shopId items').lean();
+
+  const orderedByShop = {};
+  for (const order of orders) {
+    const shopId = String(order.buyerSnapshot?.shopId || '');
+    if (!shopId) continue;
+    if (!orderedByShop[shopId]) orderedByShop[shopId] = new Set();
+    for (const item of order.items || []) {
+      if (item.productId) orderedByShop[shopId].add(String(item.productId));
+    }
+  }
+
+  const shopStatuses = shops.map((shop) => {
+    const cartItems = shop.cartState?.orderItems || {};
+    const cartItemCount = Object.keys(cartItems).length;
+    const shopId = String(shop._id);
+    return {
+      shopId,
+      shopName: shop.name,
+      shopCity: shop.city,
+      cartItemCount,
+      orderedItemCount: orderedByShop[shopId]?.size || 0,
+    };
+  });
+
+  shopStatuses.sort((a, b) => String(a.shopCity || '').localeCompare(String(b.shopCity || ''), 'uk') || String(a.shopName || '').localeCompare(String(b.shopName || ''), 'uk'));
+
+  res.json({
+    groupId: String(group._id),
+    groupName: group.name,
+    isOpen: status.isOpen,
+    currentSessionId,
+    shops: shopStatuses,
+  });
 });
 
 router.get('/session-summaries', telegramAuth, requireTelegramRole('admin'), async (req, res) => {

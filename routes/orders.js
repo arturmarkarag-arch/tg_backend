@@ -1,9 +1,10 @@
 const express = require('express');
+const mongoose = require('mongoose');
 const Order = require('../models/Order');
 const Product = require('../models/Product');
 const Receipt = require('../models/Receipt');
 const User = require('../models/User');
-const RegistrationRequest = require('../models/RegistrationRequest');
+const Shop = require('../models/Shop');
 const DeliveryGroup = require('../models/DeliveryGroup');
 const { getTelegramAuth } = require('../utils/validateTelegramInitData');
 const { telegramAuth, requireTelegramRoles } = require('../middleware/telegramAuth');
@@ -25,14 +26,22 @@ async function requireOrderingWindowOpen(req, res, next) {
     const user = req.telegramUser;
     if (!user || user.role !== 'seller') return next();
 
-    if (!user.deliveryGroupId) {
+    if (!user.shopId) {
       return res.status(403).json({
-        error: 'no_delivery_group',
-        message: 'Вас не призначено до жодної групи доставки. Зверніться до адміністратора.',
+        error: 'no_shop',
+        message: 'Вас не призначено до жодного магазину. Зверніться до адміністратора.',
       });
     }
 
-    const group = await DeliveryGroup.findById(user.deliveryGroupId).lean();
+    const shop = await Shop.findById(user.shopId).lean();
+    if (!shop || !shop.deliveryGroupId) {
+      return res.status(403).json({
+        error: 'no_delivery_group',
+        message: 'Ваш магазин не прив\'язано до групи доставки. Зверніться до адміністратора.',
+      });
+    }
+
+    const group = await DeliveryGroup.findById(shop.deliveryGroupId).lean();
     if (!group) {
       return res.status(403).json({
         error: 'delivery_group_not_found',
@@ -259,10 +268,6 @@ router.post('/', async (req, res) => {
 
   const buyer = await User.findOne({ telegramId }).lean();
   if (!buyer) {
-    const pendingRequest = await RegistrationRequest.findOne({ telegramId, status: 'pending' }).lean();
-    if (pendingRequest) {
-      return res.status(403).json({ error: 'pending_registration', message: 'Ваша заявка на реєстрацію очікує підтвердження' });
-    }
     return res.status(403).json({ error: 'not_registered', message: 'Потрібно завершити реєстрацію, перш ніж робити замовлення' });
   }
 
@@ -276,17 +281,25 @@ router.post('/', async (req, res) => {
   }
 
   // Check ordering window — only for sellers, admin/warehouse are unrestricted
-  // group and schedule are kept in outer scope so the merge logic can use them below
+  // shop, group and schedule are kept in outer scope so the merge logic can use them below
+  let shop = null;
   let group = null;
   let schedule = null;
   if (buyer.role === 'seller') {
-    if (!buyer.deliveryGroupId) {
+    if (!buyer.shopId) {
       return res.status(403).json({
-        error: 'no_delivery_group',
-        message: 'Вас не призначено до жодної групи доставки. Зверніться до адміністратора.',
+        error: 'no_shop',
+        message: 'Вас не призначено до жодного магазину. Зверніться до адміністратора.',
       });
     }
-    group = await DeliveryGroup.findById(buyer.deliveryGroupId).lean();
+    shop = await Shop.findById(buyer.shopId).lean();
+    if (!shop || !shop.deliveryGroupId) {
+      return res.status(403).json({
+        error: 'no_delivery_group',
+        message: 'Ваш магазин не прив\'язано до групи доставки. Зверніться до адміністратора.',
+      });
+    }
+    group = await DeliveryGroup.findById(shop.deliveryGroupId).lean();
     if (!group) {
       return res.status(403).json({
         error: 'delivery_group_not_found',
@@ -345,110 +358,126 @@ router.post('/', async (req, res) => {
     return res.status(400).json({ error: 'No valid items found' });
   }
 
-  // Build existingOrder query: sellers use the current ordering-session window,
-  // admin/warehouse fall back to a 3-day window.
+  // Build existingOrder query: sellers merge per SHOP within the current ordering session.
+  // admin/warehouse fall back to a 3-day per-buyer window.
   const existingOrderQuery = {
-    buyerTelegramId: buyer.telegramId,
     status: { $in: ['new', 'in_progress'] },
   };
   let currentSessionId = '';
   if (group && schedule) {
-    // Seller: merge only within the active ordering session for their delivery group
+    // Seller: merge all orders for this shop within the active ordering session
     currentSessionId = getCurrentOrderingSessionId(String(group._id), group.dayOfWeek, schedule);
-    existingOrderQuery['buyerSnapshot.deliveryGroupId'] = String(buyer.deliveryGroupId);
+    existingOrderQuery['buyerSnapshot.shopId'] = buyer.shopId;
     existingOrderQuery.orderingSessionId = currentSessionId;
   } else {
-    // Admin / warehouse: no session concept — use 3-day fallback
+    // Admin / warehouse: no session concept — use 3-day fallback per buyer
     const threeDaysAgo = new Date();
     threeDaysAgo.setDate(threeDaysAgo.getDate() - 3);
+    existingOrderQuery.buyerTelegramId = buyer.telegramId;
     existingOrderQuery.createdAt = { $gte: threeDaysAgo };
   }
 
-  const existingOrder = await Order.findOne(existingOrderQuery);
+  // Build buyerSnapshot — reflects the shop at the moment of the order
+  const buyerSnapshot = group ? {
+    shopId: buyer.shopId || null,
+    shopName: shop?.name || buyer.shopName || '',
+    shopCity: shop?.city || buyer.shopCity || '',
+    shopAddress: buyer.shopAddress || '',
+    deliveryGroupId: String(group._id),
+  } : {
+    shopId: buyer.shopId || null,
+    shopName: buyer.shopName || '',
+    shopCity: buyer.shopCity || '',
+    shopAddress: buyer.shopAddress || '',
+    deliveryGroupId: buyer.deliveryGroupId || '',
+  };
 
-  // Якщо продавець змінив магазин — не мерджити в старий заказ
-  const shopChanged = existingOrder && (
-    (existingOrder.buyerSnapshot?.shopName || '') !== (buyer.shopName || '') ||
-    (existingOrder.buyerSnapshot?.deliveryGroupId || '') !== (buyer.deliveryGroupId || '')
-  );
-  const shouldMerge = existingOrder && !shopChanged;
-
+  // Wrap the read-modify-write in a MongoDB transaction so that concurrent requests cannot
+  // interleave their reads and saves, which would cause later saves to overwrite merged items.
   let order;
-
+  const mongoSession = await mongoose.connection.startSession();
+  mongoSession.startTransaction();
   try {
-    if (shouldMerge) {
+    const txExisting = await Order.findOne(existingOrderQuery).session(mongoSession);
+
+    if (txExisting) {
       for (const newItem of validItems) {
-        const sameItem = existingOrder.items.find((i) => String(i.productId) === String(newItem.productId));
+        const sameItem = txExisting.items.find((i) => String(i.productId) === String(newItem.productId));
         if (sameItem) {
           sameItem.quantity += newItem.quantity;
           sameItem.packed = false;
           sameItem.cancelled = false;
         } else {
-          existingOrder.items.push(newItem);
+          txExisting.items.push(newItem);
         }
       }
 
-      // Keep snapshot in sync with current buyer profile on every merge
-      existingOrder.buyerSnapshot = {
-        shopName: buyer.shopName || '',
-        shopCity: buyer.shopCity || '',
-        shopAddress: buyer.shopAddress || '',
-        deliveryGroupId: buyer.deliveryGroupId || '',
-      };
-      if (currentSessionId) existingOrder.orderingSessionId = currentSessionId;
+      // Keep snapshot in sync with current shop data on every merge
+      txExisting.buyerTelegramId = buyer.telegramId;
+      txExisting.shopId = buyer.shopId || null;
+      txExisting.buyerSnapshot = buyerSnapshot;
+      if (currentSessionId) txExisting.orderingSessionId = currentSessionId;
 
-      existingOrder.totalPrice = existingOrder.items.reduce((sum, item) => sum + (Number(item.price || 0) * Number(item.quantity || 0)), 0);
-      if (existingOrder.status === 'new' || existingOrder.status === 'in_progress') {
-        existingOrder.status = 'in_progress';
+      txExisting.totalPrice = txExisting.items.reduce((sum, item) => sum + (Number(item.price || 0) * Number(item.quantity || 0)), 0);
+      if (txExisting.status === 'new' || txExisting.status === 'in_progress') {
+        txExisting.status = 'in_progress';
       }
-      await existingOrder.save();
-      order = existingOrder;
+      await txExisting.save({ session: mongoSession });
+      order = txExisting;
     } else {
       order = new Order({
         buyerTelegramId: buyer.telegramId,
+        shopId: buyer.shopId || null,
         items: validItems,
         shippingAddress,
         contactInfo,
         emojiType,
         totalPrice,
         orderingSessionId: currentSessionId,
-        buyerSnapshot: {
-          shopName: buyer.shopName || '',
-          shopCity: buyer.shopCity || '',
-          shopAddress: buyer.shopAddress || '',
-          deliveryGroupId: buyer.deliveryGroupId || '',
-        },
+        buyerSnapshot,
         ...(sanitizedKey ? { idempotencyKey: sanitizedKey } : {}),
       });
-      try {
-        await order.save();
-      } catch (saveError) {
-        // Race condition: another concurrent request already saved an order with the same
-        // idempotency key (duplicate key on unique index). Return the existing order instead
-        // of propagating a 500.
-        if (saveError.code === 11000 && sanitizedKey) {
-          const existing = await Order.findOne({ idempotencyKey: sanitizedKey }).lean();
-          if (existing) {
-            return res.status(200).json(existing);
-          }
-        }
-        throw saveError;
-      }
+      await order.save({ session: mongoSession });
     }
 
-    try {
-      const io = getIO();
-      if (io) {
-        io.emit('user_order_updated', {
-          buyerTelegramId: buyer.telegramId,
-          lastOrderAt: order.createdAt,
-        });
-      }
-    } catch (emitError) {
-      console.warn('[orders] user_order_updated emit failed:', emitError?.message || emitError);
+    await mongoSession.commitTransaction();
+  } catch (err) {
+    await mongoSession.abortTransaction();
+    // Idempotency key collision: another request already created this order
+    if (err.code === 11000 && sanitizedKey) {
+      mongoSession.endSession();
+      const existing = await Order.findOne({ idempotencyKey: sanitizedKey }).lean();
+      if (existing) return res.status(200).json(existing);
     }
-  } catch (error) {
-    throw error;
+    throw err;
+  } finally {
+    mongoSession.endSession();
+  }
+
+  // Save order position count so SettingsPage can display it without extra queries
+  const activePositions = (order.items || []).filter((i) => !i.cancelled).length;
+  if (buyer.shopId) {
+    await Shop.updateOne(
+      { _id: buyer.shopId },
+      { $set: { 'cartState.lastOrderPositions': activePositions } }
+    ).catch((e) => console.warn('[orders] lastOrderPositions update failed:', e?.message));
+  }
+
+  try {
+    const io = getIO();
+    if (io) {
+      io.emit('user_order_updated', {
+        buyerTelegramId: buyer.telegramId,
+        lastOrderAt: order.createdAt,
+      });
+      // Notify picking-group watchers of new/updated order
+      const groupId = order.buyerSnapshot?.deliveryGroupId;
+      if (groupId) {
+        io.to(`picking_group_${groupId}`).emit('shop_status_changed', { groupId: String(groupId) });
+      }
+    }
+  } catch (emitError) {
+    console.warn('[orders] socket emit failed:', emitError?.message || emitError);
   }
 
   const responseBody = order.toObject ? order.toObject() : order;

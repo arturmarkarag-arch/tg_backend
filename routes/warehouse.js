@@ -82,12 +82,12 @@ router.post('/remove-from-shift', requireTelegramRoles(['admin', 'warehouse']), 
       worker.shiftZone = { startBlock: null, endBlock: null };
       await worker.save({ session });
 
-      // Bot-specific: PickingTask locking no longer occurs (no /pick bot command)
-      // await PickingTask.updateMany(
-      //   { lockedBy: worker.telegramId, status: 'locked' },
-      //   { $set: { status: 'pending', lockedBy: null, lockedAt: null, skippedBy: [] } },
-      //   { session }
-      // );
+      // Release any tasks locked by this worker so other workers can pick them up.
+      await PickingTask.updateMany(
+        { lockedBy: worker.telegramId, status: 'locked' },
+        { $set: { status: 'pending', lockedBy: null, lockedAt: null } },
+        { session }
+      );
 
     });
   } catch (err) {
@@ -168,12 +168,12 @@ router.post('/confirm-shift', requireTelegramRoles(['admin', 'warehouse']), asyn
         { session }
       );
 
-      // Bot-specific: task locking via /pick command no longer occurs
-      // await PickingTask.updateMany( 
-      //   { status: 'locked' },
-      //   { $set: { status: 'pending', lockedBy: null, lockedAt: null } },
-      //   { session }
-      // );
+      // Release all locked tasks and reset skippedBy so the fresh shift starts clean.
+      await PickingTask.updateMany(
+        { status: { $in: ['locked', 'pending'] } },
+        { $set: { status: 'pending', lockedBy: null, lockedAt: null, skippedBy: [] } },
+        { session }
+      );
 
       for (const assignment of assignments) {
         await User.updateOne(
@@ -227,6 +227,13 @@ router.post('/close-shift', requireTelegramRoles(['admin', 'warehouse']), async 
       await User.updateMany(
         { role: 'warehouse' },
         { $set: { isOnShift: false, shiftZone: { startBlock: null, endBlock: null } } },
+        { session }
+      );
+
+      // Release all locked tasks so they are available when the next session starts.
+      await PickingTask.updateMany(
+        { status: 'locked' },
+        { $set: { status: 'pending', lockedBy: null, lockedAt: null } },
         { session }
       );
 

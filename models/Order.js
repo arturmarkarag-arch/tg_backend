@@ -10,6 +10,7 @@ const OrderItemSchema = new mongoose.Schema({
 });
 
 const BuyerSnapshotSchema = new mongoose.Schema({
+  shopId: { type: mongoose.Schema.Types.ObjectId, ref: 'Shop', default: null },
   shopName: { type: String, default: '' },
   shopCity: { type: String, default: '' },
   shopAddress: { type: String, default: '' },
@@ -19,6 +20,7 @@ const BuyerSnapshotSchema = new mongoose.Schema({
 const OrderSchema = new mongoose.Schema(
   {
     buyerTelegramId: { type: String, required: true },
+    shopId: { type: mongoose.Schema.Types.ObjectId, ref: 'Shop', default: null },
     items: { type: [OrderItemSchema], required: true },
     status: { type: String, enum: ['new', 'in_progress', 'confirmed', 'fulfilled', 'cancelled', 'expired'], default: 'new' },
     totalPrice: { type: Number, default: 0 },

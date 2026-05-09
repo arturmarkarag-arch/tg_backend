@@ -8,6 +8,15 @@ const ShopSchema = new mongoose.Schema(
     deliveryGroupId: { type: String, default: '' },
     address:         { type: String, default: '', trim: true },
     isActive:        { type: Boolean, default: true },
+    cartState: {
+      orderItems:          { type: Map, of: Number, default: {} },
+      orderItemIds:        { type: [String], default: [] },
+      lastOrderPositions:  { type: Number, default: 0 },
+      lastViewedProductId: { type: String, default: '' },
+      currentIndex:        { type: Number, default: 0 },
+      currentPage:         { type: Number, default: 0 },
+      updatedAt:           { type: Date, default: null },
+    },
   },
   { timestamps: true }
 );

@@ -220,14 +220,10 @@ router.post('/start-session', requireTelegramRoles(['warehouse', 'admin']), asyn
     // 3. Build picking tasks from this group's closed-window orders.
     await buildPickingTasksFromOrders(deliveryGroupId);
 
-    // 4. Count tasks that were created.
-    // Race guard: if another concurrent call was already building (_running still true),
-    // our call returned immediately without inserting. Wait once and recount.
-    let taskCount = await PickingTask.countDocuments(activeFilter);
-    if (taskCount === 0 && buildPickingTasksFromOrders._running) {
-      await new Promise((r) => setTimeout(r, 1500));
-      taskCount = await PickingTask.countDocuments(activeFilter);
-    }
+    // 4. Return current count. The unique partial index on PickingTask(productId, deliveryGroupId)
+    // causes insertMany(ordered:false) to silently skip duplicates, so concurrent calls from
+    // multiple server instances never create phantom tasks — no in-process flag needed.
+    const taskCount = await PickingTask.countDocuments(activeFilter);
 
     if (taskCount === 0) {
       return res.json({ noOrders: true });

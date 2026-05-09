@@ -13,6 +13,7 @@ const Order = require('../models/Order');
 const Block = require('../models/Block');
 const ReceiptItemLog = require('../models/ReceiptItemLog');
 const DeliveryGroup = require('../models/DeliveryGroup');
+const Shop = require('../models/Shop');
 const { getIO } = require('../socket');
 
 const staffOnly = requireTelegramRoles(['admin', 'warehouse']);
@@ -607,10 +608,19 @@ router.post('/:id/commit', staffOnly, async (req, res) => {
 
       // 2. Transit allocation
       if (item.transitQty > 0 && item.deliveryGroupIds && item.deliveryGroupIds.length > 0) {
+        // New architecture: users carry shopId; legacy users carry deliveryGroupId directly.
+        const shops = await Shop.find(
+          { deliveryGroupId: { $in: item.deliveryGroupIds }, isActive: true },
+          '_id'
+        ).session(session).lean();
+        const shopIds = shops.map((s) => s._id);
         const targetUsers = await User.find({
-          deliveryGroupId: { $in: item.deliveryGroupIds },
+          $or: [
+            { shopId: { $in: shopIds } },
+            { deliveryGroupId: { $in: item.deliveryGroupIds } },
+          ],
           role: 'seller',
-        }).lean();
+        }).session(session).lean();
 
         if (targetUsers.length > 0) {
           const shuffledUsers = targetUsers.sort(() => 0.5 - Math.random());

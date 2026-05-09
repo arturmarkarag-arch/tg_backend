@@ -85,6 +85,7 @@ function sanitizeUserPayload(payload, existing = null) {
 }
 
 router.get('/', async (req, res) => {
+  try {
   const page     = Math.max(1, parseInt(req.query.page) || 1);
   const pageSize = Math.min(500, Math.max(1, parseInt(req.query.pageSize) || 20));
   const roleFilter     = req.query.role || null;
@@ -108,10 +109,6 @@ router.get('/', async (req, res) => {
       windowOpenAt = getOrderingWindowOpenAt(group.dayOfWeek);
     }
   }
-
-  // Helper: compute cartItemCount from lean User doc
-  const calcCartCount = (u) =>
-    Object.values(u.miniAppState?.orderItems || {}).reduce((s, q) => s + (Number(q) || 0), 0);
 
   let users;
   let total;
@@ -154,16 +151,21 @@ router.get('/', async (req, res) => {
     total = result?.meta?.[0]?.count ?? 0;
     users = (result?.data ?? []).map((u) => ({
       ...u,
-      cartItemCount: calcCartCount(u),
       windowOrderQty: 0, // by definition — these users have no window orders
     }));
   } else if (activityFilter && windowIsOpen && windowOpenAt) {
     // no_cart / no_visit: push filter to MongoDB query — no in-memory scan
     if (activityFilter === 'no_cart') {
-      // orderItemIds is kept in sync with orderItems keys by the mini-app state endpoint
+      // Cart is now on Shop — find shops with non-empty cart and exclude their sellers
+      const shopsWithCart = await Shop.find(
+        { 'cartState.orderItemIds.0': { $exists: true } },
+        '_id'
+      ).lean();
+      const shopIdsWithCart = shopsWithCart.map((s) => s._id);
       filter['$or'] = [
-        { 'miniAppState.orderItemIds': { $exists: false } },
-        { 'miniAppState.orderItemIds': { $size: 0 } },
+        { shopId: { $exists: false } },
+        { shopId: null },
+        { shopId: { $nin: shopIdsWithCart } },
       ];
     } else if (activityFilter === 'no_visit') {
       filter['$or'] = [
@@ -177,7 +179,7 @@ router.get('/', async (req, res) => {
     ]);
     total = countResult;
     users = pageUsers;
-    // Enrich with cart and order data for display
+    // Enrich with order data for display
     const activityTids = users.map((u) => u.telegramId).filter(Boolean);
     const activityOrders = await Order.aggregate([
       { $match: { buyerTelegramId: { $in: activityTids }, createdAt: { $gte: windowOpenAt }, status: { $nin: ['cancelled', 'expired'] } } },
@@ -187,7 +189,6 @@ router.get('/', async (req, res) => {
     const activityOrderQtyMap = new Map(activityOrders.map((o) => [o._id, o.totalQty]));
     users = users.map((u) => ({
       ...u,
-      cartItemCount: calcCartCount(u),
       windowOrderQty: activityOrderQtyMap.get(u.telegramId) || 0,
     }));
   } else {
@@ -209,11 +210,23 @@ router.get('/', async (req, res) => {
       const orderQtyMap = new Map(windowOrders.map((o) => [o._id, o.totalQty]));
       users = users.map((u) => ({
         ...u,
-        cartItemCount: calcCartCount(u),
         windowOrderQty: orderQtyMap.get(u.telegramId) || 0,
       }));
     }
   }
+
+  // Batch-load shop cartState to compute cartItemCount
+  const shopIds = [...new Set(users.map((u) => u.shopId).filter(Boolean).map(String))];
+  const shopDocs = shopIds.length > 0 ? await Shop.find({ _id: { $in: shopIds } }, 'cartState').lean() : [];
+  const shopMap = new Map(shopDocs.map((s) => [String(s._id), s]));
+  const getCartCount = (u) => {
+    if (!u.shopId) return 0;
+    const shop = shopMap.get(String(u.shopId));
+    const items = shop?.cartState?.orderItems;
+    if (!items) return 0;
+    const obj = items instanceof Map ? Object.fromEntries(items) : items;
+    return Object.values(obj).reduce((s, q) => s + (Number(q) || 0), 0);
+  };
 
   const telegramIds = users.map((u) => u.telegramId).filter(Boolean);
   const lastOrders = await Order.aggregate([
@@ -224,6 +237,7 @@ router.get('/', async (req, res) => {
   const lastOrderMap = new Map(lastOrders.map((item) => [item._id, item.lastOrderAt]));
   const usersWithLastOrder = users.map((user) => ({
     ...user,
+    cartItemCount: getCartCount(user),
     lastOrderAt: lastOrderMap.get(user.telegramId) || null,
   }));
 
@@ -236,6 +250,10 @@ router.get('/', async (req, res) => {
     windowIsOpen,
     windowOpenAt: windowOpenAt?.toISOString() || null,
   });
+  } catch (err) {
+    console.error('[GET /users]', err);
+    res.status(500).json({ error: 'Failed to fetch users' });
+  }
 });
 
 router.get('/:telegramId', async (req, res) => {

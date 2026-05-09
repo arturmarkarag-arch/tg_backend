@@ -1,24 +1,36 @@
 const express = require('express');
 const { validateTelegramInitData, getInitDataFromRequest, getTelegramId, getTelegramAuth } = require('../../utils/validateTelegramInitData');
+const { requireTelegramRole } = require('../../middleware/telegramAuth');
 const { DAY_SHORT } = require('../../utils/dayNames');
 const User = require('../../models/User');
 const RegistrationRequest = require('../../models/RegistrationRequest');
 const DeliveryGroup = require('../../models/DeliveryGroup');
 const Shop = require('../../models/Shop');
 const { sendAdminNotification, sendRegistrationApprovedMessage } = require('../../telegramBot');
+const { getOrderingWindowOpenAt } = require('../../utils/orderingSchedule');
+const { getOrderingSchedule } = require('../../utils/getOrderingSchedule');
+const { getIO } = require('../../socket');
 
 const router = express.Router();
+const adminOnly = requireTelegramRole('admin');
 
 function normalizeMiniAppState(miniAppState) {
   if (!miniAppState || typeof miniAppState !== 'object') return miniAppState;
-  const normalized = { ...miniAppState };
-  if (normalized.orderItems instanceof Map) {
-    normalized.orderItems = Object.fromEntries(normalized.orderItems);
+  return { ...miniAppState };
+}
+
+function normalizeCartState(cartState) {
+  const defaults = { orderItems: {}, orderItemIds: [], lastOrderPositions: 0, lastViewedProductId: '', currentIndex: 0, currentPage: 0, updatedAt: null };
+  if (!cartState || typeof cartState !== 'object') return defaults;
+  const result = { ...defaults, ...cartState };
+  if (result.orderItems instanceof Map) {
+    result.orderItems = Object.fromEntries(result.orderItems);
+  } else if (result.orderItems && typeof result.orderItems === 'object' && !Array.isArray(result.orderItems)) {
+    result.orderItems = Object.fromEntries(Object.entries(result.orderItems));
+  } else {
+    result.orderItems = {};
   }
-  if (normalized.orderItems && typeof normalized.orderItems === 'object' && !Array.isArray(normalized.orderItems)) {
-    normalized.orderItems = Object.fromEntries(Object.entries(normalized.orderItems));
-  }
-  return normalized;
+  return result;
 }
 
 async function resolveWarehouseZone(user) {
@@ -34,13 +46,6 @@ async function resolveWarehouseZone(user) {
   if (!user?.deliveryGroupId) return '';
   const group = await DeliveryGroup.findById(user.deliveryGroupId).lean();
   return group?.name || '';
-}
-
-// Returns admin user from request (already set by telegramAuth middleware), or null
-function ensureAdmin(req) {
-  const user = req.telegramUser;
-  if (!user || user.role !== 'admin') return null;
-  return user;
 }
 
 // POST /api/v1/telegram/validate — перевірити підпис initData
@@ -112,13 +117,26 @@ router.post('/me', async (req, res) => {
   // 3. Повертаємо профіль (без чутливих полів)
   const userShop = user.shopId ? await Shop.findById(user.shopId).lean() : null;
   const resolvedGroupId = userShop?.deliveryGroupId || user.deliveryGroupId || '';
+
+  // Обчислити sessionOpenAt для продавця (для визначення нової сесії на клієнті)
+  let sessionOpenAt = null;
+  if (user.role === 'seller' && resolvedGroupId) {
+    try {
+      const group = await DeliveryGroup.findById(resolvedGroupId).lean();
+      if (group) {
+        const schedule = await getOrderingSchedule();
+        sessionOpenAt = getOrderingWindowOpenAt(group.dayOfWeek, schedule).toISOString();
+      }
+    } catch { /* non-critical */ }
+  }
+
   res.json({
     telegramId: user.telegramId,
     role: user.role,
     firstName: user.firstName,
     lastName: user.lastName,
     shopId: userShop ? String(userShop._id) : null,
-    shop: userShop ? { _id: userShop._id, name: userShop.name, city: userShop.city, deliveryGroupId: userShop.deliveryGroupId } : null,
+    shop: userShop ? { _id: userShop._id, name: userShop.name, city: userShop.city, deliveryGroupId: userShop.deliveryGroupId, cartState: normalizeCartState(userShop.cartState) } : null,
     shopName: userShop?.name || user.shopName || '',
     shopNumber: user.shopNumber,
     shopCity: userShop?.city || user.shopCity || '',
@@ -127,6 +145,7 @@ router.post('/me', async (req, res) => {
     isWarehouseManager: user.isWarehouseManager || false,
     isOnShift: user.isOnShift || false,
     shiftZone: user.shiftZone || { startBlock: null, endBlock: null },
+    sessionOpenAt,
     miniAppState: normalizeMiniAppState(user.miniAppState || {
       lastViewedProductId: '',
       currentIndex: 0,
@@ -171,6 +190,7 @@ router.patch('/me/shop', async (req, res) => {
       shopCity,
       deliveryGroupId,
       warehouseZone,
+      cartState: normalizeCartState(shop.cartState),
     });
   } catch (err) {
     console.error('[PATCH /v1/telegram/me/shop]', err.message);
@@ -178,10 +198,10 @@ router.patch('/me/shop', async (req, res) => {
   }
 });
 
-// POST /api/v1/telegram/mini-app/state — зберегти останній переглянутий товар у mini app
+// POST /api/v1/telegram/mini-app/state — зберегти навігаційний стан (User) і кошик (Shop)
 // Захищено telegramAuth middleware — telegramId береться ТІЛЬКИ з req.telegramId
 router.post('/mini-app/state', async (req, res) => {
-  const { currentIndex, currentPage, productId, orderItems, orderItemIds, viewMode, clientOrderId } = req.body;
+  const { currentIndex, currentPage, productId, orderItems, orderItemIds, viewMode } = req.body;
   const telegramId = req.telegramId;
 
   if (!Number.isInteger(currentIndex) || currentIndex < 0) {
@@ -192,25 +212,19 @@ router.post('/mini-app/state', async (req, res) => {
   }
 
   const sanitizedOrderItems = typeof orderItems === 'object' && orderItems !== null
-    ? Object.fromEntries(Object.entries(orderItems).map(([productId, qty]) => [String(productId), Number(qty) || 0]))
+    ? Object.fromEntries(Object.entries(orderItems).map(([pid, qty]) => [String(pid), Number(qty) || 0]))
     : {};
   const sanitizedOrderItemIds = Array.isArray(orderItemIds)
     ? orderItemIds.map((id) => String(id))
     : [];
 
   const validViewMode = viewMode === 'grid' ? 'grid' : 'carousel';
-  const sanitizedClientOrderId = typeof clientOrderId === 'string' && clientOrderId.trim() ? clientOrderId.trim() : null;
+
   const user = await User.findOneAndUpdate(
     { telegramId },
     {
       $set: {
-        'miniAppState.currentIndex': currentIndex,
-        'miniAppState.currentPage': currentPage,
-        'miniAppState.lastViewedProductId': String(productId || ''),
-        'miniAppState.orderItems': sanitizedOrderItems,
-        'miniAppState.orderItemIds': sanitizedOrderItemIds,
         'miniAppState.viewMode': validViewMode,
-        'miniAppState.clientOrderId': sanitizedClientOrderId,
         'miniAppState.updatedAt': new Date(),
       },
     },
@@ -225,12 +239,40 @@ router.post('/mini-app/state', async (req, res) => {
     return res.status(403).json({ error: 'User not found' });
   }
 
-  res.json({ miniAppState: normalizeMiniAppState(user.miniAppState) });
+  // Кошик і навігація зберігаються на магазині, а не на продавці
+  let cartState = normalizeCartState(null);
+  if (user.shopId) {
+    const updatedShop = await Shop.findByIdAndUpdate(
+      user.shopId,
+      {
+        $set: {
+          'cartState.orderItems': sanitizedOrderItems,
+          'cartState.orderItemIds': sanitizedOrderItemIds,
+          'cartState.lastViewedProductId': String(productId || ''),
+          'cartState.currentIndex': currentIndex,
+          'cartState.currentPage': currentPage,
+          'cartState.updatedAt': new Date(),
+        },
+      },
+      { new: true }
+    ).lean();
+    if (updatedShop) {
+      cartState = normalizeCartState(updatedShop.cartState);
+      // Notify picking-group watchers of cart change
+      const groupId = updatedShop.deliveryGroupId;
+      if (groupId) {
+        try {
+          const io = getIO();
+          if (io) io.to(`picking_group_${groupId}`).emit('shop_status_changed', { groupId: String(groupId) });
+        } catch (_) { /* non-critical */ }
+      }
+    }
+  }
+
+  res.json({ miniAppState: normalizeMiniAppState(user.miniAppState), cartState });
 });
 
-// POST /api/v1/telegram/mini-app/reset-state — очистити стан mini app
-// Захищено telegramAuth middleware — telegramId береться ТІЛЬКИ з req.telegramId
-// POST /api/v1/telegram/mini-app/reset-state — очистити стан mini app
+// POST /api/v1/telegram/mini-app/reset-state — очистити кошик магазину і навігаційний стан продавця
 // Захищено telegramAuth middleware — telegramId береться ТІЛЬКИ з req.telegramId
 router.post('/mini-app/reset-state', async (req, res) => {
   const telegramId = req.telegramId;
@@ -241,8 +283,6 @@ router.post('/mini-app/reset-state', async (req, res) => {
       $set: {
         'miniAppState.currentIndex': 0,
         'miniAppState.lastViewedProductId': '',
-        'miniAppState.orderItems': {},
-        'miniAppState.orderItemIds': [],
         'miniAppState.updatedAt': new Date(),
       },
     },
@@ -257,7 +297,28 @@ router.post('/mini-app/reset-state', async (req, res) => {
     return res.status(403).json({ error: 'User not found' });
   }
 
-  res.json({ miniAppState: normalizeMiniAppState(user.miniAppState) });
+  // Очищаємо кошик і навігацію магазину
+  let cartState = normalizeCartState(null);
+  if (user.shopId) {
+    const updatedShop = await Shop.findByIdAndUpdate(
+      user.shopId,
+      {
+        $set: {
+          'cartState.orderItems': {},
+          'cartState.orderItemIds': [],
+          'cartState.lastOrderPositions': 0,
+          'cartState.lastViewedProductId': '',
+          'cartState.currentIndex': 0,
+          'cartState.currentPage': 0,
+          'cartState.updatedAt': new Date(),
+        },
+      },
+      { new: true }
+    ).lean();
+    if (updatedShop) cartState = normalizeCartState(updatedShop.cartState);
+  }
+
+  res.json({ miniAppState: normalizeMiniAppState(user.miniAppState), cartState });
 });
 
 router.post('/register-request', async (req, res) => {
@@ -343,12 +404,7 @@ router.post('/register-request', async (req, res) => {
   res.status(201).json({ requestId: request._id, status: 'pending' });
 });
 
-router.get('/register-requests', async (req, res) => {
-  const admin = await ensureAdmin(req);
-  if (!admin) {
-    return res.status(403).json({ error: 'Only admin can access registration requests' });
-  }
-
+router.get('/register-requests', adminOnly, async (req, res) => {
   const status = String(req.query.status || 'pending');
   const allowedStatuses = ['pending', 'rejected', 'blocked', 'approved', 'all'];
   if (!allowedStatuses.includes(status)) {
@@ -360,12 +416,7 @@ router.get('/register-requests', async (req, res) => {
   res.json(requests);
 });
 
-router.post('/register-requests/:id/approve', async (req, res) => {
-  const admin = await ensureAdmin(req);
-  if (!admin) {
-    return res.status(403).json({ error: 'Only admin can approve registration requests' });
-  }
-
+router.post('/register-requests/:id/approve', adminOnly, async (req, res) => {
   const request = await RegistrationRequest.findById(req.params.id).lean();
   if (!request || request.status !== 'pending') {
     return res.status(404).json({ error: 'Pending registration request not found' });
@@ -422,12 +473,7 @@ router.post('/register-requests/:id/approve', async (req, res) => {
   res.json({ message: 'User approved', telegramId: user.telegramId, role: user.role });
 });
 
-router.post('/register-requests/:id/reject', async (req, res) => {
-  const admin = await ensureAdmin(req);
-  if (!admin) {
-    return res.status(403).json({ error: 'Only admin can reject registration requests' });
-  }
-
+router.post('/register-requests/:id/reject', adminOnly, async (req, res) => {
   const request = await RegistrationRequest.findById(req.params.id).lean();
   if (!request || request.status !== 'pending') {
     return res.status(404).json({ error: 'Pending registration request not found' });
@@ -437,12 +483,7 @@ router.post('/register-requests/:id/reject', async (req, res) => {
   res.json({ message: 'Registration request rejected', telegramId: request.telegramId });
 });
 
-router.post('/register-requests/:id/block', async (req, res) => {
-  const admin = await ensureAdmin(req);
-  if (!admin) {
-    return res.status(403).json({ error: 'Only admin can block registration requests' });
-  }
-
+router.post('/register-requests/:id/block', adminOnly, async (req, res) => {
   const request = await RegistrationRequest.findById(req.params.id).lean();
   if (!request || request.status !== 'pending') {
     return res.status(404).json({ error: 'Pending registration request not found' });
@@ -452,12 +493,7 @@ router.post('/register-requests/:id/block', async (req, res) => {
   res.json({ message: 'Registration request blocked', telegramId: request.telegramId });
 });
 
-router.post('/register-requests/:id/unblock', async (req, res) => {
-  const admin = await ensureAdmin(req);
-  if (!admin) {
-    return res.status(403).json({ error: 'Only admin can unblock registration requests' });
-  }
-
+router.post('/register-requests/:id/unblock', adminOnly, async (req, res) => {
   const request = await RegistrationRequest.findById(req.params.id).lean();
   if (!request || request.status !== 'blocked') {
     return res.status(404).json({ error: 'Blocked registration request not found' });
@@ -467,12 +503,7 @@ router.post('/register-requests/:id/unblock', async (req, res) => {
   res.json({ message: 'Registration request unblocked', telegramId: request.telegramId });
 });
 
-router.delete('/register-requests/:id', async (req, res) => {
-  const admin = await ensureAdmin(req);
-  if (!admin) {
-    return res.status(403).json({ error: 'Only admin can delete registration requests' });
-  }
-
+router.delete('/register-requests/:id', adminOnly, async (req, res) => {
   const request = await RegistrationRequest.findByIdAndDelete(req.params.id).lean();
   if (!request) {
     return res.status(404).json({ error: 'Registration request not found' });
