@@ -163,7 +163,7 @@ async function initPickingScheduler() {
       console.log(`[PickingScheduler] Worker fired at ${new Date().toISOString()} — building picking tasks`);
 
       // Build picking tasks for all delivery groups whose window just closed
-      const { buildPickingTasksFromOrders } = require('../telegramBot');
+      const { buildPickingTasksFromOrders } = require('../services/taskBuilder');
       await buildPickingTasksFromOrders(null);
       console.log('[PickingScheduler] buildPickingTasksFromOrders completed successfully');
 

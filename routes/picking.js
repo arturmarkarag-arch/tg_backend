@@ -1,4 +1,5 @@
 const express = require('express');
+const mongoose = require('mongoose');
 const PickingTask = require('../models/PickingTask');
 const Product = require('../models/Product');
 const Order = require('../models/Order');
@@ -7,7 +8,7 @@ const User = require('../models/User');
 const DeliveryGroup = require('../models/DeliveryGroup');
 const { requireTelegramRoles } = require('../middleware/telegramAuth');
 const { archiveProduct, getProductTitle } = require('../services/archiveProduct');
-const { buildPickingTasksFromOrders } = require('../telegramBot');
+const { buildPickingTasksFromOrders } = require('../services/taskBuilder');
 const { isOrderingOpen, getWarsawNow, DAY_FULL_UK, getCurrentOrderingSessionId, getOrderingWindowCloseAt } = require('../utils/orderingSchedule');
 
 const { getOrderingSchedule } = require('../utils/getOrderingSchedule');
@@ -22,16 +23,18 @@ const router = express.Router();
  * Mark Order items as packed and auto-fulfil the Order if all items are done.
  * Call after a PickingTask is completed or out-of-stocked.
  */
-async function markOrderItemsPacked(taskItems, productId, actor = { by: 'system', byName: '', byRole: 'system' }) {
+async function markOrderItemsPacked(taskItems, productId, actor = { by: 'system', byName: '', byRole: 'system' }, session = null) {
   // Only mark packed for items that were actually packed by the worker.
   // Items with packed=false are left untouched so archiveProduct can cancel them.
   const orderIds = [...new Set(taskItems.filter((i) => i.packed).map((i) => String(i.orderId)))];
   await Promise.all(
     orderIds.map(async (orderId) => {
+      const opts = session ? { session } : {};
       // Step 1: mark this product's item as packed
       const result = await Order.updateOne(
         { _id: orderId, 'items.productId': productId },
         { $set: { 'items.$.packed': true } },
+        opts,
       );
       if (result.matchedCount === 0) return;
 
@@ -47,6 +50,7 @@ async function markOrderItemsPacked(taskItems, productId, actor = { by: 'system'
           $set: { status: 'fulfilled' },
           $push: { history: { at: new Date(), ...actor, action: 'status_changed', meta: { from: 'in_progress', to: 'fulfilled', via: 'picking' } } },
         },
+        opts,
       );
     })
   );
@@ -289,11 +293,19 @@ router.post('/tasks/:taskId/complete', requireTelegramRoles(['warehouse', 'admin
     task.status = 'completed';
     task.lockedBy = null;
     task.lockedAt = null;
-    await task.save();
 
-    // Mark Order items as packed and auto-fulfil fully-packed orders
+    // Atomically save task + mark order items in one transaction so they
+    // can't diverge if the server crashes between the two writes.
     const completeActor = { by: String(user.telegramId), byName: [user.firstName, user.lastName].filter(Boolean).join(' '), byRole: user.role };
-    await markOrderItemsPacked(task.items, task.productId, completeActor);
+    const completeSess = await mongoose.connection.startSession();
+    try {
+      await completeSess.withTransaction(async () => {
+        await task.save({ session: completeSess });
+        await markOrderItemsPacked(task.items, task.productId, completeActor, completeSess);
+      });
+    } finally {
+      await completeSess.endSession();
+    }
 
     const fromBlock = typeof nextBlock === 'number' ? nextBlock : task.blockId;
     const { task: nextTask, wrappedAround: nwa } = await findAndLockNext(user.telegramId, fromBlock, task.deliveryGroupId || null);
@@ -373,6 +385,19 @@ router.post('/tasks/:taskId/out-of-stock', requireTelegramRoles(['warehouse', 'a
     let task = await PickingTask.findById(req.params.taskId);
     if (!task) return res.status(404).json({ error: 'Task not found' });
 
+    // Idempotency: if a previous request saved the task but archiveProduct crashed,
+    // retry the archive now and return success.
+    if (task.status === 'completed') {
+      const productForRetry = await Product.findById(task.productId);
+      if (productForRetry && productForRetry.status !== 'archived') {
+        await archiveProduct(productForRetry, { notifyBuyers: false, bot: null });
+      }
+      const fromBlockRetry = typeof nextBlock === 'number' ? nextBlock : task.blockId;
+      const { task: nextTask, wrappedAround: nwa } = await findAndLockNext(user.telegramId, fromBlockRetry, task.deliveryGroupId || null);
+      const nextTaskData = await buildTaskResponse(nextTask, { wrappedAround: nwa });
+      return res.json({ message: 'Out-of-stock recorded', nextTask: nextTaskData });
+    }
+
     // Auto-claim if called from review list (task still pending)
     if (task.status === 'pending') {
       const claimed = await PickingTask.findOneAndUpdate(
@@ -406,22 +431,26 @@ router.post('/tasks/:taskId/out-of-stock', requireTelegramRoles(['warehouse', 'a
     task.status = 'completed';
     task.lockedBy = null;
     task.lockedAt = null;
-    await task.save();
 
-    // Mark Order items as packed and auto-fulfil fully-packed orders
+    // Phase 1: atomically save task + mark order items so they can't diverge
+    // on a mid-request server crash.
     const outOfStockActor = { by: String(user.telegramId), byName: [user.firstName, user.lastName].filter(Boolean).join(' '), byRole: user.role };
-    await markOrderItemsPacked(task.items, task.productId, outOfStockActor);
+    const oosSess = await mongoose.connection.startSession();
+    try {
+      await oosSess.withTransaction(async () => {
+        await task.save({ session: oosSess });
+        await markOrderItemsPacked(task.items, task.productId, outOfStockActor, oosSess);
+      });
+    } finally {
+      await oosSess.endSession();
+    }
 
-    // Archive the product — removes it from blocks and cancels remaining orders.
-    // Wrapped in its own try-catch: task is already saved as completed above,
-    // so a failure here must not cause a 500 that confuses the client into retrying.
+    // Phase 2: archive product (runs its own internal transaction).
+    // NOT wrapped in try-catch — if this fails, the client receives 500 and
+    // can retry; the idempotency block above will re-attempt the archive.
     const productDoc = await Product.findById(task.productId._id || task.productId);
     if (productDoc && productDoc.status !== 'archived') {
-      try {
-        await archiveProduct(productDoc, { notifyBuyers: false, bot: null });
-      } catch (archiveErr) {
-        console.error('[picking/out-of-stock] archiveProduct failed (task already saved):', archiveErr);
-      }
+      await archiveProduct(productDoc, { notifyBuyers: false, bot: null });
     }
 
     const fromBlock = typeof nextBlock === 'number' ? nextBlock : blockId;

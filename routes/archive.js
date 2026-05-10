@@ -2,6 +2,7 @@ const express = require('express');
 const mongoose = require('mongoose');
 const { S3Client, DeleteObjectCommand } = require('@aws-sdk/client-s3');
 const Product = require('../models/Product');
+const Block = require('../models/Block');
 const { shiftUp } = require('../utils/shiftOrderNumbers');
 const { getIO } = require('../socket');
 const { telegramAuth, requireTelegramRoles } = require('../middleware/telegramAuth');
@@ -146,8 +147,41 @@ router.delete('/:id', async (req, res) => {
   if (!product) return res.status(404).json({ error: 'Product not found' });
   if (product.status !== 'archived') return res.status(400).json({ error: 'Only archived products can be permanently deleted' });
 
+  // Remove from any blocks and delete product atomically.
+  // Archived products should already have been removed from blocks by archiveProduct,
+  // but we guard against stale references from older code paths or manual DB edits.
+  let affectedBlockIds = [];
+  const session = await mongoose.connection.startSession();
+  try {
+    await session.withTransaction(async () => {
+      const affectedBlocks = await Block.find({ productIds: product._id }, 'blockId').session(session).lean();
+      affectedBlockIds = affectedBlocks.map((b) => b.blockId);
+      if (affectedBlockIds.length) {
+        await Block.updateMany(
+          { productIds: product._id },
+          { $pull: { productIds: product._id }, $inc: { version: 1 } },
+          { session }
+        );
+      }
+      await product.deleteOne({ session });
+    });
+  } finally {
+    await session.endSession();
+  }
+
+  // Delete R2 images after the DB transaction commits — if this fails the
+  // product is already gone from DB; orphaned R2 objects are acceptable.
   await deleteFromR2(product.imageNames || []);
-  await product.deleteOne();
+
+  if (affectedBlockIds.length) {
+    try {
+      const io = getIO();
+      const updatedBlocks = await Block.find({ blockId: { $in: affectedBlockIds } }).lean();
+      for (const block of updatedBlocks) {
+        io.emit('block_updated', { blockId: block.blockId, block });
+      }
+    } catch (_) {}
+  }
 
   res.json({ message: 'Product permanently deleted' });
 });

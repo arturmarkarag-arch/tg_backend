@@ -57,6 +57,28 @@ function getProductTitle(product) {
 
 const router = express.Router();
 
+// GET /api/v1/products/upload-url-public?ext=jpg — public presigned PUT URL for missing-product reports (no auth required)
+router.get('/upload-url-public', async (req, res) => {
+  try {
+    const ext = String(req.query.ext || 'jpg').replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
+    const allowed = ['jpg', 'jpeg', 'png', 'webp'];
+    if (!allowed.includes(ext)) return res.status(400).json({ error: 'Непідтримуваний формат' });
+    const safeExt = ext === 'jpeg' ? 'jpg' : ext;
+    const filename = `${crypto.randomUUID()}.${safeExt}`;
+    const key = `missing-products/${filename}`;
+    const contentType = 'image/jpeg';
+    const command = new PutObjectCommand({
+      Bucket: process.env.R2_BUCKET_NAME,
+      Key: key,
+      ContentType: contentType,
+    });
+    const uploadUrl = await getSignedUrl(s3Client, command, { expiresIn: 300 });
+    res.json({ uploadUrl, filename, key, contentType });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // GET /api/v1/products/upload-url?ext=jpg — returns a presigned PUT URL for direct R2 upload
 router.get('/upload-url', staffOnly, async (req, res) => {
   try {
@@ -270,8 +292,8 @@ router.post('/broadcast', async (req, res) => {
 */
 
 // POST /api/v1/products/report-missing
-// Body JSON: { barcode, filename } — client uploads photo to R2 first, then sends filename
-// Server fetches buffer from R2 and forwards to Telegram groups
+// Body JSON: { barcode, filename } — client uploads photo to R2 via upload-url-public first, then sends filename
+// Server fetches buffer from missing-products/ folder in R2 and forwards to Telegram groups
 router.post('/report-missing', async (req, res) => {
   const barcodeValue = String(req.body?.barcode || '').trim();
   const filename = String(req.body?.filename || '').replace(/[^a-zA-Z0-9._-]/g, '');
@@ -299,7 +321,7 @@ router.post('/report-missing', async (req, res) => {
   // Fetch photo buffer from R2
   const r2Object = await s3Client.send(new GetObjectCommand({
     Bucket: process.env.R2_BUCKET_NAME,
-    Key: `products/${filename}`,
+    Key: `missing-products/${filename}`,
   }));
   const chunks = [];
   for await (const chunk of r2Object.Body) chunks.push(chunk);
