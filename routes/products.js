@@ -1,5 +1,6 @@
 const express = require('express');
 const crypto = require('crypto');
+const mongoose = require('mongoose');
 const { S3Client, PutObjectCommand, HeadBucketCommand, GetObjectCommand } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 const { shiftUp, shiftDown } = require('../utils/shiftOrderNumbers');
@@ -139,20 +140,34 @@ router.get('/', async (req, res) => {
 
   const isV1 = String(req.baseUrl || '').includes('/api/v1') || String(req.originalUrl || '').startsWith('/api/v1');
 
-  // For the seller-facing catalogue (v1), show only products that are placed in blocks.
-  // Products in "incoming" (not yet shelved) should not be orderable.
+  // For the seller-facing catalogue (v1), show only products placed in blocks.
+  // Use $lookup aggregation to do the join server-side — avoids loading all productIds into Node.js memory.
   if (isV1) {
-    const assignedIds = await Block.distinct('productIds');
-    query._id = { $in: assignedIds };
-  }
+    const basePipeline = [
+      { $match: query },
+      {
+        $lookup: {
+          from: 'blocks',
+          localField: '_id',
+          foreignField: 'productIds',
+          as: '_block',
+          pipeline: [{ $project: { _id: 1 } }],
+        },
+      },
+      { $match: { '_block.0': { $exists: true } } },
+      { $project: { _block: 0 } },
+    ];
 
-  const total = await Product.countDocuments(query);
-  const products = await Product.find(query)
-    .sort({ orderNumber: 1, createdAt: -1 })
-    .skip(offset)
-    .limit(limit)
-    .lean();
-  if (isV1) {
+    const [countResult] = await Product.aggregate([...basePipeline, { $count: 'total' }]);
+    const total = countResult?.total ?? 0;
+
+    const products = await Product.aggregate([
+      ...basePipeline,
+      { $sort: { orderNumber: 1, createdAt: -1 } },
+      { $skip: offset },
+      { $limit: limit },
+    ]);
+
     const items = products.map((product) => ({
       id: product._id,
       title: getProductTitle(product),
@@ -172,6 +187,13 @@ router.get('/', async (req, res) => {
       hasMore: offset + items.length < total,
     });
   }
+
+  const total = await Product.countDocuments(query);
+  const products = await Product.find(query)
+    .sort({ orderNumber: 1, createdAt: -1 })
+    .skip(offset)
+    .limit(limit)
+    .lean();
 
   res.json(products);
 });
@@ -333,9 +355,6 @@ router.get('/:id', async (req, res) => {
   res.json(product);
 });
 
-// POST /api/products/block-upload-photos
-// Each uploaded photo creates a new product (no name/price/category) and appends
-// it to the specified block, preserving the exact selection order.
 // POST /api/v1/products/block-upload-photos
 // Body: { blockId, filenames: string[] } — filenames already uploaded to R2 by client
 router.post('/block-upload-photos', staffOnly, async (req, res) => {
@@ -349,41 +368,59 @@ router.post('/block-upload-photos', staffOnly, async (req, res) => {
     return res.status(400).json({ error: 'No filenames provided' });
   }
 
-  const block = await Block.findOne({ blockId });
-  if (!block) return res.status(404).json({ error: 'Block not found' });
+  // Pre-flight outside transaction (avoids holding session for a missing block)
+  const blockExists = await Block.exists({ blockId });
+  if (!blockExists) return res.status(404).json({ error: 'Block not found' });
 
-  const maxProduct = await Product.findOne({}, 'orderNumber').sort({ orderNumber: -1 }).lean();
-  let nextOrderNumber = (maxProduct?.orderNumber ?? 0) + 1;
+  const session = await mongoose.connection.startSession();
+  let results = [];
+  let savedBlock;
+  try {
+    await session.withTransaction(async () => {
+      results = []; // reset on retry
+      const block = await Block.findOne({ blockId }).session(session);
+      if (!block) throw Object.assign(new Error('Block not found'), { status: 404 });
 
-  const results = [];
-  for (const filename of filenames) {
-    const safeFilename = String(filename).replace(/[^a-zA-Z0-9._-]/g, '');
-    const imageUrl = `/api/v1/products/images/${safeFilename}`;
-    const product = new Product({
-      orderNumber: nextOrderNumber,
-      price: 0,
-      quantity: 0,
-      status: 'pending',
-      source: 'block_photo',
-      imageUrls: [imageUrl],
-      imageNames: [safeFilename],
+      // Read max orderNumber inside the transaction to prevent race conditions
+      const maxProduct = await Product.findOne({}, 'orderNumber').sort({ orderNumber: -1 }).session(session).lean();
+      let nextOrderNumber = (maxProduct?.orderNumber ?? 0) + 1;
+
+      for (const filename of filenames) {
+        const safeFilename = String(filename).replace(/[^a-zA-Z0-9._-]/g, '');
+        const imageUrl = `/api/v1/products/images/${safeFilename}`;
+        const [product] = await Product.create([{
+          orderNumber: nextOrderNumber,
+          price: 0,
+          quantity: 0,
+          status: 'pending',
+          source: 'block_photo',
+          imageUrls: [imageUrl],
+          imageNames: [safeFilename],
+        }], { session });
+        block.productIds.push(product._id);
+        nextOrderNumber += 1;
+        results.push({ productId: String(product._id), imageUrl, index: results.length });
+      }
+
+      block.version += 1;
+      await block.save({ session });
+      savedBlock = block;
     });
-    await product.save();
-    block.productIds.push(product._id);
-    nextOrderNumber += 1;
-    results.push({ productId: String(product._id), imageUrl, index: results.length });
+  } catch (err) {
+    session.endSession();
+    if (err.status) return res.status(err.status).json({ error: err.message });
+    console.error('[products/block-upload-photos]', err);
+    return res.status(500).json({ error: err.message || 'Upload failed' });
   }
-
-  block.version += 1;
-  await block.save();
+  session.endSession();
 
   try {
     const io = getIO();
     if (io) {
       io.emit('block_updated', {
-        blockId: block.blockId,
-        version: block.version,
-        productIds: block.productIds.map(String),
+        blockId: savedBlock.blockId,
+        version: savedBlock.version,
+        productIds: savedBlock.productIds.map(String),
       });
     }
   } catch (_) {}

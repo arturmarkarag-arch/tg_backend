@@ -235,7 +235,7 @@ router.post('/start-session', requireTelegramRoles(['warehouse', 'admin']), asyn
             status: { $in: ['new', 'in_progress'] },
             orderingSessionId: { $ne: currentSessionId },
           },
-          { $set: { status: 'cancelled' } },
+          { $set: { status: 'expired' } },
         );
       }
     }
@@ -333,7 +333,7 @@ router.post('/tasks/:taskId/complete', requireTelegramRoles(['warehouse', 'admin
     const task = await PickingTask.findById(req.params.taskId);
     if (!task) return res.status(404).json({ error: 'Task not found' });
     if (task.lockedBy !== user.telegramId) {
-      return res.status(403).json({ error: 'Task is not locked by you' });
+      return res.status(403).json({ error: 'expired_lock', message: 'Завдання вже взяв інший складник або час блокування минув' });
     }
 
     // Apply actual packed quantities
@@ -379,7 +379,7 @@ router.post('/tasks/:taskId/skip', requireTelegramRoles(['warehouse', 'admin']),
     const task = await PickingTask.findById(req.params.taskId);
     if (!task) return res.status(404).json({ error: 'Task not found' });
     if (task.lockedBy !== user.telegramId) {
-      return res.status(403).json({ error: 'Task is not locked by you' });
+      return res.status(403).json({ error: 'expired_lock', message: 'Завдання вже взяв інший складник або час блокування минув' });
     }
 
     const fromBlock = typeof nextBlock === 'number' ? nextBlock : task.blockId;
@@ -436,7 +436,7 @@ router.patch('/tasks/:taskId/progress', requireTelegramRoles(['warehouse', 'admi
     const task = await PickingTask.findById(req.params.taskId);
     if (!task) return res.status(404).json({ error: 'Task not found' });
     if (task.lockedBy !== user.telegramId) {
-      return res.status(403).json({ error: 'Task is not locked by you' });
+      return res.status(403).json({ error: 'expired_lock', message: 'Завдання вже взяв інший складник або час блокування минув' });
     }
 
     const packedSet = new Set(packedOrderIds.map(String));
@@ -500,7 +500,7 @@ router.post('/tasks/:taskId/out-of-stock', requireTelegramRoles(['warehouse', 'a
       if (!claimed) return res.status(409).json({ error: 'Task was claimed by another worker' });
       task = claimed;
     } else if (task.lockedBy !== user.telegramId) {
-      return res.status(403).json({ error: 'Task is not locked by you' });
+      return res.status(403).json({ error: 'expired_lock', message: 'Завдання вже взяв інший складник або час блокування минув' });
     }
 
     await task.populate('productId');
@@ -530,9 +530,15 @@ router.post('/tasks/:taskId/out-of-stock', requireTelegramRoles(['warehouse', 'a
     await markOrderItemsPacked(task.items, task.productId, outOfStockActor);
 
     // Archive the product — removes it from blocks and cancels remaining orders.
+    // Wrapped in its own try-catch: task is already saved as completed above,
+    // so a failure here must not cause a 500 that confuses the client into retrying.
     const productDoc = await Product.findById(task.productId._id || task.productId);
     if (productDoc && productDoc.status !== 'archived') {
-      await archiveProduct(productDoc, { notifyBuyers: false, bot: null });
+      try {
+        await archiveProduct(productDoc, { notifyBuyers: false, bot: null });
+      } catch (archiveErr) {
+        console.error('[picking/out-of-stock] archiveProduct failed (task already saved):', archiveErr);
+      }
     }
 
     const fromBlock = typeof nextBlock === 'number' ? nextBlock : blockId;

@@ -1,5 +1,4 @@
 const mongoose = require('mongoose');
-const DeliveryGroup = require('./DeliveryGroup');
 
 const UserHistoryEntrySchema = new mongoose.Schema({
   at: { type: Date, default: Date.now },
@@ -48,24 +47,12 @@ const UserSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-async function removeFromDeliveryGroups(telegramId) {
-  if (!telegramId) return;
-  await DeliveryGroup.updateMany(
-    { members: telegramId },
-    { $pull: { members: telegramId } }
-  );
-}
-
-UserSchema.post('findOneAndDelete', async function (doc) {
-  if (doc?.telegramId) {
-    await removeFromDeliveryGroups(doc.telegramId);
-  }
+UserSchema.post('findOneAndDelete', async function () {
+  // No-op: DeliveryGroup.members tracking removed.
 });
 
 UserSchema.post('deleteOne', { document: true, query: false }, async function () {
-  if (this?.telegramId) {
-    await removeFromDeliveryGroups(this.telegramId);
-  }
+  // No-op: DeliveryGroup.members tracking removed.
 });
 
 module.exports = mongoose.model('User', UserSchema);

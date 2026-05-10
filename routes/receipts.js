@@ -3,7 +3,6 @@ const crypto = require('crypto');
 const mongoose = require('mongoose');
 const Busboy = require('busboy');
 const { S3Client, PutObjectCommand, HeadBucketCommand } = require('@aws-sdk/client-s3');
-const { shiftUp } = require('../utils/shiftOrderNumbers');
 const { requireTelegramRoles } = require('../middleware/telegramAuth');
 const Receipt = require('../models/Receipt');
 const ReceiptItem = require('../models/ReceiptItem');
@@ -564,11 +563,36 @@ router.post('/:id/commit', staffOnly, async (req, res) => {
 
     const createdProducts = [];
 
+    // 4.1: Pre-determine how many NEW products will be created (no existingProductId or not found),
+    // then do ONE bulk shiftUp instead of one per new product.
+    const existingIdSet = new Set(
+      items.filter((i) => i.existingProductId).map((i) => String(i.existingProductId))
+    );
+    let resolvedExistingCount = 0;
+    if (existingIdSet.size > 0) {
+      resolvedExistingCount = await Product.countDocuments({
+        _id: { $in: [...existingIdSet] },
+      }).session(session);
+    }
+    const newProductCount = items.length - resolvedExistingCount;
+    if (newProductCount > 0) {
+      await Product.updateMany(
+        { orderNumber: { $gte: 1 } },
+        { $inc: { orderNumber: newProductCount } },
+        { session }
+      );
+    }
+    let nextOrderNumber = 1;
+
+    // 4.2: Track already-updated existingProductIds to prevent double-increment if two items share the same product.
+    const usedExistingProductIds = new Set();
+
     for (const item of items) {
       let currentProduct;
 
       // 1. Update or create the product
-      if (item.existingProductId) {
+      if (item.existingProductId && !usedExistingProductIds.has(String(item.existingProductId))) {
+        usedExistingProductIds.add(String(item.existingProductId));
         currentProduct = await Product.findById(item.existingProductId).session(session);
         if (currentProduct) {
           currentProduct.quantity += item.shelfQty;
@@ -581,10 +605,8 @@ router.post('/:id/commit', staffOnly, async (req, res) => {
       }
 
       if (!currentProduct) {
-        await shiftUp({ orderNumber: { $gte: 1 } }, session);
-
         currentProduct = new Product({
-          orderNumber: 1,
+          orderNumber: nextOrderNumber++,
           price: item.price,
           quantity: item.shelfQty,
           warehouse: '',
@@ -623,7 +645,12 @@ router.post('/:id/commit', staffOnly, async (req, res) => {
         }).session(session).lean();
 
         if (targetUsers.length > 0) {
-          const shuffledUsers = targetUsers.sort(() => 0.5 - Math.random());
+          // 4.4: Fisher-Yates shuffle for unbiased random distribution
+          const shuffledUsers = [...targetUsers];
+          for (let i = shuffledUsers.length - 1; i > 0; i--) {
+            const j = Math.floor(Math.random() * (i + 1));
+            [shuffledUsers[i], shuffledUsers[j]] = [shuffledUsers[j], shuffledUsers[i]];
+          }
           const packSize = Math.max(1, item.qtyPerPackage || 1);
           const baseQty = item.qtyPerShop > 0
             ? item.qtyPerShop

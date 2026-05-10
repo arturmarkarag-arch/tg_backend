@@ -34,7 +34,7 @@ function requireTelegramRoles(roles) {
       return res.status(401).json({ error: 'Telegram auth required' });
     }
 
-    const user = req.telegramUser || await User.findOne({ telegramId: req.telegramId }).lean();
+    const user = req.telegramUser;
     if (!user || !allowed.includes(user.role)) {
       return res.status(403).json({ error: `Only ${allowed.join(' or ')} can access this endpoint` });
     }

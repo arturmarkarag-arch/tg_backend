@@ -294,28 +294,20 @@ router.post('/', async (req, res) => {
     return res.status(403).json({ error: 'not_registered', message: 'Потрібно завершити реєстрацію, перш ніж робити замовлення' });
   }
 
-  // Idempotency: if a key was provided and an order already exists for it, return it immediately
   const sanitizedKey = typeof idempotencyKey === 'string' && idempotencyKey.trim() ? idempotencyKey.trim() : null;
-  if (sanitizedKey) {
-    const existingByKey = await Order.findOne({ idempotencyKey: sanitizedKey });
-    if (existingByKey) {
-      return res.status(200).json(existingByKey);
-    }
-  }
 
-  // Check ordering window — sellers AND admins with a shopId go through the full session flow.
-  // admin without shopId and warehouse users are unrestricted (3-day fallback below).
+  // Every user must have a shopId to place an order — no shopId means nowhere to deliver.
   // shop, group and schedule are kept in outer scope so the merge logic can use them below
   let shop = null;
   let group = null;
   let schedule = null;
-  if (buyer.role === 'seller' || (buyer.role === 'admin' && buyer.shopId)) {
-    if (!buyer.shopId) {
-      return res.status(403).json({
-        error: 'no_shop',
-        message: 'Вас не призначено до жодного магазину. Зверніться до адміністратора.',
-      });
-    }
+  if (!buyer.shopId) {
+    return res.status(403).json({
+      error: 'no_shop',
+      message: 'Вас не призначено до жодного магазину. Зверніться до адміністратора.',
+    });
+  }
+  if (buyer.role === 'seller' || buyer.role === 'admin') {
     shop = await Shop.findById(buyer.shopId).populate('cityId', 'name').lean();
     if (!shop || !shop.deliveryGroupId) {
       return res.status(403).json({

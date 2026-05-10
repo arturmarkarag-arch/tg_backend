@@ -50,7 +50,7 @@ async function resolveWarehouseZone(user) {
 
 // POST /api/v1/telegram/validate — перевірити підпис initData
 router.post('/validate', (req, res) => {
-  const { initData } = req.body;
+  const initData = getInitDataFromRequest(req);
   if (!initData) {
     return res.status(400).json({ error: 'initData is required' });
   }
@@ -436,6 +436,28 @@ router.post('/register-requests/:id/approve', adminOnly, async (req, res) => {
     return res.status(400).json({ error: 'Delivery group is missing for seller' });
   }
 
+  // Resolve shopId → actual Shop document to get fresh data and validate it still exists
+  let resolvedShopId = null;
+  let resolvedShopName = request.shopName || '';
+  let resolvedShopCity = request.shopCity || '';
+  let resolvedDeliveryGroupId = request.role === 'seller' ? request.deliveryGroupId || '' : '';
+  let resolvedWarehouseZone = '';
+
+  if (request.role === 'seller' && request.shopId) {
+    const shop = await Shop.findOne({ _id: request.shopId, isActive: true }).populate('cityId', 'name').lean();
+    if (!shop) {
+      return res.status(400).json({ error: 'shop_not_found', message: 'Магазин не знайдено або він неактивний. Оновіть заявку.' });
+    }
+    resolvedShopId = shop._id;
+    resolvedShopName = shop.name || '';
+    resolvedShopCity = shop.cityId?.name || '';
+    resolvedDeliveryGroupId = shop.deliveryGroupId || resolvedDeliveryGroupId;
+    if (resolvedDeliveryGroupId) {
+      const grp = await DeliveryGroup.findById(resolvedDeliveryGroupId).lean();
+      resolvedWarehouseZone = grp?.name || '';
+    }
+  }
+
   const user = await User.findOneAndUpdate(
     { telegramId: request.telegramId },
     {
@@ -444,25 +466,17 @@ router.post('/register-requests/:id/approve', adminOnly, async (req, res) => {
         role: request.role,
         firstName: request.firstName,
         lastName: request.lastName,
-        shopName: request.shopName,
-        shopCity: request.shopCity,
-        deliveryGroupId: request.role === 'seller' ? request.deliveryGroupId || '' : '',
+        shopId: resolvedShopId,
+        shopName: resolvedShopName,
+        shopCity: resolvedShopCity,
+        deliveryGroupId: resolvedDeliveryGroupId,
+        warehouseZone: resolvedWarehouseZone,
       },
     },
     { upsert: true, new: true, setDefaultsOnInsert: true }
   );
   if (!user) {
     return res.status(409).json({ error: 'User already registered' });
-  }
-  if (request.role === 'seller' && request.deliveryGroupId) {
-    const deliveryGroup = await DeliveryGroup.findByIdAndUpdate(
-      request.deliveryGroupId,
-      { $addToSet: { members: request.telegramId } },
-      { new: true }
-    ).lean();
-    if (deliveryGroup?.name) {
-      await User.findByIdAndUpdate(user._id, { warehouseZone: deliveryGroup.name });
-    }
   }
   await RegistrationRequest.findByIdAndDelete(req.params.id);
 

@@ -146,19 +146,6 @@ router.post('/confirm-shift', requireTelegramRoles(['admin', 'warehouse']), asyn
     };
   });
 
-  // Bot-specific (H-1): skippedBy is populated only by bot /pick command — no longer active
-  // const unresolvedSkippedCount = await PickingTask.countDocuments({
-  //   status: 'pending',
-  //   'skippedBy.0': { $exists: true },
-  // });
-  // if (unresolvedSkippedCount > 0) {
-  //   return res.status(409).json({
-  //     error: 'shift_change_blocked_unresolved_skipped_tasks',
-  //     message: `Неможливо почати нову зміну: є ${unresolvedSkippedCount} відкладених позицій...`,
-  //     unresolvedSkippedCount,
-  //   });
-  // }
-
   const session = await mongoose.connection.startSession();
   try {
     await session.withTransaction(async () => {
@@ -168,7 +155,10 @@ router.post('/confirm-shift', requireTelegramRoles(['admin', 'warehouse']), asyn
         { session }
       );
 
-      // Release all locked tasks and reset skippedBy so the fresh shift starts clean.
+      // Release all locked/pending tasks and reset skippedBy for a clean shift.
+      // skippedBy is used by the web picking flow: the skip endpoint writes to it
+      // and findAndLockNext filters with $nin so a worker won't see a task they skipped.
+      // Resetting here gives every worker a clean slate for the incoming shift.
       await PickingTask.updateMany(
         { status: { $in: ['locked', 'pending'] } },
         { $set: { status: 'pending', lockedBy: null, lockedAt: null, skippedBy: [] } },

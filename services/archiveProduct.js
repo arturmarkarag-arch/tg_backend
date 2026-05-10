@@ -30,6 +30,7 @@ async function archiveProduct(product, { notifyBuyers = false, bot = null } = {}
   const orderNotifications = []; // collected inside tx, emitted after commit
   let cancelledCount = 0;
   let oldOrderNumber;
+  let affectedBlockIds = [];
 
   const session = await mongoose.connection.startSession();
   session.startTransaction();
@@ -79,6 +80,17 @@ async function archiveProduct(product, { notifyBuyers = false, bot = null } = {}
     // ── 4. Shift remaining products down ────────────────────────────────────
     await shiftDown({ status: { $ne: 'archived' }, orderNumber: { $gt: oldOrderNumber } }, session);
 
+    // ── 5. Remove from blocks (inside transaction so it's atomic with archive) ──
+    const affectedBlocks = await Block.find({ productIds: product._id }, 'blockId').session(session).lean();
+    affectedBlockIds = affectedBlocks.map((b) => b.blockId);
+    if (affectedBlockIds.length) {
+      await Block.updateMany(
+        { productIds: product._id },
+        { $pull: { productIds: product._id }, $inc: { version: 1 } },
+        { session }
+      );
+    }
+
     await session.commitTransaction();
   } catch (err) {
     await session.abortTransaction();
@@ -110,16 +122,8 @@ async function archiveProduct(product, { notifyBuyers = false, bot = null } = {}
     io.emit('product_archived', { productId: String(product._id) });
   } catch (_) {}
 
-  // ── 5. Remove from blocks + broadcast ───────────────────────────────────
-  const affectedBlocks = await Block.find({ productIds: product._id }).lean();
-  const affectedBlockIds = affectedBlocks.map((b) => b.blockId);
-
+  // ── 5. Broadcast block updates (blocks were already updated inside the transaction) ───
   if (affectedBlockIds.length) {
-    await Block.updateMany(
-      { productIds: product._id },
-      { $pull: { productIds: product._id }, $inc: { version: 1 } }
-    );
-
     try {
       const io = getIO();
       const updatedBlocks = await Block.find({ blockId: { $in: affectedBlockIds } }).lean();

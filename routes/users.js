@@ -11,12 +11,6 @@ const router = express.Router();
 router.use(telegramAuth);
 router.use(requireTelegramRole('admin'));
 
-// eslint-disable-next-line no-unused-vars
-async function syncDeliveryGroupMembership(_telegramId, _groupId) {
-  // No-op: DeliveryGroup.members has been removed.
-  // Membership is now determined via User.shopId -> Shop.deliveryGroupId.
-}
-
 async function syncUserWarehouseZone(user) {
   if (user.role === 'seller') {
     let zone = '';
@@ -293,7 +287,6 @@ router.post('/', async (req, res) => {
     await user.save();
   }
 
-  await syncDeliveryGroupMembership(user.telegramId, user.deliveryGroupId);
   user = await syncUserWarehouseZone(user);
   res.status(existing ? 200 : 201).json(user);
 });
@@ -322,7 +315,6 @@ router.patch('/:telegramId/shop', async (req, res) => {
       { shopId: shopId || null, deliveryGroupId },
       { new: true }
     );
-    await syncDeliveryGroupMembership(user.telegramId, user.deliveryGroupId);
 
     if (oldShopId !== newShopId) {
       const [oldShop, newShop, activeOrders] = await Promise.all([
@@ -362,7 +354,6 @@ router.patch('/:telegramId', async (req, res) => {
       payload,
       { new: true, runValidators: true }
     );
-    await syncDeliveryGroupMembership(user.telegramId, user.deliveryGroupId);
     const updatedUser = await syncUserWarehouseZone(user);
 
     // Log shop and role changes
@@ -404,11 +395,6 @@ router.patch('/:telegramId', async (req, res) => {
 router.delete('/:telegramId', async (req, res) => {
   const user = await User.findOneAndDelete({ telegramId: req.params.telegramId });
   if (!user) return res.status(404).json({ error: 'User not found' });
-  // Remove from all delivery groups
-  await DeliveryGroup.updateMany(
-    { members: user.telegramId },
-    { $pull: { members: user.telegramId } }
-  );
   res.json({ message: 'User deleted' });
 });
 
