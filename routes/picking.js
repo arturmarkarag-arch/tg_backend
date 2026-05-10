@@ -8,7 +8,7 @@ const DeliveryGroup = require('../models/DeliveryGroup');
 const { requireTelegramRoles } = require('../middleware/telegramAuth');
 const { archiveProduct, getProductTitle } = require('../services/archiveProduct');
 const { buildPickingTasksFromOrders } = require('../telegramBot');
-const { isOrderingOpen, getWarsawNow, DAY_FULL_UK, getCurrentOrderingSessionId } = require('../utils/orderingSchedule');
+const { isOrderingOpen, getWarsawNow, DAY_FULL_UK, getCurrentOrderingSessionId, getOrderingWindowCloseAt } = require('../utils/orderingSchedule');
 
 const { getOrderingSchedule } = require('../utils/getOrderingSchedule');
 
@@ -193,7 +193,8 @@ router.post('/start-session', requireTelegramRoles(['warehouse', 'admin']), asyn
         const schedule = await getOrderingSchedule();
         const { isOpen, message } = isOrderingOpen(group.dayOfWeek, schedule);
         if (isOpen) {
-          return res.json({ windowOpen: true, message });
+          const windowCloseAt = getOrderingWindowCloseAt(group.dayOfWeek, schedule).toISOString();
+          return res.json({ windowOpen: true, message, windowCloseAt });
         }
         // Picking is only allowed on the actual delivery day.
         const { dayOfWeek: nowDOW } = getWarsawNow();

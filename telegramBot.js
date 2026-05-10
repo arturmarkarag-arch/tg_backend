@@ -404,7 +404,12 @@ const ALLOWED_TELEGRAM_GROUP_IDS = (process.env.TELEGRAM_ALLOWED_GROUP_IDS || ''
   .filter(Boolean)
   .map((id) => Number(id));
 
-function isAuthorizedGroup(chatId) {
+async function isAuthorizedGroup(chatId) {
+  try {
+    const { getAllowedGroupIds } = require('./routes/admin');
+    const ids = await getAllowedGroupIds();
+    if (ids.length) return ids.includes(String(chatId));
+  } catch (_) { /* fallback to env */ }
   if (!ALLOWED_TELEGRAM_GROUP_IDS.length) return false;
   return ALLOWED_TELEGRAM_GROUP_IDS.includes(Number(chatId));
 }
@@ -1529,7 +1534,7 @@ async function initBot(token) {
         updateUserBotActivity(chatId).catch(() => {});
       }
 
-      if (isGroupChat && !isAuthorizedGroup(chatId)) {
+      if (isGroupChat && !(await isAuthorizedGroup(chatId))) {
         if (msg.photo?.length && (isPriceLookupCaption(msg.caption || '') || isBarcodeLookupCaption(msg.caption || ''))) {
           await bot.sendMessage(chatId, 'Цей груповий чат не авторизовано. Зверніться до адміністратора для підключення бота.');
         }
@@ -1678,7 +1683,7 @@ ${buildProductInfoText(product)}`;
 
       if (text === '/start') {
         if (isGroupChat) {
-          const groupMessage = isAuthorizedGroup(chatId)
+          const groupMessage = (await isAuthorizedGroup(chatId))
             ? 'Бот активовано для цього групового чату. Надішліть фото з підписом "PRICE", щоб знайти товар за базою.'
             : 'Цей груповий чат не підключено. Зверніться до адміністратора для авторизації.';
           await bot.sendMessage(chatId, groupMessage);
@@ -1944,10 +1949,10 @@ ${buildProductInfoText(product)}`;
             let deliveryGroupId = request.deliveryGroupId || '';
             let warehouseZone   = '';
             if (shopId) {
-              const shop = await Shop.findById(shopId).lean();
+              const shop = await Shop.findById(shopId).populate('cityId', 'name').lean();
               if (shop) {
                 shopName        = shop.name;
-                shopCity        = shop.city;
+                shopCity        = shop.cityId?.name || '';
                 deliveryGroupId = shop.deliveryGroupId || '';
                 if (deliveryGroupId) {
                   const grp = await DeliveryGroup.findById(deliveryGroupId).lean();

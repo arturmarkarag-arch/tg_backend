@@ -1,11 +1,13 @@
 const express = require('express');
 const mongoose = require('mongoose');
 const Order = require('../models/Order');
+const Counter = require('../models/Counter');
 const Product = require('../models/Product');
 const Receipt = require('../models/Receipt');
 const User = require('../models/User');
 const Shop = require('../models/Shop');
 const DeliveryGroup = require('../models/DeliveryGroup');
+const PickingTask = require('../models/PickingTask');
 const { getTelegramAuth } = require('../utils/validateTelegramInitData');
 const { telegramAuth, requireTelegramRoles } = require('../middleware/telegramAuth');
 const { getIO } = require('../socket');
@@ -15,6 +17,15 @@ const { getOrderingSchedule } = require('../utils/getOrderingSchedule');
 
 const router = express.Router();
 const staffOnly = requireTelegramRoles(['admin', 'warehouse']);
+
+async function getNextOrderNumber() {
+  const counter = await Counter.findOneAndUpdate(
+    { name: 'orderNumber' },
+    { $inc: { seq: 1 } },
+    { upsert: true, new: true },
+  );
+  return counter.seq;
+}
 
 /**
  * Middleware: returns 423 Locked when the ordering window is closed for a seller.
@@ -147,9 +158,9 @@ router.get('/', async (req, res) => {
     const snap = order.buyerSnapshot;
     obj.buyer = {
       telegramId: order.buyerTelegramId,
-      shopName: snap?.shopName ?? buyer?.shopName ?? '',
-      shopAddress: snap?.shopAddress ?? buyer?.shopAddress ?? '',
-      shopCity: snap?.shopCity ?? buyer?.shopCity ?? '',
+      shopName: snap?.shopName ?? '',
+      shopAddress: snap?.shopAddress ?? '',
+      shopCity: snap?.shopCity ?? '',
       firstName: buyer?.firstName ?? '',
       lastName: buyer?.lastName ?? '',
       phoneNumber: buyer?.phoneNumber ?? '',
@@ -188,9 +199,9 @@ router.get('/transit/active', staffOnly, async (req, res) => {
         ...o,
         buyerDetails: {
           telegramId: o.buyerTelegramId,
-          shopName: snap?.shopName ?? buyer.shopName ?? '',
-          shopAddress: snap?.shopAddress ?? buyer.shopAddress ?? '',
-          shopCity: snap?.shopCity ?? buyer.shopCity ?? '',
+          shopName: snap?.shopName ?? '',
+          shopAddress: snap?.shopAddress ?? '',
+          shopCity: snap?.shopCity ?? '',
           firstName: buyer.firstName ?? '',
           lastName: buyer.lastName ?? '',
           phoneNumber: buyer.phoneNumber ?? '',
@@ -235,9 +246,9 @@ router.get('/:id', async (req, res) => {
   const snap = obj.buyerSnapshot;
   obj.buyer = {
     telegramId: order.buyerTelegramId,
-    shopName: snap?.shopName ?? buyer?.shopName ?? '',
-    shopAddress: snap?.shopAddress ?? buyer?.shopAddress ?? '',
-    shopCity: snap?.shopCity ?? buyer?.shopCity ?? '',
+    shopName: snap?.shopName ?? '',
+    shopAddress: snap?.shopAddress ?? '',
+    shopCity: snap?.shopCity ?? '',
     firstName: buyer?.firstName ?? '',
     lastName: buyer?.lastName ?? '',
     phoneNumber: buyer?.phoneNumber ?? '',
@@ -293,7 +304,7 @@ router.post('/', async (req, res) => {
         message: 'Вас не призначено до жодного магазину. Зверніться до адміністратора.',
       });
     }
-    shop = await Shop.findById(buyer.shopId).lean();
+    shop = await Shop.findById(buyer.shopId).populate('cityId', 'name').lean();
     if (!shop || !shop.deliveryGroupId) {
       return res.status(403).json({
         error: 'no_delivery_group',
@@ -382,7 +393,7 @@ router.post('/', async (req, res) => {
   const buyerSnapshot = group ? {
     shopId: buyer.shopId || null,
     shopName: shop?.name || buyer.shopName || '',
-    shopCity: shop?.city || buyer.shopCity || '',
+    shopCity: shop?.cityId?.name || '',
     shopAddress: buyer.shopAddress || '',
     deliveryGroupId: String(group._id),
   } : {
@@ -436,6 +447,7 @@ router.post('/', async (req, res) => {
         totalPrice,
         orderingSessionId: currentSessionId,
         buyerSnapshot,
+        orderNumber: await getNextOrderNumber(),
         ...(sanitizedKey ? { idempotencyKey: sanitizedKey } : {}),
       });
       await order.save({ session: mongoSession });
@@ -497,17 +509,26 @@ router.patch('/:id/snapshot', staffOnly, async (req, res) => {
   const { shopId } = req.body;
   if (!shopId) return res.status(400).json({ error: 'shopId is required' });
 
-  const shop = await Shop.findById(shopId).lean();
+  const shop = await Shop.findById(shopId).populate('cityId', 'name').lean();
   if (!shop) return res.status(400).json({ error: 'Магазин не знайдено' });
 
   if (!order.buyerSnapshot) order.buyerSnapshot = {};
   order.buyerSnapshot.shopId = String(shop._id);
   order.buyerSnapshot.shopName = shop.name || '';
-  order.buyerSnapshot.shopCity = shop.city || '';
+  order.buyerSnapshot.shopCity = shop.cityId?.name || '';
   order.buyerSnapshot.deliveryGroupId = shop.deliveryGroupId || '';
 
   order.markModified('buyerSnapshot');
   await order.save();
+
+  // Sync shopName in any active PickingTask items that reference this order.
+  // This ensures warehouse workers see the correct shop name if picking is already in progress.
+  await PickingTask.updateMany(
+    { 'items.orderId': order._id, status: { $in: ['pending', 'locked'] } },
+    { $set: { 'items.$[elem].shopName': shop.name || '' } },
+    { arrayFilters: [{ 'elem.orderId': order._id }] },
+  );
+
   res.json(order);
 });
 

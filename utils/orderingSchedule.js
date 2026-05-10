@@ -106,7 +106,7 @@ function isOrderingOpen(deliveryDayOfWeek, schedule = {}) {
     if (nowMins >= openMins) {
       return {
         isOpen: true,
-        message: `Замовлення відкрито. Закривається в ${DAY_FULL_UK[closeDay]} о ${fmt(closeHour, closeMinute)}`,
+        message: `Закривається в ${DAY_FULL_UK[closeDay]} о ${fmt(closeHour, closeMinute)}`,
       };
     }
     return {
@@ -120,7 +120,7 @@ function isOrderingOpen(deliveryDayOfWeek, schedule = {}) {
     if (nowMins < closeMins) {
       return {
         isOpen: true,
-        message: `Замовлення відкрито. Закривається сьогодні о ${fmt(closeHour, closeMinute)}`,
+        message: `Закривається сьогодні о ${fmt(closeHour, closeMinute)}`,
       };
     }
     return {
@@ -142,13 +142,13 @@ function isOrderingOpen(deliveryDayOfWeek, schedule = {}) {
     // We're on a day strictly inside the open window
     return {
       isOpen: true,
-      message: `Замовлення відкрито. Закривається в ${DAY_FULL_UK[closeDay]} о ${fmt(closeHour, closeMinute)}`,
+      message: `Закривається в ${DAY_FULL_UK[closeDay]} о ${fmt(closeHour, closeMinute)}`,
     };
   }
 
   return {
     isOpen: false,
-    message: `Замовлення закрито. Відкриються в ${DAY_FULL_UK[openDay]} о ${fmt(openHour, openMinute)}, закриються в ${DAY_FULL_UK[closeDay]} о ${fmt(closeHour, closeMinute)}`,
+    message: `Відкриються в ${DAY_FULL_UK[openDay]} о ${fmt(openHour, openMinute)}, закриються в ${DAY_FULL_UK[closeDay]} о ${fmt(closeHour, closeMinute)}`,
   };
 }
 
@@ -262,4 +262,48 @@ function getCurrentOrderingSessionId(groupId, deliveryDayOfWeek, schedule = {}) 
   return `${groupId}:${windowOpenAt.toISOString()}`;
 }
 
-module.exports = { isOrderingOpen, getWindowDescription, getWarsawNow, getOrderingWindowOpenAt, getCurrentOrderingSessionId, DAY_SHORT_UK, DAY_FULL_UK };
+/**
+ * Returns the UTC Date when the current ordering window will close for the given group.
+ * This is the next future occurrence of (closeDay at closeHour:closeMinute Warsaw time).
+ *
+ * @param {number} deliveryDayOfWeek  0=Sun … 6=Sat
+ * @param {{ closeHour?: number, closeMinute?: number }} [schedule]
+ * @returns {Date}
+ */
+function getOrderingWindowCloseAt(deliveryDayOfWeek, schedule = {}) {
+  const closeHour   = schedule.closeHour   ?? CLOSE_HOUR;
+  const closeMinute = schedule.closeMinute ?? CLOSE_MINUTE;
+  const closeDay    = deliveryDayOfWeek;
+
+  const { dayOfWeek: nowDOW, hour: nowHour, minute: nowMinute } = getWarsawNow();
+  const nowMins   = nowHour * 60 + nowMinute;
+  const closeMins = closeHour * 60 + closeMinute;
+
+  // How many days ahead is the next occurrence of closeDay?
+  let daysAhead = (closeDay - nowDOW + 7) % 7;
+  // If today IS closeDay but we've already passed closeTime → next week
+  if (daysAhead === 0 && nowMins >= closeMins) {
+    daysAhead = 7;
+  }
+
+  // Get current Warsaw calendar date
+  const now = new Date();
+  const dateParts = new Intl.DateTimeFormat('en-US', {
+    timeZone: TIMEZONE,
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour12: false,
+  }).formatToParts(now);
+  const gd = (t) => parseInt(dateParts.find((p) => p.type === t)?.value ?? '0', 10);
+
+  const target = new Date(Date.UTC(gd('year'), gd('month') - 1, gd('day') + daysAhead));
+
+  return warsawWallClockToUTC(
+    target.getUTCFullYear(),
+    target.getUTCMonth() + 1,
+    target.getUTCDate(),
+    closeHour,
+    closeMinute,
+  );
+}
+
+module.exports = { isOrderingOpen, getWindowDescription, getWarsawNow, getOrderingWindowOpenAt, getOrderingWindowCloseAt, getCurrentOrderingSessionId, DAY_SHORT_UK, DAY_FULL_UK };

@@ -1,8 +1,7 @@
 const express = require('express');
 const crypto = require('crypto');
-const Busboy = require('busboy');
-const sharp = require('sharp');
 const { S3Client, PutObjectCommand, HeadBucketCommand, GetObjectCommand } = require('@aws-sdk/client-s3');
+const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 const { shiftUp, shiftDown } = require('../utils/shiftOrderNumbers');
 const { normalizeBarcode } = require('../utils/barcodeScanner');
 const Block = require('../models/Block');
@@ -36,57 +35,18 @@ const s3Client = new S3Client({
   }
 })();
 
-function parseMultipart(req) {
-  return new Promise((resolve, reject) => {
-    const busboy = Busboy({ headers: req.headers, limits: { fileSize: 10 * 1024 * 1024 } });
-    const fields = {};
-    const files = [];
-
-    busboy.on('field', (name, val) => { fields[name] = val; });
-    busboy.on('file', (name, stream, info) => {
-      const allowed = /^image\/(jpeg|png|webp|gif)$/i;
-      if (!allowed.test(info.mimeType)) { stream.resume(); return; }
-      const chunks = [];
-      stream.on('data', (chunk) => chunks.push(chunk));
-      stream.on('end', () => {
-        if (stream.truncated) {
-          return reject(new Error('File size limit exceeded'));
-        }
-
-        files.push({ buffer: Buffer.concat(chunks), originalname: info.filename, mimetype: info.mimeType });
-      });
-    });
-
-    busboy.on('close', () => resolve({ fields, files }));
-    busboy.on('error', reject);
-    req.pipe(busboy);
-  });
-}
-
-// Compress raster images to JPEG ≤200 KB before storing on R2.
-// GIFs are stored as-is to preserve animation.
-async function compressImage(buffer, contentType) {
-  if (/^image\/gif$/i.test(contentType)) {
-    return { buffer, contentType };
-  }
-  const compressed = await sharp(buffer)
-    .resize({ width: 1200, height: 1200, fit: 'inside', withoutEnlargement: true })
-    .jpeg({ quality: 78, mozjpeg: true })
-    .toBuffer();
-  return { buffer: compressed, contentType: 'image/jpeg' };
-}
-
-async function uploadToR2(fileBuffer, filename, contentType) {
-  const { buffer, contentType: finalContentType } = await compressImage(fileBuffer, contentType);
-  const ext = /^image\/gif$/i.test(contentType) ? (filename.split('.').pop() || 'gif') : 'jpg';
-  const safeFilename = `${crypto.randomUUID()}.${ext.replace(/[^a-zA-Z0-9]/g, '')}`;
-  await s3Client.send(new PutObjectCommand({
+// Generate a presigned PUT URL for direct client-to-R2 upload
+async function getUploadPresignedUrl(ext = 'jpg') {
+  const safeExt = ext.replace(/[^a-zA-Z0-9]/g, '').toLowerCase() || 'jpg';
+  const filename = `${crypto.randomUUID()}.${safeExt}`;
+  const key = `products/${filename}`;
+  const command = new PutObjectCommand({
     Bucket: process.env.R2_BUCKET_NAME,
-    Key: `products/${safeFilename}`,
-    Body: buffer,
-    ContentType: finalContentType,
-  }));
-  return safeFilename;
+    Key: key,
+    ContentType: safeExt === 'gif' ? 'image/gif' : 'image/jpeg',
+  });
+  const uploadUrl = await getSignedUrl(s3Client, command, { expiresIn: 300 });
+  return { uploadUrl, filename, key };
 }
 
 function getProductTitle(product) {
@@ -94,6 +54,19 @@ function getProductTitle(product) {
 }
 
 const router = express.Router();
+
+// GET /api/v1/products/upload-url?ext=jpg — returns a presigned PUT URL for direct R2 upload
+router.get('/upload-url', staffOnly, async (req, res) => {
+  try {
+    const ext = String(req.query.ext || 'jpg').replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
+    const allowed = ['jpg', 'jpeg', 'png', 'webp', 'gif'];
+    if (!allowed.includes(ext)) return res.status(400).json({ error: 'Непідтримуваний формат' });
+    const result = await getUploadPresignedUrl(ext === 'jpeg' ? 'jpg' : ext);
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
 
 router.get('/images/:filename', async (req, res) => {
   const filename = req.params.filename.replace(/[^a-zA-Z0-9._-]/g, '');
@@ -273,24 +246,22 @@ router.post('/broadcast', async (req, res) => {
 });
 */
 
+// POST /api/v1/products/report-missing
+// Body JSON: { barcode, filename } — client uploads photo to R2 first, then sends filename
+// Server fetches buffer from R2 and forwards to Telegram groups
 router.post('/report-missing', async (req, res) => {
-  const parsed = await parseMultipart(req);
-  const barcodeValue = String(parsed.fields.barcode || '').trim();
+  const barcodeValue = String(req.body?.barcode || '').trim();
+  const filename = String(req.body?.filename || '').replace(/[^a-zA-Z0-9._-]/g, '');
 
   if (!barcodeValue) {
     return res.status(400).json({ error: 'barcode field is required' });
   }
-
-  if (!parsed.files.length) {
-    return res.status(400).json({ error: 'photo file is required' });
+  if (!filename) {
+    return res.status(400).json({ error: 'filename is required' });
   }
 
-  const file = parsed.files[0];
-  const allowedGroupIds = (process.env.TELEGRAM_ALLOWED_GROUP_IDS || '')
-    .split(',')
-    .map((id) => id.trim())
-    .filter(Boolean)
-    .map((id) => Number(id));
+  const { getAllowedGroupIds } = require('./admin');
+  const allowedGroupIds = await getAllowedGroupIds();
 
   if (!allowedGroupIds.length) {
     return res.status(500).json({ error: 'No allowed Telegram groups configured' });
@@ -301,6 +272,15 @@ router.post('/report-missing', async (req, res) => {
   if (!bot) {
     return res.status(500).json({ error: 'Telegram bot is not initialized' });
   }
+
+  // Fetch photo buffer from R2
+  const r2Object = await s3Client.send(new GetObjectCommand({
+    Bucket: process.env.R2_BUCKET_NAME,
+    Key: `products/${filename}`,
+  }));
+  const chunks = [];
+  for await (const chunk of r2Object.Body) chunks.push(chunk);
+  const photoBuffer = Buffer.concat(chunks);
 
   const normalizedBarcode = normalizeBarcode(barcodeValue);
   const caption = `Штрихкод: ${normalizedBarcode}\nЯка ціна?`;
@@ -319,9 +299,9 @@ router.post('/report-missing', async (req, res) => {
     }
 
     try {
-      const sent = await bot.sendPhoto(chatId, file.buffer, {
+      const sent = await bot.sendPhoto(chatId, photoBuffer, {
         caption,
-        filename: file.originalname || 'photo.jpg',
+        filename: `${normalizedBarcode}.jpg`,
       });
       const sentPhotoFileId = String(sent.photo?.[sent.photo.length - 1]?.file_id || '');
       await SearchProduct.findOneAndUpdate(
@@ -343,11 +323,7 @@ router.post('/report-missing', async (req, res) => {
     }
   }));
 
-  return res.json({
-    barcode: barcodeValue,
-    caption,
-    sent: sendResults,
-  });
+  return res.json({ barcode: barcodeValue, caption, sent: sendResults });
 });
 
 router.get('/:id', async (req, res) => {
@@ -359,30 +335,29 @@ router.get('/:id', async (req, res) => {
 // POST /api/products/block-upload-photos
 // Each uploaded photo creates a new product (no name/price/category) and appends
 // it to the specified block, preserving the exact selection order.
+// POST /api/v1/products/block-upload-photos
+// Body: { blockId, filenames: string[] } — filenames already uploaded to R2 by client
 router.post('/block-upload-photos', staffOnly, async (req, res) => {
-  const { fields, files } = await parseMultipart(req);
-  const blockId = Number(fields.blockId);
+  const blockId = Number(req.body?.blockId);
+  const filenames = Array.isArray(req.body?.filenames) ? req.body.filenames : [];
 
   if (!blockId || blockId < 1) {
     return res.status(400).json({ error: 'Invalid blockId' });
   }
-  if (!files.length) {
-    return res.status(400).json({ error: 'No files provided' });
+  if (!filenames.length) {
+    return res.status(400).json({ error: 'No filenames provided' });
   }
 
   const block = await Block.findOne({ blockId });
   if (!block) return res.status(404).json({ error: 'Block not found' });
 
-  // Reserve a contiguous range of orderNumbers by finding the current max
   const maxProduct = await Product.findOne({}, 'orderNumber').sort({ orderNumber: -1 }).lean();
   let nextOrderNumber = (maxProduct?.orderNumber ?? 0) + 1;
 
   const results = [];
-
-  for (const file of files) {
-    const filename = await uploadToR2(file.buffer, file.originalname, file.mimetype);
-    const imageUrl = `/api/v1/products/images/${filename}`;
-
+  for (const filename of filenames) {
+    const safeFilename = String(filename).replace(/[^a-zA-Z0-9._-]/g, '');
+    const imageUrl = `/api/v1/products/images/${safeFilename}`;
     const product = new Product({
       orderNumber: nextOrderNumber,
       price: 0,
@@ -390,13 +365,11 @@ router.post('/block-upload-photos', staffOnly, async (req, res) => {
       status: 'pending',
       source: 'block_photo',
       imageUrls: [imageUrl],
-      imageNames: [filename],
+      imageNames: [safeFilename],
     });
     await product.save();
-
     block.productIds.push(product._id);
     nextOrderNumber += 1;
-
     results.push({ productId: String(product._id), imageUrl, index: results.length });
   }
 
@@ -414,50 +387,33 @@ router.post('/block-upload-photos', staffOnly, async (req, res) => {
     }
   } catch (_) {}
 
-  res.json({
-    uploaded: results.length,
-    total: files.length,
-    results,
-  });
+  res.json({ uploaded: results.length, total: filenames.length, results });
 });
 
 // POST /api/products/receive — save a product from the web Receive page.
 // Required: photo file, quantity.
 // Optional: price, quantityPerPackage.
 // status is set to 'active' when both price > 0 AND quantityPerPackage > 0, otherwise 'pending'.
+// POST /api/v1/products/receive
+// Body JSON: { filename, quantity, price?, quantityPerPackage?, notes?, status? }
 router.post('/receive', staffOnly, async (req, res) => {
   try {
-    const { fields, files } = await parseMultipart(req);
+    const body = req.body;
+    const filename = String(body?.filename || '').replace(/[^a-zA-Z0-9._-]/g, '');
+    if (!filename) return res.status(400).json({ error: "Фото є обов'язковим" });
 
-    if (!files.length) {
-      return res.status(400).json({ error: "Фото є обов'язковим" });
-    }
-
-    const quantity = Number(fields.quantity ?? 0);
+    const quantity = Number(body.quantity ?? 0);
     if (!Number.isInteger(quantity) || quantity < 0) {
       return res.status(400).json({ error: 'Кількість має бути цілим числом >= 0' });
     }
 
-    const price =
-      fields.price !== undefined && fields.price !== ''
-        ? Number(fields.price)
-        : 0;
-    const quantityPerPackage =
-      fields.quantityPerPackage !== undefined && fields.quantityPerPackage !== ''
-        ? Number(fields.quantityPerPackage)
-        : 0;
-
+    const price = body.price !== undefined && body.price !== '' ? Number(body.price) : 0;
+    const quantityPerPackage = body.quantityPerPackage !== undefined && body.quantityPerPackage !== '' ? Number(body.quantityPerPackage) : 0;
     const isConfirmed = price > 0 && quantityPerPackage > 0;
-    // Client can explicitly request 'pending' to prevent auto-promotion when price+qty are filled
-    const explicitPending = fields.status === 'pending';
+    const explicitPending = body.status === 'pending';
 
-    const maxProduct = await Product.findOne({ status: { $ne: 'archived' } })
-      .sort({ orderNumber: -1 })
-      .lean();
+    const maxProduct = await Product.findOne({ status: { $ne: 'archived' } }).sort({ orderNumber: -1 }).lean();
     const nextOrderNumber = (maxProduct?.orderNumber ?? 0) + 1;
-
-    const file = files[0];
-    const filename = await uploadToR2(file.buffer, file.originalname, file.mimetype);
     const imageUrl = `/api/v1/products/images/${filename}`;
 
     const product = new Product({
@@ -467,13 +423,12 @@ router.post('/receive', staffOnly, async (req, res) => {
       quantityPerPackage,
       status: explicitPending ? 'pending' : isConfirmed ? 'active' : 'pending',
       source: 'receive',
-      notes: fields.notes ? String(fields.notes) : '',
+      notes: body.notes ? String(body.notes) : '',
       originalImageUrl: imageUrl,
       imageUrls: [imageUrl],
       imageNames: [filename],
     });
     await product.save();
-
     res.status(201).json(product);
   } catch (err) {
     console.error('[products/receive] Error:', err);
@@ -481,17 +436,10 @@ router.post('/receive', staffOnly, async (req, res) => {
   }
 });
 
+// POST /api/v1/products
+// Body JSON: { orderNumber, price, quantity, filename?, ...rest }
 router.post('/', staffOnly, async (req, res) => {
-  let fields, files = [];
-
-  if (req.is('multipart/form-data')) {
-    const parsed = await parseMultipart(req);
-    fields = parsed.fields;
-    files = parsed.files;
-  } else {
-    fields = req.body;
-  }
-
+  const fields = req.body;
   const { orderNumber, name, category, brand, model, warehouse, status } = fields;
   const price = Number(fields.price ?? 0);
   const quantity = Number(fields.quantity ?? 0);
@@ -506,10 +454,11 @@ router.post('/', staffOnly, async (req, res) => {
 
   let imageUrls = [];
   let imageNames = [];
-  for (const file of files) {
-    const filename = await uploadToR2(file.buffer, file.originalname, file.mimetype);
-    imageUrls.push(`/api/v1/products/images/${filename}`);
-    imageNames.push(filename);
+  const filenames = Array.isArray(fields.filenames) ? fields.filenames
+    : (fields.filename ? [fields.filename] : []);
+  for (const fn of filenames) {
+    const safe = String(fn).replace(/[^a-zA-Z0-9._-]/g, '');
+    if (safe) { imageUrls.push(`/api/v1/products/images/${safe}`); imageNames.push(safe); }
   }
 
   const product = new Product({
@@ -533,14 +482,7 @@ router.patch('/:id', staffOnly, async (req, res) => {
   const product = await Product.findById(req.params.id);
   if (!product) return res.status(404).json({ error: 'Product not found' });
 
-  let fields = req.body;
-  let files = [];
-
-  if (req.is('multipart/form-data')) {
-    const parsed = await parseMultipart(req);
-    fields = parsed.fields;
-    files = parsed.files;
-  }
+  const fields = req.body;
 
   const { orderNumber, name, category, brand, model, warehouse, status, price, quantity } = fields;
   const parsedOrderNumber = orderNumber !== undefined ? Number(orderNumber) : product.orderNumber;
@@ -575,7 +517,8 @@ router.patch('/:id', staffOnly, async (req, res) => {
   if (quantity !== undefined) product.quantity = Number(quantity);
   if (fields.notes !== undefined) product.notes = String(fields.notes);
   if (fields.labelPositions !== undefined) {
-    try { product.labelPositions = JSON.parse(fields.labelPositions); } catch {}
+    const lp = fields.labelPositions;
+    product.labelPositions = typeof lp === 'string' ? JSON.parse(lp) : lp;
   }
   if (fields.quantityPerPackage !== undefined) {
     product.quantityPerPackage = Number(fields.quantityPerPackage);
@@ -584,13 +527,14 @@ router.patch('/:id', staffOnly, async (req, res) => {
     product.barcode = String(fields.barcode || '').trim();
   }
 
-  if (files.length > 0) {
+  const patchFilenames = Array.isArray(fields.filenames) ? fields.filenames
+    : (fields.filename ? [fields.filename] : []);
+  if (patchFilenames.length > 0) {
     const imageUrls = [];
     const imageNames = [];
-    for (const file of files) {
-      const filename = await uploadToR2(file.buffer, file.originalname, file.mimetype);
-      imageUrls.push(`/api/v1/products/images/${filename}`);
-      imageNames.push(filename);
+    for (const fn of patchFilenames) {
+      const safe = String(fn).replace(/[^a-zA-Z0-9._-]/g, '');
+      if (safe) { imageUrls.push(`/api/v1/products/images/${safe}`); imageNames.push(safe); }
     }
     product.imageUrls = imageUrls;
     product.imageNames = imageNames;

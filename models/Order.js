@@ -32,12 +32,14 @@ const OrderSchema = new mongoose.Schema(
     idempotencyKey: { type: String },
     orderingSessionId: { type: String, default: '' },
     buyerSnapshot: { type: BuyerSnapshotSchema, default: null },
+    orderNumber: { type: Number, default: null },
   },
   { timestamps: true }
 );
 
 OrderSchema.index({ idempotencyKey: 1 }, { unique: true, sparse: true });
 OrderSchema.index({ orderingSessionId: 1 });
+OrderSchema.index({ orderNumber: 1 }, { unique: true, sparse: true });
 
 function normalizeOrderItems(items = []) {
   const grouped = new Map();

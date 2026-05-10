@@ -3,6 +3,7 @@ const User = require('../models/User');
 const Order = require('../models/Order');
 const DeliveryGroup = require('../models/DeliveryGroup');
 const Shop = require('../models/Shop');
+const City = require('../models/City');
 const { telegramAuth, requireTelegramRole } = require('../middleware/telegramAuth');
 const { isOrderingOpen, getOrderingWindowOpenAt } = require('../utils/orderingSchedule');
 
@@ -96,11 +97,22 @@ router.get('/', async (req, res) => {
   const pageSize = Math.min(500, Math.max(1, parseInt(req.query.pageSize) || 20));
   const roleFilter     = req.query.role || null;
   const groupFilter    = req.query.deliveryGroupId || null;
+  const cityFilter     = req.query.shopCity || null;
   const activityFilter = req.query.activityFilter || null; // 'no_cart' | 'no_order' | 'no_visit'
 
   const filter = {};
   if (roleFilter && roleFilter !== 'all') filter.role = roleFilter;
   if (groupFilter && groupFilter !== 'all') filter.deliveryGroupId = groupFilter;
+  if (cityFilter && cityFilter !== 'all') {
+    const city = await City.findOne({ name: cityFilter }).lean();
+    if (city) {
+      const shopsInCity = await Shop.find({ cityId: city._id }, '_id').lean();
+      filter.shopId = { $in: shopsInCity.map((s) => s._id) };
+    } else {
+      // No city found — return empty
+      filter.shopId = { $in: [] };
+    }
+  }
 
   // Window info — only when filtering sellers in a specific group
   let windowIsOpen = false;

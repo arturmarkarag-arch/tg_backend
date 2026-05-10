@@ -43,7 +43,7 @@ router.get('/', async (req, res) => {
     const result = shops.map((s) => ({
       ...s,
       cityId: s.cityId?._id ? String(s.cityId._id) : (s.cityId || null),
-      city: s.cityId?.name || s.city || '',
+      city: s.cityId?.name || '',
       sellerCount: countMap[String(s._id)] || 0,
     }));
 
@@ -78,7 +78,7 @@ router.get('/:id', async (req, res) => {
       .lean();
 
     const cityId = shop.cityId?._id ? String(shop.cityId._id) : (shop.cityId || null);
-    res.json({ ...shop, cityId, city: shop.cityId?.name || shop.city || '', sellers });
+    res.json({ ...shop, cityId, city: shop.cityId?.name || '', sellers });
   } catch (err) {
     console.error('[GET /shops/:id]', err.message);
     res.status(500).json({ error: err.message });

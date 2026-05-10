@@ -3,7 +3,7 @@ const { telegramAuth, requireTelegramRole } = require('../middleware/telegramAut
 const AppSetting = require('../models/AppSetting');
 const City = require('../models/City');
 const Shop = require('../models/Shop');
-const { listOpenAIModels } = require('../openaiClient');
+const { listOpenAIModels, initOpenAI } = require('../openaiClient');
 
 const router = express.Router();
 const OPENAI_MODEL_SETTING_KEY = 'openai.defaultModel';
@@ -169,4 +169,104 @@ router.delete('/cities/:id', telegramAuth, requireTelegramRole('admin'), async (
   }
 });
 
+// ── Telegram allowed groups ──────────────────────────────────────────────────
+const TELEGRAM_GROUPS_KEY = 'telegram.allowedGroupIds';
+
+async function getAllowedGroupIds() {
+  const fromDb = await getAppSetting(TELEGRAM_GROUPS_KEY, null);
+  if (Array.isArray(fromDb) && fromDb.length > 0) return fromDb.map(String);
+  // fallback to env
+  return (process.env.TELEGRAM_ALLOWED_GROUP_IDS || '')
+    .split(',').map((s) => s.trim()).filter(Boolean);
+}
+// ── OpenAI API Key ──────────────────────────────────────────────────────────
+const OPENAI_API_KEY_SETTING = 'openai.apiKey';
+
+function maskApiKey(key) {
+  if (!key) return '';
+  const n = key.length;
+  if (n <= 8) return '*'.repeat(n);
+  const q = Math.floor(n / 4);
+  const vis = Math.min(13, Math.max(6, Math.floor(q * 0.45)));
+  const off = Math.floor(q * 0.1);
+  return (
+    '******' +
+    key.slice(off, off + vis) +
+    '*'.repeat(5) +
+    key.slice(q + off, q + off + vis) +
+    '*****' +
+    key.slice(2 * q + off, 2 * q + off + vis) +
+    '****' +
+    key.slice(3 * q + off, 3 * q + off + vis) +
+    '****'
+  );
+}
+
+router.get('/openai-key', telegramAuth, requireTelegramRole('admin'), async (req, res) => {
+  try {
+    const fromDb = await getAppSetting(OPENAI_API_KEY_SETTING, null);
+    const key = fromDb || process.env.OPENAI_API_KEY || '';
+    res.json({
+      masked: maskApiKey(key),
+      isSet: Boolean(key),
+      source: fromDb ? 'db' : (process.env.OPENAI_API_KEY ? 'env' : 'none'),
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.put('/openai-key', telegramAuth, requireTelegramRole('admin'), async (req, res) => {
+  try {
+    const apiKey = String(req.body?.apiKey || '').trim();
+    if (!apiKey) return res.status(400).json({ error: 'apiKey не може бути порожнім' });
+    if (!apiKey.startsWith('sk-')) return res.status(400).json({ error: 'Невалідний ключ OpenAI (має починатись з sk-)' });
+    await setAppSetting(OPENAI_API_KEY_SETTING, apiKey);
+    initOpenAI(apiKey); // reinitialize live client
+    res.json({ masked: maskApiKey(apiKey), isSet: true, source: 'db' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.get('/telegram-groups', telegramAuth, requireTelegramRole('admin'), async (req, res) => {
+  try {
+    const ids = await getAllowedGroupIds();
+    res.json({ groups: ids });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.post('/telegram-groups', telegramAuth, requireTelegramRole('admin'), async (req, res) => {
+  try {
+    const groupId = String(req.body?.groupId || '').trim();
+    if (!groupId || !/^-?\d+$/.test(groupId)) {
+      return res.status(400).json({ error: 'groupId має бути числом' });
+    }
+    const current = await getAllowedGroupIds();
+    if (current.includes(groupId)) {
+      return res.status(409).json({ error: 'Ця група вже додана' });
+    }
+    const updated = [...current, groupId];
+    await setAppSetting(TELEGRAM_GROUPS_KEY, updated);
+    res.json({ groups: updated });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.delete('/telegram-groups/:groupId', telegramAuth, requireTelegramRole('admin'), async (req, res) => {
+  try {
+    const groupId = String(req.params.groupId).trim();
+    const current = await getAllowedGroupIds();
+    const updated = current.filter((id) => id !== groupId);
+    await setAppSetting(TELEGRAM_GROUPS_KEY, updated);
+    res.json({ groups: updated });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.getAllowedGroupIds = getAllowedGroupIds;
 module.exports = router;

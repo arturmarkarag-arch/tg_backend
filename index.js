@@ -13,11 +13,11 @@ const app = require('./app');
 const { initBot } = require('./telegramBot');
 const { initOpenAI } = require('./openaiClient');
 const { initSocket } = require('./socket');
+const AppSetting = require('./models/AppSetting');
 
 const PORT = Number(process.env.PORT) || 5000;
 const MONGODB_URI = process.env.MONGODB_URI || (process.env.NODE_ENV === 'production' ? null : 'mongodb://localhost:27017/tg_manager');
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 
 async function startServer() {
   try {
@@ -27,6 +27,9 @@ async function startServer() {
     await mongoose.connect(MONGODB_URI, { useNewUrlParser: true, useUnifiedTopology: true });
     console.log('Connected to MongoDB');
 
+    // Prefer key stored in DB (via admin settings), fall back to env
+    const keyFromDb = await AppSetting.findOne({ key: 'openai.apiKey' }).lean();
+    const OPENAI_API_KEY = keyFromDb?.value || process.env.OPENAI_API_KEY;
     initOpenAI(OPENAI_API_KEY);
     initBot(TELEGRAM_BOT_TOKEN);
 

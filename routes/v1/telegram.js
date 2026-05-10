@@ -115,7 +115,7 @@ router.post('/me', async (req, res) => {
   }
 
   // 3. Повертаємо профіль (без чутливих полів)
-  const userShop = user.shopId ? await Shop.findById(user.shopId).lean() : null;
+  const userShop = user.shopId ? await Shop.findById(user.shopId).populate('cityId', 'name').lean() : null;
   const resolvedGroupId = userShop?.deliveryGroupId || user.deliveryGroupId || '';
 
   // Обчислити sessionOpenAt для продавця та адміна з магазином (для визначення нової сесії на клієнті)
@@ -136,10 +136,10 @@ router.post('/me', async (req, res) => {
     firstName: user.firstName,
     lastName: user.lastName,
     shopId: userShop ? String(userShop._id) : null,
-    shop: userShop ? { _id: userShop._id, name: userShop.name, city: userShop.city, deliveryGroupId: userShop.deliveryGroupId, cartState: normalizeCartState(userShop.cartState) } : null,
+    shop: userShop ? { _id: userShop._id, name: userShop.name, city: userShop.cityId?.name || '', deliveryGroupId: userShop.deliveryGroupId, cartState: normalizeCartState(userShop.cartState) } : null,
     shopName: userShop?.name || user.shopName || '',
     shopNumber: user.shopNumber,
-    shopCity: userShop?.city || user.shopCity || '',
+    shopCity: userShop?.cityId?.name || '',
     deliveryGroupId: resolvedGroupId,
     warehouseZone: await resolveWarehouseZone(user),
     isWarehouseManager: user.isWarehouseManager || false,
@@ -172,7 +172,7 @@ router.patch('/me/shop', async (req, res) => {
       warehouseZone = group?.name || '';
     }
 
-    const shopCity = shop.cityId?.name || shop.city || '';
+    const shopCity = shop.cityId?.name || '';
     const shopName = shop.name || '';
     const deliveryGroupId = shop.deliveryGroupId ? String(shop.deliveryGroupId) : null;
 
@@ -362,7 +362,7 @@ router.post('/register-request', async (req, res) => {
   let shop = null;
   let group = null;
   if (role === 'seller') {
-    shop = await Shop.findById(shopId).lean();
+    shop = await Shop.findById(shopId).populate('cityId', 'name').lean();
     if (!shop || !shop.isActive) {
       return res.status(400).json({ error: 'Магазин не знайдено' });
     }
@@ -381,7 +381,7 @@ router.post('/register-request', async (req, res) => {
     lastName,
     shopId:          role === 'seller' ? String(shop._id) : null,
     shopName:        role === 'seller' ? shop.name        : '',
-    shopCity:        role === 'seller' ? shop.city        : '',
+    shopCity:        role === 'seller' ? (shop.cityId?.name || '') : '',
     deliveryGroupId: role === 'seller' ? shop.deliveryGroupId : '',
     role,
     status: 'pending',
@@ -395,7 +395,7 @@ router.post('/register-request', async (req, res) => {
     `Прізвище: ${lastName}\n` +
     `Роль: ${roleLabel}\n` +
     `Назва магазину: ${role === 'seller' ? shop.name : 'не вказано'}\n` +
-    `Місто: ${role === 'seller' ? shop.city : 'не вказано'}\n` +
+    `Місто: ${role === 'seller' ? (shop.cityId?.name || 'не вказано') : 'не вказано'}\n` +
     `Група доставки: ${role === 'seller' ? `${group.name} (${DAY_SHORT[group.dayOfWeek] || 'День'})` : 'не вказано'}\n` +
     `Запит створено: ${new Date().toLocaleString()}`;
 

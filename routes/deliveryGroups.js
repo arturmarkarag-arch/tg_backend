@@ -3,7 +3,7 @@ const DeliveryGroup = require('../models/DeliveryGroup');
 const User = require('../models/User');
 const Order = require('../models/Order');
 const Shop = require('../models/Shop');
-const { telegramAuth, requireTelegramRole } = require('../middleware/telegramAuth');
+const { telegramAuth, requireTelegramRole, requireTelegramRoles } = require('../middleware/telegramAuth');
 const {
   isOrderingOpen,
   getWindowDescription,
@@ -128,7 +128,7 @@ router.get('/summary', async (req, res) => {
  * GET /api/delivery-groups/:groupId/shop-status
  * Returns per-shop cart and ordered item counts for the current ordering session.
  */
-router.get('/:groupId/shop-status', telegramAuth, requireTelegramRole('admin'), async (req, res) => {
+router.get('/:groupId/shop-status', telegramAuth, requireTelegramRoles(['admin', 'warehouse']), async (req, res) => {
   const group = await DeliveryGroup.findById(req.params.groupId).lean();
   if (!group) return res.status(404).json({ error: 'Group not found' });
 
@@ -137,7 +137,8 @@ router.get('/:groupId/shop-status', telegramAuth, requireTelegramRole('admin'), 
   const currentSessionId = getCurrentOrderingSessionId(String(group._id), group.dayOfWeek, schedule);
 
   const shops = await Shop.find({ deliveryGroupId: String(group._id), isActive: true })
-    .select('name city cartState')
+    .select('name cityId cartState')
+    .populate('cityId', 'name')
     .lean();
 
   const shopIds = shops.map((s) => s._id);
@@ -165,7 +166,7 @@ router.get('/:groupId/shop-status', telegramAuth, requireTelegramRole('admin'), 
     return {
       shopId,
       shopName: shop.name,
-      shopCity: shop.city,
+      shopCity: shop.cityId?.name || '',
       cartItemCount,
       orderedItemCount: orderedByShop[shopId]?.size || 0,
     };
