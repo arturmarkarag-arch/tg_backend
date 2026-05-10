@@ -27,6 +27,16 @@ async function getNextOrderNumber() {
   return counter.seq;
 }
 
+function actorFromReq(req) {
+  const u = req.telegramUser;
+  if (!u) return { by: 'system', byName: '', byRole: 'system' };
+  return {
+    by: String(u.telegramId),
+    byName: [u.firstName, u.lastName].filter(Boolean).join(' '),
+    byRole: u.role,
+  };
+}
+
 /**
  * Middleware: returns 423 Locked when the ordering window is closed for a seller.
  * Staff (admin / warehouse) always pass through unchanged.
@@ -222,7 +232,9 @@ router.post('/:id/fulfill', telegramAuth, staffOnly, async (req, res) => {
     const order = await Order.findById(req.params.id);
     if (!order) return res.status(404).json({ error: 'Not found' });
 
+    const prevStatus = order.status;
     order.status = 'fulfilled';
+    order.history.push({ ...actorFromReq(req), action: 'status_changed', meta: { from: prevStatus, to: 'fulfilled' } });
     await order.save();
     res.json(order);
   } catch (error) {
@@ -404,6 +416,12 @@ router.post('/', async (req, res) => {
     deliveryGroupId: buyer.deliveryGroupId || '',
   };
 
+  const buyerActor = {
+    by: String(buyer.telegramId),
+    byName: [buyer.firstName, buyer.lastName].filter(Boolean).join(' '),
+    byRole: buyer.role,
+  };
+
   // Wrap the read-modify-write in a MongoDB transaction so that concurrent requests cannot
   // interleave their reads and saves, which would cause later saves to overwrite merged items.
   let order;
@@ -434,6 +452,14 @@ router.post('/', async (req, res) => {
       if (txExisting.status === 'new' || txExisting.status === 'in_progress') {
         txExisting.status = 'in_progress';
       }
+      txExisting.history.push({
+        ...buyerActor,
+        action: 'items_merged',
+        meta: {
+          addedItems: validItems.map((i) => ({ name: i.name, qty: i.quantity })),
+          totalItems: txExisting.items.filter((i) => !i.cancelled).length,
+        },
+      });
       await txExisting.save({ session: mongoSession });
       order = txExisting;
     } else {
@@ -449,6 +475,15 @@ router.post('/', async (req, res) => {
         buyerSnapshot,
         orderNumber: await getNextOrderNumber(),
         ...(sanitizedKey ? { idempotencyKey: sanitizedKey } : {}),
+        history: [{
+          ...buyerActor,
+          action: 'order_created',
+          meta: {
+            shopName: buyerSnapshot.shopName,
+            shopCity: buyerSnapshot.shopCity,
+            itemCount: validItems.length,
+          },
+        }],
       });
       await order.save({ session: mongoSession });
     }
@@ -512,6 +547,10 @@ router.patch('/:id/snapshot', staffOnly, async (req, res) => {
   const shop = await Shop.findById(shopId).populate('cityId', 'name').lean();
   if (!shop) return res.status(400).json({ error: 'Магазин не знайдено' });
 
+  const prevSnapshot = order.buyerSnapshot
+    ? { shopName: order.buyerSnapshot.shopName, shopCity: order.buyerSnapshot.shopCity }
+    : null;
+
   if (!order.buyerSnapshot) order.buyerSnapshot = {};
   order.buyerSnapshot.shopId = String(shop._id);
   order.buyerSnapshot.shopName = shop.name || '';
@@ -519,6 +558,11 @@ router.patch('/:id/snapshot', staffOnly, async (req, res) => {
   order.buyerSnapshot.deliveryGroupId = shop.deliveryGroupId || '';
 
   order.markModified('buyerSnapshot');
+  order.history.push({
+    ...actorFromReq(req),
+    action: 'snapshot_updated',
+    meta: { from: prevSnapshot, to: { shopName: shop.name || '', shopCity: shop.cityId?.name || '' } },
+  });
   await order.save();
 
   // Sync shopName in any active PickingTask items that reference this order.
@@ -567,6 +611,8 @@ router.patch('/:id', requireOrderingWindowOpen, async (req, res) => {
     }
   }
 
+  const prevStatus = order.status;
+  order.history.push({ ...actorFromReq(req), action: 'status_changed', meta: { from: prevStatus, to: update.status } });
   order.status = update.status;
   await order.save();
   res.json(order);

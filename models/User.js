@@ -1,6 +1,15 @@
 const mongoose = require('mongoose');
 const DeliveryGroup = require('./DeliveryGroup');
 
+const UserHistoryEntrySchema = new mongoose.Schema({
+  at: { type: Date, default: Date.now },
+  by: { type: String, default: 'system' },
+  byName: { type: String, default: '' },
+  byRole: { type: String, default: 'system' },
+  action: { type: String, required: true },
+  meta: { type: mongoose.Schema.Types.Mixed, default: {} },
+}, { _id: false });
+
 const UserSchema = new mongoose.Schema(
   {
     telegramId: { type: String, required: true, unique: true },
@@ -34,6 +43,7 @@ const UserSchema = new mongoose.Schema(
     },
     isOnline: { type: Boolean, default: false },
     lastActive: { type: Date, default: Date.now },
+    history: { type: [UserHistoryEntrySchema], default: [] },
   },
   { timestamps: true }
 );

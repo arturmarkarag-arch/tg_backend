@@ -305,6 +305,8 @@ router.patch('/:telegramId/shop', async (req, res) => {
     if (!existing) return res.status(404).json({ error: 'User not found' });
 
     const { shopId } = req.body;
+    const oldShopId = existing.shopId ? String(existing.shopId) : '';
+    const newShopId = shopId ? String(shopId) : '';
     let deliveryGroupId = existing.deliveryGroupId || null;
 
     if (shopId) {
@@ -321,6 +323,27 @@ router.patch('/:telegramId/shop', async (req, res) => {
       { new: true }
     );
     await syncDeliveryGroupMembership(user.telegramId, user.deliveryGroupId);
+
+    if (oldShopId !== newShopId) {
+      const [oldShop, newShop, activeOrders] = await Promise.all([
+        oldShopId ? Shop.findById(oldShopId, 'name').lean() : Promise.resolve(null),
+        newShopId ? Shop.findById(newShopId, 'name').lean() : Promise.resolve(null),
+        Order.countDocuments({ buyerTelegramId: existing.telegramId, status: { $in: ['new', 'in_progress'] } }),
+      ]);
+      const actor = req.telegramUser;
+      await User.updateOne(
+        { telegramId: req.params.telegramId },
+        { $push: { history: {
+          at: new Date(),
+          by: String(actor.telegramId),
+          byName: [actor.firstName, actor.lastName].filter(Boolean).join(' '),
+          byRole: actor.role,
+          action: 'shop_changed',
+          meta: { fromShop: oldShop?.name || null, toShop: newShop?.name || null, activeOrders },
+        } } }
+      );
+    }
+
     res.json(user);
   } catch (err) {
     console.error('[PATCH /users/:telegramId/shop]', err);
@@ -341,6 +364,36 @@ router.patch('/:telegramId', async (req, res) => {
     );
     await syncDeliveryGroupMembership(user.telegramId, user.deliveryGroupId);
     const updatedUser = await syncUserWarehouseZone(user);
+
+    // Log shop and role changes
+    const historyEntries = [];
+    const actor = req.telegramUser;
+    const actorMeta = {
+      by: String(actor.telegramId),
+      byName: [actor.firstName, actor.lastName].filter(Boolean).join(' '),
+      byRole: actor.role,
+    };
+
+    if (String(existing.shopId || '') !== String(payload.shopId || '')) {
+      const [oldShop, newShop, activeOrders] = await Promise.all([
+        existing.shopId ? Shop.findById(existing.shopId, 'name').lean() : Promise.resolve(null),
+        payload.shopId ? Shop.findById(payload.shopId, 'name').lean() : Promise.resolve(null),
+        Order.countDocuments({ buyerTelegramId: existing.telegramId, status: { $in: ['new', 'in_progress'] } }),
+      ]);
+      historyEntries.push({ at: new Date(), ...actorMeta, action: 'shop_changed', meta: { fromShop: oldShop?.name || null, toShop: newShop?.name || null, activeOrders } });
+    }
+
+    if (existing.role !== payload.role) {
+      historyEntries.push({ at: new Date(), ...actorMeta, action: 'role_changed', meta: { from: existing.role, to: payload.role } });
+    }
+
+    if (historyEntries.length > 0) {
+      await User.updateOne(
+        { telegramId: req.params.telegramId },
+        { $push: { history: { $each: historyEntries } } }
+      );
+    }
+
     res.json(updatedUser);
   } catch (err) {
     console.error('[PATCH /users/:telegramId]', err);

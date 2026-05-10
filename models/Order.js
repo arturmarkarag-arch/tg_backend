@@ -17,6 +17,15 @@ const BuyerSnapshotSchema = new mongoose.Schema({
   deliveryGroupId: { type: String, default: '' },
 }, { _id: false });
 
+const OrderHistoryEntrySchema = new mongoose.Schema({
+  at: { type: Date, default: Date.now },
+  by: { type: String, default: 'system' },
+  byName: { type: String, default: '' },
+  byRole: { type: String, default: 'system' },
+  action: { type: String, required: true },
+  meta: { type: mongoose.Schema.Types.Mixed, default: {} },
+}, { _id: false });
+
 const OrderSchema = new mongoose.Schema(
   {
     buyerTelegramId: { type: String, required: true },
@@ -33,6 +42,7 @@ const OrderSchema = new mongoose.Schema(
     orderingSessionId: { type: String, default: '' },
     buyerSnapshot: { type: BuyerSnapshotSchema, default: null },
     orderNumber: { type: Number, default: null },
+    history: { type: [OrderHistoryEntrySchema], default: [] },
   },
   { timestamps: true }
 );

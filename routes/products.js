@@ -40,13 +40,14 @@ async function getUploadPresignedUrl(ext = 'jpg') {
   const safeExt = ext.replace(/[^a-zA-Z0-9]/g, '').toLowerCase() || 'jpg';
   const filename = `${crypto.randomUUID()}.${safeExt}`;
   const key = `products/${filename}`;
+  const contentType = safeExt === 'gif' ? 'image/gif' : 'image/jpeg';
   const command = new PutObjectCommand({
     Bucket: process.env.R2_BUCKET_NAME,
     Key: key,
-    ContentType: safeExt === 'gif' ? 'image/gif' : 'image/jpeg',
+    ContentType: contentType,
   });
   const uploadUrl = await getSignedUrl(s3Client, command, { expiresIn: 300 });
-  return { uploadUrl, filename, key };
+  return { uploadUrl, filename, key, contentType };
 }
 
 function getProductTitle(product) {

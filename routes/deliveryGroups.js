@@ -149,6 +149,17 @@ router.get('/:groupId/shop-status', telegramAuth, requireTelegramRoles(['admin',
     status: { $in: ['new', 'in_progress'] },
   }).select('buyerSnapshot.shopId items').lean();
 
+  const sellers = await User.find({ shopId: { $in: shopIds }, role: 'seller' })
+    .select('shopId firstName lastName')
+    .lean();
+  const sellerByShop = {};
+  for (const seller of sellers) {
+    const sid = String(seller.shopId);
+    if (!sellerByShop[sid]) {
+      sellerByShop[sid] = [seller.firstName, seller.lastName].filter(Boolean).join(' ') || null;
+    }
+  }
+
   const orderedByShop = {};
   for (const order of orders) {
     const shopId = String(order.buyerSnapshot?.shopId || '');
@@ -167,6 +178,7 @@ router.get('/:groupId/shop-status', telegramAuth, requireTelegramRoles(['admin',
       shopId,
       shopName: shop.name,
       shopCity: shop.cityId?.name || '',
+      sellerName: sellerByShop[shopId] || null,
       cartItemCount,
       orderedItemCount: orderedByShop[shopId]?.size || 0,
     };

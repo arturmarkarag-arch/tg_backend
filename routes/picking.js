@@ -22,7 +22,7 @@ const router = express.Router();
  * Mark Order items as packed and auto-fulfil the Order if all items are done.
  * Call after a PickingTask is completed or out-of-stocked.
  */
-async function markOrderItemsPacked(taskItems, productId) {
+async function markOrderItemsPacked(taskItems, productId, actor = { by: 'system', byName: '', byRole: 'system' }) {
   // Only mark packed for items that were actually packed by the worker.
   // Items with packed=false are left untouched so archiveProduct can cancel them.
   const orderIds = [...new Set(taskItems.filter((i) => i.packed).map((i) => String(i.orderId)))];
@@ -43,7 +43,10 @@ async function markOrderItemsPacked(taskItems, productId) {
           status: { $in: ['new', 'in_progress'] },
           'items': { $not: { $elemMatch: { packed: false, cancelled: false } } },
         },
-        { $set: { status: 'fulfilled' } },
+        {
+          $set: { status: 'fulfilled' },
+          $push: { history: { at: new Date(), ...actor, action: 'status_changed', meta: { from: 'in_progress', to: 'fulfilled', via: 'picking' } } },
+        },
       );
     })
   );
@@ -350,7 +353,8 @@ router.post('/tasks/:taskId/complete', requireTelegramRoles(['warehouse', 'admin
     await task.save();
 
     // Mark Order items as packed and auto-fulfil fully-packed orders
-    await markOrderItemsPacked(task.items, task.productId);
+    const completeActor = { by: String(user.telegramId), byName: [user.firstName, user.lastName].filter(Boolean).join(' '), byRole: user.role };
+    await markOrderItemsPacked(task.items, task.productId, completeActor);
 
     const fromBlock = typeof nextBlock === 'number' ? nextBlock : task.blockId;
     const { task: nextTask, wrappedAround: nwa } = await findAndLockNext(user.telegramId, fromBlock, task.deliveryGroupId || null);
@@ -522,7 +526,8 @@ router.post('/tasks/:taskId/out-of-stock', requireTelegramRoles(['warehouse', 'a
     await task.save();
 
     // Mark Order items as packed and auto-fulfil fully-packed orders
-    await markOrderItemsPacked(task.items, task.productId);
+    const outOfStockActor = { by: String(user.telegramId), byName: [user.firstName, user.lastName].filter(Boolean).join(' '), byRole: user.role };
+    await markOrderItemsPacked(task.items, task.productId, outOfStockActor);
 
     // Archive the product — removes it from blocks and cancels remaining orders.
     const productDoc = await Product.findById(task.productId._id || task.productId);
