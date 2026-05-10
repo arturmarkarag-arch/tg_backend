@@ -155,13 +155,10 @@ router.post('/confirm-shift', requireTelegramRoles(['admin', 'warehouse']), asyn
         { session }
       );
 
-      // Release all locked/pending tasks and reset skippedBy for a clean shift.
-      // skippedBy is used by the web picking flow: the skip endpoint writes to it
-      // and findAndLockNext filters with $nin so a worker won't see a task they skipped.
-      // Resetting here gives every worker a clean slate for the incoming shift.
+      // Release all locked/pending tasks for a clean shift.
       await PickingTask.updateMany(
         { status: { $in: ['locked', 'pending'] } },
-        { $set: { status: 'pending', lockedBy: null, lockedAt: null, skippedBy: [] } },
+        { $set: { status: 'pending', lockedBy: null, lockedAt: null } },
         { session }
       );
 
@@ -235,90 +232,6 @@ router.post('/close-shift', requireTelegramRoles(['admin', 'warehouse']), async 
   res.json({
     message: 'Shift closed successfully',
     closedBy: requestingUser.telegramId,
-  });
-});
-
-router.get('/unresolved-skipped', requireTelegramRoles(['admin', 'warehouse']), async (req, res) => {
-  const requestingUser = req.telegramUser;
-  if (!requestingUser.isWarehouseManager && requestingUser.role !== 'admin') {
-    return res.status(403).json({ error: 'Only warehouse managers or admins can view unresolved skipped tasks' });
-  }
-
-  const tasks = await PickingTask.find({
-    status: { $in: ['pending', 'locked'] },
-    'skippedBy.0': { $exists: true },
-  })
-    .populate('productId')
-    .sort({ blockId: 1, positionIndex: 1 })
-    .lean();
-
-  const items = tasks
-    .map((task) => {
-      const product = task.productId;
-      if (!product || product.status === 'archived') return null;
-      const pendingQty = (task.items || [])
-        .filter((item) => !item.packed)
-        .reduce((sum, item) => sum + Number(item.quantity || 0), 0);
-
-      const imageUrl =
-        (Array.isArray(product.imageUrls) && product.imageUrls[0]) ||
-        product.localImageUrl ||
-        null;
-
-      return {
-        taskId: String(task._id),
-        productId: String(product._id),
-        productTitle: getProductTitle(product),
-        productStatus: product.status,
-        imageUrl,
-        blockId: task.blockId,
-        positionIndex: task.positionIndex,
-        taskStatus: task.status,
-        lockedBy: task.lockedBy || null,
-        lockedAt: task.lockedAt || null,
-        skippedBy: Array.isArray(task.skippedBy) ? task.skippedBy : [],
-        skippedCount: Array.isArray(task.skippedBy) ? task.skippedBy.length : 0,
-        pendingShopsCount: (task.items || []).filter((item) => !item.packed).length,
-        pendingQty,
-      };
-    })
-    .filter(Boolean);
-
-  res.json(items);
-});
-
-router.post('/unresolved-skipped/:taskId/archive', requireTelegramRoles(['admin', 'warehouse']), async (req, res) => {
-  const requestingUser = req.telegramUser;
-  if (!requestingUser.isWarehouseManager && requestingUser.role !== 'admin') {
-    return res.status(403).json({ error: 'Only warehouse managers or admins can archive unresolved skipped tasks' });
-  }
-
-  const task = await PickingTask.findById(req.params.taskId).lean();
-  if (!task) {
-    return res.status(404).json({ error: 'Picking task not found' });
-  }
-
-  if (!Array.isArray(task.skippedBy) || task.skippedBy.length === 0) {
-    return res.status(400).json({ error: 'This task is not marked as skipped' });
-  }
-
-  const product = await Product.findById(task.productId);
-  if (!product) {
-    return res.status(404).json({ error: 'Product not found' });
-  }
-
-  if (product.status === 'archived') {
-    return res.status(400).json({ error: 'Product is already archived' });
-  }
-
-  const { cancelledCount } = await archiveProduct(product, { notifyBuyers: true });
-
-  res.json({
-    message: 'Product archived from unresolved skipped task',
-    productId: String(product._id),
-    productTitle: getProductTitle(product),
-    cancelledOrdersCount: cancelledCount,
-    archivedBy: requestingUser.telegramId,
   });
 });
 

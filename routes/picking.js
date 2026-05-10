@@ -97,7 +97,7 @@ async function findAndLockNext(userTelegramId, fromBlock, deliveryGroupId = null
   const lock = { $set: { status: 'locked', lockedBy: userTelegramId, lockedAt: new Date() } };
   const opts = { sort: { blockId: 1, positionIndex: 1 }, new: true };
 
-  const fresh = { status: 'pending', skippedBy: { $nin: [userTelegramId] } };
+  const fresh = { status: 'pending' };
   if (deliveryGroupId) fresh.deliveryGroupId = String(deliveryGroupId);
 
   // Pass 1: fresh tasks fromBlock onwards
@@ -116,67 +116,6 @@ async function findAndLockNext(userTelegramId, fromBlock, deliveryGroupId = null
 
   return { task: null, wrappedAround: false };
 }
-
-// ---------------------------------------------------------------------------
-// GET /api/picking/preview?deliveryGroupId=X
-// Returns a live list of products ordered for the group, without creating tasks.
-// Used when the ordering window is still open — gives warehouse workers a heads-up.
-// ---------------------------------------------------------------------------
-router.get('/preview', requireTelegramRoles(['warehouse', 'admin']), async (req, res) => {
-  const deliveryGroupId = req.query.deliveryGroupId || null;
-  const blockIdParam = req.query.blockId ? parseInt(req.query.blockId, 10) : null;
-
-  // If blockId provided, resolve which productIds are in that block
-  let blockProductIds = null;
-  if (Number.isInteger(blockIdParam) && blockIdParam >= 1) {
-    const block = await Block.findOne({ blockId: blockIdParam }, 'productIds').lean();
-    blockProductIds = block ? block.productIds.map(String) : [];
-  }
-
-  const orderFilter = { status: { $in: ['new', 'in_progress'] } };
-  if (deliveryGroupId) {
-    orderFilter['buyerSnapshot.deliveryGroupId'] = String(deliveryGroupId);
-  }
-
-  const orders = await Order.find(orderFilter)
-    .populate('items.productId', 'name description imageUrls localImageUrl status')
-    .lean();
-
-  // Aggregate by product: total quantity + list of shops
-  const productMap = new Map();
-  for (const order of orders) {
-    const shopName = order.buyerSnapshot?.shopName || '—';
-    for (const item of order.items) {
-      if (item.packed || item.cancelled || !item.productId) continue;
-      if (item.productId.status === 'archived') continue;
-      const pid = String(item.productId._id);
-      // Filter by block if specified
-      if (blockProductIds !== null && !blockProductIds.includes(pid)) continue;
-      const entry = productMap.get(pid) || { product: item.productId, totalQty: 0, shops: [] };
-      entry.totalQty += item.quantity || 0;
-      const existing = entry.shops.find((s) => s.shopName === shopName);
-      if (existing) existing.qty += item.quantity || 0;
-      else entry.shops.push({ shopName, qty: item.quantity || 0 });
-      productMap.set(pid, entry);
-    }
-  }
-
-  const items = Array.from(productMap.values()).map(({ product, totalQty, shops }) => {
-    const imageUrl =
-      (Array.isArray(product.imageUrls) && product.imageUrls[0]) ||
-      product.localImageUrl ||
-      null;
-    return {
-      productId: String(product._id),
-      productTitle: product.name || product.description || 'Без назви',
-      imageUrl,
-      totalQty,
-      shops,
-    };
-  });
-
-  res.json({ items });
-});
 
 // ---------------------------------------------------------------------------
 // POST /api/picking/start-session
@@ -364,62 +303,6 @@ router.post('/tasks/:taskId/complete', requireTelegramRoles(['warehouse', 'admin
   } catch (err) {
     console.error('[picking/complete]', err);
     res.status(500).json({ error: err.message || 'Помилка завершення задачі' });
-  }
-});
-
-// ---------------------------------------------------------------------------
-// POST /api/picking/tasks/:taskId/skip
-// Body: { nextBlock?: N }
-// ---------------------------------------------------------------------------
-router.post('/tasks/:taskId/skip', requireTelegramRoles(['warehouse', 'admin']), async (req, res) => {
-  try {
-    const user = req.telegramUser;
-    const { nextBlock } = req.body;
-
-    const task = await PickingTask.findById(req.params.taskId);
-    if (!task) return res.status(404).json({ error: 'Task not found' });
-    if (task.lockedBy !== user.telegramId) {
-      return res.status(403).json({ error: 'expired_lock', message: 'Завдання вже взяв інший складник або час блокування минув' });
-    }
-
-    const fromBlock = typeof nextBlock === 'number' ? nextBlock : task.blockId;
-
-    task.status = 'pending';
-    task.lockedBy = null;
-    task.lockedAt = null;
-    if (!task.skippedBy.includes(user.telegramId)) {
-      task.skippedBy.push(user.telegramId);
-    }
-    await task.save();
-
-    // skippedBy now includes this user → findAndLockNext will skip this task
-    const { task: nextTask, wrappedAround: nwa } = await findAndLockNext(user.telegramId, fromBlock, task.deliveryGroupId || null);
-    const nextTaskData = await buildTaskResponse(nextTask, { wrappedAround: nwa });
-
-    res.json({ message: 'Task skipped', nextTask: nextTaskData });
-  } catch (err) {
-    console.error('[picking/skip]', err);
-    res.status(500).json({ error: err.message || 'Помилка пропуску задачі' });
-  }
-});
-
-// ---------------------------------------------------------------------------
-// GET /api/picking/review-list  — all pending tasks (no locking), for the review screen
-// ---------------------------------------------------------------------------
-router.get('/review-list', requireTelegramRoles(['warehouse', 'admin']), async (req, res) => {
-  try {
-    const deliveryGroupId = req.query.deliveryGroupId || null;
-    const filter = { status: 'pending' };
-    if (deliveryGroupId) filter.deliveryGroupId = String(deliveryGroupId);
-    const tasks = await PickingTask.find(filter)
-      .sort({ blockId: 1, positionIndex: 1 })
-      .lean();
-
-    const results = await Promise.all(tasks.map((t) => buildTaskResponse(t)));
-    res.json({ tasks: results.filter(Boolean) });
-  } catch (err) {
-    console.error('[picking/review-list]', err);
-    res.status(500).json({ error: err.message || 'Помилка завантаження списку' });
   }
 });
 

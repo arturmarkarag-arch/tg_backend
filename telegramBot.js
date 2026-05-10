@@ -982,7 +982,6 @@ async function claimPickingTask(chatId, zoneStart, zoneEnd, lastBlock) {
   const taskInZone = await claimValidTask({
     blockId: { $gte: zoneStart, $lte: zoneEnd },
     status: 'pending',
-    skippedBy: { $ne: String(chatId) },
   });
 
   if (taskInZone) {
@@ -991,7 +990,6 @@ async function claimPickingTask(chatId, zoneStart, zoneEnd, lastBlock) {
 
   const taskOutsideZone = await claimValidTask({
     status: 'pending',
-    skippedBy: { $ne: String(chatId) },
   });
 
   if (taskOutsideZone) {

@@ -9,7 +9,6 @@ const PickingTaskSchema = new mongoose.Schema(
     status: { type: String, enum: ['pending', 'locked', 'completed'], default: 'pending' },
     lockedBy: { type: String, default: null },
     lockedAt: { type: Date, default: null },
-    skippedBy: { type: [String], default: [] },
     items: [
       {
         orderId: { type: mongoose.Schema.Types.ObjectId, ref: 'Order' },
