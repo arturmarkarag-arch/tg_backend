@@ -3,6 +3,7 @@ const Shop = require('../models/Shop');
 const City = require('../models/City');
 const DeliveryGroup = require('../models/DeliveryGroup');
 const User = require('../models/User');
+const Order = require('../models/Order');
 const { telegramAuth, requireTelegramRole } = require('../middleware/telegramAuth');
 
 const router = express.Router();
@@ -31,21 +32,42 @@ router.get('/', async (req, res) => {
 
     const shops = await Shop.find(filter).populate('cityId', 'name country').sort({ city: 1, name: 1 }).lean();
 
-    // Кількість продавців по кожному магазину
-    const shopIds = shops.map((s) => s._id); // ObjectId array
-    const sellerCounts = await User.aggregate([
-      { $match: { role: 'seller', shopId: { $in: shopIds } } },
-      { $group: { _id: '$shopId', count: { $sum: 1 } } },
-    ]);
-    const countMap = {};
-    for (const row of sellerCounts) countMap[String(row._id)] = row.count;
+    // Seller names per shop
+    const shopIds = shops.map((s) => s._id);
+    const sellers = await User.find({ role: 'seller', shopId: { $in: shopIds } })
+      .select('shopId firstName lastName telegramId')
+      .lean();
+    const sellersByShop = {};
+    for (const s of sellers) {
+      const sid = String(s.shopId);
+      if (!sellersByShop[sid]) sellersByShop[sid] = [];
+      sellersByShop[sid].push([s.firstName, s.lastName].filter(Boolean).join(' ') || String(s.telegramId));
+    }
 
-    const result = shops.map((s) => ({
-      ...s,
-      cityId: s.cityId?._id ? String(s.cityId._id) : (s.cityId || null),
-      city: s.cityId?.name || '',
-      sellerCount: countMap[String(s._id)] || 0,
-    }));
+    // Active order flags — only when filtered by deliveryGroupId (for reassign modal)
+    const activeOrderShopIds = new Set();
+    if (req.query.deliveryGroupId) {
+      const activeOrders = await Order.find({
+        status: { $in: ['new', 'in_progress'] },
+        'buyerSnapshot.deliveryGroupId': req.query.deliveryGroupId,
+      }).select('shopId').lean();
+      for (const o of activeOrders) {
+        if (o.shopId) activeOrderShopIds.add(String(o.shopId));
+      }
+    }
+
+    const result = shops.map((s) => {
+      const sid = String(s._id);
+      const shopSellerNames = sellersByShop[sid] || [];
+      return {
+        ...s,
+        cityId: s.cityId?._id ? String(s.cityId._id) : (s.cityId || null),
+        city: s.cityId?.name || '',
+        sellerCount: shopSellerNames.length,
+        sellerNames: shopSellerNames,
+        hasActiveOrder: activeOrderShopIds.has(sid),
+      };
+    });
 
     res.json(result);
   } catch (err) {

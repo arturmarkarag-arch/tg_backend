@@ -10,6 +10,16 @@ let io = null;
 // Map<productId, { userId, userName, timestamp }>
 const lockedItems = new Map();
 
+// Tracks which sellers are currently viewing a given shop room
+// Map<shopId, Map<telegramId, { telegramId, name }>>
+const shopSellers = new Map();
+
+function broadcastShopSellers(shopId) {
+  const sellers = shopSellers.get(shopId);
+  const list = sellers ? Array.from(sellers.values()) : [];
+  if (io) io.to(`shop_${shopId}`).emit('shop_sellers_updated', { shopId, sellers: list, count: list.length });
+}
+
 // Tracks users in receipt rooms: Map<receiptId, Map<telegramId, { telegramId, name }>>
 const receiptParticipants = new Map();
 
@@ -88,6 +98,32 @@ function initSocket(httpServer) {
 
     socket.on('leave_picking_group', (groupId) => {
       if (groupId) socket.leave(`picking_group_${groupId}`);
+    });
+
+    // Join a shop room for co-seller presence awareness
+    socket.on('join_shop', (shopId) => {
+      if (!shopId) return;
+      const room = `shop_${shopId}`;
+      socket.join(room);
+      socket.shopIds = socket.shopIds || new Set();
+      socket.shopIds.add(String(shopId));
+
+      const sellers = shopSellers.get(String(shopId)) || new Map();
+      sellers.set(socket.telegramId, { telegramId: socket.telegramId, name: socket.userName || socket.telegramId });
+      shopSellers.set(String(shopId), sellers);
+      broadcastShopSellers(String(shopId));
+    });
+
+    socket.on('leave_shop', (shopId) => {
+      if (!shopId) return;
+      socket.leave(`shop_${shopId}`);
+      socket.shopIds?.delete(String(shopId));
+      const sellers = shopSellers.get(String(shopId));
+      if (sellers) {
+        sellers.delete(socket.telegramId);
+        if (sellers.size === 0) shopSellers.delete(String(shopId));
+        broadcastShopSellers(String(shopId));
+      }
     });
 
     socket.on('join_receipt', (receiptId) => {
@@ -250,6 +286,16 @@ function initSocket(httpServer) {
         if (data.socketId === socket.id) {
           lockedItems.delete(productId);
           io.emit('item_unlocked', { productId });
+        }
+      }
+
+      // Remove from shop presence rooms
+      for (const shopId of socket.shopIds || []) {
+        const sellers = shopSellers.get(shopId);
+        if (sellers) {
+          sellers.delete(socket.telegramId);
+          if (sellers.size === 0) shopSellers.delete(shopId);
+          broadcastShopSellers(shopId);
         }
       }
 

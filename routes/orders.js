@@ -8,6 +8,7 @@ const User = require('../models/User');
 const Shop = require('../models/Shop');
 const DeliveryGroup = require('../models/DeliveryGroup');
 const PickingTask = require('../models/PickingTask');
+const Block = require('../models/Block');
 const { getTelegramAuth } = require('../utils/validateTelegramInitData');
 const { telegramAuth, requireTelegramRoles } = require('../middleware/telegramAuth');
 const { getIO } = require('../socket');
@@ -95,6 +96,87 @@ function isProductAvailable(product) {
 function buildProductLabel(product) {
   return product.brand || product.model || product.category || product.warehouse || `#${product.orderNumber}`;
 }
+
+/**
+ * GET /conflicts — returns shops with 2+ orders from different sellers in active sessions.
+ * Admin and warehouse only.
+ */
+router.get('/conflicts', staffOnly, async (req, res) => {
+  // Collect all active delivery groups with their current sessionId so we can filter
+  // only orders that belong to the CURRENT ordering session — stale unresolved orders
+  // from previous sessions should not pollute today's picking dashboard.
+  const allGroups = await DeliveryGroup.find().lean();
+  const schedule = await getOrderingSchedule();
+
+  const currentSessionIds = new Set();
+  for (const group of allGroups) {
+    const sid = getCurrentOrderingSessionId(String(group._id), group.dayOfWeek, schedule);
+    if (sid) currentSessionIds.add(sid);
+  }
+
+  const sessionFilter = currentSessionIds.size > 0
+    ? { orderingSessionId: { $in: [...currentSessionIds] } }
+    : {};
+
+  const activeOrders = await Order.find({
+    status: { $in: ['new', 'in_progress'] },
+    ...sessionFilter,
+  }).select('shopId buyerSnapshot buyerTelegramId orderNumber _id createdAt items').lean();
+
+  // Group by shopId
+  const byShop = new Map();
+  for (const order of activeOrders) {
+    const shopId = String(order.shopId || order.buyerSnapshot?.shopId || '');
+    if (!shopId) continue;
+    if (!byShop.has(shopId)) byShop.set(shopId, []);
+    byShop.get(shopId).push(order);
+  }
+
+  // Find shops with orders from more than one unique buyer
+  const conflictShopIds = [...byShop.entries()]
+    .filter(([, orders]) => new Set(orders.map((o) => o.buyerTelegramId)).size > 1)
+    .map(([shopId]) => shopId);
+
+  if (conflictShopIds.length === 0) return res.json({ conflicts: [] });
+
+  // Look up shop names
+  const shops = await require('../models/Shop').find({ _id: { $in: conflictShopIds } })
+    .populate('cityId', 'name')
+    .select('name cityId')
+    .lean();
+  const shopInfoById = {};
+  for (const s of shops) {
+    shopInfoById[String(s._id)] = { shopName: s.name || '', shopCity: s.cityId?.name || '' };
+  }
+
+  // Look up buyer names
+  const buyerTgIds = [...new Set(activeOrders.map((o) => o.buyerTelegramId).filter(Boolean))];
+  const buyers = await User.find({ telegramId: { $in: buyerTgIds } })
+    .select('telegramId firstName lastName')
+    .lean();
+  const buyerNameById = {};
+  for (const b of buyers) {
+    buyerNameById[String(b.telegramId)] = [b.firstName, b.lastName].filter(Boolean).join(' ') || b.telegramId;
+  }
+
+  const conflicts = conflictShopIds.map((shopId) => {
+    const orders = (byShop.get(shopId) || []).map((o) => ({
+      orderId: String(o._id),
+      orderNumber: o.orderNumber,
+      buyerTelegramId: o.buyerTelegramId,
+      buyerName: buyerNameById[String(o.buyerTelegramId)] || o.buyerTelegramId,
+      itemCount: (o.items || []).filter((i) => !i.cancelled).length,
+      createdAt: o.createdAt,
+    }));
+    return {
+      shopId,
+      ...shopInfoById[shopId],
+      orders,
+    };
+  });
+
+  res.json({ conflicts });
+});
 
 router.get('/', async (req, res) => {
   const telegramId = req.telegramId;
@@ -374,6 +456,22 @@ router.post('/', async (req, res) => {
     return res.status(400).json({ error: 'No valid items found' });
   }
 
+  // Guard: sellers cannot order products that are not placed in any block.
+  // Such products have no physical location on the warehouse floor.
+  if (buyer.role === 'seller') {
+    const validProductIds = validItems.map((i) => i.productId);
+    const inBlockIds = await Block.distinct('productIds', { productIds: { $in: validProductIds } });
+    const inBlockSet = new Set(inBlockIds.map(String));
+    const notInBlock = validItems.filter((i) => !inBlockSet.has(String(i.productId)));
+    if (notInBlock.length > 0) {
+      return res.status(422).json({
+        error: 'product_not_in_block',
+        message: `Товар "${notInBlock[0].name}" ще не розміщений у жодному блоці на складі. Замовлення неможливе.`,
+        productIds: notInBlock.map((i) => String(i.productId)),
+      });
+    }
+  }
+
   // Build existingOrder query: sellers merge per SHOP within the current ordering session.
   // admin/warehouse fall back to a 3-day per-buyer window.
   const existingOrderQuery = {
@@ -381,8 +479,9 @@ router.post('/', async (req, res) => {
   };
   let currentSessionId = '';
   if (group && schedule) {
-    // Seller: merge all orders for this shop within the active ordering session
+    // Seller: merge only THIS seller's orders for this shop within the active ordering session
     currentSessionId = getCurrentOrderingSessionId(String(group._id), group.dayOfWeek, schedule);
+    existingOrderQuery.buyerTelegramId = buyer.telegramId;
     existingOrderQuery['buyerSnapshot.shopId'] = buyer.shopId;
     existingOrderQuery.orderingSessionId = currentSessionId;
   } else {
@@ -494,14 +593,19 @@ router.post('/', async (req, res) => {
     mongoSession.endSession();
   }
 
-  // Save order position count so SettingsPage can display it without extra queries
+  // Save order position count and clear the user's cart (order is placed — cart is done)
   const activePositions = (order.items || []).filter((i) => !i.cancelled).length;
-  if (buyer.shopId) {
-    await Shop.updateOne(
-      { _id: buyer.shopId },
-      { $set: { 'cartState.lastOrderPositions': activePositions } }
-    ).catch((e) => console.warn('[orders] lastOrderPositions update failed:', e?.message));
-  }
+  await User.updateOne(
+    { telegramId: buyer.telegramId },
+    {
+      $set: {
+        'cartState.lastOrderPositions': activePositions,
+        'cartState.orderItems': {},
+        'cartState.orderItemIds': [],
+        'cartState.updatedAt': new Date(),
+      },
+    }
+  ).catch((e) => console.warn('[orders] cartState clear failed:', e?.message));
 
   try {
     const io = getIO();
@@ -533,11 +637,37 @@ router.patch('/:id/snapshot', staffOnly, async (req, res) => {
   const order = await Order.findById(req.params.id);
   if (!order) return res.status(404).json({ error: 'Order not found' });
 
+  // Only allow reassigning active orders — reassigning fulfilled/cancelled orders
+  // would incorrectly move the buyer to a new shop based on historical data
+  if (!['new', 'in_progress'].includes(order.status)) {
+    return res.status(409).json({
+      error: 'order_not_active',
+      message: `Замовлення вже ${order.status === 'fulfilled' ? 'виконано' : 'скасовано'} — перенос неможливий.`,
+    });
+  }
+
   const { shopId } = req.body;
   if (!shopId) return res.status(400).json({ error: 'shopId is required' });
 
   const shop = await Shop.findById(shopId).populate('cityId', 'name').lean();
   if (!shop) return res.status(400).json({ error: 'Магазин не знайдено' });
+
+  // Warn if target shop already has an active order from someone else — creates a new conflict
+  const targetConflict = await Order.findOne({
+    shopId: shop._id,
+    status: { $in: ['new', 'in_progress'] },
+    _id: { $ne: order._id },
+  }).lean();
+  if (targetConflict) {
+    return res.status(409).json({
+      error: 'target_shop_has_order',
+      message: `Магазин "${shop.name}" вже має активне замовлення. Переніс створить конфлікт. Спочатку вирішіть той конфлікт.`,
+    });
+  }
+
+  const prevGroupId = order.buyerSnapshot?.deliveryGroupId
+    ? String(order.buyerSnapshot.deliveryGroupId)
+    : null;
 
   const prevSnapshot = order.buyerSnapshot
     ? { shopName: order.buyerSnapshot.shopName, shopCity: order.buyerSnapshot.shopCity }
@@ -547,12 +677,25 @@ router.patch('/:id/snapshot', staffOnly, async (req, res) => {
   order.buyerSnapshot.shopId = String(shop._id);
   order.buyerSnapshot.shopName = shop.name || '';
   order.buyerSnapshot.shopCity = shop.cityId?.name || '';
-  order.buyerSnapshot.deliveryGroupId = shop.deliveryGroupId || '';
+  order.buyerSnapshot.deliveryGroupId = shop.deliveryGroupId ? String(shop.deliveryGroupId) : '';
+
+  // Also update the primary shopId field so queries/grouping reflect the reassignment
+  order.shopId = shop._id;
+
+  // Update orderingSessionId if the new shop belongs to a different delivery group
+  if (shop.deliveryGroupId) {
+    const newGroup = await DeliveryGroup.findById(shop.deliveryGroupId).lean();
+    if (newGroup) {
+      const schedule = await getOrderingSchedule();
+      const newSessionId = getCurrentOrderingSessionId(String(newGroup._id), newGroup.dayOfWeek, schedule);
+      order.orderingSessionId = newSessionId;
+    }
+  }
 
   order.markModified('buyerSnapshot');
   order.history.push({
     ...actorFromReq(req),
-    action: 'snapshot_updated',
+    action: 'shop_reassigned',
     meta: { from: prevSnapshot, to: { shopName: shop.name || '', shopCity: shop.cityId?.name || '' } },
   });
   await order.save();
@@ -564,6 +707,35 @@ router.patch('/:id/snapshot', staffOnly, async (req, res) => {
     { $set: { 'items.$[elem].shopName': shop.name || '' } },
     { arrayFilters: [{ 'elem.orderId': order._id }] },
   );
+
+  // Update the buyer: move them to the new shop AND clear their cart
+  if (order.buyerTelegramId) {
+    await User.findOneAndUpdate(
+      { telegramId: order.buyerTelegramId },
+      {
+        $set: {
+          shopId: shop._id,
+          'cartState.orderItems': {},
+          'cartState.orderItemIds': [],
+          'cartState.updatedAt': new Date(),
+        },
+      },
+    );
+  }
+
+  // Notify picking dashboards: both the old group and the new group need to refresh
+  try {
+    const io = getIO();
+    if (io) {
+      const newGroupId = shop.deliveryGroupId ? String(shop.deliveryGroupId) : null;
+      if (prevGroupId) io.to(`picking_group_${prevGroupId}`).emit('shop_status_changed', { groupId: prevGroupId });
+      if (newGroupId && newGroupId !== prevGroupId) io.to(`picking_group_${newGroupId}`).emit('shop_status_changed', { groupId: newGroupId });
+      if (order.buyerTelegramId) io.emit('user_order_updated', { buyerTelegramId: order.buyerTelegramId });
+      io.emit('delivery_groups_updated');
+    }
+  } catch (emitError) {
+    console.warn('[orders.snapshot] socket emit failed:', emitError?.message || emitError);
+  }
 
   res.json(order);
 });

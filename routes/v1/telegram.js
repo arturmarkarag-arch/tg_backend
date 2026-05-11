@@ -7,8 +7,9 @@ const RegistrationRequest = require('../../models/RegistrationRequest');
 const DeliveryGroup = require('../../models/DeliveryGroup');
 const Shop = require('../../models/Shop');
 const { sendAdminNotification, sendRegistrationApprovedMessage } = require('../../telegramBot');
-const { getOrderingWindowOpenAt } = require('../../utils/orderingSchedule');
+const { getOrderingWindowOpenAt, getCurrentOrderingSessionId } = require('../../utils/orderingSchedule');
 const { getOrderingSchedule } = require('../../utils/getOrderingSchedule');
+const Order = require('../../models/Order');
 const { getIO } = require('../../socket');
 
 const router = express.Router();
@@ -20,7 +21,7 @@ function normalizeMiniAppState(miniAppState) {
 }
 
 function normalizeCartState(cartState) {
-  const defaults = { orderItems: {}, orderItemIds: [], lastOrderPositions: 0, lastViewedProductId: '', currentIndex: 0, currentPage: 0, updatedAt: null };
+  const defaults = { orderItems: {}, orderItemIds: [], lastOrderPositions: 0, lastViewedProductId: '', currentIndex: 0, currentPage: 0, updatedAt: null, lastModifiedByTelegramId: null, lastModifiedByName: null, activeSellerCount: 1, reservedForGroupId: null };
   if (!cartState || typeof cartState !== 'object') return defaults;
   const result = { ...defaults, ...cartState };
   if (result.orderItems instanceof Map) {
@@ -130,13 +131,26 @@ router.post('/me', async (req, res) => {
     } catch { /* non-critical */ }
   }
 
+  // Count sellers from the same shop active in the last 30 minutes (co-seller awareness)
+  let activeSellerCount = 1;
+  if (userShop) {
+    const thirtyMinsAgo = new Date(Date.now() - 30 * 60 * 1000);
+    activeSellerCount = await User.countDocuments({
+      shopId: userShop._id,
+      'miniAppState.updatedAt': { $gte: thirtyMinsAgo },
+    });
+    if (activeSellerCount < 1) activeSellerCount = 1;
+  }
+
+  const normalizedCartState = { ...normalizeCartState(user.cartState), activeSellerCount };
+
   res.json({
     telegramId: user.telegramId,
     role: user.role,
     firstName: user.firstName,
     lastName: user.lastName,
     shopId: userShop ? String(userShop._id) : null,
-    shop: userShop ? { _id: userShop._id, name: userShop.name, city: userShop.cityId?.name || '', deliveryGroupId: userShop.deliveryGroupId, cartState: normalizeCartState(userShop.cartState) } : null,
+    shop: userShop ? { _id: userShop._id, name: userShop.name, city: userShop.cityId?.name || '', deliveryGroupId: userShop.deliveryGroupId, cartState: normalizedCartState } : null,
     shopName: userShop?.name || user.shopName || '',
     shopNumber: user.shopNumber,
     shopCity: userShop?.cityId?.name || '',
@@ -154,7 +168,9 @@ router.post('/me', async (req, res) => {
   });
 });
 
-// PATCH /api/v1/telegram/me/shop — seller оновлює свій магазин
+// PATCH /api/v1/telegram/me/shop — seller оновлює свій магазин.
+// Якщо є активне замовлення — воно автоматично переноситься до нового магазину.
+// Кошик (cartState.orderItems) НЕ очищається — слідує за продавцем.
 router.patch('/me/shop', async (req, res) => {
   try {
     const user = req.telegramUser;
@@ -166,31 +182,121 @@ router.patch('/me/shop', async (req, res) => {
     const shop = await Shop.findById(shopId).populate('cityId', 'name').lean();
     if (!shop) return res.status(404).json({ error: 'Магазин не знайдено' });
 
-    let warehouseZone = '';
-    if (shop.deliveryGroupId) {
-      const group = await DeliveryGroup.findById(shop.deliveryGroupId).lean();
-      warehouseZone = group?.name || '';
-    }
-
     const shopCity = shop.cityId?.name || '';
     const shopName = shop.name || '';
-    const deliveryGroupId = shop.deliveryGroupId ? String(shop.deliveryGroupId) : null;
+    const newDeliveryGroupId = shop.deliveryGroupId ? String(shop.deliveryGroupId) : null;
 
-    await User.findByIdAndUpdate(user._id, {
+    let warehouseZone = '';
+    let newSessionId = null;
+    let newGroup = null;
+    if (shop.deliveryGroupId) {
+      newGroup = await DeliveryGroup.findById(shop.deliveryGroupId).lean();
+      warehouseZone = newGroup?.name || '';
+      if (newGroup) {
+        const schedule = await getOrderingSchedule();
+        newSessionId = getCurrentOrderingSessionId(String(newGroup._id), newGroup.dayOfWeek, schedule);
+      }
+    }
+
+    // If switching to a different shop — always move the active order along with the seller.
+    // Warehouse/admin resolves any conflicts via the picking dashboard.
+    // Cart items also follow the seller (kept as-is, only navigation position resets).
+    let orderMoved = false;
+    if (user.shopId && String(user.shopId) !== String(shop._id)) {
+      const currentShop = await Shop.findById(user.shopId).lean();
+      let currentSessionId = null;
+      if (currentShop?.deliveryGroupId) {
+        const currentGroup = await DeliveryGroup.findById(currentShop.deliveryGroupId).lean();
+        if (currentGroup) {
+          const schedule = await getOrderingSchedule();
+          currentSessionId = getCurrentOrderingSessionId(String(currentGroup._id), currentGroup.dayOfWeek, schedule);
+        }
+      }
+
+      const activeOrder = await Order.findOne({
+        buyerTelegramId: user.telegramId,
+        shopId: user.shopId,
+        status: { $in: ['new', 'in_progress'] },
+        ...(currentSessionId ? { orderingSessionId: currentSessionId } : {}),
+      });
+      if (activeOrder) {
+        const prevGroupId = activeOrder.buyerSnapshot?.deliveryGroupId
+          ? String(activeOrder.buyerSnapshot.deliveryGroupId)
+          : null;
+
+        // Always move the order to the new shop — warehouse/admin resolves any conflicts.
+        // The picking dashboard flags orders that arrived via shop_reassigned so staff
+        // can see who moved where and decide whether to act.
+        activeOrder.shopId = shop._id;
+        if (!activeOrder.buyerSnapshot) activeOrder.buyerSnapshot = {};
+        activeOrder.buyerSnapshot.shopId = String(shop._id);
+        activeOrder.buyerSnapshot.shopName = shopName;
+        activeOrder.buyerSnapshot.shopCity = shopCity;
+        activeOrder.buyerSnapshot.deliveryGroupId = newDeliveryGroupId || '';
+        if (newSessionId) activeOrder.orderingSessionId = newSessionId;
+        activeOrder.markModified('buyerSnapshot');
+        activeOrder.history.push({
+          by: String(user.telegramId),
+          byName: [user.firstName, user.lastName].filter(Boolean).join(' '),
+          byRole: user.role,
+          action: 'shop_reassigned',
+          meta: {
+            from: { shopName: currentShop?.name || '', deliveryGroupId: prevGroupId || '' },
+            to: { shopName, shopCity, deliveryGroupId: newDeliveryGroupId || '' },
+            reason: 'seller_changed_shop',
+          },
+        });
+        await activeOrder.save();
+        orderMoved = true;
+
+        // Sync shopName in any active PickingTask items referencing this order
+        const PickingTask = require('../../models/PickingTask');
+        await PickingTask.updateMany(
+          { 'items.orderId': activeOrder._id, status: { $in: ['pending', 'locked'] } },
+          { $set: { 'items.$[elem].shopName': shopName } },
+          { arrayFilters: [{ 'elem.orderId': activeOrder._id }] },
+        );
+
+        // Notify both picking dashboards (old group loses the order, new group gains it)
+        try {
+          const io = getIO();
+          if (io) {
+            if (prevGroupId) io.to(`picking_group_${prevGroupId}`).emit('shop_status_changed', { groupId: prevGroupId });
+            if (newDeliveryGroupId && newDeliveryGroupId !== prevGroupId) {
+              io.to(`picking_group_${newDeliveryGroupId}`).emit('shop_status_changed', { groupId: newDeliveryGroupId });
+              io.emit('delivery_groups_updated');
+            }
+            io.emit('user_order_updated', { buyerTelegramId: user.telegramId });
+          }
+        } catch (e) {
+          console.warn('[PATCH /me/shop] socket emit failed:', e?.message);
+        }
+      }
+    }
+
+    // Update user: move to new shop. Cart items are kept — they follow the seller.
+    // Only navigation position is reset (new shop = start browsing from beginning).
+    const updatedUser = await User.findByIdAndUpdate(user._id, {
       shopId: shop._id,
       shopName,
       shopCity,
       deliveryGroupId: shop.deliveryGroupId || null,
       warehouseZone,
-    });
+      'cartState.lastViewedProductId': '',
+      'cartState.currentIndex': 0,
+      'cartState.currentPage': 0,
+      'cartState.updatedAt': new Date(),
+      'cartState.reservedForGroupId': null,
+    }, { new: true });
 
     res.json({
       shopId: String(shop._id),
       shopName,
       shopCity,
-      deliveryGroupId,
+      deliveryGroupId: newDeliveryGroupId,
       warehouseZone,
-      cartState: normalizeCartState(shop.cartState),
+      cartState: normalizeCartState(updatedUser?.cartState ?? null),
+      ...(orderMoved ? { orderMoved: true } : {}),
     });
   } catch (err) {
     console.error('[PATCH /v1/telegram/me/shop]', err.message);
@@ -211,11 +317,17 @@ router.post('/mini-app/state', async (req, res) => {
     return res.status(400).json({ error: 'currentPage must be a non-negative integer' });
   }
 
+  const MAX_CART_ITEMS = 200; // reasonable upper bound per user cart
+
   const sanitizedOrderItems = typeof orderItems === 'object' && orderItems !== null
-    ? Object.fromEntries(Object.entries(orderItems).map(([pid, qty]) => [String(pid), Number(qty) || 0]))
+    ? Object.fromEntries(
+        Object.entries(orderItems)
+          .slice(0, MAX_CART_ITEMS)
+          .map(([pid, qty]) => [String(pid), Math.min(1000, Math.max(0, Number(qty) || 0))]),
+      )
     : {};
   const sanitizedOrderItemIds = Array.isArray(orderItemIds)
-    ? orderItemIds.map((id) => String(id))
+    ? orderItemIds.slice(0, MAX_CART_ITEMS).map((id) => String(id))
     : [];
 
   const validViewMode = viewMode === 'grid' ? 'grid' : 'carousel';
@@ -239,11 +351,12 @@ router.post('/mini-app/state', async (req, res) => {
     return res.status(403).json({ error: 'User not found' });
   }
 
-  // Кошик і навігація зберігаються на магазині, а не на продавці
+  // Кошик зберігається на продавці (User), а не на магазині — кожен має ізольований кошик
   let cartState = normalizeCartState(null);
-  if (user.shopId) {
-    const updatedShop = await Shop.findByIdAndUpdate(
-      user.shopId,
+  if (user) {
+    const modifierName = [user.firstName, user.lastName].filter(Boolean).join(' ') || String(telegramId);
+    const updatedUser = await User.findOneAndUpdate(
+      { telegramId },
       {
         $set: {
           'cartState.orderItems': sanitizedOrderItems,
@@ -256,14 +369,27 @@ router.post('/mini-app/state', async (req, res) => {
       },
       { new: true }
     ).lean();
-    if (updatedShop) {
-      cartState = normalizeCartState(updatedShop.cartState);
-      // Notify picking-group watchers of cart change
-      const groupId = updatedShop.deliveryGroupId;
-      if (groupId) {
+    if (updatedUser) {
+      cartState = normalizeCartState(updatedUser.cartState);
+      const io = getIO();
+      if (io && user.shopId) {
+        // Notify picking-group watchers of cart change
+        const shopDoc = await Shop.findById(user.shopId).select('deliveryGroupId').lean();
+        const groupId = shopDoc?.deliveryGroupId;
         try {
-          const io = getIO();
-          if (io) io.to(`picking_group_${groupId}`).emit('shop_status_changed', { groupId: String(groupId) });
+          if (groupId) io.to(`picking_group_${groupId}`).emit('shop_status_changed', { groupId: String(groupId) });
+        } catch (_) { /* non-critical */ }
+
+        // Broadcast to shop room — clients filter out their own events by telegramId
+        try {
+          const shopRoom = `shop_${String(user.shopId)}`;
+          const itemCount = sanitizedOrderItemIds.length;
+          io.to(shopRoom).emit('shop_cart_changed', {
+            shopId: String(user.shopId),
+            modifiedBy: { telegramId: String(telegramId), name: modifierName },
+            updatedAt: cartState.updatedAt,
+            itemCount,
+          });
         } catch (_) { /* non-critical */ }
       }
     }
@@ -297,11 +423,11 @@ router.post('/mini-app/reset-state', async (req, res) => {
     return res.status(403).json({ error: 'User not found' });
   }
 
-  // Очищаємо кошик і навігацію магазину
+  // Очищаємо кошик продавця (тепер зберігається в User)
   let cartState = normalizeCartState(null);
-  if (user.shopId) {
-    const updatedShop = await Shop.findByIdAndUpdate(
-      user.shopId,
+  if (user && user.shopId) {
+    const updatedUser = await User.findOneAndUpdate(
+      { telegramId },
       {
         $set: {
           'cartState.orderItems': {},
@@ -315,7 +441,7 @@ router.post('/mini-app/reset-state', async (req, res) => {
       },
       { new: true }
     ).lean();
-    if (updatedShop) cartState = normalizeCartState(updatedShop.cartState);
+    if (updatedUser) cartState = normalizeCartState(updatedUser.cartState);
   }
 
   res.json({ miniAppState: normalizeMiniAppState(user.miniAppState), cartState });

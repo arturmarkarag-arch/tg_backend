@@ -137,50 +137,117 @@ router.get('/:groupId/shop-status', telegramAuth, requireTelegramRoles(['admin',
   const currentSessionId = getCurrentOrderingSessionId(String(group._id), group.dayOfWeek, schedule);
 
   const shops = await Shop.find({ deliveryGroupId: String(group._id), isActive: true })
-    .select('name cityId cartState')
+    .select('name cityId')
     .populate('cityId', 'name')
     .lean();
 
   const shopIds = shops.map((s) => s._id);
 
   const orders = await Order.find({
-    'buyerSnapshot.shopId': { $in: shopIds },
+    shopId: { $in: shopIds },
     orderingSessionId: currentSessionId,
     status: { $in: ['new', 'in_progress'] },
-  }).select('buyerSnapshot.shopId items').lean();
+  }).select('buyerSnapshot shopId buyerTelegramId items orderNumber _id createdAt history').lean();
 
-  const sellers = await User.find({ shopId: { $in: shopIds }, role: 'seller' })
-    .select('shopId firstName lastName')
+  const sellers = await User.find({ role: 'seller', shopId: { $in: shopIds } })
+    .select('shopId firstName lastName telegramId cartState')
     .lean();
-  const sellerByShop = {};
+  // Collect ALL sellers per shop with cart status
+  const sellersByShop = {};
   for (const seller of sellers) {
     const sid = String(seller.shopId);
-    if (!sellerByShop[sid]) {
-      sellerByShop[sid] = [seller.firstName, seller.lastName].filter(Boolean).join(' ') || null;
-    }
+    if (!sellersByShop[sid]) sellersByShop[sid] = [];
+    const items = seller.cartState?.orderItems;
+    const itemObj = items instanceof Map ? Object.fromEntries(items) : (items || {});
+    sellersByShop[sid].push({
+      name: [seller.firstName, seller.lastName].filter(Boolean).join(' ') || String(seller.telegramId),
+      telegramId: String(seller.telegramId),
+      hasCart: Object.keys(itemObj).length > 0,
+    });
   }
 
+  // Build buyer name lookup from all unique buyerTelegramIds in orders
+  const buyerTgIds = [...new Set(orders.map((o) => o.buyerTelegramId).filter(Boolean))];
+  const buyers = await User.find({ telegramId: { $in: buyerTgIds } })
+    .select('telegramId firstName lastName')
+    .lean();
+  const buyerNameById = {};
+  for (const b of buyers) {
+    buyerNameById[String(b.telegramId)] = [b.firstName, b.lastName].filter(Boolean).join(' ') || b.telegramId;
+  }
+
+  // Group orders by shopId for conflict detection
+  const ordersByShop = {};
   const orderedByShop = {};
   for (const order of orders) {
-    const shopId = String(order.buyerSnapshot?.shopId || '');
+    const shopId = String(order.shopId || order.buyerSnapshot?.shopId || '');
     if (!shopId) continue;
+    if (!ordersByShop[shopId]) ordersByShop[shopId] = [];
+    // Flag any order that was ever reassigned to a different shop (regardless of who did it).
+    const reassignEntry = (order.history || []).slice().reverse().find((h) => h.action === 'shop_reassigned');
+    const wasReassigned = !!reassignEntry;
+    ordersByShop[shopId].push({
+      orderId: String(order._id),
+      orderNumber: order.orderNumber,
+      buyerTelegramId: order.buyerTelegramId,
+      buyerName: buyerNameById[String(order.buyerTelegramId)] || order.buyerTelegramId,
+      itemCount: (order.items || []).filter((i) => !i.cancelled).length,
+      createdAt: order.createdAt,
+      wasReassigned,
+      fromShopName: wasReassigned ? (reassignEntry?.meta?.from?.shopName || null) : null,
+    });
     if (!orderedByShop[shopId]) orderedByShop[shopId] = new Set();
     for (const item of order.items || []) {
       if (item.productId) orderedByShop[shopId].add(String(item.productId));
     }
   }
 
+  // Build per-shop seller cart items map (cartState is now per-user, not per-shop)
+  const cartItemsByShop = {};
+  for (const seller of sellers) {
+    const sid = String(seller.shopId);
+    const items = seller.cartState?.orderItems;
+    if (!items) continue;
+    const itemObj = items instanceof Map ? Object.fromEntries(items) : items;
+    cartItemsByShop[sid] = (cartItemsByShop[sid] || 0) + Object.keys(itemObj).length;
+  }
+
+  // Build set of telegramIds that placed an order per shop in this session
+  const orderedBuyersByShop = {};
+  for (const order of orders) {
+    const sid = String(order.shopId || '');
+    if (!sid || !order.buyerTelegramId) continue;
+    if (!orderedBuyersByShop[sid]) orderedBuyersByShop[sid] = new Set();
+    orderedBuyersByShop[sid].add(String(order.buyerTelegramId));
+  }
+
   const shopStatuses = shops.map((shop) => {
-    const cartItems = shop.cartState?.orderItems || {};
-    const cartItemCount = Object.keys(cartItems).length;
     const shopId = String(shop._id);
+    const cartItemCount = cartItemsByShop[shopId] || 0;
+    const shopOrders = ordersByShop[shopId] || [];
+    const uniqueBuyers = new Set(shopOrders.map((o) => o.buyerTelegramId));
+    const shopSellerObjs = sellersByShop[shopId] || [];
+    const orderedBuyers = orderedBuyersByShop[shopId] || new Set();
+    const sellersWithStatus = shopSellerObjs.map((s) => ({ ...s, hasOrder: orderedBuyers.has(s.telegramId) }));
+    // hasConflict: 2+ separate buyers placed orders in this shop this session
+    // hasMultipleSellers: 2+ sellers are assigned to this shop (unusual, possible mistake)
+    // hasSellerOrderMismatch: multiple sellers but only some (not all) placed orders — likely someone forgot
+    const hasMultipleSellers = shopSellerObjs.length > 1;
+    const sellersWithOrder = shopSellerObjs.filter((s) => orderedBuyers.has(s.telegramId));
+    const hasSellerOrderMismatch = hasMultipleSellers && shopOrders.length > 0 && sellersWithOrder.length !== shopSellerObjs.length;
     return {
       shopId,
       shopName: shop.name,
       shopCity: shop.cityId?.name || '',
-      sellerName: sellerByShop[shopId] || null,
+      sellers: sellersWithStatus,
+      sellerName: sellersWithStatus.length > 0 ? sellersWithStatus.map((s) => s.name).join(', ') : null,
+      sellerCount: sellersWithStatus.length,
       cartItemCount,
       orderedItemCount: orderedByShop[shopId]?.size || 0,
+      orders: shopOrders,
+      hasConflict: uniqueBuyers.size > 1,
+      hasMultipleSellers,
+      hasSellerOrderMismatch,
     };
   });
 
@@ -262,6 +329,29 @@ router.get('/', async (req, res) => {
   });
   const schedule = await getOrderingSchedule();
 
+  // Flag groups whose ordering session is currently CLOSED but still have active orders.
+  // This covers any case — seller switched shop, admin moved order, whatever.
+  // Orders in an OPEN session are resolved (normal or conflict), no badge needed.
+  const closedSessionToGroupId = {};
+  for (const g of groups) {
+    const { isOpen } = isOrderingOpen(g.dayOfWeek, schedule);
+    if (!isOpen) {
+      const sid = getCurrentOrderingSessionId(String(g._id), g.dayOfWeek, schedule);
+      if (sid) closedSessionToGroupId[sid] = String(g._id);
+    }
+  }
+  const problematicByGroup = {};
+  if (Object.keys(closedSessionToGroupId).length > 0) {
+    const ordersInClosedGroups = await Order.find({
+      status: { $in: ['new', 'in_progress'] },
+      orderingSessionId: { $in: Object.keys(closedSessionToGroupId) },
+    }).select('orderingSessionId').lean();
+    for (const order of ordersInClosedGroups) {
+      const groupId = closedSessionToGroupId[order.orderingSessionId];
+      if (groupId) problematicByGroup[groupId] = true;
+    }
+  }
+
   const [shopCounts, sellerCounts] = await Promise.all([
     Shop.aggregate([
       { $match: { isActive: true } },
@@ -282,6 +372,7 @@ router.get('/', async (req, res) => {
     isOpen: isOrderingOpen(g.dayOfWeek, schedule).isOpen,
     shopCount: shopCountMap[String(g._id)] || 0,
     sellerCount: sellerCountMap[String(g._id)] || 0,
+    hasRelocatedOrders: !!problematicByGroup[String(g._id)],
   }));
   res.json(result);
 });

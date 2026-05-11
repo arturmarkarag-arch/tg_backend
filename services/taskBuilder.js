@@ -157,11 +157,12 @@ async function buildPickingTasksFromOrders(targetDeliveryGroupId = null) {
     const tasks = [];
     for (const [, group] of toInsert.entries()) {
       const position = positions.get(String(group.productId));
+      if (!position) continue; // product not placed in any block — skip until warehouse assigns it
       tasks.push({
         productId: group.productId,
         deliveryGroupId: group.deliveryGroupId,
-        blockId: position?.blockId ?? 0,
-        positionIndex: position ? position.index + 1 : 0,
+        blockId: position.blockId,
+        positionIndex: position.index + 1,
         items: group.items,
       });
     }

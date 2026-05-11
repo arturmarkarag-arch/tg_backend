@@ -164,22 +164,32 @@ router.post('/start-session', requireTelegramRoles(['warehouse', 'admin']), asyn
       return res.json({ alreadyStarted: true, taskCount: existingCount });
     }
 
-    // 3. Cancel stale orders from previous sessions before building tasks.
-    // This ensures orders that were never fulfilled in a past session cannot
-    // bleed into the current picking run.
+    // 3. Block start if there are orders from stale sessions — admin must resolve them first.
+    // Silently expiring orders could cause lost purchases: a seller who moved shops or whose
+    // session ID drifted would lose their order without any warning.
     if (deliveryGroupId) {
       const group2 = await DeliveryGroup.findById(deliveryGroupId, 'dayOfWeek').lean();
       if (group2) {
         const schedule2 = await getOrderingSchedule();
         const currentSessionId = getCurrentOrderingSessionId(String(deliveryGroupId), group2.dayOfWeek, schedule2);
-        await Order.updateMany(
+        const staleOrders = await Order.find(
           {
             'buyerSnapshot.deliveryGroupId': String(deliveryGroupId),
             status: { $in: ['new', 'in_progress'] },
             orderingSessionId: { $ne: currentSessionId },
           },
-          { $set: { status: 'expired' } },
-        );
+          'buyerSnapshot buyerTelegramId orderingSessionId',
+        ).lean();
+
+        if (staleOrders.length > 0) {
+          const conflicts = staleOrders.map((o) => ({
+            orderId: String(o._id),
+            shopName: o.buyerSnapshot?.shopName || '—',
+            shopCity: o.buyerSnapshot?.shopCity || '',
+            buyerTelegramId: String(o.buyerTelegramId),
+          }));
+          return res.json({ unresolved: true, conflicts });
+        }
       }
     }
 
@@ -287,7 +297,7 @@ router.post('/tasks/:taskId/complete', requireTelegramRoles(['warehouse', 'admin
       } else {
         item.packedQuantity = item.quantity; // default: assume fully packed
       }
-      item.packed = true;
+      item.packed = item.packedQuantity > 0;
     }
 
     task.status = 'completed';

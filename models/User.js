@@ -40,6 +40,18 @@ const UserSchema = new mongoose.Schema(
       viewMode: { type: String, enum: ['carousel', 'grid'], default: 'carousel' },
       updatedAt: { type: Date, default: null },
     },
+    cartState: {
+      orderItems:          { type: Map, of: Number, default: {} },
+      orderItemIds:        { type: [String], default: [] },
+      lastOrderPositions:  { type: Number, default: 0 },
+      lastViewedProductId: { type: String, default: '' },
+      currentIndex:        { type: Number, default: 0 },
+      currentPage:         { type: Number, default: 0 },
+      updatedAt:           { type: Date, default: null },
+      // Set when an order is cancelled+restored to cart during cross-group shop switch.
+      // Blocks submission to any other delivery group until cleared (order placed or cart cleared).
+      reservedForGroupId:  { type: String, default: null },
+    },
     isOnline: { type: Boolean, default: false },
     lastActive: { type: Date, default: Date.now },
     history: { type: [UserHistoryEntrySchema], default: [] },
