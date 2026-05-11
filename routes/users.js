@@ -334,6 +334,17 @@ router.patch('/:telegramId/shop', async (req, res) => {
           meta: { fromShop: oldShop?.name || null, toShop: newShop?.name || null, activeOrders },
         } } }
       );
+      // Persist last-seller snapshot on the old shop so the hint survives user deletion
+      if (oldShopId) {
+        await Shop.findByIdAndUpdate(oldShopId, {
+          lastSeller: {
+            telegramId: existing.telegramId,
+            firstName:  existing.firstName  || '',
+            lastName:   existing.lastName   || '',
+            unassignedAt: new Date(),
+          },
+        }).catch(() => {});
+      }
     }
 
     res.json(user);
@@ -395,6 +406,17 @@ router.patch('/:telegramId', async (req, res) => {
 router.delete('/:telegramId', async (req, res) => {
   const user = await User.findOneAndDelete({ telegramId: req.params.telegramId });
   if (!user) return res.status(404).json({ error: 'User not found' });
+  // Preserve seller identity on the shop so "Раніше тут був" hint survives deletion
+  if (user.shopId) {
+    await Shop.findByIdAndUpdate(user.shopId, {
+      lastSeller: {
+        telegramId:   user.telegramId,
+        firstName:    user.firstName  || '',
+        lastName:     user.lastName   || '',
+        unassignedAt: new Date(),
+      },
+    }).catch(() => {});
+  }
   res.json({ message: 'User deleted' });
 });
 
