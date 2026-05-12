@@ -5,7 +5,10 @@ const DeliveryGroup = require('../models/DeliveryGroup');
 const Shop = require('../models/Shop');
 const City = require('../models/City');
 const { telegramAuth, requireTelegramRole } = require('../middleware/telegramAuth');
-const { isOrderingOpen, getOrderingWindowOpenAt } = require('../utils/orderingSchedule');
+const { isOrderingOpen, getOrderingWindowOpenAt, getCurrentOrderingSessionId } = require('../utils/orderingSchedule');
+const { getOrderingSchedule } = require('../utils/getOrderingSchedule');
+const PickingTask = require('../models/PickingTask');
+const { getIO } = require('../socket');
 
 const router = express.Router();
 router.use(telegramAuth);
@@ -345,6 +348,100 @@ router.patch('/:telegramId/shop', async (req, res) => {
           },
         }).catch(() => {});
       }
+
+      // Mirror the order-migration logic from PATCH /me/shop:
+      // when admin moves a seller from one shop to another, their active order follows them.
+      // Without this the order stays orphaned at the old shop while the seller is now elsewhere,
+      // which creates a phantom conflict and a stale order that nobody can fulfil.
+      if (oldShopId && newShopId) {
+        // Resolve session IDs for both old and new shop so we query the right order
+        const [oldShopFull, newShopFull] = await Promise.all([
+          Shop.findById(oldShopId).populate('cityId', 'name').lean(),
+          Shop.findById(newShopId).populate('cityId', 'name').lean(),
+        ]);
+
+        let oldSessionId = null;
+        if (oldShopFull?.deliveryGroupId) {
+          const oldGroup = await DeliveryGroup.findById(oldShopFull.deliveryGroupId).lean();
+          if (oldGroup) {
+            const schedule = await getOrderingSchedule();
+            oldSessionId = getCurrentOrderingSessionId(String(oldGroup._id), oldGroup.dayOfWeek, schedule);
+          }
+        }
+
+        let newSessionId = null;
+        if (newShopFull?.deliveryGroupId) {
+          const newGroup = await DeliveryGroup.findById(newShopFull.deliveryGroupId).lean();
+          if (newGroup) {
+            const schedule = await getOrderingSchedule();
+            newSessionId = getCurrentOrderingSessionId(String(newGroup._id), newGroup.dayOfWeek, schedule);
+          }
+        }
+
+        const activeOrder = await Order.findOne({
+          buyerTelegramId: existing.telegramId,
+          shopId: existing.shopId,
+          status: { $in: ['new', 'in_progress'] },
+          ...(oldSessionId ? { orderingSessionId: oldSessionId } : {}),
+        });
+
+        if (activeOrder) {
+          const prevGroupId = activeOrder.buyerSnapshot?.deliveryGroupId
+            ? String(activeOrder.buyerSnapshot.deliveryGroupId)
+            : null;
+
+          activeOrder.shopId = newShopFull._id;
+          if (!activeOrder.buyerSnapshot) activeOrder.buyerSnapshot = {};
+          activeOrder.buyerSnapshot.shopId = String(newShopFull._id);
+          activeOrder.buyerSnapshot.shopName = newShopFull.name || '';
+          activeOrder.buyerSnapshot.shopCity = newShopFull.cityId?.name || '';
+          activeOrder.buyerSnapshot.deliveryGroupId = newShopFull.deliveryGroupId
+            ? String(newShopFull.deliveryGroupId) : '';
+          if (newSessionId) activeOrder.orderingSessionId = newSessionId;
+          activeOrder.markModified('buyerSnapshot');
+          activeOrder.history.push({
+            by: String(actor.telegramId),
+            byName: [actor.firstName, actor.lastName].filter(Boolean).join(' '),
+            byRole: actor.role,
+            action: 'shop_reassigned',
+            meta: {
+              from: { shopName: oldShopFull?.name || '', deliveryGroupId: existing.deliveryGroupId || '' },
+              to: { shopName: newShopFull.name || '', shopCity: newShopFull.cityId?.name || '' },
+              reason: 'admin_reassigned_seller',
+            },
+          });
+          await activeOrder.save();
+
+          // Sync shopName in any PickingTask items that reference this order
+          await PickingTask.updateMany(
+            { 'items.orderId': activeOrder._id, status: { $in: ['pending', 'locked'] } },
+            { $set: { 'items.$[elem].shopName': newShopFull.name || '' } },
+            { arrayFilters: [{ 'elem.orderId': activeOrder._id }] },
+          ).catch(() => {});
+
+          // Notify both picking dashboards
+          try {
+            const io = getIO();
+            if (io) {
+              const newGroupId = newShopFull.deliveryGroupId ? String(newShopFull.deliveryGroupId) : null;
+              if (prevGroupId) io.to(`picking_group_${prevGroupId}`).emit('shop_status_changed', { groupId: prevGroupId });
+              if (newGroupId && newGroupId !== prevGroupId) {
+                io.to(`picking_group_${newGroupId}`).emit('shop_status_changed', { groupId: newGroupId });
+                io.emit('delivery_groups_updated');
+              }
+              io.emit('user_order_updated', { buyerTelegramId: existing.telegramId });
+            }
+          } catch (emitErr) {
+            console.warn('[PATCH /users/:telegramId/shop] socket emit failed:', emitErr?.message);
+          }
+        }
+      }
+
+      // Always clear any stale cross-group cart reservation when shop changes
+      await User.updateOne(
+        { telegramId: req.params.telegramId },
+        { $set: { 'cartState.reservedForGroupId': null } },
+      ).catch(() => {});
     }
 
     res.json(user);

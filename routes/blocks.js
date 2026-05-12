@@ -242,6 +242,39 @@ router.post('/move', staffOnly, async (req, res) => {
   }
 });
 
+// DELETE /api/blocks/:number/products/:productId — remove product from block (returns it to incoming)
+router.delete('/:number/products/:productId', staffOnly, async (req, res) => {
+  const num = Number(req.params.number);
+  const { productId } = req.params;
+  if (!num || num < 1) return res.status(400).json({ error: 'Invalid block number' });
+
+  try {
+    const block = await Block.findOne({ blockId: num });
+    if (!block) return res.status(404).json({ error: 'Block not found' });
+
+    const idx = block.productIds.findIndex((id) => id.toString() === productId);
+    if (idx === -1) return res.status(404).json({ error: 'Product not in block' });
+
+    block.productIds.splice(idx, 1);
+    block.version += 1;
+    await block.save();
+
+    await block.populate({ path: 'productIds', match: { status: { $in: ['active', 'pending'] } } });
+    const updated = block.toObject();
+
+    try {
+      const io = getIO();
+      io.emit('block_updated', slimBlock(updated));
+      io.emit('incoming_updated');
+    } catch (_) {}
+
+    res.json(updated);
+  } catch (err) {
+    console.error('[blocks/remove-product] Error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // POST /api/blocks/:number/add — add product to block
 router.post('/:number/add', staffOnly, async (req, res) => {
   const num = Number(req.params.number);

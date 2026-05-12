@@ -78,17 +78,6 @@ app.use('/api/admin', adminRouter);
 app.use('/api/shops', shopsRouter);
 app.use('/api/v1/telegram', telegramV1Router);
 
-// Picking task auto-scheduler — fires at closeHour:closeMinute (Warsaw) every day
-if (process.env.REDIS_URL || process.env.NODE_ENV !== 'production') {
-  try {
-    const { initPickingScheduler } = require('./broadcast/pickingScheduler');
-    initPickingScheduler().catch((err) => {
-      console.warn('[PickingScheduler] Init failed:', err.message);
-    });
-  } catch (err) {
-    console.warn('[PickingScheduler] Load failed:', err.message);
-  }
-}
 
 app.use((err, req, res, next) => {
   console.error(err);

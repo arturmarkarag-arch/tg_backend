@@ -108,6 +108,15 @@ router.post('/me', async (req, res) => {
       });
     }
 
+    const rejectedRequest = await RegistrationRequest.findOne({ telegramId, status: 'rejected' }).lean();
+    if (rejectedRequest) {
+      return res.status(403).json({
+        error: 'rejected_registration',
+        telegramId,
+        message: 'Вашу заявку було відхилено. Ви можете надіслати нову заявку.',
+      });
+    }
+
     return res.status(403).json({
       error: 'not_registered',
       telegramId,
@@ -476,13 +485,18 @@ router.post('/register-request', async (req, res) => {
 
   const existingRequest = await RegistrationRequest.findOne({
     telegramId,
-    status: { $in: ['pending', 'blocked'] },
+    status: { $in: ['pending', 'blocked', 'rejected'] },
   }).lean();
   if (existingRequest) {
     if (existingRequest.status === 'blocked') {
       return res.status(403).json({ error: 'Registration request blocked', message: 'Ваша реєстрація заблокована.' });
     }
-    return res.status(409).json({ error: 'Registration request already exists' });
+    if (existingRequest.status === 'rejected') {
+      // Allow re-submission: delete old rejected request first
+      await RegistrationRequest.findByIdAndDelete(existingRequest._id);
+    } else {
+      return res.status(409).json({ error: 'Registration request already exists' });
+    }
   }
 
   let shop = null;
@@ -546,6 +560,10 @@ router.post('/register-requests/:id/approve', adminOnly, async (req, res) => {
   const request = await RegistrationRequest.findById(req.params.id).lean();
   if (!request || request.status !== 'pending') {
     return res.status(404).json({ error: 'Pending registration request not found' });
+  }
+  // Admin may override shopId at approve time (e.g. seller picked wrong shop)
+  if (req.body.shopId) {
+    request.shopId = req.body.shopId;
   }
 
   const existingUser = await User.findOne({ telegramId: request.telegramId }).lean();
@@ -618,7 +636,7 @@ router.post('/register-requests/:id/reject', adminOnly, async (req, res) => {
   if (!request || request.status !== 'pending') {
     return res.status(404).json({ error: 'Pending registration request not found' });
   }
-
+  // Mark as rejected so the user sees "заявку відхилено" in Mini App and can re-submit
   await RegistrationRequest.findByIdAndUpdate(req.params.id, { status: 'rejected' });
   res.json({ message: 'Registration request rejected', telegramId: request.telegramId });
 });

@@ -99,15 +99,6 @@ router.post('/ordering-schedule', telegramAuth, requireTelegramRole('admin'), as
     }
     const saved = await setAppSetting(ORDERING_SCHEDULE_KEY, schedule);
 
-    // Reschedule the picking auto-scheduler with the new close time
-    try {
-      const { reschedulePickingJob } = require('../broadcast/pickingScheduler');
-      await reschedulePickingJob(schedule.closeHour, schedule.closeMinute);
-    } catch (schedErr) {
-      // Non-fatal: schedule is saved, scheduler self-heals on next restart
-      console.error('[Admin] reschedulePickingJob failed:', schedErr.message);
-    }
-
     res.json(saved);
   } catch (error) {
     res.status(400).json({ error: error.message || 'Invalid schedule data' });
