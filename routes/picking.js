@@ -12,6 +12,7 @@ const { buildPickingTasksFromOrders } = require('../services/taskBuilder');
 const { isOrderingOpen, getWarsawNow, DAY_FULL_UK, getCurrentOrderingSessionId, getOrderingWindowCloseAt } = require('../utils/orderingSchedule');
 
 const { getOrderingSchedule } = require('../utils/getOrderingSchedule');
+const { appError } = require('../utils/errors');
 
 const router = express.Router();
 
@@ -127,7 +128,7 @@ async function findAndLockNext(userTelegramId, fromBlock, deliveryGroupId = null
 // Checks ordering window, then atomically builds picking tasks for the group.
 // Idempotent: if tasks already exist for this group, returns count without rebuilding.
 // ---------------------------------------------------------------------------
-router.post('/start-session', requireTelegramRoles(['warehouse', 'admin']), async (req, res) => {
+router.post('/start-session', requireTelegramRoles(['warehouse', 'admin']), async (req, res, next) => {
   try {
     const { deliveryGroupId = null } = req.body;
 
@@ -208,21 +209,21 @@ router.post('/start-session', requireTelegramRoles(['warehouse', 'admin']), asyn
     res.json({ started: true, taskCount });
   } catch (err) {
     console.error('[picking/start-session]', err);
-    res.status(500).json({ error: err.message || 'Помилка запуску сесії збирання' });
+    next(appError('picking_session_failed'));
   }
 });
 
 // ---------------------------------------------------------------------------
 // GET /api/picking/next-task?currentBlock=N
 // ---------------------------------------------------------------------------
-router.get('/next-task', requireTelegramRoles(['warehouse', 'admin']), async (req, res) => {
+router.get('/next-task', requireTelegramRoles(['warehouse', 'admin']), async (req, res, next) => {
   try {
     const user = req.telegramUser;
     const currentBlock = parseInt(req.query.currentBlock, 10);
     const deliveryGroupId = req.query.deliveryGroupId || null;
 
     if (!Number.isInteger(currentBlock) || currentBlock < 1) {
-      return res.status(400).json({ error: 'currentBlock must be a positive integer' });
+      return next(appError('picking_current_block_invalid'));
     }
 
     // Release stale locks:
@@ -270,7 +271,7 @@ router.get('/next-task', requireTelegramRoles(['warehouse', 'admin']), async (re
     res.json({ task: taskData });
   } catch (err) {
     console.error('[picking/next-task]', err);
-    res.status(500).json({ error: err.message || 'Помилка отримання задачі' });
+    next(appError('picking_next_failed'));
   }
 });
 
@@ -278,16 +279,14 @@ router.get('/next-task', requireTelegramRoles(['warehouse', 'admin']), async (re
 // POST /api/picking/tasks/:taskId/complete
 // Body: { items: [{ orderId, actualQty }], nextBlock?: N }
 // ---------------------------------------------------------------------------
-router.post('/tasks/:taskId/complete', requireTelegramRoles(['warehouse', 'admin']), async (req, res) => {
+router.post('/tasks/:taskId/complete', requireTelegramRoles(['warehouse', 'admin']), async (req, res, next) => {
   try {
     const user = req.telegramUser;
     const { items = [], nextBlock } = req.body;
 
     const task = await PickingTask.findById(req.params.taskId);
-    if (!task) return res.status(404).json({ error: 'Task not found' });
-    if (task.lockedBy !== user.telegramId) {
-      return res.status(403).json({ error: 'expired_lock', message: 'Завдання вже взяв інший складник або час блокування минув' });
-    }
+    if (!task) return next(appError('picking_task_not_found'));
+    if (task.lockedBy !== user.telegramId) return next(appError('expired_lock'));
 
     // Apply actual packed quantities
     for (const item of task.items) {
@@ -324,7 +323,7 @@ router.post('/tasks/:taskId/complete', requireTelegramRoles(['warehouse', 'admin
     res.json({ message: 'Task completed', nextTask: nextTaskData });
   } catch (err) {
     console.error('[picking/complete]', err);
-    res.status(500).json({ error: err.message || 'Помилка завершення задачі' });
+    next(appError('picking_complete_failed'));
   }
 });
 
@@ -333,16 +332,14 @@ router.post('/tasks/:taskId/complete', requireTelegramRoles(['warehouse', 'admin
 // Body: { packedOrderIds: string[] }
 // Saves partial packed state without completing the task.
 // ---------------------------------------------------------------------------
-router.patch('/tasks/:taskId/progress', requireTelegramRoles(['warehouse', 'admin']), async (req, res) => {
+router.patch('/tasks/:taskId/progress', requireTelegramRoles(['warehouse', 'admin']), async (req, res, next) => {
   try {
     const user = req.telegramUser;
     const { packedOrderIds = [] } = req.body;
 
     const task = await PickingTask.findById(req.params.taskId);
-    if (!task) return res.status(404).json({ error: 'Task not found' });
-    if (task.lockedBy !== user.telegramId) {
-      return res.status(403).json({ error: 'expired_lock', message: 'Завдання вже взяв інший складник або час блокування минув' });
-    }
+    if (!task) return next(appError('picking_task_not_found'));
+    if (task.lockedBy !== user.telegramId) return next(appError('expired_lock'));
 
     const packedSet = new Set(packedOrderIds.map(String));
     for (const item of task.items) {
@@ -353,14 +350,14 @@ router.patch('/tasks/:taskId/progress', requireTelegramRoles(['warehouse', 'admi
     res.json({ ok: true });
   } catch (err) {
     console.error('[picking/progress]', err);
-    res.status(500).json({ error: err.message || 'Помилка збереження прогресу' });
+    next(appError('picking_progress_failed'));
   }
 });
 
 // ---------------------------------------------------------------------------
 // POST /api/picking/tasks/:taskId/claim  — atomically lock a task from the review list
 // ---------------------------------------------------------------------------
-router.post('/tasks/:taskId/claim', requireTelegramRoles(['warehouse', 'admin']), async (req, res) => {
+router.post('/tasks/:taskId/claim', requireTelegramRoles(['warehouse', 'admin']), async (req, res, next) => {
   try {
     const user = req.telegramUser;
 
@@ -369,17 +366,17 @@ router.post('/tasks/:taskId/claim', requireTelegramRoles(['warehouse', 'admin'])
       { $set: { status: 'locked', lockedBy: user.telegramId, lockedAt: new Date() } },
       { new: true },
     );
-    if (!claimed) return res.status(409).json({ error: 'Task is no longer available' });
+    if (!claimed) return next(appError('picking_claim_unavailable'));
 
     const taskData = await buildTaskResponse(claimed);
     if (!taskData) {
       await PickingTask.findByIdAndUpdate(claimed._id, { $set: { status: 'pending', lockedBy: null, lockedAt: null } });
-      return res.status(404).json({ error: 'Product not found' });
+      return next(appError('picking_product_not_found'));
     }
     res.json({ task: taskData });
   } catch (err) {
     console.error('[picking/claim]', err);
-    res.status(500).json({ error: err.message || 'Помилка призначення задачі' });
+    next(appError('picking_claim_failed'));
   }
 });
 
@@ -387,13 +384,13 @@ router.post('/tasks/:taskId/claim', requireTelegramRoles(['warehouse', 'admin'])
 // POST /api/picking/tasks/:taskId/out-of-stock
 // Body: { nextBlock?: N, packedOrderIds?: string[] }
 // ---------------------------------------------------------------------------
-router.post('/tasks/:taskId/out-of-stock', requireTelegramRoles(['warehouse', 'admin']), async (req, res) => {
+router.post('/tasks/:taskId/out-of-stock', requireTelegramRoles(['warehouse', 'admin']), async (req, res, next) => {
   try {
     const user = req.telegramUser;
     const { nextBlock, packedOrderIds = [] } = req.body;
 
     let task = await PickingTask.findById(req.params.taskId);
-    if (!task) return res.status(404).json({ error: 'Task not found' });
+    if (!task) return next(appError('picking_task_not_found'));
 
     // Idempotency: if a previous request saved the task but archiveProduct crashed,
     // retry the archive now and return success.
@@ -415,10 +412,10 @@ router.post('/tasks/:taskId/out-of-stock', requireTelegramRoles(['warehouse', 'a
         { $set: { status: 'locked', lockedBy: user.telegramId, lockedAt: new Date() } },
         { new: true },
       );
-      if (!claimed) return res.status(409).json({ error: 'Task was claimed by another worker' });
+      if (!claimed) return next(appError('picking_claim_taken_by_other'));
       task = claimed;
     } else if (task.lockedBy !== user.telegramId) {
-      return res.status(403).json({ error: 'expired_lock', message: 'Завдання вже взяв інший складник або час блокування минув' });
+      return next(appError('expired_lock'));
     }
 
     await task.populate('productId');
@@ -470,7 +467,7 @@ router.post('/tasks/:taskId/out-of-stock', requireTelegramRoles(['warehouse', 'a
     res.json({ message: 'Out-of-stock recorded', nextTask: nextTaskData });
   } catch (err) {
     console.error('[picking/out-of-stock]', err);
-    res.status(500).json({ error: err.message || 'Помилка запису "немає на складі"' });
+    next(appError('picking_oos_failed'));
   }
 });
 

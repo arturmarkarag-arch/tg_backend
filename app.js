@@ -79,13 +79,10 @@ app.use('/api/shops', shopsRouter);
 app.use('/api/v1/telegram', telegramV1Router);
 
 
-app.use((err, req, res, next) => {
-  console.error(err);
-  // Never expose internal error details to clients in production
-  const isDev = process.env.NODE_ENV === 'development';
-  res.status(err.status || 500).json({
-    error: isDev ? (err.message || 'Internal server error') : 'Internal server error',
-  });
-});
+// Centralised error handler — converts AppError (and known Mongoose errors)
+// into a consistent JSON envelope { error: <code>, message: <ukrainian text>, ... }.
+// All routes that throw `appError(...)` (utils/errors.js) end up here.
+const { errorHandler } = require('./utils/errors');
+app.use(errorHandler);
 
 module.exports = app;

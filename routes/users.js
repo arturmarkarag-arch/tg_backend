@@ -1,5 +1,6 @@
 const express = require('express');
 const mongoose = require('mongoose');
+const { appError, asyncHandler } = require('../utils/errors');
 const User = require('../models/User');
 const Order = require('../models/Order');
 const DeliveryGroup = require('../models/DeliveryGroup');
@@ -90,8 +91,7 @@ async function sanitizeUserPayload(payload, existing = null) {
   return data;
 }
 
-router.get('/', async (req, res) => {
-  try {
+router.get('/', asyncHandler(async (req, res) => {
   const page     = Math.max(1, parseInt(req.query.page) || 1);
   const pageSize = Math.min(500, Math.max(1, parseInt(req.query.pageSize) || 20));
   const roleFilter     = req.query.role || null;
@@ -257,19 +257,15 @@ router.get('/', async (req, res) => {
     windowIsOpen,
     windowOpenAt: windowOpenAt?.toISOString() || null,
   });
-  } catch (err) {
-    console.error('[GET /users]', err);
-    res.status(500).json({ error: 'Failed to fetch users' });
-  }
-});
+}));
 
-router.get('/:telegramId', async (req, res) => {
+router.get('/:telegramId', asyncHandler(async (req, res) => {
   const user = await User.findOne({ telegramId: req.params.telegramId });
-  if (!user) return res.status(404).json({ error: 'User not found' });
+  if (!user) throw appError('user_not_found');
   res.json(user);
-});
+}));
 
-router.post('/', async (req, res) => {
+router.post('/', asyncHandler(async (req, res) => {
   const existing = await User.findOne({ telegramId: req.body.telegramId });
   const payload = await sanitizeUserPayload(req.body, existing);
   // telegramId береться з body тільки при створенні нового юзера
@@ -284,16 +280,15 @@ router.post('/', async (req, res) => {
 
   user = await syncUserWarehouseZone(user);
   res.status(existing ? 200 : 201).json(user);
-});
+}));
 
 // Lightweight endpoint — only updates shopId + syncs deliveryGroupId from the shop.
 // All writes (User, Order, PickingTask, lastSeller, history) run inside a single
 // MongoDB transaction so a partial failure cannot leave User and Order pointing
 // to different shops.
-router.patch('/:telegramId/shop', async (req, res) => {
-  try {
-    const existing = await User.findOne({ telegramId: req.params.telegramId });
-    if (!existing) return res.status(404).json({ error: 'User not found' });
+router.patch('/:telegramId/shop', asyncHandler(async (req, res) => {
+  const existing = await User.findOne({ telegramId: req.params.telegramId });
+  if (!existing) throw appError('user_not_found');
 
     const { shopId } = req.body;
     const oldShopId = existing.shopId ? String(existing.shopId) : '';
@@ -358,7 +353,7 @@ router.patch('/:telegramId/shop', async (req, res) => {
     }
 
     const newShop = await Shop.findById(newShopId).populate('cityId', 'name').lean();
-    if (!newShop) return res.status(404).json({ error: 'Shop not found' });
+    if (!newShop) throw appError('shop_not_found');
 
     let migrationResult = null;
     const session = await mongoose.connection.startSession();
@@ -400,16 +395,11 @@ router.patch('/:telegramId/shop', async (req, res) => {
     }
 
     res.json(migrationResult?.updatedUser || existing);
-  } catch (err) {
-    console.error('[PATCH /users/:telegramId/shop]', err);
-    res.status(500).json({ error: 'Failed to update shop assignment' });
-  }
-});
+}));
 
-router.patch('/:telegramId', async (req, res) => {
-  try {
-    const existing = await User.findOne({ telegramId: req.params.telegramId });
-    if (!existing) return res.status(404).json({ error: 'User not found' });
+router.patch('/:telegramId', asyncHandler(async (req, res) => {
+  const existing = await User.findOne({ telegramId: req.params.telegramId });
+  if (!existing) throw appError('user_not_found');
 
     const payload = await sanitizeUserPayload(req.body, existing);
     const oldShopId = existing.shopId ? String(existing.shopId) : '';
@@ -422,7 +412,7 @@ router.patch('/:telegramId', async (req, res) => {
     let migrationResult = null;
     if (shopChanged && newShopId && payload.role === 'seller') {
       const newShop = await Shop.findById(newShopId).populate('cityId', 'name').lean();
-      if (!newShop) return res.status(404).json({ error: 'Shop not found' });
+      if (!newShop) throw appError('shop_not_found');
 
       const session = await mongoose.connection.startSession();
       try {
@@ -510,59 +500,72 @@ router.patch('/:telegramId', async (req, res) => {
     }
 
     res.json(updatedUser);
-  } catch (err) {
-    console.error('[PATCH /users/:telegramId]', err);
-    res.status(500).json({ error: 'Failed to update user' });
-  }
-});
+}));
 
-router.delete('/:telegramId', async (req, res) => {
-  // Pre-flight: refuse hard-delete if the user has anything pending in the
-  // pipeline. Otherwise the Order/PickingTask rows would survive with a
-  // buyerTelegramId that no longer resolves to anyone (orphaned records).
-  const existing = await User.findOne({ telegramId: req.params.telegramId }).lean();
-  if (!existing) return res.status(404).json({ error: 'User not found' });
+router.delete('/:telegramId', asyncHandler(async (req, res) => {
+  // Перевірку «активних робіт» і саме видалення робимо в одній транзакції,
+  // щоб у вікні між count і findOneAndDelete не з'явилося нове замовлення/
+  // пакувальний таск (інакше отримаємо «висячі» посилання на видаленого user'а).
+  const session = await mongoose.connection.startSession();
+  try {
+    let result;
+    await session.withTransaction(async () => {
+      const existing = await User.findOne({ telegramId: req.params.telegramId }).session(session);
+      if (!existing) throw appError('user_not_found');
 
-  const [activeOrders, activePickingTasks] = await Promise.all([
-    Order.countDocuments({
-      buyerTelegramId: existing.telegramId,
-      status: { $in: ['new', 'in_progress'] },
-    }),
-    // Picking tasks reference orders by orderId — find any pending/locked task that
-    // contains an order belonging to this buyer.
-    (async () => {
-      const buyerOrderIds = await Order.find({ buyerTelegramId: existing.telegramId }, '_id').lean();
-      if (!buyerOrderIds.length) return 0;
-      return PickingTask.countDocuments({
-        'items.orderId': { $in: buyerOrderIds.map((o) => o._id) },
-        status: { $in: ['pending', 'locked'] },
-      });
-    })(),
-  ]);
+      const [activeOrders, activePickingTasks] = await Promise.all([
+        Order.countDocuments({
+          buyerTelegramId: existing.telegramId,
+          status: { $in: ['new', 'in_progress'] },
+        }).session(session),
+        // Picking tasks reference orders by orderId — find any pending/locked task that
+        // contains an order belonging to this buyer.
+        (async () => {
+          const buyerOrderIds = await Order.find(
+            { buyerTelegramId: existing.telegramId },
+            '_id',
+          ).session(session).lean();
+          if (!buyerOrderIds.length) return 0;
+          return PickingTask.countDocuments({
+            'items.orderId': { $in: buyerOrderIds.map((o) => o._id) },
+            status: { $in: ['pending', 'locked'] },
+          }).session(session);
+        })(),
+      ]);
 
-  if (activeOrders > 0 || activePickingTasks > 0) {
-    return res.status(409).json({
-      error: 'user_has_active_work',
-      message: `Не можна видалити користувача: ${activeOrders} активне замовлення, ${activePickingTasks} активний пакувальний таск. Спочатку завершіть або скасуйте їх.`,
-      activeOrders,
-      activePickingTasks,
+      if (activeOrders > 0 || activePickingTasks > 0) {
+        throw appError('user_has_active_work', { activeOrders, activePickingTasks });
+      }
+
+      const shopId = existing.shopId;
+      await User.deleteOne({ _id: existing._id }, { session });
+
+      // Зберігаємо «слід» продавця на магазині — у тій самій транзакції,
+      // щоб або обидва записи з'явилися, або жодного.
+      if (shopId) {
+        await Shop.updateOne(
+          { _id: shopId },
+          {
+            $set: {
+              lastSeller: {
+                telegramId: existing.telegramId,
+                firstName: existing.firstName || '',
+                lastName: existing.lastName || '',
+                unassignedAt: new Date(),
+              },
+            },
+          },
+          { session },
+        );
+      }
+
+      result = { message: 'Користувача видалено' };
     });
-  }
 
-  const user = await User.findOneAndDelete({ telegramId: req.params.telegramId });
-  if (!user) return res.status(404).json({ error: 'User not found' });
-  // Preserve seller identity on the shop so "Раніше тут був" hint survives deletion
-  if (user.shopId) {
-    await Shop.findByIdAndUpdate(user.shopId, {
-      lastSeller: {
-        telegramId:   user.telegramId,
-        firstName:    user.firstName  || '',
-        lastName:     user.lastName   || '',
-        unassignedAt: new Date(),
-      },
-    }).catch(() => {});
+    return res.json(result);
+  } finally {
+    session.endSession();
   }
-  res.json({ message: 'User deleted' });
-});
+}));
 
 module.exports = router;

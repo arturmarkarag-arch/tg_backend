@@ -1,5 +1,6 @@
 const express = require('express');
 const mongoose = require('mongoose');
+const { appError, asyncHandler } = require('../utils/errors');
 const DeliveryGroup = require('../models/DeliveryGroup');
 const User = require('../models/User');
 const Order = require('../models/Order');
@@ -129,9 +130,9 @@ router.get('/summary', async (req, res) => {
  * GET /api/delivery-groups/:groupId/shop-status
  * Returns per-shop cart and ordered item counts for the current ordering session.
  */
-router.get('/:groupId/shop-status', telegramAuth, requireTelegramRoles(['admin', 'warehouse']), async (req, res) => {
+router.get('/:groupId/shop-status', telegramAuth, requireTelegramRoles(['admin', 'warehouse']), asyncHandler(async (req, res) => {
   const group = await DeliveryGroup.findById(req.params.groupId).lean();
-  if (!group) return res.status(404).json({ error: 'Group not found' });
+  if (!group) throw appError('group_not_found');
 
   const schedule = await getOrderingSchedule();
   const status = isOrderingOpen(group.dayOfWeek, schedule);
@@ -261,7 +262,7 @@ router.get('/:groupId/shop-status', telegramAuth, requireTelegramRoles(['admin',
     currentSessionId,
     shops: shopStatuses,
   });
-});
+}));
 
 router.get('/session-summaries', telegramAuth, requireTelegramRole('admin'), async (req, res) => {
   const groups = await DeliveryGroup.find().lean();
@@ -293,9 +294,9 @@ router.get('/session-summaries', telegramAuth, requireTelegramRole('admin'), asy
   res.json(summaries);
 });
 
-router.post('/:id/close-ordering-session', telegramAuth, requireTelegramRole('admin'), async (req, res) => {
+router.post('/:id/close-ordering-session', telegramAuth, requireTelegramRole('admin'), asyncHandler(async (req, res) => {
   const group = await DeliveryGroup.findById(req.params.id).lean();
-  if (!group) return res.status(404).json({ error: 'Group not found' });
+  if (!group) throw appError('group_not_found');
 
   const schedule = await getOrderingSchedule();
   const status = isOrderingOpen(group.dayOfWeek, schedule);
@@ -318,7 +319,7 @@ router.post('/:id/close-ordering-session', telegramAuth, requireTelegramRole('ad
       : 'Старих замовлень для закриття не знайдено.',
     expiredCount,
   });
-});
+}));
 
 router.get('/', async (req, res) => {
   const groups = await DeliveryGroup.find().lean();
@@ -378,20 +379,18 @@ router.get('/', async (req, res) => {
   res.json(result);
 });
 
-router.post('/', telegramAuth, requireTelegramRole('admin'), async (req, res) => {
+router.post('/', telegramAuth, requireTelegramRole('admin'), asyncHandler(async (req, res) => {
   const { name, dayOfWeek } = req.body;
-  if (!name || dayOfWeek === undefined) {
-    return res.status(400).json({ error: 'name and dayOfWeek are required' });
-  }
+  if (!name || dayOfWeek === undefined) throw appError('group_name_or_day_required');
 
   const group = new DeliveryGroup({ name, dayOfWeek });
   await group.save();
   res.status(201).json(group);
-});
+}));
 
-router.patch('/:id', telegramAuth, requireTelegramRole('admin'), async (req, res) => {
+router.patch('/:id', telegramAuth, requireTelegramRole('admin'), asyncHandler(async (req, res) => {
   const group = await DeliveryGroup.findById(req.params.id);
-  if (!group) return res.status(404).json({ error: 'Group not found' });
+  if (!group) throw appError('group_not_found');
 
   const { name, dayOfWeek } = req.body;
   if (name !== undefined) group.name = name;
@@ -399,9 +398,9 @@ router.patch('/:id', telegramAuth, requireTelegramRole('admin'), async (req, res
 
   await group.save();
   res.json(group);
-});
+}));
 
-router.delete('/:id', telegramAuth, requireTelegramRole('admin'), async (req, res) => {
+router.delete('/:id', telegramAuth, requireTelegramRole('admin'), asyncHandler(async (req, res) => {
   // Check + delete in a single transaction so that a magazin or active order
   // created between the count and findByIdAndDelete cannot leave an orphan
   // reference behind.
@@ -410,53 +409,27 @@ router.delete('/:id', telegramAuth, requireTelegramRole('admin'), async (req, re
     let result;
     await session.withTransaction(async () => {
       const group = await DeliveryGroup.findById(req.params.id).session(session);
-      if (!group) {
-        result = { status: 404, body: { error: 'Group not found' } };
-        return;
-      }
+      if (!group) throw appError('group_not_found');
 
       const shopCount = await Shop.countDocuments({
         deliveryGroupId: String(group._id),
       }).session(session);
-      if (shopCount > 0) {
-        result = {
-          status: 400,
-          body: {
-            error: 'group_has_shops',
-            message: `Не можна видалити групу: ${shopCount} магазин(ів) прив'язано (включно з неактивними).`,
-            shopCount,
-          },
-        };
-        return;
-      }
+      if (shopCount > 0) throw appError('group_has_shops', { shopCount });
 
-      const activeOrderCount = await Order.countDocuments({
+      const activeOrders = await Order.countDocuments({
         'buyerSnapshot.deliveryGroupId': String(group._id),
         status: { $in: ['new', 'in_progress'] },
       }).session(session);
-      if (activeOrderCount > 0) {
-        result = {
-          status: 409,
-          body: {
-            error: 'group_has_active_orders',
-            message: `Не можна видалити групу: ${activeOrderCount} активне замовлення прив'язано.`,
-            activeOrders: activeOrderCount,
-          },
-        };
-        return;
-      }
+      if (activeOrders > 0) throw appError('group_has_active_orders', { activeOrders });
 
       await DeliveryGroup.deleteOne({ _id: group._id }, { session });
-      result = { status: 200, body: { message: 'Group deleted' } };
+      result = { message: 'Group deleted' };
     });
-    return res.status(result.status).json(result.body);
-  } catch (err) {
-    console.error('[DELETE /delivery-groups/:id]', err.message);
-    return res.status(500).json({ error: err.message });
+    return res.json(result);
   } finally {
     session.endSession();
   }
-});
+}));
 
 /**
  * POST /api/delivery-groups/:id/broadcast

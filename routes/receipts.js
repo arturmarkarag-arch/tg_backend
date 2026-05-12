@@ -14,6 +14,7 @@ const ReceiptItemLog = require('../models/ReceiptItemLog');
 const DeliveryGroup = require('../models/DeliveryGroup');
 const Shop = require('../models/Shop');
 const { getIO } = require('../socket');
+const { appError, asyncHandler } = require('../utils/errors');
 
 const staffOnly = requireTelegramRoles(['admin', 'warehouse']);
 
@@ -119,437 +120,400 @@ function safeParseArray(val) {
 
 const router = express.Router();
 
-router.get('/', staffOnly, async (req, res) => {
+router.get('/', staffOnly, asyncHandler(async (req, res) => {
+  const statusFilter = req.query.status;
+  const page     = Math.max(1, parseInt(req.query.page) || 1);
+  const pageSize = Math.min(100, Math.max(1, parseInt(req.query.pageSize) || 20));
+
+  const query = {};
+  if (statusFilter) query.status = statusFilter;
+
+  const [total, receipts] = await Promise.all([
+    Receipt.countDocuments(query),
+    Receipt.find(query)
+      .sort({ createdAt: -1 })
+      .skip((page - 1) * pageSize)
+      .limit(pageSize)
+      .lean(),
+  ]);
+
+  // Batch count items (one aggregate instead of N queries)
+  const receiptIds = receipts.map((r) => r._id);
+  const counts = await ReceiptItem.aggregate([
+    { $match: { receiptId: { $in: receiptIds } } },
+    { $group: { _id: '$receiptId', count: { $sum: 1 } } },
+  ]);
+  const countMap = new Map(counts.map((c) => [String(c._id), c.count]));
+  const receiptsWithCounts = receipts.map((r) => ({ ...r, itemsCount: countMap.get(String(r._id)) || 0 }));
+
+  res.json({
+    receipts: receiptsWithCounts,
+    total,
+    page,
+    pageSize,
+    pageCount: Math.max(1, Math.ceil(total / pageSize)),
+  });
+}));
+
+router.get('/:id', staffOnly, asyncHandler(async (req, res) => {
+  const receipt = await Receipt.findById(req.params.id).lean();
+  if (!receipt) throw appError('receipt_not_found');
+  res.json(receipt);
+}));
+
+router.delete('/:id', staffOnly, asyncHandler(async (req, res) => {
+  const receipt = await Receipt.findById(req.params.id);
+  if (!receipt) throw appError('receipt_not_found');
+  if (receipt.status !== 'draft') throw appError('receipt_only_draft_delete');
+
+  const itemCount = await ReceiptItem.countDocuments({ receiptId: receipt._id });
+  if (itemCount > 0) throw appError('receipt_only_empty_delete');
+
+  await receipt.deleteOne();
+  res.json({ message: 'Receipt deleted' });
+}));
+
+router.post('/', staffOnly, asyncHandler(async (req, res) => {
+  const receiptNumber = `REC-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
+  const receipt = new Receipt({
+    receiptNumber,
+    status: 'draft',
+    createdBy: req.user.telegramId,
+  });
   try {
-    const statusFilter = req.query.status;
-    const page     = Math.max(1, parseInt(req.query.page) || 1);
-    const pageSize = Math.min(100, Math.max(1, parseInt(req.query.pageSize) || 20));
-
-    const query = {};
-    if (statusFilter) query.status = statusFilter;
-
-    const [total, receipts] = await Promise.all([
-      Receipt.countDocuments(query),
-      Receipt.find(query)
-        .sort({ createdAt: -1 })
-        .skip((page - 1) * pageSize)
-        .limit(pageSize)
-        .lean(),
-    ]);
-
-    // Batch count items (one aggregate instead of N queries)
-    const receiptIds = receipts.map((r) => r._id);
-    const counts = await ReceiptItem.aggregate([
-      { $match: { receiptId: { $in: receiptIds } } },
-      { $group: { _id: '$receiptId', count: { $sum: 1 } } },
-    ]);
-    const countMap = new Map(counts.map((c) => [String(c._id), c.count]));
-    const receiptsWithCounts = receipts.map((r) => ({ ...r, itemsCount: countMap.get(String(r._id)) || 0 }));
-
-    res.json({
-      receipts: receiptsWithCounts,
-      total,
-      page,
-      pageSize,
-      pageCount: Math.max(1, Math.ceil(total / pageSize)),
-    });
-  } catch (err) {
-    console.error('[receipts.list] Error:', err);
-    res.status(500).json({ error: err.message || 'Failed to fetch receipts' });
-  }
-});
-
-router.get('/:id', staffOnly, async (req, res) => {
-  try {
-    const receipt = await Receipt.findById(req.params.id).lean();
-    if (!receipt) return res.status(404).json({ error: 'Receipt not found' });
-    res.json(receipt);
-  } catch (err) {
-    console.error('[receipts.get] Error:', err);
-    res.status(500).json({ error: err.message || 'Failed to fetch receipt' });
-  }
-});
-
-router.delete('/:id', staffOnly, async (req, res) => {
-  try {
-    const receipt = await Receipt.findById(req.params.id);
-    if (!receipt) return res.status(404).json({ error: 'Receipt not found' });
-    if (receipt.status !== 'draft') {
-      return res.status(400).json({ error: 'Only draft receipts can be deleted' });
-    }
-
-    const itemCount = await ReceiptItem.countDocuments({ receiptId: receipt._id });
-    if (itemCount > 0) {
-      return res.status(400).json({ error: 'Only empty receipts can be deleted' });
-    }
-
-    await receipt.deleteOne();
-    res.json({ message: 'Receipt deleted' });
-  } catch (err) {
-    console.error('[receipts.delete] Error:', err);
-    res.status(500).json({ error: err.message || 'Failed to delete receipt' });
-  }
-});
-
-router.post('/', staffOnly, async (req, res) => {
-  try {
-    const receiptNumber = `REC-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
-    const receipt = new Receipt({
-      receiptNumber,
-      status: 'draft',
-      createdBy: req.user.telegramId,
-    });
     await receipt.save();
-    ReceiptItemLog.create({
-      receiptId: receipt._id,
-      itemName: receipt.receiptNumber,
-      action: 'receipt_create',
-      actor: getActor(req),
-    }).catch((e) => console.error('[ReceiptItemLog] receipt_create error:', e));
-    res.status(201).json(receipt);
   } catch (err) {
-    console.error('[receipts.create] Error:', err);
-    if (err.code === 11000) {
-      return res.status(409).json({ error: 'Receipt number already exists' });
-    }
-    res.status(500).json({ error: err.message || 'Failed to create receipt' });
+    if (err.code === 11000) throw appError('receipt_number_exists');
+    throw err;
   }
-});
+  ReceiptItemLog.create({
+    receiptId: receipt._id,
+    itemName: receipt.receiptNumber,
+    action: 'receipt_create',
+    actor: getActor(req),
+  }).catch((e) => console.error('[ReceiptItemLog] receipt_create error:', e));
+  res.status(201).json(receipt);
+}));
 
-router.post('/:id/items', staffOnly, async (req, res) => {
-  try {
-    const receipt = await Receipt.findById(req.params.id);
-    if (!receipt) return res.status(404).json({ error: 'Receipt not found' });
-    if (receipt.status !== 'draft') {
-      return res.status(409).json({ error: 'Cannot add items to a completed receipt' });
-    }
+router.post('/:id/items', staffOnly, asyncHandler(async (req, res) => {
+  const receipt = await Receipt.findById(req.params.id);
+  if (!receipt) throw appError('receipt_not_found');
+  if (receipt.status !== 'draft') throw appError('receipt_already_completed');
 
-    if (!req.is('multipart/form-data')) {
-      return res.status(400).json({ error: 'multipart/form-data is required' });
-    }
+  if (!req.is('multipart/form-data')) throw appError('receipt_multipart_required');
 
-    const parsed = await parseMultipart(req);
-    const file = parsed.files?.[0];
-    const existingProductId = parsed.fields.existingProductId ? String(parsed.fields.existingProductId).trim() : null;
-    const isWarehousePending = parsed.fields.warehousePending === 'true';
-    const deliveryGroupIds = safeParseArray(parsed.fields.deliveryGroupIds);
-    if (deliveryGroupIds === null) {
-      return res.status(400).json({ error: 'Invalid deliveryGroupIds format' });
+  const parsed = await parseMultipart(req);
+  const file = parsed.files?.[0];
+  const existingProductId = parsed.fields.existingProductId ? String(parsed.fields.existingProductId).trim() : null;
+  const isWarehousePending = parsed.fields.warehousePending === 'true';
+  const deliveryGroupIds = safeParseArray(parsed.fields.deliveryGroupIds);
+  if (deliveryGroupIds === null) throw appError('receipt_invalid_delivery_groups');
+  if (deliveryGroupIds.length > 0) {
+    const existingCount = await DeliveryGroup.countDocuments({ _id: { $in: deliveryGroupIds } });
+    if (existingCount !== deliveryGroupIds.length) throw appError('receipt_delivery_groups_missing');
+  }
+  const qtyPerShop = parseIntField(parsed.fields.qtyPerShop);
+
+  if (!file && !existingProductId) throw appError('receipt_photo_required');
+
+  const totalQty = parseIntField(parsed.fields.totalQty);
+  const transitQty = parseIntField(parsed.fields.transitQty);
+  const shelfQty = totalQty - transitQty;
+
+  if (totalQty < 1) throw appError('receipt_qty_invalid');
+  if (shelfQty < 0) throw appError('receipt_transit_exceeds_total');
+
+  let photoUrl;
+  let photoName;
+  if (file) {
+    const filename = await uploadToR2(file.buffer, file.originalname, file.mimetype);
+    photoUrl = `/api/v1/products/images/${filename}`;
+    photoName = file.originalname || filename;
+  }
+
+  // Pull photo from existingProduct if item has no photo
+  if (!photoUrl && existingProductId) {
+    const existingProduct = await Product.findById(existingProductId).lean();
+    if (existingProduct) {
+      photoUrl = existingProduct.imageUrls?.[0] || existingProduct.localImageUrl || '';
+      photoName = existingProduct.imageNames?.[0] || existingProduct.imageUrls?.[0] || 'photo.jpg';
     }
-    if (deliveryGroupIds.length > 0) {
-      const existingCount = await DeliveryGroup.countDocuments({ _id: { $in: deliveryGroupIds } });
-      if (existingCount !== deliveryGroupIds.length) {
-        return res.status(400).json({ error: 'One or more deliveryGroupIds do not exist' });
+  }
+
+  const receiptItem = new ReceiptItem({
+    receiptId: receipt._id,
+    photoUrl: photoUrl || '',
+    photoName: photoName || '',
+    totalQty,
+    transitQty: transitQty || 0,
+    deliveryGroupIds: Array.isArray(deliveryGroupIds) ? deliveryGroupIds : [],
+    qtyPerShop,
+    shelfQty,
+    name: String(parsed.fields.name || '').trim(),
+    price: parsed.fields.price !== undefined && parsed.fields.price !== '' ? Number(parsed.fields.price) : null,
+    qtyPerPackage: parsed.fields.qtyPerPackage ? Number(parsed.fields.qtyPerPackage) : 1,
+    barcode: String(parsed.fields.barcode || '').trim(),
+    existingProductId: existingProductId || null,
+    warehousePending: isWarehousePending,
+  });
+
+  await receiptItem.save();
+
+  // Log: who added this item
+  ReceiptItemLog.create({
+    receiptId: receipt._id,
+    itemId: receiptItem._id,
+    itemName: receiptItem.name,
+    action: 'create',
+    actor: getActor(req),
+  }).catch((e) => console.error('[ReceiptItemLog] create error:', e));
+
+  const io = getIO();
+  if (io) {
+    io.to(`receipt_${receipt._id.toString()}`).emit('receipt_item_added', receiptItem);
+  }
+
+  res.status(201).json(receiptItem);
+}));
+
+router.get('/:id/items', staffOnly, asyncHandler(async (req, res) => {
+  const receipt = await Receipt.findById(req.params.id);
+  if (!receipt) throw appError('receipt_not_found');
+
+  const items = await ReceiptItem.find({ receiptId: receipt._id }).sort({ createdAt: -1 }).lean();
+
+  // Enrich each item with currentLocation (block + product status) and productCurrentQty
+  const productIds = items.map((i) => i.existingProductId || i.createdProductId).filter(Boolean);
+  let productMap = {};
+  let blockMap = {};
+
+  if (productIds.length > 0) {
+    const [products, blocks] = await Promise.all([
+      Product.find({ _id: { $in: productIds } }, 'quantity status barcodeChecked barcode').lean(),
+      Block.find({ productIds: { $in: productIds } }, 'blockId productIds').lean(),
+    ]);
+    productMap = Object.fromEntries(products.map((p) => [String(p._id), p]));
+    for (const block of blocks) {
+      for (const pid of block.productIds) {
+        blockMap[String(pid)] = block.blockId;
       }
     }
-    const qtyPerShop = parseIntField(parsed.fields.qtyPerShop);
-
-    if (!file && !existingProductId) {
-      return res.status(400).json({ error: 'Photo file is required when this is a new product' });
-    }
-
-    const totalQty = parseIntField(parsed.fields.totalQty);
-    const transitQty = parseIntField(parsed.fields.transitQty);
-    const shelfQty = totalQty - transitQty;
-
-    if (totalQty < 1) {
-      return res.status(400).json({ error: 'totalQty must be a positive integer' });
-    }
-    if (shelfQty < 0) {
-      return res.status(400).json({ error: 'transitQty cannot exceed totalQty' });
-    }
-
-    let photoUrl;
-    let photoName;
-    if (file) {
-      const filename = await uploadToR2(file.buffer, file.originalname, file.mimetype);
-      photoUrl = `/api/v1/products/images/${filename}`;
-      photoName = file.originalname || filename;
-    }
-
-    // Pull photo from existingProduct if item has no photo
-    if (!photoUrl && existingProductId) {
-      const existingProduct = await Product.findById(existingProductId).lean();
-      if (existingProduct) {
-        photoUrl = existingProduct.imageUrls?.[0] || existingProduct.localImageUrl || '';
-        photoName = existingProduct.imageNames?.[0] || existingProduct.imageUrls?.[0] || 'photo.jpg';
-      }
-    }
-
-    const receiptItem = new ReceiptItem({
-      receiptId: receipt._id,
-      photoUrl: photoUrl || '',
-      photoName: photoName || '',
-      totalQty,
-      transitQty: transitQty || 0,
-      deliveryGroupIds: Array.isArray(deliveryGroupIds) ? deliveryGroupIds : [],
-      qtyPerShop,
-      shelfQty,
-      name: String(parsed.fields.name || '').trim(),
-      price: parsed.fields.price !== undefined && parsed.fields.price !== '' ? Number(parsed.fields.price) : null,
-      qtyPerPackage: parsed.fields.qtyPerPackage ? Number(parsed.fields.qtyPerPackage) : 1,
-      barcode: String(parsed.fields.barcode || '').trim(),
-      existingProductId: existingProductId || null,
-      warehousePending: isWarehousePending,
-    });
-
-    await receiptItem.save();
-
-    // Log: who added this item
-    ReceiptItemLog.create({
-      receiptId: receipt._id,
-      itemId: receiptItem._id,
-      itemName: receiptItem.name,
-      action: 'create',
-      actor: getActor(req),
-    }).catch((e) => console.error('[ReceiptItemLog] create error:', e));
-
-    const io = getIO();
-    if (io) {
-      io.to(`receipt_${receipt._id.toString()}`).emit('receipt_item_added', receiptItem);
-    }
-
-    res.status(201).json(receiptItem);
-  } catch (err) {
-    console.error('[receipts.items.create] Error:', err);
-    res.status(500).json({ error: err.message || 'Failed to add receipt item' });
   }
-});
 
-router.get('/:id/items', staffOnly, async (req, res) => {
-  try {
-    const receipt = await Receipt.findById(req.params.id);
-    if (!receipt) return res.status(404).json({ error: 'Receipt not found' });
+  const enrichedItems = items.map((item) => {
+    const productId = item.existingProductId || item.createdProductId;
+    const product = productId ? productMap[String(productId)] : null;
+    const blockId = productId ? (blockMap[String(productId)] ?? null) : null;
+    return {
+      ...item,
+      currentLocation: { blockId, status: product?.status ?? null },
+      productCurrentQty: product?.quantity ?? null,
+      barcodeChecked: product?.barcodeChecked ?? false,
+    };
+  });
 
-    const items = await ReceiptItem.find({ receiptId: receipt._id }).sort({ createdAt: -1 }).lean();
-
-    // Enrich each item with currentLocation (block + product status) and productCurrentQty
-    const productIds = items.map((i) => i.existingProductId || i.createdProductId).filter(Boolean);
-    let productMap = {};
-    let blockMap = {};
-
-    if (productIds.length > 0) {
-      const [products, blocks] = await Promise.all([
-        Product.find({ _id: { $in: productIds } }, 'quantity status barcodeChecked barcode').lean(),
-        Block.find({ productIds: { $in: productIds } }, 'blockId productIds').lean(),
-      ]);
-      productMap = Object.fromEntries(products.map((p) => [String(p._id), p]));
-      for (const block of blocks) {
-        for (const pid of block.productIds) {
-          blockMap[String(pid)] = block.blockId;
-        }
-      }
-    }
-
-    const enrichedItems = items.map((item) => {
-      const productId = item.existingProductId || item.createdProductId;
-      const product = productId ? productMap[String(productId)] : null;
-      const blockId = productId ? (blockMap[String(productId)] ?? null) : null;
-      return {
-        ...item,
-        currentLocation: { blockId, status: product?.status ?? null },
-        productCurrentQty: product?.quantity ?? null,
-        barcodeChecked: product?.barcodeChecked ?? false,
-      };
-    });
-
-    res.json(enrichedItems);
-  } catch (err) {
-    console.error('[receipts.items.list] Error:', err);
-    res.status(500).json({ error: err.message || 'Failed to fetch receipt items' });
-  }
-});
+  res.json(enrichedItems);
+}));
 
 // ОНОВЛЕННЯ ПОЗИЦІЇ (PATCH)
-router.patch('/:id/items/:itemId', staffOnly, async (req, res) => {
-  try {
-    if (!req.is('multipart/form-data')) {
-      return res.status(400).json({ error: 'multipart/form-data is required' });
-    }
-
-    // Validate receipt status and item existence BEFORE consuming the body
-    const [receipt, item] = await Promise.all([
-      Receipt.findById(req.params.id).lean(),
-      ReceiptItem.findOne({ _id: req.params.itemId, receiptId: req.params.id }),
-    ]);
-    if (!item) return res.status(404).json({ error: 'Item not found' });
-    if (!receipt || receipt.status !== 'draft') {
-      return res.status(409).json({ error: 'Cannot modify a completed receipt' });
-    }
-
-    const parsed = await parseMultipart(req);
-
-    const totalQty = parsed.fields.totalQty !== undefined ? parseIntField(parsed.fields.totalQty, item.totalQty) : item.totalQty;
-    const transitQty = parsed.fields.transitQty !== undefined ? parseIntField(parsed.fields.transitQty, item.transitQty) : item.transitQty;
-    const shelfQty = totalQty - transitQty;
-
-    if (totalQty < 1) return res.status(400).json({ error: 'Invalid totalQty' });
-    if (shelfQty < 0) return res.status(400).json({ error: 'transitQty cannot exceed totalQty' });
-
-    const existingProductId = parsed.fields.existingProductId ? String(parsed.fields.existingProductId).trim() : null;
-    if (existingProductId) {
-      const exists = await Product.exists({ _id: existingProductId });
-      if (!exists) return res.status(400).json({ error: 'existingProductId does not exist' });
-    }
-    const deliveryGroupIds = safeParseArray(parsed.fields.deliveryGroupIds);
-    if (deliveryGroupIds === null) {
-      return res.status(400).json({ error: 'Invalid deliveryGroupIds format' });
-    }
-    if (deliveryGroupIds.length > 0) {
-      const existingCount = await DeliveryGroup.countDocuments({ _id: { $in: deliveryGroupIds } });
-      if (existingCount !== deliveryGroupIds.length) {
-        return res.status(400).json({ error: 'One or more deliveryGroupIds do not exist' });
-      }
-    }
-    const qtyPerShop = parseIntField(parsed.fields.qtyPerShop);
-
-    // Capture values before changes for diff
-    const _oldSnapshot = {
-      name: item.name,
-      totalQty: item.totalQty,
-      transitQty: item.transitQty,
-      shelfQty: item.shelfQty,
-      price: item.price,
-      qtyPerPackage: item.qtyPerPackage,
-      qtyPerShop: item.qtyPerShop,
-      barcode: item.barcode,
-      photoUrl: item.photoUrl,
-    };
-
-    item.totalQty = totalQty;
-    item.transitQty = transitQty;
-    item.shelfQty = shelfQty;
-    item.deliveryGroupIds = deliveryGroupIds;
-    item.qtyPerShop = qtyPerShop;
-    if (parsed.fields.name !== undefined) item.name = String(parsed.fields.name).trim();
-    if (parsed.fields.price !== undefined) item.price = parsed.fields.price !== '' ? Number(parsed.fields.price) : null;
-    if (parsed.fields.qtyPerPackage !== undefined) item.qtyPerPackage = Number(parsed.fields.qtyPerPackage) || 1;
-    if (parsed.fields.barcode !== undefined) item.barcode = String(parsed.fields.barcode).trim();
-    item.existingProductId = existingProductId || null;
-
-    const file = parsed.files?.[0];
-    if (file) {
-      const filename = await uploadToR2(file.buffer, file.originalname, file.mimetype);
-      item.photoUrl = `/api/v1/products/images/${filename}`;
-      item.photoName = file.originalname || filename;
-    } else if (!item.photoUrl && existingProductId) {
-      const existingProduct = await Product.findById(existingProductId).lean();
-      if (existingProduct) {
-        item.photoUrl = existingProduct.imageUrls?.[0] || existingProduct.localImageUrl || item.photoUrl;
-        item.photoName = existingProduct.imageNames?.[0] || existingProduct.imageUrls?.[0] || item.photoName;
-      }
-    }
-
-    await item.save();
-
-    // Log: which fields changed and who changed them
-    const _newSnapshot = {
-      name: item.name,
-      totalQty: item.totalQty,
-      transitQty: item.transitQty,
-      shelfQty: item.shelfQty,
-      price: item.price,
-      qtyPerPackage: item.qtyPerPackage,
-      qtyPerShop: item.qtyPerShop,
-      barcode: item.barcode,
-      photoUrl: item.photoUrl,
-    };
-    const _logChanges = Object.entries(_oldSnapshot)
-      .filter(([field]) => String(_oldSnapshot[field] ?? '') !== String(_newSnapshot[field] ?? ''))
-      .map(([field]) => ({ field, label: FIELD_LABELS[field] || field, from: _oldSnapshot[field], to: _newSnapshot[field] }));
-    if (_logChanges.length > 0) {
-      ReceiptItemLog.create({
-        receiptId: receipt._id,
-        itemId: item._id,
-        itemName: item.name,
-        action: 'update',
-        actor: getActor(req),
-        changes: _logChanges,
-      }).catch((e) => console.error('[ReceiptItemLog] update error:', e));
-    }
-
-    // If barcode was explicitly submitted and there's a linked existing product, enrich the Product record.
-    // We also set barcodeChecked: true when the field is empty — that means the user confirmed "no barcode".
-    if (parsed.fields.barcode !== undefined && item.existingProductId) {
-      const newBarcode = String(parsed.fields.barcode).trim();
-      const update = { barcodeChecked: true };
-      if (newBarcode) update.barcode = newBarcode;
-      await Product.findByIdAndUpdate(item.existingProductId, { $set: update });
-    }
-
-    const io = getIO();
-    if (io) io.to(`receipt_${req.params.id}`).emit('receipt_item_updated', item);
-
-    res.json(item);
-  } catch (err) {
-    console.error('[receipts.items.update] Error:', err);
-    res.status(500).json({ error: err.message || 'Failed to update item' });
+router.patch('/:id/items/:itemId', staffOnly, asyncHandler(async (req, res) => {
+  if (!req.is('multipart/form-data')) {
+    throw appError('validation_failed', { field: 'multipart/form-data is required' });
   }
-});
+
+  // Validate receipt status and item existence BEFORE consuming the body
+  const [receipt, item] = await Promise.all([
+    Receipt.findById(req.params.id).lean(),
+    ReceiptItem.findOne({ _id: req.params.itemId, receiptId: req.params.id }),
+  ]);
+  if (!item) throw appError('receipt_item_not_found');
+  if (!receipt || receipt.status !== 'draft') throw appError('receipt_completed_locked');
+
+  const parsed = await parseMultipart(req);
+
+  const totalQty = parsed.fields.totalQty !== undefined ? parseIntField(parsed.fields.totalQty, item.totalQty) : item.totalQty;
+  const transitQty = parsed.fields.transitQty !== undefined ? parseIntField(parsed.fields.transitQty, item.transitQty) : item.transitQty;
+  const shelfQty = totalQty - transitQty;
+
+  if (totalQty < 1) throw appError('validation_failed', { field: 'totalQty' });
+  if (shelfQty < 0) throw appError('validation_failed', { field: 'transitQty' });
+
+  const existingProductId = parsed.fields.existingProductId ? String(parsed.fields.existingProductId).trim() : null;
+  if (existingProductId) {
+    const exists = await Product.exists({ _id: existingProductId });
+    if (!exists) throw appError('validation_failed', { field: 'existingProductId' });
+  }
+  const deliveryGroupIds = safeParseArray(parsed.fields.deliveryGroupIds);
+  if (deliveryGroupIds === null) {
+    throw appError('validation_failed', { field: 'deliveryGroupIds' });
+  }
+  if (deliveryGroupIds.length > 0) {
+    const existingCount = await DeliveryGroup.countDocuments({ _id: { $in: deliveryGroupIds } });
+    if (existingCount !== deliveryGroupIds.length) {
+      throw appError('validation_failed', { field: 'deliveryGroupIds' });
+    }
+  }
+  const qtyPerShop = parseIntField(parsed.fields.qtyPerShop);
+
+  // Capture values before changes for diff
+  const _oldSnapshot = {
+    name: item.name,
+    totalQty: item.totalQty,
+    transitQty: item.transitQty,
+    shelfQty: item.shelfQty,
+    price: item.price,
+    qtyPerPackage: item.qtyPerPackage,
+    qtyPerShop: item.qtyPerShop,
+    barcode: item.barcode,
+    photoUrl: item.photoUrl,
+  };
+
+  item.totalQty = totalQty;
+  item.transitQty = transitQty;
+  item.shelfQty = shelfQty;
+  item.deliveryGroupIds = deliveryGroupIds;
+  item.qtyPerShop = qtyPerShop;
+  if (parsed.fields.name !== undefined) item.name = String(parsed.fields.name).trim();
+  if (parsed.fields.price !== undefined) item.price = parsed.fields.price !== '' ? Number(parsed.fields.price) : null;
+  if (parsed.fields.qtyPerPackage !== undefined) item.qtyPerPackage = Number(parsed.fields.qtyPerPackage) || 1;
+  if (parsed.fields.barcode !== undefined) item.barcode = String(parsed.fields.barcode).trim();
+  item.existingProductId = existingProductId || null;
+
+  const file = parsed.files?.[0];
+  if (file) {
+    const filename = await uploadToR2(file.buffer, file.originalname, file.mimetype);
+    item.photoUrl = `/api/v1/products/images/${filename}`;
+    item.photoName = file.originalname || filename;
+  } else if (!item.photoUrl && existingProductId) {
+    const existingProduct = await Product.findById(existingProductId).lean();
+    if (existingProduct) {
+      item.photoUrl = existingProduct.imageUrls?.[0] || existingProduct.localImageUrl || item.photoUrl;
+      item.photoName = existingProduct.imageNames?.[0] || existingProduct.imageUrls?.[0] || item.photoName;
+    }
+  }
+
+  // Save item AND re-check receipt.status='draft' in the SAME transaction so
+  // that a concurrent commit (which CAS-flips status to 'completed') will
+  // either run before us (we abort with 409) or run after us (it sees our
+  // changes). Без цього вікно між початковою перевіркою і item.save() могло
+  // дати «змінив позицію вже завершеної накладної».
+  const txSession = await mongoose.connection.startSession();
+  try {
+    await txSession.withTransaction(async () => {
+      const liveReceipt = await Receipt.findOne(
+        { _id: req.params.id, status: 'draft' },
+        '_id status',
+      ).session(txSession);
+      if (!liveReceipt) throw appError('receipt_completed_locked');
+      await item.save({ session: txSession });
+    });
+  } finally {
+    txSession.endSession();
+  }
+
+  // Log: which fields changed and who changed them
+  const _newSnapshot = {
+    name: item.name,
+    totalQty: item.totalQty,
+    transitQty: item.transitQty,
+    shelfQty: item.shelfQty,
+    price: item.price,
+    qtyPerPackage: item.qtyPerPackage,
+    qtyPerShop: item.qtyPerShop,
+    barcode: item.barcode,
+    photoUrl: item.photoUrl,
+  };
+  const _logChanges = Object.entries(_oldSnapshot)
+    .filter(([field]) => String(_oldSnapshot[field] ?? '') !== String(_newSnapshot[field] ?? ''))
+    .map(([field]) => ({ field, label: FIELD_LABELS[field] || field, from: _oldSnapshot[field], to: _newSnapshot[field] }));
+  if (_logChanges.length > 0) {
+    ReceiptItemLog.create({
+      receiptId: receipt._id,
+      itemId: item._id,
+      itemName: item.name,
+      action: 'update',
+      actor: getActor(req),
+      changes: _logChanges,
+    }).catch((e) => console.error('[ReceiptItemLog] update error:', e));
+  }
+
+  // If barcode was explicitly submitted and there's a linked existing product, enrich the Product record.
+  // We also set barcodeChecked: true when the field is empty — that means the user confirmed "no barcode".
+  if (parsed.fields.barcode !== undefined && item.existingProductId) {
+    const newBarcode = String(parsed.fields.barcode).trim();
+    const update = { barcodeChecked: true };
+    if (newBarcode) update.barcode = newBarcode;
+    await Product.findByIdAndUpdate(item.existingProductId, { $set: update });
+  }
+
+  const io = getIO();
+  if (io) io.to(`receipt_${req.params.id}`).emit('receipt_item_updated', item);
+
+  res.json(item);
+}));
 
 // ВИДАЛЕННЯ ПОЗИЦІЇ (DELETE)
-router.delete('/:id/items/:itemId', staffOnly, async (req, res) => {
+router.delete('/:id/items/:itemId', staffOnly, asyncHandler(async (req, res) => {
+  const session = await mongoose.connection.startSession();
   try {
-    const receipt = await Receipt.findById(req.params.id).lean();
-    if (!receipt) return res.status(404).json({ error: 'Receipt not found' });
-    if (receipt.status !== 'draft') {
-      return res.status(409).json({ error: 'Cannot delete items from a completed receipt' });
-    }
+    let deletedItem = null;
 
-    const item = await ReceiptItem.findOneAndDelete({ _id: req.params.itemId, receiptId: req.params.id });
-    if (!item) return res.status(404).json({ error: 'Item not found' });
+    await session.withTransaction(async () => {
+      // Атомарна перевірка статусу + delete у одній сесії: захищає від race
+      // condition «commit накладної проскочив після перевірки, до видалення».
+      const receipt = await Receipt.findOne(
+        { _id: req.params.id },
+        '_id status',
+      ).session(session);
+      if (!receipt) throw appError('receipt_not_found');
+      if (receipt.status !== 'draft') throw appError('receipt_completed_no_delete');
+
+      const item = await ReceiptItem.findOneAndDelete(
+        { _id: req.params.itemId, receiptId: req.params.id },
+        { session },
+      );
+      if (!item) throw appError('receipt_item_not_found');
+      deletedItem = item;
+    });
+
+    // Аудит-лог видалення позиції — обов'язковий слід для розслідувань
+    // (раніше DELETE не писав у ReceiptItemLog взагалі).
+    ReceiptItemLog.create({
+      receiptId: req.params.id,
+      itemId: deletedItem._id,
+      itemName: deletedItem.name || '',
+      action: 'delete',
+      actor: getActor(req),
+      changes: [
+        { field: 'name', label: FIELD_LABELS.name, from: deletedItem.name, to: null },
+        { field: 'totalQty', label: FIELD_LABELS.totalQty, from: deletedItem.totalQty, to: null },
+        { field: 'price', label: FIELD_LABELS.price, from: deletedItem.price, to: null },
+      ],
+    }).catch((e) => console.error('[ReceiptItemLog] delete error:', e));
 
     const io = getIO();
     if (io) io.to(`receipt_${req.params.id}`).emit('receipt_item_deleted', req.params.itemId);
 
-    res.json({ message: 'Item deleted' });
-  } catch (err) {
-    console.error('[receipts.items.delete] Error:', err);
-    res.status(500).json({ error: err.message || 'Failed to delete item' });
+    res.json({ message: 'Позицію видалено' });
+  } finally {
+    session.endSession();
   }
-});
+}));
 
-router.post('/:id/commit', staffOnly, async (req, res) => {
-  // Pre-flight checks (no session needed yet)
+router.post('/:id/commit', staffOnly, asyncHandler(async (req, res) => {
+  // Cheap pre-flight (avoids opening a session for the obviously-bad case).
   const receiptCheck = await Receipt.findById(req.params.id).lean();
-  if (!receiptCheck) return res.status(404).json({ error: 'Receipt not found' });
-  if (receiptCheck.status === 'completed') {
-    return res.status(409).json({ error: 'Receipt already completed' });
-  }
-
-  const items = await ReceiptItem.find({ receiptId: req.params.id });
-  if (!items.length) {
-    return res.status(400).json({ error: 'Receipt has no items' });
-  }
-
-  const invalidItem = items.find((item) => !item.name || item.price === null || item.price <= 0);
-  if (invalidItem) {
-    return res.status(400).json({ error: 'Не всі товари повністю описані' });
-  }
-
-  // Guard: unresolved warehouse-pending items
-  const pendingItem = items.find((item) => item.warehousePending);
-  if (pendingItem) {
-    return res.status(422).json({
-      error: `Позиція "${pendingItem.name || 'без назви'}" ще не прив'язана до складу. Знайдіть товар або оформіть як новий.`,
-    });
-  }
-
-  // Guard: transit without delivery groups
-  const orphanTransit = items.find(
-    (item) => item.transitQty > 0 && (!item.deliveryGroupIds || item.deliveryGroupIds.length === 0),
-  );
-  if (orphanTransit) {
-    return res.status(422).json({
-      error: `Позиція "${orphanTransit.name || 'без назви'}" має транзит ${orphanTransit.transitQty} шт, але групи доставки не вказані`,
-    });
-  }
+  if (!receiptCheck) throw appError('receipt_not_found');
+  if (receiptCheck.status === 'completed') throw appError('receipt_already_completed');
 
   const session = await mongoose.connection.startSession();
   session.startTransaction();
 
   try {
-    // Atomic CAS: draft → completed (prevents double-commit race condition)
+    // Atomic CAS: draft → completed. Виконуємо ПЕРШИМ кроком транзакції, щоб
+    // паралельний PATCH/DELETE item (який теж перевіряє status='draft' у своїй
+    // транзакції) гарантовано побачив новий статус і відмовив запит, а не
+    // переписав/видалив позицію вже після нашої перевірки.
     const receipt = await Receipt.findOneAndUpdate(
       { _id: req.params.id, status: 'draft' },
       { $set: { status: 'completed', completedAt: new Date() } },
@@ -558,7 +522,29 @@ router.post('/:id/commit', staffOnly, async (req, res) => {
     if (!receipt) {
       await session.abortTransaction();
       session.endSession();
-      return res.status(409).json({ error: 'Receipt not found or already completed' });
+      throw appError('receipt_already_completed');
+    }
+
+    // Re-load items INSIDE the transaction — таким чином усі зміни, які
+    // могли пройти між pre-check і CAS, вже або встигли (і ми бачимо актуальний
+    // стан), або заблоковані статус-CAS-ом у власних транзакціях.
+    const items = await ReceiptItem.find({ receiptId: receipt._id }).session(session);
+    if (!items.length) throw appError('receipt_no_items');
+
+    const invalidItem = items.find((item) => !item.name || item.price === null || item.price <= 0);
+    if (invalidItem) throw appError('receipt_items_incomplete');
+
+    const pendingItem = items.find((item) => item.warehousePending);
+    if (pendingItem) throw appError('receipt_item_pending', { name: pendingItem.name });
+
+    const orphanTransit = items.find(
+      (item) => item.transitQty > 0 && (!item.deliveryGroupIds || item.deliveryGroupIds.length === 0),
+    );
+    if (orphanTransit) {
+      throw appError('receipt_item_orphan_transit', {
+        name: orphanTransit.name,
+        transitQty: orphanTransit.transitQty,
+      });
     }
 
     const createdProducts = [];
@@ -722,113 +708,103 @@ router.post('/:id/commit', staffOnly, async (req, res) => {
   } catch (err) {
     await session.abortTransaction();
     session.endSession();
+    // AppError instances are already user-facing; rethrow so the central handler
+    // turns them into proper JSON. Anything else becomes a generic commit failure.
+    if (err && err.name === 'AppError') throw err;
     console.error('[receipts.commit] Error:', err);
-    res.status(500).json({ error: err.message || 'Failed to commit receipt' });
+    throw appError('receipt_commit_failed');
   }
-});
+}));
 
 // ── RESOLVE WAREHOUSE-PENDING ─────────────────────────────────────────────
 // Link a warehousePending item to an existing product, or mark it as a brand-new product.
-router.patch('/:id/items/:itemId/link', staffOnly, async (req, res) => {
-  try {
-    const { existingProductId, markAsNew, keepNewPhoto } = req.body || {};
-    const item = await ReceiptItem.findOne({ _id: req.params.itemId, receiptId: req.params.id });
-    if (!item) return res.status(404).json({ error: 'Item not found' });
+router.patch('/:id/items/:itemId/link', staffOnly, asyncHandler(async (req, res) => {
+  const { existingProductId, markAsNew, keepNewPhoto } = req.body || {};
+  const item = await ReceiptItem.findOne({ _id: req.params.itemId, receiptId: req.params.id });
+  if (!item) throw appError('receipt_item_not_found');
 
-    if (existingProductId) {
-      item.existingProductId = existingProductId;
-      const prod = await Product.findById(existingProductId);
-      if (prod) {
-        if (item.photoUrl && keepNewPhoto === true) {
-          // User chose the NEW photo — update the product record so it shows everywhere
-          prod.imageUrls = [item.photoUrl, ...(prod.imageUrls || []).filter((u) => u !== item.photoUrl)];
-          if (item.photoName) {
-            prod.imageNames = [item.photoName, ...(prod.imageNames || []).filter((n) => n !== item.photoName)];
-          }
-          await prod.save();
-        } else if (!item.photoUrl || keepNewPhoto === false) {
-          // User chose the OLD photo (or item had no photo) — pull from product
-          item.photoUrl = prod.imageUrls?.[0] || prod.localImageUrl || '';
-          item.photoName = prod.imageNames?.[0] || '';
+  if (existingProductId) {
+    item.existingProductId = existingProductId;
+    const prod = await Product.findById(existingProductId);
+    if (prod) {
+      if (item.photoUrl && keepNewPhoto === true) {
+        // User chose the NEW photo — update the product record so it shows everywhere
+        prod.imageUrls = [item.photoUrl, ...(prod.imageUrls || []).filter((u) => u !== item.photoUrl)];
+        if (item.photoName) {
+          prod.imageNames = [item.photoName, ...(prod.imageNames || []).filter((n) => n !== item.photoName)];
         }
-        if (!item.name || item.name === 'Без назви') {
-          item.name = prod.brand || prod.model || item.name;
-        }
-        if (item.price == null && prod.price != null) {
-          item.price = prod.price;
-        }
+        await prod.save();
+      } else if (!item.photoUrl || keepNewPhoto === false) {
+        // User chose the OLD photo (or item had no photo) — pull from product
+        item.photoUrl = prod.imageUrls?.[0] || prod.localImageUrl || '';
+        item.photoName = prod.imageNames?.[0] || '';
+      }
+      if (!item.name || item.name === 'Без назви') {
+        item.name = prod.brand || prod.model || item.name;
+      }
+      if (item.price == null && prod.price != null) {
+        item.price = prod.price;
       }
     }
-    item.warehousePending = false;
-    await item.save();
-
-    ReceiptItemLog.create({
-      receiptId: req.params.id,
-      itemId: item._id,
-      itemName: item.name,
-      action: 'resolve_pending',
-      actor: getActor(req),
-      meta: { existingProductId: existingProductId || null, markAsNew: !!markAsNew },
-    }).catch((e) => console.error('[ReceiptItemLog] resolve_pending error:', e));
-
-    // Return enriched item (same as GET /:id/items enrichment)
-    const productId = item.existingProductId || item.createdProductId;
-    let enriched = item.toObject();
-    if (productId) {
-      const [prod, block] = await Promise.all([
-        Product.findById(productId, 'quantity status barcodeChecked barcode price').lean(),
-        Block.findOne({ productIds: productId }, 'blockId').lean(),
-      ]);
-      enriched.currentLocation = { blockId: block?.blockId ?? null, status: prod?.status ?? null };
-      enriched.productCurrentQty = prod?.quantity ?? null;
-      enriched.barcodeChecked = prod?.barcodeChecked ?? false;
-    } else {
-      enriched.currentLocation = { blockId: null, status: null };
-      enriched.productCurrentQty = null;
-    }
-
-    const io = getIO();
-    if (io) io.to(`receipt_${req.params.id}`).emit('receipt_item_updated', enriched);
-
-    res.json(enriched);
-  } catch (err) {
-    console.error('[receipts.items.link] Error:', err);
-    res.status(500).json({ error: err.message || 'Failed to link item' });
   }
-});
+  item.warehousePending = false;
+  await item.save();
+
+  ReceiptItemLog.create({
+    receiptId: req.params.id,
+    itemId: item._id,
+    itemName: item.name,
+    action: 'resolve_pending',
+    actor: getActor(req),
+    meta: { existingProductId: existingProductId || null, markAsNew: !!markAsNew },
+  }).catch((e) => console.error('[ReceiptItemLog] resolve_pending error:', e));
+
+  // Return enriched item (same as GET /:id/items enrichment)
+  const productId = item.existingProductId || item.createdProductId;
+  let enriched = item.toObject();
+  if (productId) {
+    const [prod, block] = await Promise.all([
+      Product.findById(productId, 'quantity status barcodeChecked barcode price').lean(),
+      Block.findOne({ productIds: productId }, 'blockId').lean(),
+    ]);
+    enriched.currentLocation = { blockId: block?.blockId ?? null, status: prod?.status ?? null };
+    enriched.productCurrentQty = prod?.quantity ?? null;
+    enriched.barcodeChecked = prod?.barcodeChecked ?? false;
+  } else {
+    enriched.currentLocation = { blockId: null, status: null };
+    enriched.productCurrentQty = null;
+  }
+
+  const io = getIO();
+  if (io) io.to(`receipt_${req.params.id}`).emit('receipt_item_updated', enriched);
+
+  res.json(enriched);
+}));
 
 // ── HISTORY / AUDIT LOG ────────────────────────────────────────────────────
 
 // GET all logs for a receipt (lazy — only called when user explicitly opens history)
-router.get('/:id/logs', staffOnly, async (req, res) => {
-  try {
-    const logs = await ReceiptItemLog.find({ receiptId: req.params.id })
-      .sort({ createdAt: -1 })
-      .lean();
-    res.json(logs);
-  } catch (err) {
-    res.status(500).json({ error: err.message || 'Failed to fetch logs' });
-  }
-});
+router.get('/:id/logs', staffOnly, asyncHandler(async (req, res) => {
+  const logs = await ReceiptItemLog.find({ receiptId: req.params.id })
+    .sort({ createdAt: -1 })
+    .lean();
+  res.json(logs);
+}));
 
 // POST a move_to_block action from the frontend (addToBlock lives in blocks route, not here)
-router.post('/:id/items/:itemId/log', staffOnly, async (req, res) => {
-  try {
-    const { action, blockId, itemName } = req.body || {};
-    if (!action) return res.status(400).json({ error: 'action is required' });
+router.post('/:id/items/:itemId/log', staffOnly, asyncHandler(async (req, res) => {
+  const { action, blockId, itemName } = req.body || {};
+  if (!action) throw appError('receipt_log_action_required');
 
-    await ReceiptItemLog.create({
-      receiptId: req.params.id,
-      itemId: req.params.itemId,
-      itemName: itemName || '',
-      action,
-      actor: getActor(req),
-      meta: blockId ? { blockId } : {},
-    });
-    res.json({ ok: true });
-  } catch (err) {
-    res.status(500).json({ error: err.message || 'Failed to log action' });
-  }
-});
+  await ReceiptItemLog.create({
+    receiptId: req.params.id,
+    itemId: req.params.itemId,
+    itemName: itemName || '',
+    action,
+    actor: getActor(req),
+    meta: blockId ? { blockId } : {},
+  });
+  res.json({ ok: true });
+}));
 
 module.exports = router;

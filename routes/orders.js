@@ -15,6 +15,7 @@ const { getIO } = require('../socket');
 const { isOrderingOpen, getOrderingWindowOpenAt, getCurrentOrderingSessionId } = require('../utils/orderingSchedule');
 
 const { getOrderingSchedule } = require('../utils/getOrderingSchedule');
+const { appError } = require('../utils/errors');
 
 const router = express.Router();
 const staffOnly = requireTelegramRoles(['admin', 'warehouse']);
@@ -194,7 +195,7 @@ router.get('/', async (req, res) => {
   const filter = {};
   if (buyerTelegramId) {
     if (String(buyerTelegramId) !== telegramId && !['admin', 'warehouse'].includes(authUser.role)) {
-      return res.status(403).json({ error: 'You may only query your own orders' });
+      throw appError('order_query_forbidden');
     }
     filter.buyerTelegramId = String(buyerTelegramId);
   } else if (!['admin', 'warehouse'].includes(authUser.role)) {
@@ -305,14 +306,14 @@ router.get('/transit/active', staffOnly, async (req, res) => {
     res.json(enrichedOrders);
   } catch (error) {
     console.error('[orders.transit.active] Error:', error);
-    res.status(500).json({ error: 'Failed to fetch transit orders' });
+    next(appError('order_transit_failed'));
   }
 });
 
-router.post('/:id/fulfill', telegramAuth, staffOnly, async (req, res) => {
+router.post('/:id/fulfill', telegramAuth, staffOnly, async (req, res, next) => {
   try {
     const order = await Order.findById(req.params.id);
-    if (!order) return res.status(404).json({ error: 'Not found' });
+    if (!order) return next(appError('order_not_found'));
 
     const prevStatus = order.status;
     order.status = 'fulfilled';
@@ -321,7 +322,7 @@ router.post('/:id/fulfill', telegramAuth, staffOnly, async (req, res) => {
     res.json(order);
   } catch (error) {
     console.error('[orders.fulfill] Error:', error);
-    res.status(500).json({ error: 'Failed to fulfill order' });
+    next(appError('order_fulfill_failed'));
   }
 });
 
@@ -330,9 +331,9 @@ router.get('/:id', async (req, res) => {
   const authUser = req.telegramUser;
 
   const order = await Order.findById(req.params.id).populate('items.productId');
-  if (!order) return res.status(404).json({ error: 'Order not found' });
+  if (!order) throw appError('order_not_found');
   if (String(order.buyerTelegramId) !== telegramId && !['admin', 'warehouse'].includes(authUser.role)) {
-    return res.status(403).json({ error: 'You do not have permission to view this order' });
+    throw appError('order_view_forbidden');
   }
 
   const buyer = await User.findOne({ telegramId: order.buyerTelegramId });
@@ -355,20 +356,20 @@ router.post('/', async (req, res) => {
 
   const validation = getTelegramAuth(req, process.env.TELEGRAM_BOT_TOKEN);
   if (!validation.valid) {
-    return res.status(401).json({ error: validation.error || 'Invalid or missing initData' });
+    throw appError('order_invalid_initdata');
   }
 
   const telegramId = String(validation.telegramId || '');
   if (!telegramId) {
-    return res.status(401).json({ error: 'Invalid initData' });
+    throw appError('order_invalid_initdata');
   }
 
   if (buyerTelegramId && String(buyerTelegramId) !== telegramId) {
-    return res.status(403).json({ error: 'buyerTelegramId does not match authenticated user' });
+    throw appError('order_buyer_mismatch');
   }
 
   if (!Array.isArray(items) || items.length === 0) {
-    return res.status(400).json({ error: 'Valid items are required' });
+    throw appError('order_items_required');
   }
 
   const buyer = await User.findOne({ telegramId }).lean();
@@ -453,7 +454,7 @@ router.post('/', async (req, res) => {
   }
 
   if (validItems.length === 0) {
-    return res.status(400).json({ error: 'No valid items found' });
+    throw appError('order_no_valid_items');
   }
 
   // Guard: sellers cannot order products that are not placed in any block.
@@ -579,6 +580,26 @@ router.post('/', async (req, res) => {
       await order.save({ session: mongoSession });
     }
 
+    // Clear the buyer's cart inside the SAME transaction. Якщо винести цю
+    // операцію назовні (як було раніше з .catch warn), отримаємо вікно, у якому
+    // замовлення вже існує, але кошик ще «повний» — і клієнт може повторно
+    // оформити те саме. Тепер або обидві дії проходять, або жодна.
+    {
+      const activePositions = (order.items || []).filter((i) => !i.cancelled).length;
+      await User.updateOne(
+        { telegramId: buyer.telegramId },
+        {
+          $set: {
+            'cartState.lastOrderPositions': activePositions,
+            'cartState.orderItems': {},
+            'cartState.orderItemIds': [],
+            'cartState.updatedAt': new Date(),
+          },
+        },
+        { session: mongoSession },
+      );
+    }
+
     await mongoSession.commitTransaction();
   } catch (err) {
     await mongoSession.abortTransaction();
@@ -594,19 +615,12 @@ router.post('/', async (req, res) => {
   }
 
   // Save order position count and clear the user's cart (order is placed — cart is done)
-  const activePositions = (order.items || []).filter((i) => !i.cancelled).length;
-  await User.updateOne(
-    { telegramId: buyer.telegramId },
-    {
-      $set: {
-        'cartState.lastOrderPositions': activePositions,
-        'cartState.orderItems': {},
-        'cartState.orderItemIds': [],
-        'cartState.updatedAt': new Date(),
-      },
-    }
-  ).catch((e) => console.warn('[orders] cartState clear failed:', e?.message));
-
+  // NOTE: cart-clear is now performed INSIDE the transaction above (atomic with
+  // order.save). Тут лише пост-дії: емітимо сокет і повертаємо клієнту явний
+  // статус, чи вдалося оповістити підписників — щоб UI не «думав», що все ок,
+  // коли real-time оновлення фактично не пройшло.
+  let socketDelivered = true;
+  let socketError = null;
   try {
     const io = getIO();
     if (io) {
@@ -619,15 +633,23 @@ router.post('/', async (req, res) => {
       if (groupId) {
         io.to(`picking_group_${groupId}`).emit('shop_status_changed', { groupId: String(groupId) });
       }
+    } else {
+      socketDelivered = false;
+      socketError = 'socket_not_initialized';
     }
   } catch (emitError) {
-    console.warn('[orders] socket emit failed:', emitError?.message || emitError);
+    socketDelivered = false;
+    socketError = emitError?.message || String(emitError);
+    console.warn('[orders] socket emit failed:', socketError);
   }
 
   const responseBody = order.toObject ? order.toObject() : order;
   if (archivedItems.length > 0) {
     responseBody.archivedItems = archivedItems;
   }
+  // Явний прапорець для UI: якщо socketDelivered === false, клієнту слід
+  // явно перепідтягнути стан (refetch), бо real-time оновлення не дійде.
+  responseBody._meta = { socketDelivered, ...(socketError ? { socketError } : {}) };
 
   res.status(201).json(responseBody);
 });
@@ -635,7 +657,7 @@ router.post('/', async (req, res) => {
 // PATCH /:id/snapshot — admin reassigns order to a different shop
 router.patch('/:id/snapshot', staffOnly, async (req, res) => {
   const order = await Order.findById(req.params.id);
-  if (!order) return res.status(404).json({ error: 'Order not found' });
+  if (!order) throw appError('order_not_found');
 
   // Only allow reassigning active orders — reassigning fulfilled/cancelled orders
   // would incorrectly move the buyer to a new shop based on historical data
@@ -647,10 +669,10 @@ router.patch('/:id/snapshot', staffOnly, async (req, res) => {
   }
 
   const { shopId } = req.body;
-  if (!shopId) return res.status(400).json({ error: 'shopId is required' });
+  if (!shopId) throw appError('order_shop_required');
 
   const shop = await Shop.findById(shopId).populate('cityId', 'name').lean();
-  if (!shop) return res.status(400).json({ error: 'Магазин не знайдено' });
+  if (!shop) throw appError('order_shop_not_found');
 
   // Warn if target shop already has an active order from someone else — creates a new conflict
   const targetConflict = await Order.findOne({
@@ -778,20 +800,20 @@ router.patch('/:id', requireOrderingWindowOpen, async (req, res) => {
     if (req.body[key] !== undefined) update[key] = req.body[key];
   }
   if (!Object.keys(update).length) {
-    return res.status(400).json({ error: 'No valid fields to update' });
+    throw appError('order_no_fields');
   }
 
   const order = await Order.findById(req.params.id);
-  if (!order) return res.status(404).json({ error: 'Order not found' });
+  if (!order) throw appError('order_not_found');
 
   const isOwner = order.buyerTelegramId === telegramId;
   const isStaff = ['admin', 'warehouse'].includes(user.role);
   if (!isOwner && !isStaff) {
-    return res.status(403).json({ error: 'You do not have permission to modify this order' });
+    throw appError('order_modify_forbidden');
   }
 
   if (isOwner && !isStaff && update.status) {
-    return res.status(403).json({ error: 'Sellers cannot change order status' });
+    throw appError('order_seller_no_status');
   }
 
   if (update.status === 'cancelled' && order.status !== 'cancelled') {

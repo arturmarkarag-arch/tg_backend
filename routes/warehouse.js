@@ -6,6 +6,7 @@ const Product = require('../models/Product');
 const PickingTask = require('../models/PickingTask');
 const { archiveProduct, getProductTitle } = require('../services/archiveProduct');
 const { requireTelegramRoles } = require('../middleware/telegramAuth');
+const { appError, asyncHandler } = require('../utils/errors');
 
 const router = express.Router();
 
@@ -14,7 +15,7 @@ function normalizeWorkerId(id) {
   return String(id).trim();
 }
 
-router.get('/workers', requireTelegramRoles(['admin', 'warehouse']), async (req, res) => {
+router.get('/workers', requireTelegramRoles(['admin', 'warehouse']), asyncHandler(async (req, res) => {
   const workers = await User.find({ role: 'warehouse' }).sort({ firstName: 1, lastName: 1 }).lean();
   res.json(workers.map((worker) => ({
     telegramId: worker.telegramId,
@@ -26,9 +27,9 @@ router.get('/workers', requireTelegramRoles(['admin', 'warehouse']), async (req,
     isOnShift: worker.isOnShift || false,
     shiftZone: worker.shiftZone || { startBlock: null, endBlock: null },
   })));
-});
+}));
 
-router.get('/shift-status', requireTelegramRoles(['admin', 'warehouse']), async (req, res) => {
+router.get('/shift-status', requireTelegramRoles(['admin', 'warehouse']), asyncHandler(async (req, res) => {
   const activeWorkers = await User.find({ role: 'warehouse', isOnShift: true }).lean();
   const activeWorkerIds = activeWorkers.map((worker) => String(worker.telegramId));
   const lockedTasks = await PickingTask.find({ status: 'locked', lockedBy: { $in: activeWorkerIds } })
@@ -56,13 +57,11 @@ router.get('/shift-status', requireTelegramRoles(['admin', 'warehouse']), async 
   }));
 
   res.json(response);
-});
+}));
 
-router.post('/remove-from-shift', requireTelegramRoles(['admin', 'warehouse']), async (req, res) => {
+router.post('/remove-from-shift', requireTelegramRoles(['admin', 'warehouse']), asyncHandler(async (req, res) => {
   const { workerId } = req.body;
-  if (!workerId) {
-    return res.status(400).json({ error: 'workerId is required' });
-  }
+  if (!workerId) throw appError('warehouse_worker_id_required');
 
   const normalizedWorkerId = String(workerId).trim();
   let worker;
@@ -74,9 +73,7 @@ router.post('/remove-from-shift', requireTelegramRoles(['admin', 'warehouse']), 
         telegramId: normalizedWorkerId,
       }).session(session);
 
-      if (!worker) {
-        throw Object.assign(new Error('Warehouse worker not found'), { status: 404 });
-      }
+      if (!worker) throw appError('warehouse_worker_not_found');
 
       worker.isOnShift = false;
       worker.shiftZone = { startBlock: null, endBlock: null };
@@ -90,52 +87,40 @@ router.post('/remove-from-shift', requireTelegramRoles(['admin', 'warehouse']), 
       );
 
     });
-  } catch (err) {
+  } finally {
     await session.endSession();
-    return res.status(err.status || 500).json({ error: err.message || 'Failed to remove worker from shift' });
   }
-  await session.endSession();
 
   res.json({ message: 'Worker removed from shift and locked tasks released' });
-});
+}));
 
-router.post('/confirm-shift', requireTelegramRoles(['admin', 'warehouse']), async (req, res) => {
+router.post('/confirm-shift', requireTelegramRoles(['admin', 'warehouse']), asyncHandler(async (req, res) => {
   const requestingUser = req.telegramUser;
   if (!requestingUser.isWarehouseManager && requestingUser.role !== 'admin') {
-    return res.status(403).json({ error: 'Only warehouse managers or admins can confirm shift assignments' });
+    throw appError('warehouse_only_manager_confirm');
   }
 
   const { workerIds } = req.body;
-  if (!Array.isArray(workerIds) || workerIds.length === 0) {
-    return res.status(400).json({ error: 'workerIds must be a non-empty array' });
-  }
+  if (!Array.isArray(workerIds) || workerIds.length === 0) throw appError('warehouse_workerids_required');
 
   const normalizedIds = workerIds.map(normalizeWorkerId).filter(Boolean);
-  if (normalizedIds.length === 0) {
-    return res.status(400).json({ error: 'Invalid workerIds provided' });
-  }
+  if (normalizedIds.length === 0) throw appError('warehouse_workerids_invalid');
 
   const warehouseWorkers = await User.find({ role: 'warehouse' }).lean();
   const matchedWorkers = warehouseWorkers.filter((worker) =>
     normalizedIds.includes(worker.telegramId) || normalizedIds.includes(String(worker._id))
   );
 
-  if (matchedWorkers.length === 0) {
-    return res.status(404).json({ error: 'No matching warehouse workers found' });
-  }
+  if (matchedWorkers.length === 0) throw appError('warehouse_no_matching_workers');
 
   const totalWorkers = matchedWorkers.length;
   const lastBlock = await Block.findOne().sort({ blockId: -1 }).lean();
   const maxBlockNumber = lastBlock ? lastBlock.blockId : 0;
 
-  if (maxBlockNumber === 0) {
-    return res.status(400).json({ error: 'No warehouse blocks defined' });
-  }
+  if (maxBlockNumber === 0) throw appError('warehouse_no_blocks');
 
   const blocksPerPerson = Math.floor(maxBlockNumber / totalWorkers);
-  if (blocksPerPerson < 1) {
-    return res.status(400).json({ error: 'Insufficient blocks to assign to selected workers' });
-  }
+  if (blocksPerPerson < 1) throw appError('warehouse_insufficient_blocks');
 
   const assignments = matchedWorkers.map((worker, index) => {
     const startBlock = index * blocksPerPerson + 1;
@@ -188,12 +173,12 @@ router.post('/confirm-shift', requireTelegramRoles(['admin', 'warehouse']), asyn
     assigned: assignments,
     requestedBy: requestingUser.telegramId,
   });
-});
+}));
 
-router.post('/close-shift', requireTelegramRoles(['admin', 'warehouse']), async (req, res) => {
+router.post('/close-shift', requireTelegramRoles(['admin', 'warehouse']), asyncHandler(async (req, res) => {
   const requestingUser = req.telegramUser;
   if (!requestingUser.isWarehouseManager && requestingUser.role !== 'admin') {
-    return res.status(403).json({ error: 'Only warehouse managers or admins can close shift' });
+    throw appError('warehouse_only_manager_close');
   }
 
   // Bot-specific (H-6): PickingTask guard relied on bot /pick locking — no longer relevant
@@ -233,6 +218,6 @@ router.post('/close-shift', requireTelegramRoles(['admin', 'warehouse']), async 
     message: 'Shift closed successfully',
     closedBy: requestingUser.telegramId,
   });
-});
+}));
 
 module.exports = router;

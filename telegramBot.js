@@ -15,20 +15,26 @@ async function updateUserBotActivity(chatId) {
         botLastSessionAt: new Date(),
       }
     );
-  } catch (_) {}
+  } catch (e) {
+    console.warn('[telegramBot] markUserBotActive failed:', e.message);
+  }
 }
 
 async function markUserBotBlocked(chatId) {
   try {
     await User.findOneAndUpdate({ telegramId: String(chatId) }, { botBlocked: true });
-  } catch (_) {}
+  } catch (e) {
+    console.warn('[telegramBot] markUserBotBlocked failed:', e.message);
+  }
 }
 
 
 async function logBotInteraction(telegramId, type, action, label = '', context = {}) {
   try {
     await BotInteractionLog.create({ telegramId: String(telegramId), type, action, label, context });
-  } catch (_) {}
+  } catch (e) {
+    console.warn('[telegramBot] logBotInteraction failed:', e.message);
+  }
 }
 
 async function handleMyChatMemberUpdate(update) {
@@ -432,7 +438,9 @@ async function initBot(token) {
               { inline_keyboard: [[{ text: '❌ Заявка оброблена', callback_data: 'noop' }]] },
               { chat_id: chatId, message_id: msgId }
             );
-          } catch (_) {}
+          } catch (e) {
+            console.warn('[Bot] editMessageReplyMarkup (already-processed) failed:', e.message);
+          }
           return;
         }
 
@@ -490,7 +498,9 @@ async function initBot(token) {
             { inline_keyboard: [[{ text: '✅ Оброблено', callback_data: 'noop' }]] },
             { chat_id: chatId, message_id: msgId }
           );
-        } catch (_) {}
+        } catch (e) {
+          console.warn('[Bot] editMessageReplyMarkup (processed) failed:', e.message);
+        }
         return;
       }
 
@@ -498,7 +508,9 @@ async function initBot(token) {
       await bot.answerCallbackQuery(query.id, { text: 'Невідома дія.', show_alert: true });
       } catch (err) {
         console.error('[Bot] Callback query handler error:', err);
-        try { await bot.answerCallbackQuery(query.id); } catch (_) {}
+        try { await bot.answerCallbackQuery(query.id); } catch (e) {
+          console.warn('[Bot] answerCallbackQuery (after error) failed:', e.message);
+        }
       }
     });
 

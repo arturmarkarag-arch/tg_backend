@@ -104,7 +104,9 @@ async function archiveProduct(product, { notifyBuyers = false, bot = null } = {}
     try {
       const io = getIO();
       io.emit('order_updated', { orderId, buyerTelegramId });
-    } catch (_) {}
+    } catch (e) {
+      console.warn('[archiveProduct] socket order_updated failed:', e.message);
+    }
 
     if (notifyBuyers && bot) {
       await bot
@@ -112,7 +114,10 @@ async function archiveProduct(product, { notifyBuyers = false, bot = null } = {}
           buyerTelegramId,
           `⛔ Товар "${getProductTitle(product)}" на складі закінчився. Цю позицію видалено з вашого замовлення.`
         )
-        .catch(() => null);
+        .catch((e) => {
+          console.warn(`[archiveProduct] notify buyer ${buyerTelegramId} failed:`, e.message);
+          return null;
+        });
     }
   }
 
@@ -120,7 +125,9 @@ async function archiveProduct(product, { notifyBuyers = false, bot = null } = {}
   try {
     const io = getIO();
     io.emit('product_archived', { productId: String(product._id) });
-  } catch (_) {}
+  } catch (e) {
+    console.warn('[archiveProduct] socket product_archived failed:', e.message);
+  }
 
   // ── 5. Broadcast block updates (blocks were already updated inside the transaction) ───
   if (affectedBlockIds.length) {
@@ -134,7 +141,9 @@ async function archiveProduct(product, { notifyBuyers = false, bot = null } = {}
           productIds: (updated.productIds || []).map(String),
         });
       }
-    } catch (_) {}
+    } catch (e) {
+      console.warn('[archiveProduct] socket block_updated failed:', e.message);
+    }
   }
 
   return { cancelledCount };

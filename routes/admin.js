@@ -1,5 +1,6 @@
 const express = require('express');
 const mongoose = require('mongoose');
+const { appError, asyncHandler } = require('../utils/errors');
 const { telegramAuth, requireTelegramRole } = require('../middleware/telegramAuth');
 const AppSetting = require('../models/AppSetting');
 const City = require('../models/City');
@@ -25,130 +26,100 @@ async function setAppSetting(key, value) {
   return setting.value;
 }
 
-router.get('/openai/models', telegramAuth, requireTelegramRole('admin'), async (req, res) => {
-  try {
-    const supportsImage = req.query.supportsImage === 'true';
-    const models = await listOpenAIModels({ supportsImage });
-    res.json(models);
-  } catch (error) {
-    console.error('[admin/openai/models] error', error.message || error);
-    res.status(500).json({ error: error.message || 'Unable to fetch OpenAI models' });
-  }
-});
+router.get('/openai/models', telegramAuth, requireTelegramRole('admin'), asyncHandler(async (req, res) => {
+  const supportsImage = req.query.supportsImage === 'true';
+  const models = await listOpenAIModels({ supportsImage });
+  res.json(models);
+}));
 
-router.get('/openai/settings', telegramAuth, requireTelegramRole('admin'), async (req, res) => {
-  try {
-    const defaultModel = process.env.OPENAI_MODEL || 'gpt-5.4-nano';
-    const selectedModel = await getAppSetting(OPENAI_MODEL_SETTING_KEY, defaultModel);
-    res.json({ model: selectedModel });
-  } catch (error) {
-    console.error('[admin/openai/settings] error', error.message || error);
-    res.status(500).json({ error: error.message || 'Unable to read OpenAI settings' });
-  }
-});
+router.get('/openai/settings', telegramAuth, requireTelegramRole('admin'), asyncHandler(async (req, res) => {
+  const defaultModel = process.env.OPENAI_MODEL || 'gpt-5.4-nano';
+  const selectedModel = await getAppSetting(OPENAI_MODEL_SETTING_KEY, defaultModel);
+  res.json({ model: selectedModel });
+}));
 
-router.post('/openai/settings', telegramAuth, requireTelegramRole('admin'), async (req, res) => {
-  try {
-    const model = req.body?.model;
-    if (!model || typeof model !== 'string') {
-      return res.status(400).json({ error: 'Model is required' });
+router.post('/openai/settings', telegramAuth, requireTelegramRole('admin'), asyncHandler(async (req, res) => {
+  const model = req.body?.model;
+  if (!model || typeof model !== 'string') throw appError('openai_model_required');
+
+  const models = await listOpenAIModels();
+  if (!models.some((item) => item.id === model)) throw appError('openai_model_unknown');
+
+  const selectedModel = await setAppSetting(OPENAI_MODEL_SETTING_KEY, model);
+  res.json({ model: selectedModel });
+}));
+
+router.get('/ordering-schedule', telegramAuth, requireTelegramRole('admin'), asyncHandler(async (req, res) => {
+  const saved = await getAppSetting(ORDERING_SCHEDULE_KEY, ORDERING_SCHEDULE_DEFAULTS);
+  res.json({ ...ORDERING_SCHEDULE_DEFAULTS, ...saved });
+}));
+
+router.post('/ordering-schedule', telegramAuth, requireTelegramRole('admin'), asyncHandler(async (req, res) => {
+  const { openHour, openMinute, closeHour, closeMinute } = req.body;
+  const toInt = (v, min, max) => {
+    const n = parseInt(v, 10);
+    if (isNaN(n) || n < min || n > max) {
+      throw appError('schedule_invalid', { reason: `Значення ${v} поза діапазоном [${min}, ${max}]` });
     }
+    return n;
+  };
+  const schedule = {
+    openHour:    toInt(openHour,    0, 23),
+    openMinute:  toInt(openMinute,  0, 59),
+    closeHour:   toInt(closeHour,   0, 23),
+    closeMinute: toInt(closeMinute, 0, 59),
+  };
+  // Заборонити нульове вікно: open і close однакові немає сенсу.
+  // open < close — звичайне вікно (16:00→07:30 наступного дня).
+  // open > close — вікно з переходом через північ (теж коректно, бо open/close завжди різні календарні дні).
+  const openMins  = schedule.openHour  * 60 + schedule.openMinute;
+  const closeMins = schedule.closeHour * 60 + schedule.closeMinute;
+  if (openMins === closeMins) throw appError('schedule_zero_duration');
+  const saved = await setAppSetting(ORDERING_SCHEDULE_KEY, schedule);
 
-    const models = await listOpenAIModels();
-    if (!models.some((item) => item.id === model)) {
-      return res.status(400).json({ error: 'Unknown or unsupported model' });
-    }
-
-    const selectedModel = await setAppSetting(OPENAI_MODEL_SETTING_KEY, model);
-    res.json({ model: selectedModel });
-  } catch (error) {
-    console.error('[admin/openai/settings] error', error.message || error);
-    res.status(500).json({ error: error.message || 'Unable to save OpenAI settings' });
-  }
-});
-
-router.get('/ordering-schedule', telegramAuth, requireTelegramRole('admin'), async (req, res) => {
-  try {
-    const saved = await getAppSetting(ORDERING_SCHEDULE_KEY, ORDERING_SCHEDULE_DEFAULTS);
-    res.json({ ...ORDERING_SCHEDULE_DEFAULTS, ...saved });
-  } catch (error) {
-    res.status(500).json({ error: error.message || 'Unable to read ordering schedule' });
-  }
-});
-
-router.post('/ordering-schedule', telegramAuth, requireTelegramRole('admin'), async (req, res) => {
-  try {
-    const { openHour, openMinute, closeHour, closeMinute } = req.body;
-    const toInt = (v, min, max) => {
-      const n = parseInt(v, 10);
-      if (isNaN(n) || n < min || n > max) throw new Error(`Value ${v} out of range [${min}, ${max}]`);
-      return n;
-    };
-    const schedule = {
-      openHour:    toInt(openHour,    0, 23),
-      openMinute:  toInt(openMinute,  0, 59),
-      closeHour:   toInt(closeHour,   0, 23),
-      closeMinute: toInt(closeMinute, 0, 59),
-    };
-    // Заборонити нульове вікно: open і close однакові немає сенсу.
-    // open < close — звичайне вікно (16:00→07:30 наступного дня).
-    // open > close — вікно з переходом через північ (теж коректно, бо open/close завжди різні календарні дні).
-    const openMins  = schedule.openHour  * 60 + schedule.openMinute;
-    const closeMins = schedule.closeHour * 60 + schedule.closeMinute;
-    if (openMins === closeMins) {
-      return res.status(400).json({ error: 'Open time and close time cannot be identical — window would have zero duration' });
-    }
-    const saved = await setAppSetting(ORDERING_SCHEDULE_KEY, schedule);
-
-    res.json(saved);
-  } catch (error) {
-    res.status(400).json({ error: error.message || 'Invalid schedule data' });
-  }
-});
+  res.json(saved);
+}));
 
 // GET /api/admin/cities — список міст з City колекції
-router.get('/cities', telegramAuth, requireTelegramRole('admin'), async (req, res) => {
-  try {
-    const cities = await City.find().sort({ name: 1 }).lean();
-    res.json(cities); // [{_id, name, country}]
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
+router.get('/cities', telegramAuth, requireTelegramRole('admin'), asyncHandler(async (req, res) => {
+  const cities = await City.find().sort({ name: 1 }).lean();
+  res.json(cities); // [{_id, name, country}]
+}));
 
 // POST /api/admin/cities — створити нове місто
-router.post('/cities', telegramAuth, requireTelegramRole('admin'), async (req, res) => {
+router.post('/cities', telegramAuth, requireTelegramRole('admin'), asyncHandler(async (req, res) => {
+  const name = String(req.body?.name || '').trim();
+  if (!name) throw appError('city_name_required');
   try {
-    const name = String(req.body?.name || '').trim();
-    if (!name) return res.status(400).json({ error: 'name є обовʼязковим' });
     const city = await City.create({ name, country: req.body?.country || 'PL' });
     res.status(201).json(city);
   } catch (err) {
-    if (err.code === 11000) return res.status(409).json({ error: `Місто "${req.body?.name}" вже існує` });
-    res.status(500).json({ error: err.message });
+    if (err.code === 11000) throw appError('city_already_exists', { name });
+    throw err;
   }
-});
+}));
 
 // PATCH /api/admin/cities/:id — перейменувати місто
-router.patch('/cities/:id', telegramAuth, requireTelegramRole('admin'), async (req, res) => {
+router.patch('/cities/:id', telegramAuth, requireTelegramRole('admin'), asyncHandler(async (req, res) => {
+  const name = String(req.body?.name || '').trim();
+  if (!name) throw appError('city_name_required');
   try {
-    const name = String(req.body?.name || '').trim();
-    if (!name) return res.status(400).json({ error: 'name є обовʼязковим' });
     const city = await City.findByIdAndUpdate(
       req.params.id,
       { name },
       { new: true, runValidators: true }
     );
-    if (!city) return res.status(404).json({ error: 'Місто не знайдено' });
+    if (!city) throw appError('city_not_found');
     res.json(city);
   } catch (err) {
-    if (err.code === 11000) return res.status(409).json({ error: `Місто з такою назвою вже існує` });
-    res.status(500).json({ error: err.message });
+    if (err && err.name === 'AppError') throw err;
+    if (err.code === 11000) throw appError('city_already_exists', { name });
+    throw err;
   }
-});
+}));
 
 // DELETE /api/admin/cities/:id — видалити місто (якщо немає магазинів)
-router.delete('/cities/:id', telegramAuth, requireTelegramRole('admin'), async (req, res) => {
+router.delete('/cities/:id', telegramAuth, requireTelegramRole('admin'), asyncHandler(async (req, res) => {
   // Транзакція захищає від race-condition: між countDocuments і findByIdAndDelete
   // адмін міг створити новий магазин, який стане «висіти» на видаленому місті.
   const session = await mongoose.connection.startSession();
@@ -156,27 +127,16 @@ router.delete('/cities/:id', telegramAuth, requireTelegramRole('admin'), async (
     let result;
     await session.withTransaction(async () => {
       const shopCount = await Shop.countDocuments({ cityId: req.params.id }).session(session);
-      if (shopCount > 0) {
-        result = {
-          status: 400,
-          body: { error: `Не можна видалити: ${shopCount} магазин(ів) прив'язано до цього міста` },
-        };
-        return;
-      }
+      if (shopCount > 0) throw appError('city_has_shops', { shopCount });
       const deleted = await City.findByIdAndDelete(req.params.id, { session });
-      if (!deleted) {
-        result = { status: 404, body: { error: 'Місто не знайдено' } };
-        return;
-      }
-      result = { status: 200, body: { message: 'Місто видалено' } };
+      if (!deleted) throw appError('city_not_found');
+      result = { message: 'Місто видалено' };
     });
-    return res.status(result.status).json(result.body);
-  } catch (err) {
-    return res.status(500).json({ error: err.message });
+    return res.json(result);
   } finally {
     session.endSession();
   }
-});
+}));
 
 // ── Telegram allowed groups ──────────────────────────────────────────────────
 const TELEGRAM_GROUPS_KEY = 'telegram.allowedGroupIds';

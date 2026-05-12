@@ -6,6 +6,7 @@ const Counter = require('../models/Counter');
 const Product = require('../models/Product');
 const { getIO } = require('../socket');
 const { requireTelegramRoles } = require('../middleware/telegramAuth');
+const { appError, asyncHandler } = require('../utils/errors');
 
 function slimBlock(block) {
   return {
@@ -18,31 +19,26 @@ function slimBlock(block) {
 const staffOnly = requireTelegramRoles(['admin', 'warehouse']);
 
 // GET /api/blocks — all blocks with product count, or paginated blocks when limit/offset are supplied
-router.get('/', async (req, res) => {
-  try {
-    const limit = req.query.limit ? Number(req.query.limit) : undefined;
-    const offset = req.query.offset ? Number(req.query.offset) : 0;
-    const query = Block.find().sort('blockId');
+router.get('/', asyncHandler(async (req, res) => {
+  const limit = req.query.limit ? Number(req.query.limit) : undefined;
+  const offset = req.query.offset ? Number(req.query.offset) : 0;
+  const query = Block.find().sort('blockId');
 
-    if (limit !== undefined) {
-      query.skip(offset).limit(limit);
-    }
-
-    const blocks = await query
-      .populate({ path: 'productIds', match: { status: { $in: ['active', 'pending'] } } })
-      .lean();
-
-    if (limit !== undefined) {
-      const total = await Block.countDocuments();
-      return res.json({ items: blocks, total });
-    }
-
-    res.json(blocks);
-  } catch (err) {
-    console.error('[blocks/list] Error:', err);
-    res.status(500).json({ error: err.message });
+  if (limit !== undefined) {
+    query.skip(offset).limit(limit);
   }
-});
+
+  const blocks = await query
+    .populate({ path: 'productIds', match: { status: { $in: ['active', 'pending'] } } })
+    .lean();
+
+  if (limit !== undefined) {
+    const total = await Block.countDocuments();
+    return res.json({ items: blocks, total });
+  }
+
+  res.json(blocks);
+}));
 
 async function getNextBlockId() {
   const maxBlock = await Block.findOne({}, 'blockId').sort({ blockId: -1 }).lean();
@@ -83,7 +79,7 @@ async function getNextBlockId() {
 }
 
 // POST /api/blocks — create a new block with the next sequential blockId
-router.post('/', staffOnly, async (req, res) => {
+router.post('/', staffOnly, asyncHandler(async (req, res) => {
   const MAX_RETRIES = 5;
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt += 1) {
     try {
@@ -94,7 +90,9 @@ router.post('/', staffOnly, async (req, res) => {
       try {
         const io = getIO();
         io.emit('block_updated', slimBlock(created));
-      } catch (_) {}
+      } catch (e) {
+        console.warn('[blocks/create] socket emit failed:', e.message);
+      }
 
       return res.status(201).json(created);
     } catch (err) {
@@ -102,38 +100,31 @@ router.post('/', staffOnly, async (req, res) => {
         continue;
       }
       console.error('[blocks/create] Error:', err);
-      if (err.code === 11000) {
-        return res.status(409).json({ error: 'Block ID conflict, please retry' });
-      }
-      return res.status(500).json({ error: err.message });
+      if (err.code === 11000) throw appError('block_id_conflict');
+      throw appError('block_create_failed');
     }
   }
 
-  res.status(409).json({ error: 'Block ID conflict, please retry' });
-});
+  throw appError('block_id_conflict');
+}));
 
 // GET /api/blocks/incoming/products — products not assigned to any block
-router.get('/incoming/products', async (req, res) => {
-  try {
-    const assignedIds = await Block.distinct('productIds');
-    const products = await Product.find({
-      status: 'active',
-      source: 'receive',
-      _id: { $nin: assignedIds },
-    })
-      .sort('-createdAt')
-      .lean();
-    res.json(products);
-  } catch (err) {
-    console.error('[blocks/incoming/products] Error:', err);
-    res.status(500).json({ error: err.message });
-  }
-});
+router.get('/incoming/products', asyncHandler(async (req, res) => {
+  const assignedIds = await Block.distinct('productIds');
+  const products = await Product.find({
+    status: 'active',
+    source: 'receive',
+    _id: { $nin: assignedIds },
+  })
+    .sort('-createdAt')
+    .lean();
+  res.json(products);
+}));
 
 // GET /api/blocks/search/products?q=term — search products across all blocks
-router.get('/search/products', async (req, res) => {
+router.get('/search/products', asyncHandler(async (req, res) => {
   const q = req.query.q;
-  if (!q) return res.status(400).json({ error: 'Missing search query' });
+  if (!q) throw appError('block_search_query_required');
 
   const products = await Product.find({
     $or: [
@@ -144,27 +135,22 @@ router.get('/search/products', async (req, res) => {
   }).lean();
 
   res.json(products);
-});
+}));
 
 // GET /api/blocks/:number — single block with populated products
-router.get('/:number', async (req, res) => {
-  try {
-    const num = Number(req.params.number);
-    if (!num || num < 1) return res.status(400).json({ error: 'Invalid block number' });
+router.get('/:number', asyncHandler(async (req, res) => {
+  const num = Number(req.params.number);
+  if (!num || num < 1) throw appError('block_invalid_number');
 
-    const block = await Block.findOne({ blockId: num })
-      .populate({ path: 'productIds', match: { status: { $in: ['active', 'pending'] } } })
-      .lean();
-    if (!block) return res.status(404).json({ error: 'Block not found' });
-    res.json(block);
-  } catch (err) {
-    console.error('[blocks/get] Error:', err);
-    res.status(500).json({ error: err.message });
-  }
-});
+  const block = await Block.findOne({ blockId: num })
+    .populate({ path: 'productIds', match: { status: { $in: ['active', 'pending'] } } })
+    .lean();
+  if (!block) throw appError('block_not_found');
+  res.json(block);
+}));
 
 // POST /api/blocks/move — move product between blocks
-router.post('/move', staffOnly, async (req, res) => {
+router.post('/move', staffOnly, asyncHandler(async (req, res) => {
   const { productId, fromBlock, toBlock, toIndex, expectedFromVersion, expectedToVersion } = req.body;
   const fromBlockId = Number(fromBlock);
   const toBlockId = Number(toBlock);
@@ -176,166 +162,130 @@ router.post('/move', staffOnly, async (req, res) => {
     !Number.isInteger(toBlockId) ||
     !Number.isInteger(index)
   ) {
-    return res.status(400).json({ error: 'Missing or invalid required fields: productId, fromBlock, toBlock, toIndex' });
+    throw appError('block_move_invalid_fields');
+  }
+
+  let updatedSource;
+  let updatedTarget;
+
+  const session = await mongoose.connection.startSession();
+  try {
+    await session.withTransaction(async () => {
+      const source = await Block.findOne({ blockId: fromBlockId }).session(session);
+      const target = fromBlockId === toBlockId
+        ? source
+        : await Block.findOne({ blockId: toBlockId }).session(session);
+
+      if (!source || !target) throw appError('block_not_found');
+
+      // Optimistic lock — refuse if any provided expected version is stale.
+      if (expectedFromVersion != null && Number(expectedFromVersion) !== source.version) {
+        throw appError('block_stale', { blockId: source.blockId, currentVersion: source.version });
+      }
+      if (
+        fromBlockId !== toBlockId &&
+        expectedToVersion != null &&
+        Number(expectedToVersion) !== target.version
+      ) {
+        throw appError('block_stale', { blockId: target.blockId, currentVersion: target.version });
+      }
+
+      const idx = source.productIds.findIndex((id) => id.toString() === productId);
+      if (idx === -1) throw appError('product_not_in_source_block');
+
+      source.productIds.splice(idx, 1);
+      const safeIndex = Math.min(Math.max(0, index), target.productIds.length);
+      target.productIds.splice(safeIndex, 0, productId);
+
+      if (fromBlockId === toBlockId) {
+        source.version += 1;
+        await source.save({ session });
+      } else {
+        source.version += 1;
+        target.version += 1;
+        await source.save({ session });
+        await target.save({ session });
+      }
+
+      await source.populate({ path: 'productIds', match: { status: { $in: ['active', 'pending'] } } });
+      updatedSource = source.toObject();
+      updatedTarget = updatedSource;
+
+      if (fromBlockId !== toBlockId) {
+        await target.populate({ path: 'productIds', match: { status: { $in: ['active', 'pending'] } } });
+        updatedTarget = target.toObject();
+      }
+    });
+  } finally {
+    session.endSession();
   }
 
   try {
-    let updatedSource;
-    let updatedTarget;
-
-    const session = await mongoose.connection.startSession();
-    try {
-      await session.withTransaction(async () => {
-        const source = await Block.findOne({ blockId: fromBlockId }).session(session);
-        const target = fromBlockId === toBlockId
-          ? source
-          : await Block.findOne({ blockId: toBlockId }).session(session);
-
-        if (!source || !target) {
-          throw Object.assign(new Error('Block not found'), { status: 404 });
-        }
-
-        // Optimistic lock — refuse if any provided expected version is stale.
-        if (expectedFromVersion != null && Number(expectedFromVersion) !== source.version) {
-          throw Object.assign(new Error('Source block was modified by another user'), {
-            status: 409,
-            code: 'block_stale',
-            blockId: source.blockId,
-            currentVersion: source.version,
-          });
-        }
-        if (
-          fromBlockId !== toBlockId &&
-          expectedToVersion != null &&
-          Number(expectedToVersion) !== target.version
-        ) {
-          throw Object.assign(new Error('Target block was modified by another user'), {
-            status: 409,
-            code: 'block_stale',
-            blockId: target.blockId,
-            currentVersion: target.version,
-          });
-        }
-
-        const idx = source.productIds.findIndex((id) => id.toString() === productId);
-        if (idx === -1) {
-          throw Object.assign(new Error('Product not found in source block'), { status: 400 });
-        }
-
-        source.productIds.splice(idx, 1);
-        const safeIndex = Math.min(Math.max(0, index), target.productIds.length);
-        target.productIds.splice(safeIndex, 0, productId);
-
-        if (fromBlockId === toBlockId) {
-          source.version += 1;
-          await source.save({ session });
-        } else {
-          source.version += 1;
-          target.version += 1;
-          await source.save({ session });
-          await target.save({ session });
-        }
-
-        await source.populate({ path: 'productIds', match: { status: { $in: ['active', 'pending'] } } });
-        updatedSource = source.toObject();
-        updatedTarget = updatedSource;
-
-        if (fromBlockId !== toBlockId) {
-          await target.populate({ path: 'productIds', match: { status: { $in: ['active', 'pending'] } } });
-          updatedTarget = target.toObject();
-        }
-      });
-    } finally {
-      session.endSession();
+    const io = getIO();
+    io.emit('block_updated', slimBlock(updatedSource));
+    if (fromBlockId !== toBlockId) {
+      io.emit('block_updated', slimBlock(updatedTarget));
     }
+  } catch (_) {}
 
-    try {
-      const io = getIO();
-      io.emit('block_updated', slimBlock(updatedSource));
-      if (fromBlockId !== toBlockId) {
-        io.emit('block_updated', slimBlock(updatedTarget));
-      }
-    } catch (_) {}
-
-    res.json({ source: updatedSource, target: updatedTarget });
-  } catch (err) {
-    console.error('[blocks/move] Error:', err);
-    res.status(err.status || 500).json({ error: err.message });
-  }
-});
+  res.json({ source: updatedSource, target: updatedTarget });
+}));
 
 // DELETE /api/blocks/:number/products/:productId — remove product from block (returns it to incoming)
-router.delete('/:number/products/:productId', staffOnly, async (req, res) => {
+router.delete('/:number/products/:productId', staffOnly, asyncHandler(async (req, res) => {
   const num = Number(req.params.number);
   const { productId } = req.params;
-  if (!num || num < 1) return res.status(400).json({ error: 'Invalid block number' });
+  if (!num || num < 1) throw appError('block_invalid_number');
 
   // Optimistic lock can be passed via query or header to keep DELETE body-free.
   const expectedVersionRaw = req.query.expectedVersion ?? req.get('if-match');
   const expectedVersion = expectedVersionRaw != null ? Number(expectedVersionRaw) : null;
 
-  try {
-    const block = await Block.findOne({ blockId: num });
-    if (!block) return res.status(404).json({ error: 'Block not found' });
+  const block = await Block.findOne({ blockId: num });
+  if (!block) throw appError('block_not_found');
 
-    if (expectedVersion != null && expectedVersion !== block.version) {
-      return res.status(409).json({
-        error: 'Block was modified by another user',
-        code: 'block_stale',
-        currentVersion: block.version,
-      });
-    }
-
-    const idx = block.productIds.findIndex((id) => id.toString() === productId);
-    if (idx === -1) return res.status(404).json({ error: 'Product not in block' });
-
-    block.productIds.splice(idx, 1);
-    block.version += 1;
-    await block.save();
-
-    await block.populate({ path: 'productIds', match: { status: { $in: ['active', 'pending'] } } });
-    const updated = block.toObject();
-
-    try {
-      const io = getIO();
-      io.emit('block_updated', slimBlock(updated));
-      io.emit('incoming_updated');
-    } catch (_) {}
-
-    res.json(updated);
-  } catch (err) {
-    console.error('[blocks/remove-product] Error:', err);
-    res.status(500).json({ error: err.message });
+  if (expectedVersion != null && expectedVersion !== block.version) {
+    throw appError('block_stale', { currentVersion: block.version });
   }
-});
+
+  const idx = block.productIds.findIndex((id) => id.toString() === productId);
+  if (idx === -1) throw appError('product_not_in_block');
+
+  block.productIds.splice(idx, 1);
+  block.version += 1;
+  await block.save();
+
+  await block.populate({ path: 'productIds', match: { status: { $in: ['active', 'pending'] } } });
+  const updated = block.toObject();
+
+  try {
+    const io = getIO();
+    io.emit('block_updated', slimBlock(updated));
+    io.emit('incoming_updated');
+  } catch (_) {}
+
+  res.json(updated);
+}));
 
 // POST /api/blocks/:number/add — add product to block
-router.post('/:number/add', staffOnly, async (req, res) => {
+router.post('/:number/add', staffOnly, asyncHandler(async (req, res) => {
   const num = Number(req.params.number);
   const { productId, index, expectedVersion } = req.body;
-  if (!productId) return res.status(400).json({ error: 'Missing productId' });
-  if (!mongoose.Types.ObjectId.isValid(productId)) {
-    return res.status(400).json({ error: 'Invalid productId' });
-  }
+  if (!productId) throw appError('block_missing_product_id');
+  if (!mongoose.Types.ObjectId.isValid(productId)) throw appError('block_invalid_product_id');
 
   let updated;
   const session = await mongoose.connection.startSession();
   try {
     await session.withTransaction(async () => {
       const block = await Block.findOne({ blockId: num }).session(session);
-      if (!block) {
-        throw Object.assign(new Error('Block not found'), { status: 404 });
-      }
+      if (!block) throw appError('block_not_found');
 
       // Optimistic lock: if client sent a version, refuse on mismatch so a stale
       // UI cannot blindly overwrite a concurrent change. Backwards-compatible
       // when the field is omitted.
       if (expectedVersion != null && Number(expectedVersion) !== block.version) {
-        throw Object.assign(new Error('Block was modified by another user'), {
-          status: 409,
-          code: 'block_stale',
-          currentVersion: block.version,
-        });
+        throw appError('block_stale', { currentVersion: block.version });
       }
 
       // Uniqueness across blocks: a product must live in exactly one block at a
@@ -344,17 +294,9 @@ router.post('/:number/add', staffOnly, async (req, res) => {
       const existing = await Block.findOne({ productIds: productId }).session(session).lean();
       if (existing) {
         if (existing.blockId === num) {
-          throw Object.assign(new Error('Product already in this block'), {
-            status: 409,
-            code: 'product_already_in_block',
-            existingBlockId: existing.blockId,
-          });
+          throw appError('product_already_in_block', { existingBlockId: existing.blockId });
         }
-        throw Object.assign(new Error(`Product is already in block ${existing.blockId}`), {
-          status: 409,
-          code: 'product_in_other_block',
-          existingBlockId: existing.blockId,
-        });
+        throw appError('product_in_other_block', { existingBlockId: existing.blockId });
       }
 
       const safeIndex = index != null
@@ -367,14 +309,6 @@ router.post('/:number/add', staffOnly, async (req, res) => {
       await block.populate('productIds');
       updated = block.toObject();
     });
-  } catch (err) {
-    console.error('[blocks/add] Error:', err.message);
-    const status = err.status || 500;
-    const payload = { error: err.message };
-    if (err.code) payload.code = err.code;
-    if (err.existingBlockId != null) payload.existingBlockId = err.existingBlockId;
-    if (err.currentVersion != null) payload.currentVersion = err.currentVersion;
-    return res.status(status).json(payload);
   } finally {
     session.endSession();
   }
@@ -386,6 +320,6 @@ router.post('/:number/add', staffOnly, async (req, res) => {
   } catch (_) { /* socket not initialized yet */ }
 
   res.json(updated);
-});
+}));
 
 module.exports = router;

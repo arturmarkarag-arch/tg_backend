@@ -2,6 +2,7 @@ const express = require('express');
 const { S3Client, HeadBucketCommand } = require('@aws-sdk/client-s3');
 const { normalizeBarcode } = require('../utils/barcodeScanner');
 const SearchProduct = require('../models/SearchProduct');
+const { appError, asyncHandler } = require('../utils/errors');
 
 const s3Client = new S3Client({
   region: process.env.R2_REGION || 'auto',
@@ -43,19 +44,17 @@ function checkResendRateLimit(barcode) {
 
 // WARNING: Routes under /api/search-products operate on a separate store-only schema.
 // This is NOT the same data as /api/products and should remain isolated.
-router.get('/images/:filename', (req, res) => {
+router.get('/images/:filename', asyncHandler(async (req, res) => {
   const publicUrl = process.env.R2_PUBLIC_URL;
-  if (!publicUrl) return res.status(503).json({ error: 'R2_PUBLIC_URL not configured' });
+  if (!publicUrl) throw appError('search_r2_public_url_missing');
   const filename = req.params.filename.replace(/[^a-zA-Z0-9._-]/g, '');
   res.redirect(302, `${publicUrl}/search-products/${filename}`);
-});
+}));
 
-router.get('/check', async (req, res) => {
+router.get('/check', asyncHandler(async (req, res) => {
   const barcodeValue = String(req.query.barcode || '').trim();
   const normalizedBarcode = normalizeBarcode(barcodeValue);
-  if (!normalizedBarcode) {
-    return res.status(400).json({ error: 'barcode query parameter is required' });
-  }
+  if (!normalizedBarcode) throw appError('product_barcode_required');
 
   const record = await SearchProduct.findOne({ barcode: normalizedBarcode, status: 'active' }).sort({ updatedAt: -1 }).lean();
   if (!record || !record.price || record.price <= 0) {
@@ -81,9 +80,9 @@ router.get('/check', async (req, res) => {
       createdAt: record.createdAt,
     },
   });
-});
+}));
 
-router.get('/', async (req, res) => {
+router.get('/', asyncHandler(async (req, res) => {
   const barcodeValue = String(req.query.barcode || '').trim();
   const query = { status: 'active' };
   if (barcodeValue) {
@@ -94,33 +93,23 @@ router.get('/', async (req, res) => {
   }
   const items = await SearchProduct.find(query).sort({ createdAt: -1 }).lean();
   res.json({ items });
-});
+}));
 
-router.post('/resend', async (req, res) => {
+router.post('/resend', asyncHandler(async (req, res) => {
   const barcodeValue = String(req.body.barcode || '').trim();
-  if (!barcodeValue) {
-    return res.status(400).json({ error: 'barcode field is required' });
-  }
+  if (!barcodeValue) throw appError('product_barcode_required');
 
   const normalizedBarcode = normalizeBarcode(barcodeValue);
-  if (!normalizedBarcode) {
-    return res.status(400).json({ error: 'barcode field is required' });
-  }
+  if (!normalizedBarcode) throw appError('product_barcode_required');
 
-  if (!checkResendRateLimit(normalizedBarcode)) {
-    return res.status(429).json({ error: 'Too many resend requests for this barcode. Try again later.' });
-  }
+  if (!checkResendRateLimit(normalizedBarcode)) throw appError('search_resend_rate_limited');
 
   const record = await SearchProduct.findOne({ barcode: normalizedBarcode, status: 'active' }).sort({ updatedAt: -1 }).lean();
-  if (!record || !record.requestTelegramPhotoFileId || !record.groupChatId) {
-    return res.status(404).json({ error: 'No existing request found for this barcode' });
-  }
+  if (!record || !record.requestTelegramPhotoFileId || !record.groupChatId) throw appError('search_no_existing_request');
 
   const { getBot } = require('../telegramBot');
   const bot = getBot();
-  if (!bot) {
-    return res.status(500).json({ error: 'Telegram bot is not initialized' });
-  }
+  if (!bot) throw appError('telegram_bot_not_initialized');
 
   try {
     await bot.sendPhoto(Number(record.groupChatId), record.requestTelegramPhotoFileId, {
@@ -129,8 +118,8 @@ router.post('/resend', async (req, res) => {
     return res.json({ resent: true });
   } catch (err) {
     console.error('Failed to resend existing request:', err.message || err);
-    return res.status(500).json({ error: 'Failed to resend request' });
+    throw appError('search_resend_failed');
   }
-});
+}));
 
 module.exports = router;

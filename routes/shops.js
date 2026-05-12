@@ -1,5 +1,6 @@
 const express = require('express');
 const mongoose = require('mongoose');
+const { appError, asyncHandler } = require('../utils/errors');
 const Shop = require('../models/Shop');
 const City = require('../models/City');
 const DeliveryGroup = require('../models/DeliveryGroup');
@@ -12,9 +13,8 @@ const router = express.Router();
 // ─── GET /api/shops ──────────────────────────────────────────────────────────
 // Список магазинів. За замовчуванням тільки активні.
 // Query: ?cityId=xxx  ?city=Warszawa (legacy)  ?deliveryGroupId=xxx  ?includeInactive=true
-router.get('/', async (req, res) => {
-  try {
-    const filter = {};
+router.get('/', asyncHandler(async (req, res) => {
+  const filter = {};
 
     if (req.query.includeInactive !== 'true') {
       filter.isActive = true;
@@ -71,116 +71,86 @@ router.get('/', async (req, res) => {
     });
 
     res.json(result);
-  } catch (err) {
-    console.error('[GET /shops]', err.message);
-    res.status(500).json({ error: err.message });
-  }
-});
+}));
 
 // ─── GET /api/shops/cities ────────────────────────────────────────────────────
 // Публічний список міст (для реєстрації та seller)
-router.get('/cities', async (req, res) => {
-  try {
-    const cities = await City.find().sort({ name: 1 }).lean();
-    res.json(cities);
-  } catch (err) {
-    console.error('[GET /shops/cities]', err.message);
-    res.status(500).json({ error: err.message });
-  }
-});
+router.get('/cities', asyncHandler(async (req, res) => {
+  const cities = await City.find().sort({ name: 1 }).lean();
+  res.json(cities);
+}));
 
 // ─── GET /api/shops/:id ───────────────────────────────────────────────────────
-router.get('/:id', async (req, res) => {
-  try {
-    const shop = await Shop.findById(req.params.id).populate('cityId', 'name country').lean();
-    if (!shop) return res.status(404).json({ error: 'Shop not found' });
+router.get('/:id', asyncHandler(async (req, res) => {
+  const shop = await Shop.findById(req.params.id).populate('cityId', 'name country').lean();
+  if (!shop) throw appError('shop_not_found');
 
-    // Продавці цього магазину
-    const sellers = await User.find({ shopId: shop._id, role: 'seller' })
-      .select('telegramId firstName lastName')
-      .lean();
+  // Продавці цього магазину
+  const sellers = await User.find({ shopId: shop._id, role: 'seller' })
+    .select('telegramId firstName lastName')
+    .lean();
 
-    const cityId = shop.cityId?._id ? String(shop.cityId._id) : (shop.cityId || null);
-    res.json({ ...shop, cityId, city: shop.cityId?.name || '', sellers });
-  } catch (err) {
-    console.error('[GET /shops/:id]', err.message);
-    res.status(500).json({ error: err.message });
-  }
-});
+  const cityId = shop.cityId?._id ? String(shop.cityId._id) : (shop.cityId || null);
+  res.json({ ...shop, cityId, city: shop.cityId?.name || '', sellers });
+}));
 
 // ─── POST /api/shops ──────────────────────────────────────────────────────────
-router.post('/', telegramAuth, requireTelegramRole('admin'), async (req, res) => {
-  try {
-    const { name, cityId, deliveryGroupId, address } = req.body;
+router.post('/', telegramAuth, requireTelegramRole('admin'), asyncHandler(async (req, res) => {
+  const { name, cityId, deliveryGroupId, address } = req.body;
 
-    if (!name || !String(name).trim()) {
-      return res.status(400).json({ error: 'name є обовʼязковим' });
-    }
-    if (!cityId) {
-      return res.status(400).json({ error: 'cityId є обовʼязковим' });
-    }
-    if (!deliveryGroupId) {
-      return res.status(400).json({ error: 'deliveryGroupId є обовʼязковим' });
-    }
+  if (!name || !String(name).trim()) throw appError('shop_name_required');
+  if (!cityId) throw appError('shop_city_required');
+  if (!deliveryGroupId) throw appError('shop_delivery_group_required');
 
-    const cityDoc = await City.findById(cityId).lean();
-    if (!cityDoc) return res.status(400).json({ error: 'Місто не знайдено' });
-    const group = await DeliveryGroup.findById(deliveryGroupId).lean();
-    if (!group) return res.status(400).json({ error: 'Групу доставки не знайдено' });
+  const cityDoc = await City.findById(cityId).lean();
+  if (!cityDoc) throw appError('shop_city_not_found');
+  const group = await DeliveryGroup.findById(deliveryGroupId).lean();
+  if (!group) throw appError('shop_delivery_group_not_found');
 
-    const shop = await Shop.create({
-      name: String(name).trim(),
-      cityId: cityDoc._id,
-      city: cityDoc.name,
-      deliveryGroupId: deliveryGroupId ? String(deliveryGroupId) : '',
-      address: address ? String(address).trim() : '',
-    });
+  const shop = await Shop.create({
+    name: String(name).trim(),
+    cityId: cityDoc._id,
+    city: cityDoc.name,
+    deliveryGroupId: deliveryGroupId ? String(deliveryGroupId) : '',
+    address: address ? String(address).trim() : '',
+  });
 
-    res.status(201).json(shop);
-  } catch (err) {
-    console.error('[POST /shops]', err.message);
-    res.status(500).json({ error: err.message });
-  }
-});
+  res.status(201).json(shop);
+}));
 
 // ─── PATCH /api/shops/:id ─────────────────────────────────────────────────────
-router.patch('/:id', telegramAuth, requireTelegramRole('admin'), async (req, res) => {
-  try {
-    const shop = await Shop.findById(req.params.id);
-    if (!shop) return res.status(404).json({ error: 'Shop not found' });
+router.patch('/:id', telegramAuth, requireTelegramRole('admin'), asyncHandler(async (req, res) => {
+  const shop = await Shop.findById(req.params.id);
+  if (!shop) throw appError('shop_not_found');
 
-    const { name, cityId, deliveryGroupId, address, isActive } = req.body;
+  const { name, cityId, deliveryGroupId, address, isActive } = req.body;
 
-    if (name !== undefined) shop.name = String(name).trim();
-    if (address !== undefined) shop.address = String(address).trim();
-    if (isActive !== undefined) shop.isActive = Boolean(isActive);
+  if (name !== undefined) shop.name = String(name).trim();
+  if (address !== undefined) shop.address = String(address).trim();
+  if (isActive !== undefined) shop.isActive = Boolean(isActive);
 
-    if (cityId !== undefined) {
-      const cityDoc = await City.findById(cityId).lean();
-      if (!cityDoc) return res.status(400).json({ error: 'Місто не знайдено' });
-      shop.cityId = cityDoc._id;
-      shop.city = cityDoc.name;
-    }
-
-    if (deliveryGroupId !== undefined) {
-      if (deliveryGroupId) {
-        const group = await DeliveryGroup.findById(deliveryGroupId).lean();
-        if (!group) return res.status(400).json({ error: 'Групу доставки не знайдено' });
-      }
-      shop.deliveryGroupId = deliveryGroupId ? String(deliveryGroupId) : '';
-    }
-
-    await shop.save();
-    res.json(shop);
-  } catch (err) {
-    console.error('[PATCH /shops/:id]', err.message);
-    res.status(500).json({ error: err.message });
+  if (cityId !== undefined) {
+    const cityDoc = await City.findById(cityId).lean();
+    if (!cityDoc) throw appError('shop_city_not_found');
+    shop.cityId = cityDoc._id;
+    shop.city = cityDoc.name;
   }
-});
+
+  if (deliveryGroupId !== undefined) {
+    if (deliveryGroupId) {
+      const group = await DeliveryGroup.findById(deliveryGroupId).lean();
+      if (!group) throw appError('shop_delivery_group_not_found');
+    }
+    shop.deliveryGroupId = deliveryGroupId ? String(deliveryGroupId) : '';
+  }
+
+  await shop.save();
+  res.json(shop);
+}));
 
 // ─── DELETE /api/shops/:id ────────────────────────────────────────────────────
 // Видаляємо тільки якщо 0 продавців прив'язано
-router.delete('/:id', telegramAuth, requireTelegramRole('admin'), async (req, res) => {
+router.delete('/:id', telegramAuth, requireTelegramRole('admin'), asyncHandler(async (req, res) => {
   // Wrap check + delete in a transaction so a seller or active order created
   // between the count and the delete cannot leave us with orphan references.
   const session = await mongoose.connection.startSession();
@@ -188,125 +158,94 @@ router.delete('/:id', telegramAuth, requireTelegramRole('admin'), async (req, re
     let result;
     await session.withTransaction(async () => {
       const shop = await Shop.findById(req.params.id).session(session);
-      if (!shop) {
-        result = { status: 404, body: { error: 'Shop not found' } };
-        return;
-      }
+      if (!shop) throw appError('shop_not_found');
 
       const sellerCount = await User.countDocuments({
         shopId: String(shop._id),
         role: 'seller',
       }).session(session);
-      if (sellerCount > 0) {
-        result = {
-          status: 400,
-          body: {
-            error: `Не можна видалити магазин: ${sellerCount} продавець(ів) прив'язано. Спочатку зніміть їх у налаштуваннях магазину.`,
-          },
-        };
-        return;
-      }
+      if (sellerCount > 0) throw appError('shop_has_sellers', { sellerCount });
 
-      const activeOrderCount = await Order.countDocuments({
+      const activeOrders = await Order.countDocuments({
         shopId: shop._id,
         status: { $in: ['new', 'in_progress'] },
       }).session(session);
-      if (activeOrderCount > 0) {
-        result = {
-          status: 409,
-          body: {
-            error: 'shop_has_active_orders',
-            message: `Не можна видалити магазин: ${activeOrderCount} активне замовлення прив'язано. Спочатку завершіть або скасуйте їх.`,
-            activeOrders: activeOrderCount,
-          },
-        };
-        return;
-      }
+      if (activeOrders > 0) throw appError('shop_has_active_orders', { activeOrders });
 
       await Shop.deleteOne({ _id: shop._id }, { session });
-      result = { status: 200, body: { message: 'Магазин видалено' } };
+      result = { message: 'Магазин видалено' };
     });
-    return res.status(result.status).json(result.body);
-  } catch (err) {
-    console.error('[DELETE /shops/:id]', err.message);
-    return res.status(500).json({ error: err.message });
+    return res.json(result);
   } finally {
     session.endSession();
   }
-});
+}));
 
 // ─── PATCH /api/shops/:id/sellers ─────────────────────────────────────────────
 // Масове оновлення продавців магазину (знімаємо/додаємо через список telegramId)
 // Body: { sellers: ['111', '222'] } — повний новий список продавців магазину
-router.patch('/:id/sellers', telegramAuth, requireTelegramRole('admin'), async (req, res) => {
-  try {
-    const shop = await Shop.findById(req.params.id).lean();
-    if (!shop) return res.status(404).json({ error: 'Shop not found' });
+router.patch('/:id/sellers', telegramAuth, requireTelegramRole('admin'), asyncHandler(async (req, res) => {
+  const shop = await Shop.findById(req.params.id).lean();
+  if (!shop) throw appError('shop_not_found');
 
-    const newSellers = Array.isArray(req.body.sellers)
-      ? req.body.sellers.map((id) => String(id).trim()).filter(Boolean)
-      : [];
+  const newSellers = Array.isArray(req.body.sellers)
+    ? req.body.sellers.map((id) => String(id).trim()).filter(Boolean)
+    : [];
 
-    const shopIdStr = String(shop._id);
+  const shopIdStr = String(shop._id);
 
-    // Поточні продавці цього магазину
-    const currentSellers = await User.find({ shopId: shopIdStr, role: 'seller' })
-      .select('telegramId')
-      .lean();
-    const currentIds = currentSellers.map((u) => u.telegramId);
+  // Поточні продавці цього магазину
+  const currentSellers = await User.find({ shopId: shopIdStr, role: 'seller' })
+    .select('telegramId')
+    .lean();
+  const currentIds = currentSellers.map((u) => u.telegramId);
 
-    // Валідуємо нових продавців
-    if (newSellers.length > 0) {
-      const validUsers = await User.find({
-        telegramId: { $in: newSellers },
-        role: 'seller',
-      }).distinct('telegramId');
-      const invalid = newSellers.filter((id) => !validUsers.includes(id));
-      if (invalid.length > 0) {
-        return res.status(400).json({ error: `Продавців не знайдено: ${invalid.join(', ')}` });
-      }
-    }
-
-    // Знімаємо/призначаємо в одній транзакції — інакше при збої між
-    // двома updateMany частина продавців може опинитися «у підвішеному стані»
-    // (вже знятий зі старого, ще не призначений у новий).
-    const toRemove = currentIds.filter((id) => !newSellers.includes(id));
-    const toAdd = newSellers.filter((id) => !currentIds.includes(id));
-
-    if (toRemove.length > 0 || toAdd.length > 0) {
-      const session = await mongoose.connection.startSession();
-      try {
-        await session.withTransaction(async () => {
-          if (toRemove.length > 0) {
-            await User.updateMany(
-              { telegramId: { $in: toRemove } },
-              { $set: { shopId: null } },
-              { session }
-            );
-          }
-          if (toAdd.length > 0) {
-            await User.updateMany(
-              { telegramId: { $in: toAdd }, role: 'seller' },
-              { $set: { shopId: shopIdStr } },
-              { session }
-            );
-          }
-        });
-      } finally {
-        session.endSession();
-      }
-    }
-
-    // Повертаємо оновлений список
-    const updatedSellers = await User.find({ shopId: shopIdStr, role: 'seller' })
-      .select('telegramId firstName lastName')
-      .lean();
-
-    res.json({ sellers: updatedSellers });
-  } catch (err) {
-    console.error('[PATCH /shops/:id/sellers]', err.message);
-    res.status(500).json({ error: err.message });
+  // Валідуємо нових продавців
+  if (newSellers.length > 0) {
+    const validUsers = await User.find({
+      telegramId: { $in: newSellers },
+      role: 'seller',
+    }).distinct('telegramId');
+    const invalid = newSellers.filter((id) => !validUsers.includes(id));
+    if (invalid.length > 0) throw appError('shop_sellers_invalid', { ids: invalid });
   }
-});
+
+  // Знімаємо/призначаємо в одній транзакції — інакше при збої між
+  // двома updateMany частина продавців може опинитися «у підвішеному стані»
+  // (вже знятий зі старого, ще не призначений у новий).
+  const toRemove = currentIds.filter((id) => !newSellers.includes(id));
+  const toAdd = newSellers.filter((id) => !currentIds.includes(id));
+
+  if (toRemove.length > 0 || toAdd.length > 0) {
+    const session = await mongoose.connection.startSession();
+    try {
+      await session.withTransaction(async () => {
+        if (toRemove.length > 0) {
+          await User.updateMany(
+            { telegramId: { $in: toRemove } },
+            { $set: { shopId: null } },
+            { session }
+          );
+        }
+        if (toAdd.length > 0) {
+          await User.updateMany(
+            { telegramId: { $in: toAdd }, role: 'seller' },
+            { $set: { shopId: shopIdStr } },
+            { session }
+          );
+        }
+      });
+    } finally {
+      session.endSession();
+    }
+  }
+
+  // Повертаємо оновлений список
+  const updatedSellers = await User.find({ shopId: shopIdStr, role: 'seller' })
+    .select('telegramId firstName lastName')
+    .lean();
+
+  res.json({ sellers: updatedSellers });
+}));
 
 module.exports = router;

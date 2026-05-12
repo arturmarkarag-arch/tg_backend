@@ -1,19 +1,20 @@
 const User = require('../models/User');
 const { getTelegramAuth } = require('../utils/validateTelegramInitData');
+const { appError } = require('../utils/errors');
 
 async function telegramAuth(req, res, next) {
   const { valid, parsedData, telegramId, initData, error } = getTelegramAuth(req, process.env.TELEGRAM_BOT_TOKEN);
   if (!valid) {
-    return res.status(401).json({ error: error || 'Invalid initData' });
+    return next(appError('auth_invalid_init_data', { reason: error }));
   }
 
   if (!telegramId) {
-    return res.status(400).json({ error: 'Telegram user id is missing' });
+    return next(appError('auth_telegram_id_missing'));
   }
 
   const user = await User.findOne({ telegramId }).lean();
   if (!user) {
-    return res.status(403).json({ error: 'not_registered', message: 'User is not registered' });
+    return next(appError('not_registered'));
   }
 
   req.telegramInitData = initData;
@@ -31,12 +32,12 @@ function requireTelegramRoles(roles) {
   const allowed = Array.isArray(roles) ? roles : [roles];
   return async function (req, res, next) {
     if (!req.telegramId) {
-      return res.status(401).json({ error: 'Telegram auth required' });
+      return next(appError('auth_required'));
     }
 
     const user = req.telegramUser;
     if (!user || !allowed.includes(user.role)) {
-      return res.status(403).json({ error: `Only ${allowed.join(' or ')} can access this endpoint` });
+      return next(appError('auth_role_required', { allowed }));
     }
 
     req.user = user;

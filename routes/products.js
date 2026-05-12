@@ -10,6 +10,7 @@ const { getIO } = require('../socket');
 const Product = require('../models/Product');
 const SearchProduct = require('../models/SearchProduct');
 const { requireTelegramRoles } = require('../middleware/telegramAuth');
+const { appError, asyncHandler } = require('../utils/errors');
 
 const staffOnly = requireTelegramRoles(['admin', 'warehouse']);
 
@@ -58,39 +59,31 @@ function getProductTitle(product) {
 const router = express.Router();
 
 // GET /api/v1/products/upload-url-public?ext=jpg — public presigned PUT URL for missing-product reports (no auth required)
-router.get('/upload-url-public', async (req, res) => {
-  try {
-    const ext = String(req.query.ext || 'jpg').replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
-    const allowed = ['jpg', 'jpeg', 'png', 'webp'];
-    if (!allowed.includes(ext)) return res.status(400).json({ error: 'Непідтримуваний формат' });
-    const safeExt = ext === 'jpeg' ? 'jpg' : ext;
-    const filename = `${crypto.randomUUID()}.${safeExt}`;
-    const key = `missing-products/${filename}`;
-    const contentType = 'image/jpeg';
-    const command = new PutObjectCommand({
-      Bucket: process.env.R2_BUCKET_NAME,
-      Key: key,
-      ContentType: contentType,
-    });
-    const uploadUrl = await getSignedUrl(s3Client, command, { expiresIn: 300 });
-    res.json({ uploadUrl, filename, key, contentType });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
+router.get('/upload-url-public', asyncHandler(async (req, res) => {
+  const ext = String(req.query.ext || 'jpg').replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
+  const allowed = ['jpg', 'jpeg', 'png', 'webp'];
+  if (!allowed.includes(ext)) throw appError('product_image_unsupported');
+  const safeExt = ext === 'jpeg' ? 'jpg' : ext;
+  const filename = `${crypto.randomUUID()}.${safeExt}`;
+  const key = `missing-products/${filename}`;
+  const contentType = 'image/jpeg';
+  const command = new PutObjectCommand({
+    Bucket: process.env.R2_BUCKET_NAME,
+    Key: key,
+    ContentType: contentType,
+  });
+  const uploadUrl = await getSignedUrl(s3Client, command, { expiresIn: 300 });
+  res.json({ uploadUrl, filename, key, contentType });
+}));
 
 // GET /api/v1/products/upload-url?ext=jpg — returns a presigned PUT URL for direct R2 upload
-router.get('/upload-url', staffOnly, async (req, res) => {
-  try {
-    const ext = String(req.query.ext || 'jpg').replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
-    const allowed = ['jpg', 'jpeg', 'png', 'webp', 'gif'];
-    if (!allowed.includes(ext)) return res.status(400).json({ error: 'Непідтримуваний формат' });
-    const result = await getUploadPresignedUrl(ext === 'jpeg' ? 'jpg' : ext);
-    res.json(result);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
+router.get('/upload-url', staffOnly, asyncHandler(async (req, res) => {
+  const ext = String(req.query.ext || 'jpg').replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
+  const allowed = ['jpg', 'jpeg', 'png', 'webp', 'gif'];
+  if (!allowed.includes(ext)) throw appError('product_image_unsupported');
+  const result = await getUploadPresignedUrl(ext === 'jpeg' ? 'jpg' : ext);
+  res.json(result);
+}));
 
 router.get('/images/:filename', async (req, res) => {
   const filename = req.params.filename.replace(/[^a-zA-Z0-9._-]/g, '');
@@ -104,21 +97,17 @@ router.get('/images/:filename', async (req, res) => {
     res.set('Access-Control-Allow-Origin', '*');
     data.Body.pipe(res);
   } catch {
-    res.status(404).json({ error: 'Image not found' });
+    res.status(404).json({ error: 'product_image_not_found', message: 'Зображення не знайдено' });
   }
 });
 
 // GET /api/products/drafts — pending (unconfirmed) products
-router.get('/drafts', staffOnly, async (req, res) => {
-  try {
-    const products = await Product.find({ status: 'pending', source: 'receive' })
-      .sort('-createdAt')
-      .lean();
-    res.json(products);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
+router.get('/drafts', staffOnly, asyncHandler(async (req, res) => {
+  const products = await Product.find({ status: 'pending', source: 'receive' })
+    .sort('-createdAt')
+    .lean();
+  res.json(products);
+}));
 
 router.get('/', async (req, res) => {
   const limit = Math.min(50, Math.max(1, Number(req.query.limit) || 24));
@@ -220,12 +209,10 @@ router.get('/', async (req, res) => {
   res.json(products);
 });
 
-router.get('/check', async (req, res) => {
+router.get('/check', asyncHandler(async (req, res) => {
   const barcodeValue = String(req.query.barcode || '').trim();
   const normalizedBarcode = normalizeBarcode(barcodeValue);
-  if (!normalizedBarcode) {
-    return res.status(400).json({ error: 'barcode query parameter is required' });
-  }
+  if (!normalizedBarcode) throw appError('product_barcode_required');
 
   const product = await Product.findOne({ barcode: normalizedBarcode, status: { $ne: 'archived' } }).lean();
 
@@ -251,18 +238,16 @@ router.get('/check', async (req, res) => {
     },
     blockId: block ? block.blockId : null,
   });
-});
+}));
 
-router.get('/pending', async (req, res) => {
+router.get('/pending', asyncHandler(async (req, res) => {
   const products = await Product.find({ status: 'pending' }).sort({ orderNumber: 1 });
   res.json(products);
-});
+}));
 
-router.patch('/reorder', staffOnly, async (req, res) => {
+router.patch('/reorder', staffOnly, asyncHandler(async (req, res) => {
   const { order } = req.body;
-  if (!Array.isArray(order)) {
-    return res.status(400).json({ error: 'Order must be an array of product ids' });
-  }
+  if (!Array.isArray(order)) throw appError('product_reorder_invalid');
 
   const bulkOps = order.map((id, index) => ({
     updateOne: {
@@ -282,7 +267,7 @@ router.patch('/reorder', staffOnly, async (req, res) => {
     session.endSession();
   }
   res.json({ message: 'Order updated' });
-});
+}));
 
 /*
 router.post('/broadcast', async (req, res) => {
@@ -303,29 +288,21 @@ router.post('/broadcast', async (req, res) => {
 // POST /api/v1/products/report-missing
 // Body JSON: { barcode, filename } — client uploads photo to R2 via upload-url-public first, then sends filename
 // Server fetches buffer from missing-products/ folder in R2 and forwards to Telegram groups
-router.post('/report-missing', async (req, res) => {
+router.post('/report-missing', asyncHandler(async (req, res) => {
   const barcodeValue = String(req.body?.barcode || '').trim();
   const filename = String(req.body?.filename || '').replace(/[^a-zA-Z0-9._-]/g, '');
 
-  if (!barcodeValue) {
-    return res.status(400).json({ error: 'barcode field is required' });
-  }
-  if (!filename) {
-    return res.status(400).json({ error: 'filename is required' });
-  }
+  if (!barcodeValue) throw appError('product_barcode_required');
+  if (!filename) throw appError('product_filename_required');
 
   const { getAllowedGroupIds } = require('./admin');
   const allowedGroupIds = await getAllowedGroupIds();
 
-  if (!allowedGroupIds.length) {
-    return res.status(500).json({ error: 'No allowed Telegram groups configured' });
-  }
+  if (!allowedGroupIds.length) throw appError('telegram_groups_not_configured');
 
   const { getBot } = require('../telegramBot');
   const bot = getBot();
-  if (!bot) {
-    return res.status(500).json({ error: 'Telegram bot is not initialized' });
-  }
+  if (!bot) throw appError('telegram_bot_not_initialized');
 
   // Fetch photo buffer from R2
   const r2Object = await s3Client.send(new GetObjectCommand({
@@ -378,30 +355,26 @@ router.post('/report-missing', async (req, res) => {
   }));
 
   return res.json({ barcode: barcodeValue, caption, sent: sendResults });
-});
+}));
 
-router.get('/:id', async (req, res) => {
+router.get('/:id', asyncHandler(async (req, res) => {
   const product = await Product.findById(req.params.id);
-  if (!product) return res.status(404).json({ error: 'Product not found' });
+  if (!product) throw appError('product_not_found');
   res.json(product);
-});
+}));
 
 // POST /api/v1/products/block-upload-photos
 // Body: { blockId, filenames: string[] } — filenames already uploaded to R2 by client
-router.post('/block-upload-photos', staffOnly, async (req, res) => {
+router.post('/block-upload-photos', staffOnly, asyncHandler(async (req, res) => {
   const blockId = Number(req.body?.blockId);
   const filenames = Array.isArray(req.body?.filenames) ? req.body.filenames : [];
 
-  if (!blockId || blockId < 1) {
-    return res.status(400).json({ error: 'Invalid blockId' });
-  }
-  if (!filenames.length) {
-    return res.status(400).json({ error: 'No filenames provided' });
-  }
+  if (!blockId || blockId < 1) throw appError('product_block_id_invalid');
+  if (!filenames.length) throw appError('product_filenames_required');
 
   // Pre-flight outside transaction (avoids holding session for a missing block)
   const blockExists = await Block.exists({ blockId });
-  if (!blockExists) return res.status(404).json({ error: 'Block not found' });
+  if (!blockExists) throw appError('block_not_found');
 
   const session = await mongoose.connection.startSession();
   let results = [];
@@ -410,7 +383,7 @@ router.post('/block-upload-photos', staffOnly, async (req, res) => {
     await session.withTransaction(async () => {
       results = []; // reset on retry
       const block = await Block.findOne({ blockId }).session(session);
-      if (!block) throw Object.assign(new Error('Block not found'), { status: 404 });
+      if (!block) throw appError('block_not_found');
 
       // Read max orderNumber inside the transaction to prevent race conditions
       const maxProduct = await Product.findOne({}, 'orderNumber').sort({ orderNumber: -1 }).session(session).lean();
@@ -437,13 +410,9 @@ router.post('/block-upload-photos', staffOnly, async (req, res) => {
       await block.save({ session });
       savedBlock = block;
     });
-  } catch (err) {
+  } finally {
     session.endSession();
-    if (err.status) return res.status(err.status).json({ error: err.message });
-    console.error('[products/block-upload-photos]', err);
-    return res.status(500).json({ error: err.message || 'Upload failed' });
   }
-  session.endSession();
 
   try {
     const io = getIO();
@@ -454,10 +423,12 @@ router.post('/block-upload-photos', staffOnly, async (req, res) => {
         productIds: savedBlock.productIds.map(String),
       });
     }
-  } catch (_) {}
+  } catch (e) {
+    console.warn('[products/upload] socket block_updated failed:', e.message);
+  }
 
   res.json({ uploaded: results.length, total: filenames.length, results });
-});
+}));
 
 // POST /api/products/receive — save a product from the web Receive page.
 // Required: photo file, quantity.
@@ -465,62 +436,55 @@ router.post('/block-upload-photos', staffOnly, async (req, res) => {
 // status is set to 'active' when both price > 0 AND quantityPerPackage > 0, otherwise 'pending'.
 // POST /api/v1/products/receive
 // Body JSON: { filename, quantity, price?, quantityPerPackage?, notes?, status? }
-router.post('/receive', staffOnly, async (req, res) => {
+router.post('/receive', staffOnly, asyncHandler(async (req, res) => {
+  const body = req.body;
+  const filename = String(body?.filename || '').replace(/[^a-zA-Z0-9._-]/g, '');
+  if (!filename) throw appError('product_photo_required');
+
+  const quantity = Number(body.quantity ?? 0);
+  if (!Number.isInteger(quantity) || quantity < 0) throw appError('product_quantity_invalid');
+
+  const price = body.price !== undefined && body.price !== '' ? Number(body.price) : 0;
+  const quantityPerPackage = body.quantityPerPackage !== undefined && body.quantityPerPackage !== '' ? Number(body.quantityPerPackage) : 0;
+  const isConfirmed = price > 0 && quantityPerPackage > 0;
+  const explicitPending = body.status === 'pending';
+  const imageUrl = `/api/v1/products/images/${filename}`;
+
+  // Read max orderNumber AND insert the new product inside the same transaction
+  // so two concurrent /receive requests cannot read the same max and produce
+  // duplicate orderNumbers (race — fixed by the transaction's snapshot read).
+  let product;
+  const session = await mongoose.connection.startSession();
   try {
-    const body = req.body;
-    const filename = String(body?.filename || '').replace(/[^a-zA-Z0-9._-]/g, '');
-    if (!filename) return res.status(400).json({ error: "Фото є обов'язковим" });
-
-    const quantity = Number(body.quantity ?? 0);
-    if (!Number.isInteger(quantity) || quantity < 0) {
-      return res.status(400).json({ error: 'Кількість має бути цілим числом >= 0' });
-    }
-
-    const price = body.price !== undefined && body.price !== '' ? Number(body.price) : 0;
-    const quantityPerPackage = body.quantityPerPackage !== undefined && body.quantityPerPackage !== '' ? Number(body.quantityPerPackage) : 0;
-    const isConfirmed = price > 0 && quantityPerPackage > 0;
-    const explicitPending = body.status === 'pending';
-    const imageUrl = `/api/v1/products/images/${filename}`;
-
-    // Read max orderNumber AND insert the new product inside the same transaction
-    // so two concurrent /receive requests cannot read the same max and produce
-    // duplicate orderNumbers (race — fixed by the transaction's snapshot read).
-    let product;
-    const session = await mongoose.connection.startSession();
-    try {
-      await session.withTransaction(async () => {
-        const maxProduct = await Product.findOne({ status: { $ne: 'archived' } }, 'orderNumber')
-          .sort({ orderNumber: -1 })
-          .session(session)
-          .lean();
-        const nextOrderNumber = (maxProduct?.orderNumber ?? 0) + 1;
-        const [created] = await Product.create([{
-          orderNumber: nextOrderNumber,
-          price,
-          quantity,
-          quantityPerPackage,
-          status: explicitPending ? 'pending' : isConfirmed ? 'active' : 'pending',
-          source: 'receive',
-          notes: body.notes ? String(body.notes) : '',
-          originalImageUrl: imageUrl,
-          imageUrls: [imageUrl],
-          imageNames: [filename],
-        }], { session });
-        product = created;
-      });
-    } finally {
-      session.endSession();
-    }
-    res.status(201).json(product);
-  } catch (err) {
-    console.error('[products/receive] Error:', err);
-    res.status(500).json({ error: err.message });
+    await session.withTransaction(async () => {
+      const maxProduct = await Product.findOne({ status: { $ne: 'archived' } }, 'orderNumber')
+        .sort({ orderNumber: -1 })
+        .session(session)
+        .lean();
+      const nextOrderNumber = (maxProduct?.orderNumber ?? 0) + 1;
+      const [created] = await Product.create([{
+        orderNumber: nextOrderNumber,
+        price,
+        quantity,
+        quantityPerPackage,
+        status: explicitPending ? 'pending' : isConfirmed ? 'active' : 'pending',
+        source: 'receive',
+        notes: body.notes ? String(body.notes) : '',
+        originalImageUrl: imageUrl,
+        imageUrls: [imageUrl],
+        imageNames: [filename],
+      }], { session });
+      product = created;
+    });
+  } finally {
+    session.endSession();
   }
-});
+  res.status(201).json(product);
+}));
 
 // POST /api/v1/products
 // Body JSON: { orderNumber, price, quantity, filename?, ...rest }
-router.post('/', staffOnly, async (req, res) => {
+router.post('/', staffOnly, asyncHandler(async (req, res) => {
   const fields = req.body;
   const { orderNumber, name, category, brand, model, warehouse, status } = fields;
   const price = Number(fields.price ?? 0);
@@ -528,9 +492,7 @@ router.post('/', staffOnly, async (req, res) => {
   const parsedOrderNumber = Number(orderNumber ?? 0);
   const currentBrand = brand || name || '';
 
-  if (price <= 0 || quantity < 0 || parsedOrderNumber <= 0) {
-    return res.status(400).json({ error: "Порядковий номер, ціна та кількість є обов'язковими" });
-  }
+  if (price <= 0 || quantity < 0 || parsedOrderNumber <= 0) throw appError('product_required_fields');
 
   let imageUrls = [];
   let imageNames = [];
@@ -568,11 +530,11 @@ router.post('/', staffOnly, async (req, res) => {
   }
 
   res.status(201).json(product);
-});
+}));
 
-router.patch('/:id', staffOnly, async (req, res) => {
+router.patch('/:id', staffOnly, asyncHandler(async (req, res) => {
   const product = await Product.findById(req.params.id);
-  if (!product) return res.status(404).json({ error: 'Product not found' });
+  if (!product) throw appError('product_not_found');
 
   const fields = req.body;
 
@@ -581,12 +543,12 @@ router.patch('/:id', staffOnly, async (req, res) => {
   const incomingBrand = brand || name;
 
   if (orderNumber !== undefined && (Number.isNaN(parsedOrderNumber) || parsedOrderNumber <= 0)) {
-    return res.status(400).json({ error: 'Порядковий номер має бути цілим числом більше за 0' });
+    throw appError('product_order_invalid');
   }
 
   if (status === 'archived') {
     // Don't allow archiving via PATCH — use DELETE endpoint for proper soft-delete
-    return res.status(400).json({ error: 'Використовуйте DELETE для архівації товару' });
+    throw appError('product_archive_via_delete');
   }
 
   // Apply mutations to the product object first (in-memory) — they are persisted
@@ -659,16 +621,16 @@ router.patch('/:id', staffOnly, async (req, res) => {
   }
 
   res.json(product);
-});
+}));
 
-router.delete('/:id', staffOnly, async (req, res) => {
+router.delete('/:id', staffOnly, asyncHandler(async (req, res) => {
   const product = await Product.findById(req.params.id);
-  if (!product) return res.status(404).json({ error: 'Product not found' });
+  if (!product) throw appError('product_not_found');
 
   const { archiveProduct } = require('../services/archiveProduct');
   await archiveProduct(product, { notifyBuyers: false });
 
   res.json({ message: 'Product archived' });
-});
+}));
 
 module.exports = router;

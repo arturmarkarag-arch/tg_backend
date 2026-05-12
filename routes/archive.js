@@ -6,6 +6,7 @@ const Block = require('../models/Block');
 const { shiftUp } = require('../utils/shiftOrderNumbers');
 const { getIO } = require('../socket');
 const { telegramAuth, requireTelegramRoles } = require('../middleware/telegramAuth');
+const { appError, asyncHandler } = require('../utils/errors');
 
 const router = express.Router();
 
@@ -55,7 +56,7 @@ async function deleteFromR2(imageNames = []) {
  * sorted newest-day-first, within each day newest-first.
  * Only includes products archived within the last 30 days.
  */
-router.get('/', async (req, res) => {
+router.get('/', asyncHandler(async (req, res) => {
   const page = Math.max(1, parseInt(req.query.page) || 1);
   const pageSize = Math.min(100, Math.max(1, parseInt(req.query.pageSize) || 20));
 
@@ -90,20 +91,20 @@ router.get('/', async (req, res) => {
     pageCount: Math.ceil(total / pageSize),
     groups: grouped,
   });
-});
+}));
 
 /**
  * POST /api/archive/:id/restore
  * Restore an archived product back to active status.
  */
-router.post('/:id/restore', async (req, res) => {
+router.post('/:id/restore', asyncHandler(async (req, res) => {
   const session = await mongoose.startSession();
   let product;
   try {
     await session.withTransaction(async () => {
       product = await Product.findById(req.params.id).session(session);
-      if (!product) throw Object.assign(new Error('Product not found'), { status: 404 });
-      if (product.status !== 'archived') throw Object.assign(new Error('Product is not archived'), { status: 400 });
+      if (!product) throw appError('product_not_found');
+      if (product.status !== 'archived') throw appError('product_not_archived');
 
       let restoreOrder;
       if (product.originalOrderNumber) {
@@ -126,26 +127,23 @@ router.post('/:id/restore', async (req, res) => {
       product.orderNumber = restoreOrder;
       await product.save({ session });
     });
-  } catch (err) {
+  } finally {
     await session.endSession();
-    if (err.status) return res.status(err.status).json({ error: err.message });
-    throw err;
   }
-  await session.endSession();
 
-  try { getIO().emit('incoming_updated'); } catch (_) {}
+  try { getIO().emit('incoming_updated'); } catch (e) { console.warn('[archive/restore] socket incoming_updated failed:', e.message); }
 
   res.json(product);
-});
+}));
 
 /**
  * DELETE /api/archive/:id
  * Permanently delete an archived product and its R2 images.
  */
-router.delete('/:id', async (req, res) => {
+router.delete('/:id', asyncHandler(async (req, res) => {
   const product = await Product.findById(req.params.id);
-  if (!product) return res.status(404).json({ error: 'Product not found' });
-  if (product.status !== 'archived') return res.status(400).json({ error: 'Only archived products can be permanently deleted' });
+  if (!product) throw appError('product_not_found');
+  if (product.status !== 'archived') throw appError('product_only_archived_can_delete');
 
   // Remove from any blocks and delete product atomically.
   // Archived products should already have been removed from blocks by archiveProduct,
@@ -180,10 +178,12 @@ router.delete('/:id', async (req, res) => {
       for (const block of updatedBlocks) {
         io.emit('block_updated', { blockId: block.blockId, block });
       }
-    } catch (_) {}
+    } catch (e) {
+      console.warn('[archive/delete] socket block_updated failed:', e.message);
+    }
   }
 
   res.json({ message: 'Product permanently deleted' });
-});
+}));
 
 module.exports = { router };
