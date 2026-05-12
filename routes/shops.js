@@ -1,4 +1,5 @@
 const express = require('express');
+const mongoose = require('mongoose');
 const Shop = require('../models/Shop');
 const City = require('../models/City');
 const DeliveryGroup = require('../models/DeliveryGroup');
@@ -180,37 +181,57 @@ router.patch('/:id', telegramAuth, requireTelegramRole('admin'), async (req, res
 // ─── DELETE /api/shops/:id ────────────────────────────────────────────────────
 // Видаляємо тільки якщо 0 продавців прив'язано
 router.delete('/:id', telegramAuth, requireTelegramRole('admin'), async (req, res) => {
+  // Wrap check + delete in a transaction so a seller or active order created
+  // between the count and the delete cannot leave us with orphan references.
+  const session = await mongoose.connection.startSession();
   try {
-    const shop = await Shop.findById(req.params.id).lean();
-    if (!shop) return res.status(404).json({ error: 'Shop not found' });
+    let result;
+    await session.withTransaction(async () => {
+      const shop = await Shop.findById(req.params.id).session(session);
+      if (!shop) {
+        result = { status: 404, body: { error: 'Shop not found' } };
+        return;
+      }
 
-    const sellerCount = await User.countDocuments({ shopId: String(shop._id), role: 'seller' });
-    if (sellerCount > 0) {
-      return res.status(400).json({
-        error: `Не можна видалити магазин: ${sellerCount} продавець(ів) прив'язано. Спочатку зніміть їх у налаштуваннях магазину.`,
-      });
-    }
+      const sellerCount = await User.countDocuments({
+        shopId: String(shop._id),
+        role: 'seller',
+      }).session(session);
+      if (sellerCount > 0) {
+        result = {
+          status: 400,
+          body: {
+            error: `Не можна видалити магазин: ${sellerCount} продавець(ів) прив'язано. Спочатку зніміть їх у налаштуваннях магазину.`,
+          },
+        };
+        return;
+      }
 
-    // Refuse if any active order still references this shop. Without this check
-    // the order would be orphaned with a shopId pointing at a deleted document,
-    // and warehouse staff would see "Невідомий магазин" in the picking dashboard.
-    const activeOrderCount = await Order.countDocuments({
-      shopId: shop._id,
-      status: { $in: ['new', 'in_progress'] },
+      const activeOrderCount = await Order.countDocuments({
+        shopId: shop._id,
+        status: { $in: ['new', 'in_progress'] },
+      }).session(session);
+      if (activeOrderCount > 0) {
+        result = {
+          status: 409,
+          body: {
+            error: 'shop_has_active_orders',
+            message: `Не можна видалити магазин: ${activeOrderCount} активне замовлення прив'язано. Спочатку завершіть або скасуйте їх.`,
+            activeOrders: activeOrderCount,
+          },
+        };
+        return;
+      }
+
+      await Shop.deleteOne({ _id: shop._id }, { session });
+      result = { status: 200, body: { message: 'Магазин видалено' } };
     });
-    if (activeOrderCount > 0) {
-      return res.status(409).json({
-        error: 'shop_has_active_orders',
-        message: `Не можна видалити магазин: ${activeOrderCount} активне замовлення прив'язано. Спочатку завершіть або скасуйте їх.`,
-        activeOrders: activeOrderCount,
-      });
-    }
-
-    await Shop.findByIdAndDelete(req.params.id);
-    res.json({ message: 'Магазин видалено' });
+    return res.status(result.status).json(result.body);
   } catch (err) {
     console.error('[DELETE /shops/:id]', err.message);
-    res.status(500).json({ error: err.message });
+    return res.status(500).json({ error: err.message });
+  } finally {
+    session.endSession();
   }
 });
 
@@ -246,16 +267,34 @@ router.patch('/:id/sellers', telegramAuth, requireTelegramRole('admin'), async (
       }
     }
 
-    // Знімаємо з магазину тих, кого прибрали зі списку
+    // Знімаємо/призначаємо в одній транзакції — інакше при збої між
+    // двома updateMany частина продавців може опинитися «у підвішеному стані»
+    // (вже знятий зі старого, ще не призначений у новий).
     const toRemove = currentIds.filter((id) => !newSellers.includes(id));
-    if (toRemove.length > 0) {
-      await User.updateMany({ telegramId: { $in: toRemove } }, { $set: { shopId: null } });
-    }
-
-    // Призначаємо магазин новим продавцям
     const toAdd = newSellers.filter((id) => !currentIds.includes(id));
-    if (toAdd.length > 0) {
-      await User.updateMany({ telegramId: { $in: toAdd }, role: 'seller' }, { $set: { shopId: shopIdStr } });
+
+    if (toRemove.length > 0 || toAdd.length > 0) {
+      const session = await mongoose.connection.startSession();
+      try {
+        await session.withTransaction(async () => {
+          if (toRemove.length > 0) {
+            await User.updateMany(
+              { telegramId: { $in: toRemove } },
+              { $set: { shopId: null } },
+              { session }
+            );
+          }
+          if (toAdd.length > 0) {
+            await User.updateMany(
+              { telegramId: { $in: toAdd }, role: 'seller' },
+              { $set: { shopId: shopIdStr } },
+              { session }
+            );
+          }
+        });
+      } finally {
+        session.endSession();
+      }
     }
 
     // Повертаємо оновлений список

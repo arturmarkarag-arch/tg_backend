@@ -165,7 +165,7 @@ router.get('/:number', async (req, res) => {
 
 // POST /api/blocks/move — move product between blocks
 router.post('/move', staffOnly, async (req, res) => {
-  const { productId, fromBlock, toBlock, toIndex } = req.body;
+  const { productId, fromBlock, toBlock, toIndex, expectedFromVersion, expectedToVersion } = req.body;
   const fromBlockId = Number(fromBlock);
   const toBlockId = Number(toBlock);
   const index = Number(toIndex);
@@ -193,6 +193,28 @@ router.post('/move', staffOnly, async (req, res) => {
 
         if (!source || !target) {
           throw Object.assign(new Error('Block not found'), { status: 404 });
+        }
+
+        // Optimistic lock — refuse if any provided expected version is stale.
+        if (expectedFromVersion != null && Number(expectedFromVersion) !== source.version) {
+          throw Object.assign(new Error('Source block was modified by another user'), {
+            status: 409,
+            code: 'block_stale',
+            blockId: source.blockId,
+            currentVersion: source.version,
+          });
+        }
+        if (
+          fromBlockId !== toBlockId &&
+          expectedToVersion != null &&
+          Number(expectedToVersion) !== target.version
+        ) {
+          throw Object.assign(new Error('Target block was modified by another user'), {
+            status: 409,
+            code: 'block_stale',
+            blockId: target.blockId,
+            currentVersion: target.version,
+          });
         }
 
         const idx = source.productIds.findIndex((id) => id.toString() === productId);
@@ -248,9 +270,21 @@ router.delete('/:number/products/:productId', staffOnly, async (req, res) => {
   const { productId } = req.params;
   if (!num || num < 1) return res.status(400).json({ error: 'Invalid block number' });
 
+  // Optimistic lock can be passed via query or header to keep DELETE body-free.
+  const expectedVersionRaw = req.query.expectedVersion ?? req.get('if-match');
+  const expectedVersion = expectedVersionRaw != null ? Number(expectedVersionRaw) : null;
+
   try {
     const block = await Block.findOne({ blockId: num });
     if (!block) return res.status(404).json({ error: 'Block not found' });
+
+    if (expectedVersion != null && expectedVersion !== block.version) {
+      return res.status(409).json({
+        error: 'Block was modified by another user',
+        code: 'block_stale',
+        currentVersion: block.version,
+      });
+    }
 
     const idx = block.productIds.findIndex((id) => id.toString() === productId);
     if (idx === -1) return res.status(404).json({ error: 'Product not in block' });
@@ -278,19 +312,72 @@ router.delete('/:number/products/:productId', staffOnly, async (req, res) => {
 // POST /api/blocks/:number/add — add product to block
 router.post('/:number/add', staffOnly, async (req, res) => {
   const num = Number(req.params.number);
-  const { productId, index } = req.body;
+  const { productId, index, expectedVersion } = req.body;
   if (!productId) return res.status(400).json({ error: 'Missing productId' });
+  if (!mongoose.Types.ObjectId.isValid(productId)) {
+    return res.status(400).json({ error: 'Invalid productId' });
+  }
 
-  const block = await Block.findOne({ blockId: num });
-  if (!block) return res.status(404).json({ error: 'Block not found' });
+  let updated;
+  const session = await mongoose.connection.startSession();
+  try {
+    await session.withTransaction(async () => {
+      const block = await Block.findOne({ blockId: num }).session(session);
+      if (!block) {
+        throw Object.assign(new Error('Block not found'), { status: 404 });
+      }
 
-  const safeIndex = index != null ? Math.min(Math.max(0, index), block.productIds.length) : block.productIds.length;
-  block.productIds.splice(safeIndex, 0, productId);
-  block.version += 1;
-  await block.save();
+      // Optimistic lock: if client sent a version, refuse on mismatch so a stale
+      // UI cannot blindly overwrite a concurrent change. Backwards-compatible
+      // when the field is omitted.
+      if (expectedVersion != null && Number(expectedVersion) !== block.version) {
+        throw Object.assign(new Error('Block was modified by another user'), {
+          status: 409,
+          code: 'block_stale',
+          currentVersion: block.version,
+        });
+      }
 
-  await block.populate('productIds');
-  const updated = block.toObject();
+      // Uniqueness across blocks: a product must live in exactly one block at a
+      // time. Without this check warehouse staff could pack the same item from
+      // two blocks (double-picking) and picking tasks would resolve ambiguously.
+      const existing = await Block.findOne({ productIds: productId }).session(session).lean();
+      if (existing) {
+        if (existing.blockId === num) {
+          throw Object.assign(new Error('Product already in this block'), {
+            status: 409,
+            code: 'product_already_in_block',
+            existingBlockId: existing.blockId,
+          });
+        }
+        throw Object.assign(new Error(`Product is already in block ${existing.blockId}`), {
+          status: 409,
+          code: 'product_in_other_block',
+          existingBlockId: existing.blockId,
+        });
+      }
+
+      const safeIndex = index != null
+        ? Math.min(Math.max(0, Number(index)), block.productIds.length)
+        : block.productIds.length;
+      block.productIds.splice(safeIndex, 0, productId);
+      block.version += 1;
+      await block.save({ session });
+
+      await block.populate('productIds');
+      updated = block.toObject();
+    });
+  } catch (err) {
+    console.error('[blocks/add] Error:', err.message);
+    const status = err.status || 500;
+    const payload = { error: err.message };
+    if (err.code) payload.code = err.code;
+    if (err.existingBlockId != null) payload.existingBlockId = err.existingBlockId;
+    if (err.currentVersion != null) payload.currentVersion = err.currentVersion;
+    return res.status(status).json(payload);
+  } finally {
+    session.endSession();
+  }
 
   // Broadcast to all clients so they see the update in real time
   try {

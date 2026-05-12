@@ -1,4 +1,5 @@
 const express = require('express');
+const mongoose = require('mongoose');
 const DeliveryGroup = require('../models/DeliveryGroup');
 const User = require('../models/User');
 const Order = require('../models/Order');
@@ -401,37 +402,60 @@ router.patch('/:id', telegramAuth, requireTelegramRole('admin'), async (req, res
 });
 
 router.delete('/:id', telegramAuth, requireTelegramRole('admin'), async (req, res) => {
-  const group = await DeliveryGroup.findById(req.params.id);
-  if (!group) return res.status(404).json({ error: 'Group not found' });
+  // Check + delete in a single transaction so that a magazin or active order
+  // created between the count and findByIdAndDelete cannot leave an orphan
+  // reference behind.
+  const session = await mongoose.connection.startSession();
+  try {
+    let result;
+    await session.withTransaction(async () => {
+      const group = await DeliveryGroup.findById(req.params.id).session(session);
+      if (!group) {
+        result = { status: 404, body: { error: 'Group not found' } };
+        return;
+      }
 
-  // Count ALL shops, not just active ones — an inactive shop can still hold an
-  // active order (or get re-activated later) and we don't want to orphan its
-  // delivery-group reference.
-  const shopCount = await Shop.countDocuments({ deliveryGroupId: String(group._id) });
-  if (shopCount > 0) {
-    return res.status(400).json({
-      error: 'group_has_shops',
-      message: `Не можна видалити групу: ${shopCount} магазин(ів) прив'язано (включно з неактивними).`,
-      shopCount,
+      const shopCount = await Shop.countDocuments({
+        deliveryGroupId: String(group._id),
+      }).session(session);
+      if (shopCount > 0) {
+        result = {
+          status: 400,
+          body: {
+            error: 'group_has_shops',
+            message: `Не можна видалити групу: ${shopCount} магазин(ів) прив'язано (включно з неактивними).`,
+            shopCount,
+          },
+        };
+        return;
+      }
+
+      const activeOrderCount = await Order.countDocuments({
+        'buyerSnapshot.deliveryGroupId': String(group._id),
+        status: { $in: ['new', 'in_progress'] },
+      }).session(session);
+      if (activeOrderCount > 0) {
+        result = {
+          status: 409,
+          body: {
+            error: 'group_has_active_orders',
+            message: `Не можна видалити групу: ${activeOrderCount} активне замовлення прив'язано.`,
+            activeOrders: activeOrderCount,
+          },
+        };
+        return;
+      }
+
+      await DeliveryGroup.deleteOne({ _id: group._id }, { session });
+      result = { status: 200, body: { message: 'Group deleted' } };
     });
+    return res.status(result.status).json(result.body);
+  } catch (err) {
+    console.error('[DELETE /delivery-groups/:id]', err.message);
+    return res.status(500).json({ error: err.message });
+  } finally {
+    session.endSession();
   }
-
-  // Even with zero shops, refuse if any orders still reference this group via
-  // their snapshot — we'd lose the link otherwise.
-  const activeOrderCount = await Order.countDocuments({
-    'buyerSnapshot.deliveryGroupId': String(group._id),
-    status: { $in: ['new', 'in_progress'] },
-  });
-  if (activeOrderCount > 0) {
-    return res.status(409).json({
-      error: 'group_has_active_orders',
-      message: `Не можна видалити групу: ${activeOrderCount} активне замовлення прив'язано.`,
-      activeOrders: activeOrderCount,
-    });
-  }
-
-  await DeliveryGroup.findByIdAndDelete(req.params.id);
-  res.json({ message: 'Group deleted' });
 });
 
 /**

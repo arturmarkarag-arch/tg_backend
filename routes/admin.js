@@ -1,4 +1,5 @@
 const express = require('express');
+const mongoose = require('mongoose');
 const { telegramAuth, requireTelegramRole } = require('../middleware/telegramAuth');
 const AppSetting = require('../models/AppSetting');
 const City = require('../models/City');
@@ -148,15 +149,32 @@ router.patch('/cities/:id', telegramAuth, requireTelegramRole('admin'), async (r
 
 // DELETE /api/admin/cities/:id — видалити місто (якщо немає магазинів)
 router.delete('/cities/:id', telegramAuth, requireTelegramRole('admin'), async (req, res) => {
+  // Транзакція захищає від race-condition: між countDocuments і findByIdAndDelete
+  // адмін міг створити новий магазин, який стане «висіти» на видаленому місті.
+  const session = await mongoose.connection.startSession();
   try {
-    const shopCount = await Shop.countDocuments({ cityId: req.params.id });
-    if (shopCount > 0) {
-      return res.status(400).json({ error: `Не можна видалити: ${shopCount} магазин(ів) прив'язано до цього міста` });
-    }
-    await City.findByIdAndDelete(req.params.id);
-    res.json({ message: 'Місто видалено' });
+    let result;
+    await session.withTransaction(async () => {
+      const shopCount = await Shop.countDocuments({ cityId: req.params.id }).session(session);
+      if (shopCount > 0) {
+        result = {
+          status: 400,
+          body: { error: `Не можна видалити: ${shopCount} магазин(ів) прив'язано до цього міста` },
+        };
+        return;
+      }
+      const deleted = await City.findByIdAndDelete(req.params.id, { session });
+      if (!deleted) {
+        result = { status: 404, body: { error: 'Місто не знайдено' } };
+        return;
+      }
+      result = { status: 200, body: { message: 'Місто видалено' } };
+    });
+    return res.status(result.status).json(result.body);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    return res.status(500).json({ error: err.message });
+  } finally {
+    session.endSession();
   }
 });
 
