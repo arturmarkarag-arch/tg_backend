@@ -166,9 +166,8 @@ router.post('/start-session', requireTelegramRoles(['warehouse', 'admin']), asyn
       return res.json({ alreadyStarted: true, taskCount: existingCount });
     }
 
-    // 3. Block start if there are orders from stale sessions — admin must resolve them first.
-    // Silently expiring orders could cause lost purchases: a seller who moved shops or whose
-    // session ID drifted would lose their order without any warning.
+    // 3. Detect stale orders from previous sessions.
+    // These orders should NOT block warehouse flow; admins resolve them separately.
     const group2 = await DeliveryGroup.findById(deliveryGroupId, 'dayOfWeek').lean();
     if (group2) {
       const schedule2 = await getOrderingSchedule();
@@ -182,21 +181,28 @@ router.post('/start-session', requireTelegramRoles(['warehouse', 'admin']), asyn
         'buyerSnapshot buyerTelegramId orderingSessionId',
       ).lean();
 
-      if (staleOrders.length > 0) {
-        const conflicts = staleOrders.map((o) => ({
-          orderId: String(o._id),
-          shopName: o.buyerSnapshot?.shopName || '—',
-          shopCity: o.buyerSnapshot?.shopCity || '',
-          buyerTelegramId: String(o.buyerTelegramId),
-        }));
-        return res.json({ unresolved: true, conflicts });
+      // 4. Build picking tasks only from the CURRENT session.
+      await buildPickingTasksFromOrders(deliveryGroupId, { orderingSessionId: currentSessionId });
+
+      // 5. Return stale warnings for admin visibility without blocking start.
+      const staleWarnings = staleOrders.map((o) => ({
+        orderId: String(o._id),
+        shopName: o.buyerSnapshot?.shopName || '—',
+        shopCity: o.buyerSnapshot?.shopCity || '',
+        buyerTelegramId: String(o.buyerTelegramId),
+      }));
+
+      const taskCount = await PickingTask.countDocuments(activeFilter);
+      if (taskCount === 0) {
+        return res.json({ noOrders: true, staleWarnings });
       }
+      return res.json({ started: true, taskCount, staleWarnings });
     }
 
-    // 4. Build picking tasks from this group's closed-window orders.
+    // Fallback: if group lookup failed, keep previous behavior without session scoping.
     await buildPickingTasksFromOrders(deliveryGroupId);
 
-    // 4. Return current count. The unique partial index on PickingTask(productId, deliveryGroupId)
+    // Return current count. The unique partial index on PickingTask(productId, deliveryGroupId)
     // causes insertMany(ordered:false) to silently skip duplicates, so concurrent calls from
     // multiple server instances never create phantom tasks — no in-process flag needed.
     const taskCount = await PickingTask.countDocuments(activeFilter);

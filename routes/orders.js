@@ -15,10 +15,11 @@ const { getIO } = require('../socket');
 const { isOrderingOpen, getOrderingWindowOpenAt, getCurrentOrderingSessionId } = require('../utils/orderingSchedule');
 
 const { getOrderingSchedule } = require('../utils/getOrderingSchedule');
-const { appError } = require('../utils/errors');
+const { appError, asyncHandler } = require('../utils/errors');
 
 const router = express.Router();
 const staffOnly = requireTelegramRoles(['admin', 'warehouse']);
+const adminOnly = requireTelegramRoles(['admin']);
 
 async function getNextOrderNumber() {
   const counter = await Counter.findOneAndUpdate(
@@ -37,6 +38,45 @@ function actorFromReq(req) {
     byName: [u.firstName, u.lastName].filter(Boolean).join(' '),
     byRole: u.role,
   };
+}
+
+async function ensureOrderIsStale(order, session = null) {
+  const groupId = order?.buyerSnapshot?.deliveryGroupId ? String(order.buyerSnapshot.deliveryGroupId) : '';
+  if (!groupId) return;
+
+  const groupQuery = DeliveryGroup.findById(groupId).lean();
+  const group = session ? await groupQuery.session(session) : await groupQuery;
+  if (!group) return;
+
+  const schedule = await getOrderingSchedule();
+  const currentSessionId = getCurrentOrderingSessionId(String(group._id), group.dayOfWeek, schedule);
+  if (String(order.orderingSessionId || '') === String(currentSessionId || '')) {
+    throw appError('validation_failed', { field: 'orderingSessionId', details: 'order_is_current_session' });
+  }
+}
+
+async function detachOrderFromPendingTasks(orderId, session) {
+  await PickingTask.updateMany(
+    { 'items.orderId': orderId, status: { $in: ['pending', 'locked'] } },
+    { $pull: { items: { orderId } } },
+    { session },
+  );
+
+  await PickingTask.deleteMany(
+    { status: { $in: ['pending', 'locked'] }, items: { $size: 0 } },
+    { session },
+  );
+}
+
+async function ensureOrderNotInPickingPipeline(orderId, session = null) {
+  const query = PickingTask.exists({
+    'items.orderId': orderId,
+    status: { $in: ['pending', 'locked', 'completed'] },
+  });
+  const exists = session ? await query.session(session) : await query;
+  if (exists) {
+    throw appError('order_picking_started');
+  }
 }
 
 /**
@@ -671,6 +711,9 @@ router.patch('/:id/snapshot', staffOnly, async (req, res) => {
     });
   }
 
+  // Hard guard: once the order is in picking pipeline, admin reassignment is forbidden.
+  await ensureOrderNotInPickingPipeline(order._id);
+
   const { shopId } = req.body;
   if (!shopId) throw appError('order_shop_required');
 
@@ -753,6 +796,9 @@ router.patch('/:id/snapshot', staffOnly, async (req, res) => {
         throw Object.assign(new Error('tx_conflict'), { code: 'target_shop_has_order' });
       }
 
+      // Re-check in transaction to close the race with the picking board.
+      await ensureOrderNotInPickingPipeline(order._id, session);
+
       await order.save({ session });
 
       // Sync shopName in any active PickingTask items that reference this order.
@@ -816,6 +862,171 @@ router.patch('/:id/snapshot', staffOnly, async (req, res) => {
 
   res.json(order);
 });
+
+// POST /:id/stale/restore-to-cart — admin-only action.
+// Restores stale order items to seller cart and expires the order in one transaction.
+router.post('/:id/stale/restore-to-cart', telegramAuth, adminOnly, asyncHandler(async (req, res) => {
+  const session = await mongoose.connection.startSession();
+  let result = null;
+  try {
+    await session.withTransaction(async () => {
+      const order = await Order.findById(req.params.id).session(session);
+      if (!order) throw appError('order_not_found');
+      if (!['new', 'in_progress'].includes(order.status)) {
+        throw appError('order_not_active', { status: order.status });
+      }
+
+      await ensureOrderIsStale(order, session);
+
+      const buyerTelegramId = String(order.buyerTelegramId || '');
+      if (!buyerTelegramId) throw appError('validation_failed', { field: 'buyerTelegramId' });
+
+      const buyer = await User.findOne({ telegramId: buyerTelegramId }).session(session);
+      if (!buyer) throw appError('user_not_found');
+
+      const cartItems = buyer.cartState?.orderItems instanceof Map
+        ? Object.fromEntries(buyer.cartState.orderItems)
+        : { ...(buyer.cartState?.orderItems || {}) };
+      const orderItemIds = new Set(Array.isArray(buyer.cartState?.orderItemIds) ? buyer.cartState.orderItemIds.map(String) : []);
+
+      let restoredPositions = 0;
+      for (const item of order.items || []) {
+        if (item.cancelled) continue;
+        const pid = String(item.productId || '');
+        const qty = Number(item.quantity || 0);
+        if (!pid || qty <= 0) continue;
+        restoredPositions += 1;
+        cartItems[pid] = Number(cartItems[pid] || 0) + qty;
+        orderItemIds.add(pid);
+      }
+
+      await User.updateOne(
+        { _id: buyer._id },
+        {
+          $set: {
+            'cartState.orderItems': cartItems,
+            'cartState.orderItemIds': Array.from(orderItemIds),
+            'cartState.updatedAt': new Date(),
+            'cartState.lastOrderPositions': restoredPositions,
+            'cartState.reservedForGroupId': order.buyerSnapshot?.deliveryGroupId ? String(order.buyerSnapshot.deliveryGroupId) : null,
+          },
+        },
+        { session },
+      );
+
+      await detachOrderFromPendingTasks(order._id, session);
+
+      order.status = 'expired';
+      order.history.push({
+        ...actorFromReq(req),
+        action: 'stale_order_restored_to_cart',
+        meta: {
+          restoredPositions,
+          deliveryGroupId: order.buyerSnapshot?.deliveryGroupId || '',
+          fromSessionId: order.orderingSessionId || '',
+        },
+      });
+      await order.save({ session });
+
+      await User.updateOne(
+        { _id: buyer._id },
+        {
+          $push: {
+            history: {
+              at: new Date(),
+              ...actorFromReq(req),
+              action: 'stale_order_restored_to_cart',
+              meta: {
+                orderId: String(order._id),
+                orderNumber: order.orderNumber || null,
+                restoredPositions,
+                shopName: order.buyerSnapshot?.shopName || '',
+                shopCity: order.buyerSnapshot?.shopCity || '',
+              },
+            },
+          },
+        },
+        { session },
+      );
+
+      result = {
+        orderId: String(order._id),
+        buyerTelegramId,
+        deliveryGroupId: order.buyerSnapshot?.deliveryGroupId ? String(order.buyerSnapshot.deliveryGroupId) : '',
+        restoredPositions,
+      };
+    });
+  } finally {
+    session.endSession();
+  }
+
+  try {
+    const io = getIO();
+    if (io) {
+      io.emit('user_order_updated', { buyerTelegramId: result.buyerTelegramId });
+      const groupId = result.deliveryGroupId || null;
+      if (groupId) io.to(`picking_group_${String(groupId)}`).emit('shop_status_changed', { groupId: String(groupId) });
+      io.emit('delivery_groups_updated');
+    }
+  } catch (emitErr) {
+    console.warn('[orders.stale.restore] socket emit failed:', emitErr?.message || emitErr);
+  }
+
+  res.json({ message: 'Замовлення повернуто в кошик продавця', ...result });
+}));
+
+// POST /:id/stale/expire — admin-only action.
+// Expires stale order and detaches it from pending picking tasks.
+router.post('/:id/stale/expire', telegramAuth, adminOnly, asyncHandler(async (req, res) => {
+  const session = await mongoose.connection.startSession();
+  let result = null;
+  try {
+    await session.withTransaction(async () => {
+      const order = await Order.findById(req.params.id).session(session);
+      if (!order) throw appError('order_not_found');
+      if (!['new', 'in_progress'].includes(order.status)) {
+        throw appError('order_not_active', { status: order.status });
+      }
+
+      await ensureOrderIsStale(order, session);
+      await detachOrderFromPendingTasks(order._id, session);
+
+      order.status = 'expired';
+      order.history.push({
+        ...actorFromReq(req),
+        action: 'stale_order_expired_by_admin',
+        meta: {
+          deliveryGroupId: order.buyerSnapshot?.deliveryGroupId || '',
+          fromSessionId: order.orderingSessionId || '',
+        },
+      });
+      await order.save({ session });
+
+      result = {
+        orderId: String(order._id),
+        buyerTelegramId: String(order.buyerTelegramId || ''),
+        deliveryGroupId: order.buyerSnapshot?.deliveryGroupId ? String(order.buyerSnapshot.deliveryGroupId) : '',
+      };
+    });
+  } finally {
+    session.endSession();
+  }
+
+  try {
+    const io = getIO();
+    if (io) {
+      if (result.buyerTelegramId) io.emit('user_order_updated', { buyerTelegramId: result.buyerTelegramId });
+      if (result.deliveryGroupId) {
+        io.to(`picking_group_${result.deliveryGroupId}`).emit('shop_status_changed', { groupId: result.deliveryGroupId });
+      }
+      io.emit('delivery_groups_updated');
+    }
+  } catch (emitErr) {
+    console.warn('[orders.stale.expire] socket emit failed:', emitErr?.message || emitErr);
+  }
+
+  res.json({ message: 'Старе замовлення закрито', ...result });
+}));
 
 router.patch('/:id', requireOrderingWindowOpen, async (req, res) => {
   throw appError('order_status_change_disabled');

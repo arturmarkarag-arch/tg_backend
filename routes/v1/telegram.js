@@ -442,6 +442,28 @@ router.post('/mini-app/reset-state', async (req, res) => {
       { new: true }
     ).lean();
     if (updatedUser) cartState = normalizeCartState(updatedUser.cartState);
+
+    // Keep picking dashboards fresh when cart is explicitly reset.
+    const io = getIO();
+    if (io) {
+      try {
+        const shopDoc = await Shop.findById(user.shopId).select('deliveryGroupId').lean();
+        const groupId = shopDoc?.deliveryGroupId;
+        if (groupId) io.to(`picking_group_${String(groupId)}`).emit('shop_status_changed', { groupId: String(groupId) });
+      } catch (_) { /* non-critical */ }
+
+      try {
+        io.to(`shop_${String(user.shopId)}`).emit('shop_cart_changed', {
+          shopId: String(user.shopId),
+          modifiedBy: {
+            telegramId: String(telegramId),
+            name: [user.firstName, user.lastName].filter(Boolean).join(' ') || String(telegramId),
+          },
+          updatedAt: cartState.updatedAt,
+          itemCount: 0,
+        });
+      } catch (_) { /* non-critical */ }
+    }
   }
 
   res.json({ miniAppState: normalizeMiniAppState(user.miniAppState), cartState });

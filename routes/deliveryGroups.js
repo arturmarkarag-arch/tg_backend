@@ -151,6 +151,12 @@ router.get('/:groupId/shop-status', telegramAuth, requireTelegramRoles(['admin',
     status: { $in: ['new', 'in_progress'] },
   }).select('buyerSnapshot shopId buyerTelegramId items orderNumber _id createdAt history').lean();
 
+  const staleOrders = await Order.find({
+    'buyerSnapshot.deliveryGroupId': String(group._id),
+    status: { $in: ['new', 'in_progress'] },
+    orderingSessionId: { $ne: currentSessionId },
+  }).select('buyerSnapshot buyerTelegramId items orderNumber _id createdAt orderingSessionId').lean();
+
   const sellers = await User.find({ role: { $in: ['seller', 'admin'] }, shopId: { $in: shopIds } })
     .select('shopId firstName lastName telegramId cartState role')
     .lean();
@@ -170,7 +176,7 @@ router.get('/:groupId/shop-status', telegramAuth, requireTelegramRoles(['admin',
   }
 
   // Build buyer name+role lookup from all unique buyerTelegramIds in orders
-  const buyerTgIds = [...new Set(orders.map((o) => o.buyerTelegramId).filter(Boolean))];
+  const buyerTgIds = [...new Set([...orders, ...staleOrders].map((o) => o.buyerTelegramId).filter(Boolean))];
   const buyers = await User.find({ telegramId: { $in: buyerTgIds } })
     .select('telegramId firstName lastName role')
     .lean();
@@ -205,7 +211,7 @@ router.get('/:groupId/shop-status', telegramAuth, requireTelegramRoles(['admin',
     });
     if (!orderedByShop[shopId]) orderedByShop[shopId] = new Set();
     for (const item of order.items || []) {
-      if (item.productId) orderedByShop[shopId].add(String(item.productId));
+      if (item.productId && !item.cancelled) orderedByShop[shopId].add(String(item.productId));
     }
   }
 
@@ -265,6 +271,19 @@ router.get('/:groupId/shop-status', telegramAuth, requireTelegramRoles(['admin',
     groupName: group.name,
     isOpen: status.isOpen,
     currentSessionId,
+    viewerRole: req.telegramUser?.role || '',
+    staleOrderCount: staleOrders.length,
+    staleOrders: staleOrders.map((order) => ({
+      orderId: String(order._id),
+      orderNumber: order.orderNumber,
+      buyerTelegramId: String(order.buyerTelegramId || ''),
+      buyerName: buyerInfoById[String(order.buyerTelegramId)]?.name || order.buyerTelegramId,
+      shopName: order.buyerSnapshot?.shopName || '—',
+      shopCity: order.buyerSnapshot?.shopCity || '',
+      itemCount: (order.items || []).filter((i) => !i.cancelled).length,
+      orderingSessionId: order.orderingSessionId || '',
+      createdAt: order.createdAt,
+    })),
     shops: shopStatuses,
   });
 }));
@@ -339,22 +358,21 @@ router.get('/', async (req, res) => {
   // Flag groups whose ordering session is currently CLOSED but still have active orders.
   // This covers any case — seller switched shop, admin moved order, whatever.
   // Orders in an OPEN session are resolved (normal or conflict), no badge needed.
-  const closedSessionToGroupId = {};
+  const closedGroupIds = [];
   for (const g of groups) {
     const { isOpen } = isOrderingOpen(g.dayOfWeek, schedule);
     if (!isOpen) {
-      const sid = getCurrentOrderingSessionId(String(g._id), g.dayOfWeek, schedule);
-      if (sid) closedSessionToGroupId[sid] = String(g._id);
+      closedGroupIds.push(String(g._id));
     }
   }
   const problematicByGroup = {};
-  if (Object.keys(closedSessionToGroupId).length > 0) {
+  if (closedGroupIds.length > 0) {
     const ordersInClosedGroups = await Order.find({
+      'buyerSnapshot.deliveryGroupId': { $in: closedGroupIds },
       status: { $in: ['new', 'in_progress'] },
-      orderingSessionId: { $in: Object.keys(closedSessionToGroupId) },
-    }).select('orderingSessionId').lean();
+    }).select('buyerSnapshot.deliveryGroupId').lean();
     for (const order of ordersInClosedGroups) {
-      const groupId = closedSessionToGroupId[order.orderingSessionId];
+      const groupId = order?.buyerSnapshot?.deliveryGroupId ? String(order.buyerSnapshot.deliveryGroupId) : '';
       if (groupId) problematicByGroup[groupId] = true;
     }
   }

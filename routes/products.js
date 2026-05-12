@@ -481,6 +481,12 @@ router.post('/receive', staffOnly, asyncHandler(async (req, res) => {
   } finally {
     session.endSession();
   }
+  try {
+    const io = getIO();
+    if (io) io.emit('incoming_updated');
+  } catch (e) {
+    console.warn('[products/receive] socket incoming_updated failed:', e.message);
+  }
   res.status(201).json(product);
 }));
 
@@ -620,6 +626,13 @@ router.patch('/:id', staffOnly, asyncHandler(async (req, res) => {
     }
   } else {
     await product.save();
+  }
+
+  try {
+    const io = getIO();
+    if (io) io.emit('incoming_updated');
+  } catch (e) {
+    console.warn('[products/patch] socket incoming_updated failed:', e.message);
   }
 
   res.json(product);

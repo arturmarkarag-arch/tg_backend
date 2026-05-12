@@ -31,6 +31,7 @@ function getProductTitle(product) {
 
 async function archiveProduct(product, { notifyBuyers = false, bot = null } = {}) {
   const orderNotifications = []; // collected inside tx, emitted after commit
+  const affectedGroupIds = new Set();
   let cancelledCount = 0;
   let oldOrderNumber;
   let affectedBlockIds = [];
@@ -103,6 +104,9 @@ async function archiveProduct(product, { notifyBuyers = false, bot = null } = {}
 
       await order.save({ session });
       orderNotifications.push({ orderId: String(order._id), buyerTelegramId: order.buyerTelegramId });
+      if (order.buyerSnapshot?.deliveryGroupId) {
+        affectedGroupIds.add(String(order.buyerSnapshot.deliveryGroupId));
+      }
     }
 
     // ── 2. Close open PickingTasks ───────────────────────────────────────────
@@ -147,6 +151,7 @@ async function archiveProduct(product, { notifyBuyers = false, bot = null } = {}
     try {
       const io = getIO();
       io.emit('order_updated', { orderId, buyerTelegramId });
+      io.emit('user_order_updated', { buyerTelegramId });
     } catch (e) {
       console.warn('[archiveProduct] socket order_updated failed:', e.message);
     }
@@ -164,10 +169,24 @@ async function archiveProduct(product, { notifyBuyers = false, bot = null } = {}
     }
   }
 
+  // Notify picking dashboards for groups touched by this archive reconciliation.
+  if (affectedGroupIds.size > 0) {
+    try {
+      const io = getIO();
+      for (const groupId of affectedGroupIds) {
+        io.to(`picking_group_${groupId}`).emit('shop_status_changed', { groupId });
+      }
+      io.emit('delivery_groups_updated');
+    } catch (e) {
+      console.warn('[archiveProduct] socket shop_status_changed failed:', e.message);
+    }
+  }
+
   // Notify all clients that the product catalogue changed
   try {
     const io = getIO();
     io.emit('product_archived', { productId: String(product._id) });
+    io.emit('incoming_updated');
   } catch (e) {
     console.warn('[archiveProduct] socket product_archived failed:', e.message);
   }

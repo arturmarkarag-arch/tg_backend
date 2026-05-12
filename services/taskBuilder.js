@@ -35,12 +35,14 @@ async function getShippingBlockPositions(productIds) {
 }
 
 /**
- * Creates / appends PickingTask records from all current open orders.
+ * Creates / appends PickingTask records from current active orders.
  * Pass targetDeliveryGroupId to scope to one delivery group only.
+ * Pass options.orderingSessionId to restrict building to one ordering session.
  *
  * Guard: re-entrant calls are silently dropped (only one run at a time).
  */
-async function buildPickingTasksFromOrders(targetDeliveryGroupId = null) {
+async function buildPickingTasksFromOrders(targetDeliveryGroupId = null, options = {}) {
+  const orderingSessionId = options?.orderingSessionId ? String(options.orderingSessionId) : null;
   if (buildPickingTasksFromOrders._running) return;
   buildPickingTasksFromOrders._running = true;
   try {
@@ -62,7 +64,15 @@ async function buildPickingTasksFromOrders(targetDeliveryGroupId = null) {
     }
 
     // 2. Take all active orders and build missing picking tasks.
-    const orders = await Order.find({ status: { $in: ['new', 'in_progress'] } })
+    const orderFilter = { status: { $in: ['new', 'in_progress'] } };
+    if (targetDeliveryGroupId !== null) {
+      orderFilter['buyerSnapshot.deliveryGroupId'] = String(targetDeliveryGroupId);
+    }
+    if (orderingSessionId) {
+      orderFilter.orderingSessionId = orderingSessionId;
+    }
+
+    const orders = await Order.find(orderFilter)
       .populate('items.productId')
       .sort({ createdAt: 1 })
       .lean();

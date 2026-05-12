@@ -11,6 +11,17 @@ const DeliveryGroup = require('../models/DeliveryGroup');
 const PickingTask = require('../models/PickingTask');
 const { getCurrentOrderingSessionId } = require('../utils/orderingSchedule');
 const { getOrderingSchedule } = require('../utils/getOrderingSchedule');
+const { appError } = require('../utils/errors');
+
+async function ensureOrderNotInPickingPipeline(orderId, session) {
+  const exists = await PickingTask.exists({
+    'items.orderId': orderId,
+    status: { $in: ['pending', 'locked', 'completed'] },
+  }).session(session);
+  if (exists) {
+    throw appError('order_picking_started');
+  }
+}
 
 /**
  * @param {Object} params
@@ -95,12 +106,14 @@ async function migrateSellerShop({
         $or: [
           { shopId: null },
           { 'buyerSnapshot.shopId': null },
-          { 'buyerSnapshot.shopId': '' },
+          { 'buyerSnapshot.shopId': { $exists: false } },
         ],
       }).sort({ updatedAt: -1, createdAt: -1 }).session(session);
     }
 
     if (activeOrder) {
+      await ensureOrderNotInPickingPipeline(activeOrder._id, session);
+
       prevGroupId = activeOrder.buyerSnapshot?.deliveryGroupId
         ? String(activeOrder.buyerSnapshot.deliveryGroupId)
         : null;

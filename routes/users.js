@@ -40,6 +40,17 @@ async function syncUserWarehouseZone(user) {
   return user;
 }
 
+async function ensureOrderNotInPickingPipeline(orderId, session = null) {
+  const query = PickingTask.exists({
+    'items.orderId': orderId,
+    status: { $in: ['pending', 'locked', 'completed'] },
+  });
+  const exists = session ? await query.session(session) : await query;
+  if (exists) {
+    throw appError('order_picking_started');
+  }
+}
+
 async function sanitizeUserPayload(payload, existing = null) {
   const role = payload.role ?? existing?.role ?? 'seller';
   const data = {
@@ -302,11 +313,13 @@ router.patch('/:telegramId/shop', asyncHandler(async (req, res) => {
         return res.json(existing);
       }
       let parkedOrderMeta = null;
+      let unassignedPrevGroupId = null;
       const session = await mongoose.connection.startSession();
       try {
         await session.withTransaction(async () => {
           const actor = req.telegramUser;
           const oldShop = await Shop.findById(oldShopId).session(session).lean();
+          unassignedPrevGroupId = oldShop?.deliveryGroupId ? String(oldShop.deliveryGroupId) : null;
 
           const activeOrder = await Order.findOne({
             buyerTelegramId: existing.telegramId,
@@ -315,6 +328,8 @@ router.patch('/:telegramId/shop', asyncHandler(async (req, res) => {
           }).sort({ createdAt: -1 }).session(session);
 
           if (activeOrder) {
+            await ensureOrderNotInPickingPipeline(activeOrder._id, session);
+
             const prevGroupId = activeOrder.buyerSnapshot?.deliveryGroupId
               ? String(activeOrder.buyerSnapshot.deliveryGroupId)
               : null;
@@ -401,10 +416,20 @@ router.patch('/:telegramId/shop', asyncHandler(async (req, res) => {
         try {
           const io = getIO();
           if (io) {
-            if (parkedOrderMeta.prevGroupId) {
-              io.to(`picking_group_${parkedOrderMeta.prevGroupId}`).emit('shop_status_changed', { groupId: parkedOrderMeta.prevGroupId });
+            const groupIdToNotify = parkedOrderMeta.prevGroupId || unassignedPrevGroupId;
+            if (groupIdToNotify) {
+              io.to(`picking_group_${groupIdToNotify}`).emit('shop_status_changed', { groupId: groupIdToNotify });
             }
             io.emit('user_order_updated', { buyerTelegramId: parkedOrderMeta.buyerTelegramId });
+          }
+        } catch (emitErr) {
+          console.warn('[PATCH /users/:telegramId/shop][unassign] socket emit failed:', emitErr?.message);
+        }
+      } else if (unassignedPrevGroupId) {
+        try {
+          const io = getIO();
+          if (io) {
+            io.to(`picking_group_${unassignedPrevGroupId}`).emit('shop_status_changed', { groupId: unassignedPrevGroupId });
           }
         } catch (emitErr) {
           console.warn('[PATCH /users/:telegramId/shop][unassign] socket emit failed:', emitErr?.message);
