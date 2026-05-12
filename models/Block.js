@@ -10,6 +10,12 @@ const BlockSchema = new mongoose.Schema(
 );
 
 BlockSchema.index({ blockId: 1 }, { unique: true });
-BlockSchema.index({ productIds: 1 });
+// Унікальний multikey-індекс гарантує, що один товар не може бути одночасно
+// у двох блоках. Mongo створює окремий запис індексу на кожен елемент масиву;
+// порожні масиви не створюють записів, тому декілька блоків з порожнім
+// productIds співіснують вільно. Тестова перевірка перед оновленням productIds
+// (Block.findOne({ productIds })) залишається — для людських повідомлень про
+// конфлікт; цей індекс — захист від race condition між паралельними запитами.
+BlockSchema.index({ productIds: 1 }, { unique: true, sparse: true });
 
 module.exports = mongoose.model('Block', BlockSchema);

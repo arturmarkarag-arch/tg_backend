@@ -167,6 +167,9 @@ router.post('/move', staffOnly, asyncHandler(async (req, res) => {
 
   let updatedSource;
   let updatedTarget;
+  let sourceId;
+  let targetId;
+  let isSameBlock = false;
 
   const session = await mongoose.connection.startSession();
   try {
@@ -207,18 +210,25 @@ router.post('/move', staffOnly, asyncHandler(async (req, res) => {
         await target.save({ session });
       }
 
-      await source.populate({ path: 'productIds', match: { status: { $in: ['active', 'pending'] } } });
-      updatedSource = source.toObject();
-      updatedTarget = updatedSource;
-
-      if (fromBlockId !== toBlockId) {
-        await target.populate({ path: 'productIds', match: { status: { $in: ['active', 'pending'] } } });
-        updatedTarget = target.toObject();
-      }
+      // Зберігаємо лише ID збережених документів. populate без { session }
+      // читав би поза snapshot транзакції — клієнт міг отримати застарілі
+      // або, навпаки, ще не закомічені дані. Робимо populate ПІСЛЯ commit.
+      sourceId = source._id;
+      targetId = target._id;
+      isSameBlock = fromBlockId === toBlockId;
     });
   } finally {
     session.endSession();
   }
+
+  updatedSource = await Block.findById(sourceId)
+    .populate({ path: 'productIds', match: { status: { $in: ['active', 'pending'] } } })
+    .lean();
+  updatedTarget = isSameBlock
+    ? updatedSource
+    : await Block.findById(targetId)
+        .populate({ path: 'productIds', match: { status: { $in: ['active', 'pending'] } } })
+        .lean();
 
   try {
     const io = getIO();
@@ -232,31 +242,57 @@ router.post('/move', staffOnly, asyncHandler(async (req, res) => {
 }));
 
 // DELETE /api/blocks/:number/products/:productId — remove product from block (returns it to incoming)
+//
+// Реалізовано як атомарний findOneAndUpdate з $pull + $inc(version), бо
+// раніше findOne -> splice -> save() мав race condition: дві паралельні
+// DELETE без expectedVersion читали один і той самий productIds, кожен
+// видаляв свій id, останній save() перетирав попередній — видалений товар
+// «повертався» у блок. Тепер write проходить лише при збігу version.
 router.delete('/:number/products/:productId', staffOnly, asyncHandler(async (req, res) => {
   const num = Number(req.params.number);
   const { productId } = req.params;
   if (!num || num < 1) throw appError('block_invalid_number');
+  if (!mongoose.Types.ObjectId.isValid(productId)) throw appError('block_invalid_product_id');
 
   // Optimistic lock can be passed via query or header to keep DELETE body-free.
   const expectedVersionRaw = req.query.expectedVersion ?? req.get('if-match');
   const expectedVersion = expectedVersionRaw != null ? Number(expectedVersionRaw) : null;
 
-  const block = await Block.findOne({ blockId: num });
-  if (!block) throw appError('block_not_found');
+  const MAX_RETRIES = 5;
+  let updatedRaw = null;
+  for (let attempt = 0; attempt < MAX_RETRIES; attempt += 1) {
+    const current = await Block.findOne({ blockId: num }).lean();
+    if (!current) throw appError('block_not_found');
 
-  if (expectedVersion != null && expectedVersion !== block.version) {
-    throw appError('block_stale', { currentVersion: block.version });
+    if (expectedVersion != null && expectedVersion !== current.version) {
+      throw appError('block_stale', { currentVersion: current.version });
+    }
+
+    if (!current.productIds.some((id) => String(id) === String(productId))) {
+      throw appError('product_not_in_block');
+    }
+
+    const versionToMatch = expectedVersion != null ? expectedVersion : current.version;
+    updatedRaw = await Block.findOneAndUpdate(
+      { blockId: num, version: versionToMatch, productIds: productId },
+      { $pull: { productIds: productId }, $inc: { version: 1 } },
+      { new: true },
+    );
+    if (updatedRaw) break;
+
+    // Збій збігу версії: якщо клієнт надіслав expectedVersion — це stale,
+    // повідомляємо явно. Інакше — паралельний запис; читаємо свіжу версію
+    // і повторюємо.
+    if (expectedVersion != null) {
+      const refreshed = await Block.findOne({ blockId: num }).lean();
+      throw appError('block_stale', { currentVersion: refreshed?.version });
+    }
   }
+  if (!updatedRaw) throw appError('block_concurrent_modification');
 
-  const idx = block.productIds.findIndex((id) => id.toString() === productId);
-  if (idx === -1) throw appError('product_not_in_block');
-
-  block.productIds.splice(idx, 1);
-  block.version += 1;
-  await block.save();
-
-  await block.populate({ path: 'productIds', match: { status: { $in: ['active', 'pending'] } } });
-  const updated = block.toObject();
+  const updated = await Block.findById(updatedRaw._id)
+    .populate({ path: 'productIds', match: { status: { $in: ['active', 'pending'] } } })
+    .lean();
 
   try {
     const io = getIO();
@@ -268,50 +304,79 @@ router.delete('/:number/products/:productId', staffOnly, asyncHandler(async (req
 }));
 
 // POST /api/blocks/:number/add — add product to block
+//
+// Атомарно через findOneAndUpdate з фільтром по version. Унікальний multikey-
+// індекс на productIds — фінальний бар'єр від race condition між двома різними
+// блоками: якщо два запити одночасно намагаються додати один і той же товар
+// у різні блоки, другий отримає duplicate-key (E11000) і ми повертаємо
+// product_in_other_block з актуальним номером блока.
 router.post('/:number/add', staffOnly, asyncHandler(async (req, res) => {
   const num = Number(req.params.number);
   const { productId, index, expectedVersion } = req.body;
+  if (!num || num < 1) throw appError('block_invalid_number');
   if (!productId) throw appError('block_missing_product_id');
   if (!mongoose.Types.ObjectId.isValid(productId)) throw appError('block_invalid_product_id');
 
-  let updated;
-  const session = await mongoose.connection.startSession();
-  try {
-    await session.withTransaction(async () => {
-      const block = await Block.findOne({ blockId: num }).session(session);
-      if (!block) throw appError('block_not_found');
+  const MAX_RETRIES = 5;
+  let updatedRaw = null;
+  for (let attempt = 0; attempt < MAX_RETRIES; attempt += 1) {
+    const current = await Block.findOne({ blockId: num }).lean();
+    if (!current) throw appError('block_not_found');
 
-      // Optimistic lock: if client sent a version, refuse on mismatch so a stale
-      // UI cannot blindly overwrite a concurrent change. Backwards-compatible
-      // when the field is omitted.
-      if (expectedVersion != null && Number(expectedVersion) !== block.version) {
-        throw appError('block_stale', { currentVersion: block.version });
+    if (expectedVersion != null && Number(expectedVersion) !== current.version) {
+      throw appError('block_stale', { currentVersion: current.version });
+    }
+
+    // М'яка попередня перевірка для людського повідомлення (з номером блока).
+    // Жорсткий гарант — унікальний індекс нижче.
+    const existing = await Block.findOne({ productIds: productId }).lean();
+    if (existing) {
+      if (existing.blockId === num) {
+        throw appError('product_already_in_block', { existingBlockId: existing.blockId });
       }
+      throw appError('product_in_other_block', { existingBlockId: existing.blockId });
+    }
 
-      // Uniqueness across blocks: a product must live in exactly one block at a
-      // time. Without this check warehouse staff could pack the same item from
-      // two blocks (double-picking) and picking tasks would resolve ambiguously.
-      const existing = await Block.findOne({ productIds: productId }).session(session).lean();
-      if (existing) {
-        if (existing.blockId === num) {
-          throw appError('product_already_in_block', { existingBlockId: existing.blockId });
+    const safeIndex = index != null
+      ? Math.min(Math.max(0, Number(index)), current.productIds.length)
+      : current.productIds.length;
+    const versionToMatch = expectedVersion != null ? Number(expectedVersion) : current.version;
+
+    try {
+      updatedRaw = await Block.findOneAndUpdate(
+        { blockId: num, version: versionToMatch },
+        {
+          $push: { productIds: { $each: [productId], $position: safeIndex } },
+          $inc: { version: 1 },
+        },
+        { new: true },
+      );
+    } catch (err) {
+      if (err.code === 11000) {
+        // Race програно: інший паралельний запит уже розмістив цей товар.
+        const placed = await Block.findOne({ productIds: productId }).lean();
+        if (placed) {
+          if (placed.blockId === num) {
+            throw appError('product_already_in_block', { existingBlockId: placed.blockId });
+          }
+          throw appError('product_in_other_block', { existingBlockId: placed.blockId });
         }
-        throw appError('product_in_other_block', { existingBlockId: existing.blockId });
       }
+      throw err;
+    }
 
-      const safeIndex = index != null
-        ? Math.min(Math.max(0, Number(index)), block.productIds.length)
-        : block.productIds.length;
-      block.productIds.splice(safeIndex, 0, productId);
-      block.version += 1;
-      await block.save({ session });
+    if (updatedRaw) break;
 
-      await block.populate('productIds');
-      updated = block.toObject();
-    });
-  } finally {
-    session.endSession();
+    if (expectedVersion != null) {
+      const refreshed = await Block.findOne({ blockId: num }).lean();
+      throw appError('block_stale', { currentVersion: refreshed?.version });
+    }
   }
+  if (!updatedRaw) throw appError('block_concurrent_modification');
+
+  const updated = await Block.findById(updatedRaw._id)
+    .populate({ path: 'productIds', match: { status: { $in: ['active', 'pending'] } } })
+    .lean();
 
   // Broadcast to all clients so they see the update in real time
   try {
