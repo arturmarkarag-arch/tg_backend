@@ -35,14 +35,15 @@ router.get('/', asyncHandler(async (req, res) => {
 
     // Seller names per shop
     const shopIds = shops.map((s) => s._id);
-    const sellers = await User.find({ role: 'seller', shopId: { $in: shopIds } })
-      .select('shopId firstName lastName telegramId')
+    const sellers = await User.find({ role: { $in: ['seller', 'admin'] }, shopId: { $in: shopIds } })
+      .select('shopId firstName lastName telegramId role')
       .lean();
     const sellersByShop = {};
     for (const s of sellers) {
       const sid = String(s.shopId);
       if (!sellersByShop[sid]) sellersByShop[sid] = [];
-      sellersByShop[sid].push([s.firstName, s.lastName].filter(Boolean).join(' ') || String(s.telegramId));
+      const label = [s.firstName, s.lastName].filter(Boolean).join(' ') || String(s.telegramId);
+      sellersByShop[sid].push(s.role === 'admin' ? `${label} (адмін)` : label);
     }
 
     // Active order flags — only when filtered by deliveryGroupId (for reassign modal)
@@ -86,8 +87,8 @@ router.get('/:id', asyncHandler(async (req, res) => {
   if (!shop) throw appError('shop_not_found');
 
   // Продавці цього магазину
-  const sellers = await User.find({ shopId: shop._id, role: 'seller' })
-    .select('telegramId firstName lastName')
+  const sellers = await User.find({ shopId: shop._id, role: { $in: ['seller', 'admin'] } })
+    .select('telegramId firstName lastName role')
     .lean();
 
   const cityId = shop.cityId?._id ? String(shop.cityId._id) : (shop.cityId || null);

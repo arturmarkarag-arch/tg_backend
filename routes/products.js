@@ -422,6 +422,8 @@ router.post('/block-upload-photos', staffOnly, asyncHandler(async (req, res) => 
         version: savedBlock.version,
         productIds: savedBlock.productIds.map(String),
       });
+      // New products added to a block → notify sellers their catalogue changed
+      io.emit('catalogue_updated');
     }
   } catch (e) {
     console.warn('[products/upload] socket block_updated failed:', e.message);

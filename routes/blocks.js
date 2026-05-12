@@ -298,6 +298,8 @@ router.delete('/:number/products/:productId', staffOnly, asyncHandler(async (req
     const io = getIO();
     io.emit('block_updated', slimBlock(updated));
     io.emit('incoming_updated');
+    // Product left the block → may disappear from seller catalogue
+    io.emit('catalogue_updated');
   } catch (_) {}
 
   res.json(updated);
@@ -378,10 +380,12 @@ router.post('/:number/add', staffOnly, asyncHandler(async (req, res) => {
     .populate({ path: 'productIds', match: { status: { $in: ['active', 'pending'] } } })
     .lean();
 
-  // Broadcast to all clients so they see the update in real time
+  // Broadcast to all clients so they see the update in real time.
+  // catalogue_updated signals sellers that a new product appeared in the catalogue.
   try {
     const io = getIO();
     io.emit('block_updated', slimBlock(updated));
+    io.emit('catalogue_updated');
   } catch (_) { /* socket not initialized yet */ }
 
   res.json(updated);

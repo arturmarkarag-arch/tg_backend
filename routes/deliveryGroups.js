@@ -151,8 +151,8 @@ router.get('/:groupId/shop-status', telegramAuth, requireTelegramRoles(['admin',
     status: { $in: ['new', 'in_progress'] },
   }).select('buyerSnapshot shopId buyerTelegramId items orderNumber _id createdAt history').lean();
 
-  const sellers = await User.find({ role: 'seller', shopId: { $in: shopIds } })
-    .select('shopId firstName lastName telegramId cartState')
+  const sellers = await User.find({ role: { $in: ['seller', 'admin'] }, shopId: { $in: shopIds } })
+    .select('shopId firstName lastName telegramId cartState role')
     .lean();
   // Collect ALL sellers per shop with cart status
   const sellersByShop = {};
@@ -164,18 +164,22 @@ router.get('/:groupId/shop-status', telegramAuth, requireTelegramRoles(['admin',
     sellersByShop[sid].push({
       name: [seller.firstName, seller.lastName].filter(Boolean).join(' ') || String(seller.telegramId),
       telegramId: String(seller.telegramId),
+      role: seller.role,
       hasCart: Object.keys(itemObj).length > 0,
     });
   }
 
-  // Build buyer name lookup from all unique buyerTelegramIds in orders
+  // Build buyer name+role lookup from all unique buyerTelegramIds in orders
   const buyerTgIds = [...new Set(orders.map((o) => o.buyerTelegramId).filter(Boolean))];
   const buyers = await User.find({ telegramId: { $in: buyerTgIds } })
-    .select('telegramId firstName lastName')
+    .select('telegramId firstName lastName role')
     .lean();
-  const buyerNameById = {};
+  const buyerInfoById = {};
   for (const b of buyers) {
-    buyerNameById[String(b.telegramId)] = [b.firstName, b.lastName].filter(Boolean).join(' ') || b.telegramId;
+    buyerInfoById[String(b.telegramId)] = {
+      name: [b.firstName, b.lastName].filter(Boolean).join(' ') || b.telegramId,
+      role: b.role,
+    };
   }
 
   // Group orders by shopId for conflict detection
@@ -192,7 +196,8 @@ router.get('/:groupId/shop-status', telegramAuth, requireTelegramRoles(['admin',
       orderId: String(order._id),
       orderNumber: order.orderNumber,
       buyerTelegramId: order.buyerTelegramId,
-      buyerName: buyerNameById[String(order.buyerTelegramId)] || order.buyerTelegramId,
+      buyerName: buyerInfoById[String(order.buyerTelegramId)]?.name || order.buyerTelegramId,
+      buyerRole: buyerInfoById[String(order.buyerTelegramId)]?.role || 'seller',
       itemCount: (order.items || []).filter((i) => !i.cancelled).length,
       createdAt: order.createdAt,
       wasReassigned,

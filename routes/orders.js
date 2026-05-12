@@ -390,7 +390,7 @@ router.post('/', async (req, res) => {
       message: 'Вас не призначено до жодного магазину. Зверніться до адміністратора.',
     });
   }
-  if (buyer.role === 'seller' || buyer.role === 'admin') {
+  if (buyer.role === 'seller' || buyer.role === 'admin' || buyer.role === 'warehouse') {
     shop = await Shop.findById(buyer.shopId).populate('cityId', 'name').lean();
     if (!shop || !shop.deliveryGroupId) {
       return res.status(403).json({
@@ -406,6 +406,14 @@ router.post('/', async (req, res) => {
       });
     }
     schedule = await getOrderingSchedule();
+    // Seller and admin are bound by the ordering window.
+    // Warehouse workers are NOT allowed to place orders at all.
+    if (buyer.role === 'warehouse') {
+      return res.status(403).json({
+        error: 'order_role_forbidden',
+        message: 'Працівники складу не можуть робити замовлення.',
+      });
+    }
     const { isOpen, message } = isOrderingOpen(group.dayOfWeek, schedule);
     if (!isOpen) {
       return res.status(423).json({ error: 'ordering_closed', message });
@@ -457,9 +465,10 @@ router.post('/', async (req, res) => {
     throw appError('order_no_valid_items');
   }
 
-  // Guard: sellers cannot order products that are not placed in any block.
-  // Such products have no physical location on the warehouse floor.
-  if (buyer.role === 'seller') {
+  // Guard: all buyers cannot order products that are not placed in any block.
+  // Such products have no physical location on the warehouse floor and will
+  // never generate a PickingTask in buildPickingTasksFromOrders.
+  {
     const validProductIds = validItems.map((i) => i.productId);
     const inBlockIds = await Block.distinct('productIds', { productIds: { $in: validProductIds } });
     const inBlockSet = new Set(inBlockIds.map(String));
@@ -480,13 +489,14 @@ router.post('/', async (req, res) => {
   };
   let currentSessionId = '';
   if (group && schedule) {
-    // Seller: merge only THIS seller's orders for this shop within the active ordering session
+    // All roles with a delivery group: merge within the active ordering session.
+    // This includes warehouse, which now also gets orderingSessionId for conflict detection.
     currentSessionId = getCurrentOrderingSessionId(String(group._id), group.dayOfWeek, schedule);
     existingOrderQuery.buyerTelegramId = buyer.telegramId;
     existingOrderQuery['buyerSnapshot.shopId'] = buyer.shopId;
     existingOrderQuery.orderingSessionId = currentSessionId;
   } else {
-    // Admin / warehouse: no session concept — use 3-day fallback per buyer
+    // Fallback (e.g. buyer has no delivery group) — use 3-day window per buyer
     const threeDaysAgo = new Date();
     threeDaysAgo.setDate(threeDaysAgo.getDate() - 3);
     existingOrderQuery.buyerTelegramId = buyer.telegramId;
@@ -674,9 +684,10 @@ router.patch('/:id/snapshot', staffOnly, async (req, res) => {
   const shop = await Shop.findById(shopId).populate('cityId', 'name').lean();
   if (!shop) throw appError('order_shop_not_found');
 
-  // Warn if target shop already has an active order from someone else — creates a new conflict
+  // Warn if target shop already has an active order from someone else — creates a new conflict.
+  // $or covers legacy orders where shopId was null at creation time but buyerSnapshot.shopId was set.
   const targetConflict = await Order.findOne({
-    shopId: shop._id,
+    $or: [{ shopId: shop._id }, { 'buyerSnapshot.shopId': String(shop._id) }],
     status: { $in: ['new', 'in_progress'] },
     _id: { $ne: order._id },
   }).lean();
@@ -731,8 +742,24 @@ router.patch('/:id/snapshot', staffOnly, async (req, res) => {
   }
 
   const session = await mongoose.connection.startSession();
+  let txConflict = null;
   try {
     await session.withTransaction(async () => {
+      // Re-check inside the transaction to close the TOCTOU window.
+      // Two admins may both pass the optimistic check above, but only one can
+      // commit — the second will see the conflict here and abort cleanly.
+      const conflictInTx = await Order.findOne({
+        $or: [{ shopId: shop._id }, { 'buyerSnapshot.shopId': String(shop._id) }],
+        status: { $in: ['new', 'in_progress'] },
+        _id: { $ne: order._id },
+      }).session(session).lean();
+      if (conflictInTx) {
+        txConflict = true;
+        // Throwing a plain Error aborts the transaction without triggering a
+        // TransientTransactionError retry in the Mongoose driver.
+        throw Object.assign(new Error('tx_conflict'), { code: 'target_shop_has_order' });
+      }
+
       await order.save({ session });
 
       // Sync shopName in any active PickingTask items that reference this order.
@@ -771,6 +798,13 @@ router.patch('/:id/snapshot', staffOnly, async (req, res) => {
     });
   } finally {
     session.endSession();
+  }
+
+  if (txConflict) {
+    return res.status(409).json({
+      error: 'target_shop_has_order',
+      message: `Магазин "${shop.name}" вже має активне замовлення. Переніс створить конфлікт. Спочатку вирішіть той конфлікт.`,
+    });
   }
 
   // Notify picking dashboards: both the old group and the new group need to refresh
