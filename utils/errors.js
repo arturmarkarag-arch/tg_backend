@@ -92,6 +92,7 @@ const ERRORS = {
   order_not_found:          { status: 404, message: 'Замовлення не знайдено' },
   order_not_active:         { status: 409, message: ({ status } = {}) =>
                                 `Замовлення вже ${status === 'fulfilled' ? 'виконано' : 'скасовано'} — перенос неможливий.` },
+  order_status_change_disabled: { status: 403, message: 'Ручна зміна статусу замовлення вимкнена. Статус змінюється лише автоматично під час збирання.' },
 
   // ── Cart (mini-app) ────────────────────────────────────────────────────────
   cart_stale:               { status: 409, message: 'Кошик було змінено з іншого пристрою. Перевірте склад і повторіть.' },
@@ -155,6 +156,7 @@ const ERRORS = {
   picking_task_not_found:         { status: 404, message: 'Завдання не знайдено' },
   picking_product_not_found:      { status: 404, message: 'Товар не знайдено' },
   picking_current_block_invalid:  { status: 400, message: 'currentBlock має бути додатнім цілим числом' },
+  picking_delivery_group_required:{ status: 400, message: 'Для старту сесії збирання потрібно передати deliveryGroupId' },
   picking_session_failed:         { status: 500, message: 'Помилка запуску сесії збирання' },
   picking_next_failed:            { status: 500, message: 'Помилка отримання задачі' },
   picking_complete_failed:        { status: 500, message: 'Помилка завершення задачі' },

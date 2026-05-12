@@ -295,18 +295,66 @@ router.patch('/:telegramId/shop', asyncHandler(async (req, res) => {
     const newShopId = shopId ? String(shopId) : '';
 
     // Special case: clearing the shop assignment (no destination shop).
+    // Keep cart and keep active order, but detach order from the shop so conflict
+    // dashboards no longer treat it as attached to the old shop.
     if (!newShopId) {
       if (!oldShopId) {
         return res.json(existing);
       }
+      let parkedOrderMeta = null;
       const session = await mongoose.connection.startSession();
       try {
         await session.withTransaction(async () => {
           const actor = req.telegramUser;
           const oldShop = await Shop.findById(oldShopId).session(session).lean();
 
-          // Detach order from this seller? No — we leave it where it is and let
-          // admins reassign it via /orders/:id/snapshot. We only detach the user.
+          const activeOrder = await Order.findOne({
+            buyerTelegramId: existing.telegramId,
+            shopId: existing.shopId,
+            status: { $in: ['new', 'in_progress'] },
+          }).sort({ createdAt: -1 }).session(session);
+
+          if (activeOrder) {
+            const prevGroupId = activeOrder.buyerSnapshot?.deliveryGroupId
+              ? String(activeOrder.buyerSnapshot.deliveryGroupId)
+              : null;
+
+            activeOrder.shopId = null;
+            if (!activeOrder.buyerSnapshot) activeOrder.buyerSnapshot = {};
+            activeOrder.buyerSnapshot.shopId = null;
+            activeOrder.buyerSnapshot.shopName = '';
+            activeOrder.buyerSnapshot.shopCity = '';
+            activeOrder.buyerSnapshot.deliveryGroupId = '';
+            activeOrder.orderingSessionId = '';
+            activeOrder.markModified('buyerSnapshot');
+            activeOrder.history.push({
+              by: String(actor.telegramId),
+              byName: [actor.firstName, actor.lastName].filter(Boolean).join(' '),
+              byRole: actor.role,
+              action: 'shop_unassigned',
+              meta: {
+                from: {
+                  shopName: oldShop?.name || '',
+                  shopCity: oldShop?.cityId?.name || '',
+                  deliveryGroupId: oldShop?.deliveryGroupId || '',
+                },
+                reason: 'admin_unassigned_seller',
+              },
+            });
+            await activeOrder.save({ session });
+
+            await PickingTask.updateMany(
+              { 'items.orderId': activeOrder._id, status: { $in: ['pending', 'locked'] } },
+              { $set: { 'items.$[elem].shopName': '' } },
+              { arrayFilters: [{ 'elem.orderId': activeOrder._id }], session },
+            );
+
+            parkedOrderMeta = {
+              buyerTelegramId: existing.telegramId,
+              prevGroupId,
+            };
+          }
+
           await User.updateOne(
             { telegramId: req.params.telegramId },
             {
@@ -348,6 +396,21 @@ router.patch('/:telegramId/shop', asyncHandler(async (req, res) => {
       } finally {
         session.endSession();
       }
+
+      if (parkedOrderMeta) {
+        try {
+          const io = getIO();
+          if (io) {
+            if (parkedOrderMeta.prevGroupId) {
+              io.to(`picking_group_${parkedOrderMeta.prevGroupId}`).emit('shop_status_changed', { groupId: parkedOrderMeta.prevGroupId });
+            }
+            io.emit('user_order_updated', { buyerTelegramId: parkedOrderMeta.buyerTelegramId });
+          }
+        } catch (emitErr) {
+          console.warn('[PATCH /users/:telegramId/shop][unassign] socket emit failed:', emitErr?.message);
+        }
+      }
+
       const refreshed = await User.findOne({ telegramId: req.params.telegramId });
       return res.json(refreshed);
     }

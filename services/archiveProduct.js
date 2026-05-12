@@ -19,7 +19,10 @@ const mongoose = require('mongoose');
 const Order = require('../models/Order');
 const PickingTask = require('../models/PickingTask');
 const Block = require('../models/Block');
+const DeliveryGroup = require('../models/DeliveryGroup');
 const { shiftDown } = require('../utils/shiftOrderNumbers');
+const { isOrderingOpen } = require('../utils/orderingSchedule');
+const { getOrderingSchedule } = require('../utils/getOrderingSchedule');
 const { getIO } = require('../socket');
 
 function getProductTitle(product) {
@@ -31,12 +34,49 @@ async function archiveProduct(product, { notifyBuyers = false, bot = null } = {}
   let cancelledCount = 0;
   let oldOrderNumber;
   let affectedBlockIds = [];
+  const groupOpenCache = new Map();
+  let cachedSchedule = null;
+  let scheduleLoaded = false;
 
   const session = await mongoose.connection.startSession();
   session.startTransaction();
   try {
+    const isGroupOrderingOpen = async (deliveryGroupId) => {
+      const key = String(deliveryGroupId || '');
+      if (!key) return false;
+      if (groupOpenCache.has(key)) return groupOpenCache.get(key);
+
+      if (!scheduleLoaded) {
+        try {
+          cachedSchedule = await getOrderingSchedule();
+        } catch {
+          cachedSchedule = null;
+        }
+        scheduleLoaded = true;
+      }
+
+      // Fail-safe: if schedule is unavailable, freeze status transitions.
+      if (!cachedSchedule) {
+        groupOpenCache.set(key, true);
+        return true;
+      }
+
+      const group = await DeliveryGroup.findById(key, 'dayOfWeek').session(session).lean();
+      if (!group) {
+        groupOpenCache.set(key, true);
+        return true;
+      }
+
+      const { isOpen } = isOrderingOpen(group.dayOfWeek, cachedSchedule);
+      groupOpenCache.set(key, isOpen);
+      return isOpen;
+    };
+
     // ── 1. Reconcile active orders ───────────────────────────────────────────
-    const activeOrders = await Order.find({ 'items.productId': product._id }).session(session);
+    const activeOrders = await Order.find({
+      status: { $in: ['new', 'in_progress'] },
+      'items.productId': product._id,
+    }).session(session);
 
     for (const order of activeOrders) {
       const matchingItems = order.items.filter(
@@ -50,12 +90,15 @@ async function archiveProduct(product, { notifyBuyers = false, bot = null } = {}
         cancelledCount += 1;
       }
 
-      const isFullyProcessed = order.items.every((i) => i.packed || i.cancelled);
-      if (isFullyProcessed) {
-        const allCancelled = order.items.every((i) => i.cancelled);
-        order.status = allCancelled ? 'cancelled' : 'confirmed';
-      } else {
-        order.status = 'in_progress';
+      const orderingOpenNow = await isGroupOrderingOpen(order.buyerSnapshot?.deliveryGroupId);
+      if (!orderingOpenNow) {
+        const isFullyProcessed = order.items.every((i) => i.packed || i.cancelled);
+        if (isFullyProcessed) {
+          const allCancelled = order.items.every((i) => i.cancelled);
+          order.status = allCancelled ? 'cancelled' : 'confirmed';
+        } else {
+          order.status = 'in_progress';
+        }
       }
 
       await order.save({ session });

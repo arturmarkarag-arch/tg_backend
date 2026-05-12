@@ -131,34 +131,35 @@ async function findAndLockNext(userTelegramId, fromBlock, deliveryGroupId = null
 router.post('/start-session', requireTelegramRoles(['warehouse', 'admin']), async (req, res, next) => {
   try {
     const { deliveryGroupId = null } = req.body;
+    if (!deliveryGroupId) {
+      return next(appError('picking_delivery_group_required'));
+    }
 
     // 1. Check ordering window and delivery day.
-    if (deliveryGroupId) {
-      const group = await DeliveryGroup.findById(deliveryGroupId, 'dayOfWeek name').lean();
-      if (group) {
-        // getOrderingSchedule() throws if the key is absent from DB — error propagates to catch below.
-        const schedule = await getOrderingSchedule();
-        const { isOpen, message } = isOrderingOpen(group.dayOfWeek, schedule);
-        if (isOpen) {
-          const windowCloseAt = getOrderingWindowCloseAt(group.dayOfWeek, schedule).toISOString();
-          return res.json({ windowOpen: true, message, windowCloseAt });
-        }
-        // Picking is only allowed on the actual delivery day.
-        const { dayOfWeek: nowDOW } = getWarsawNow();
-        if (nowDOW !== group.dayOfWeek) {
-          return res.json({
-            wrongDay: true,
-            deliveryDayOfWeek: group.dayOfWeek,
-            deliveryDayName: DAY_FULL_UK[group.dayOfWeek],
-          });
-        }
+    const group = await DeliveryGroup.findById(deliveryGroupId, 'dayOfWeek name').lean();
+    if (group) {
+      // getOrderingSchedule() throws if the key is absent from DB — error propagates to catch below.
+      const schedule = await getOrderingSchedule();
+      const { isOpen, message } = isOrderingOpen(group.dayOfWeek, schedule);
+      if (isOpen) {
+        const windowCloseAt = getOrderingWindowCloseAt(group.dayOfWeek, schedule).toISOString();
+        return res.json({ windowOpen: true, message, windowCloseAt });
+      }
+      // Picking is only allowed on the actual delivery day.
+      const { dayOfWeek: nowDOW } = getWarsawNow();
+      if (nowDOW !== group.dayOfWeek) {
+        return res.json({
+          wrongDay: true,
+          deliveryDayOfWeek: group.dayOfWeek,
+          deliveryDayName: DAY_FULL_UK[group.dayOfWeek],
+        });
       }
     }
 
     // 2. Idempotent: if tasks already exist, return their count.
     const activeFilter = {
       status: { $in: ['pending', 'locked'] },
-      ...(deliveryGroupId ? { deliveryGroupId: String(deliveryGroupId) } : {}),
+      deliveryGroupId: String(deliveryGroupId),
     };
     const existingCount = await PickingTask.countDocuments(activeFilter);
     if (existingCount > 0) {
@@ -168,29 +169,27 @@ router.post('/start-session', requireTelegramRoles(['warehouse', 'admin']), asyn
     // 3. Block start if there are orders from stale sessions — admin must resolve them first.
     // Silently expiring orders could cause lost purchases: a seller who moved shops or whose
     // session ID drifted would lose their order without any warning.
-    if (deliveryGroupId) {
-      const group2 = await DeliveryGroup.findById(deliveryGroupId, 'dayOfWeek').lean();
-      if (group2) {
-        const schedule2 = await getOrderingSchedule();
-        const currentSessionId = getCurrentOrderingSessionId(String(deliveryGroupId), group2.dayOfWeek, schedule2);
-        const staleOrders = await Order.find(
-          {
-            'buyerSnapshot.deliveryGroupId': String(deliveryGroupId),
-            status: { $in: ['new', 'in_progress'] },
-            orderingSessionId: { $ne: currentSessionId },
-          },
-          'buyerSnapshot buyerTelegramId orderingSessionId',
-        ).lean();
+    const group2 = await DeliveryGroup.findById(deliveryGroupId, 'dayOfWeek').lean();
+    if (group2) {
+      const schedule2 = await getOrderingSchedule();
+      const currentSessionId = getCurrentOrderingSessionId(String(deliveryGroupId), group2.dayOfWeek, schedule2);
+      const staleOrders = await Order.find(
+        {
+          'buyerSnapshot.deliveryGroupId': String(deliveryGroupId),
+          status: { $in: ['new', 'in_progress'] },
+          orderingSessionId: { $ne: currentSessionId },
+        },
+        'buyerSnapshot buyerTelegramId orderingSessionId',
+      ).lean();
 
-        if (staleOrders.length > 0) {
-          const conflicts = staleOrders.map((o) => ({
-            orderId: String(o._id),
-            shopName: o.buyerSnapshot?.shopName || '—',
-            shopCity: o.buyerSnapshot?.shopCity || '',
-            buyerTelegramId: String(o.buyerTelegramId),
-          }));
-          return res.json({ unresolved: true, conflicts });
-        }
+      if (staleOrders.length > 0) {
+        const conflicts = staleOrders.map((o) => ({
+          orderId: String(o._id),
+          shopName: o.buyerSnapshot?.shopName || '—',
+          shopCity: o.buyerSnapshot?.shopCity || '',
+          buyerTelegramId: String(o.buyerTelegramId),
+        }));
+        return res.json({ unresolved: true, conflicts });
       }
     }
 

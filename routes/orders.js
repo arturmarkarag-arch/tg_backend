@@ -312,14 +312,7 @@ router.get('/transit/active', staffOnly, async (req, res) => {
 
 router.post('/:id/fulfill', telegramAuth, staffOnly, async (req, res, next) => {
   try {
-    const order = await Order.findById(req.params.id);
-    if (!order) return next(appError('order_not_found'));
-
-    const prevStatus = order.status;
-    order.status = 'fulfilled';
-    order.history.push({ ...actorFromReq(req), action: 'status_changed', meta: { from: prevStatus, to: 'fulfilled' } });
-    await order.save();
-    res.json(order);
+    return next(appError('order_status_change_disabled'));
   } catch (error) {
     console.error('[orders.fulfill] Error:', error);
     next(appError('order_fulfill_failed'));
@@ -825,45 +818,7 @@ router.patch('/:id/snapshot', staffOnly, async (req, res) => {
 });
 
 router.patch('/:id', requireOrderingWindowOpen, async (req, res) => {
-  const telegramId = req.telegramId;
-  const user = req.telegramUser;
-
-  const allowedFields = ['status'];
-  const update = {};
-  for (const key of allowedFields) {
-    if (req.body[key] !== undefined) update[key] = req.body[key];
-  }
-  if (!Object.keys(update).length) {
-    throw appError('order_no_fields');
-  }
-
-  const order = await Order.findById(req.params.id);
-  if (!order) throw appError('order_not_found');
-
-  const isOwner = order.buyerTelegramId === telegramId;
-  const isStaff = ['admin', 'warehouse'].includes(user.role);
-  if (!isOwner && !isStaff) {
-    throw appError('order_modify_forbidden');
-  }
-
-  if (isOwner && !isStaff && update.status) {
-    throw appError('order_seller_no_status');
-  }
-
-  if (update.status === 'cancelled' && order.status !== 'cancelled') {
-    console.error('[orders.patch] cancelling order', order._id, 'currentStatus=', order.status, 'update=', update);
-    for (const item of order.items) {
-      if (!item.packed && !item.cancelled) {
-        item.cancelled = true;
-      }
-    }
-  }
-
-  const prevStatus = order.status;
-  order.history.push({ ...actorFromReq(req), action: 'status_changed', meta: { from: prevStatus, to: update.status } });
-  order.status = update.status;
-  await order.save();
-  res.json(order);
+  throw appError('order_status_change_disabled');
 });
 
 module.exports = router;

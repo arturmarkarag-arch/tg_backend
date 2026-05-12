@@ -75,14 +75,30 @@ async function migrateSellerShop({
   let movedOrder = null;
   let prevGroupId = null;
 
-  if (oldShopId && oldShopId !== newShopId) {
-    const orderQuery = {
-      buyerTelegramId: existingUser.telegramId,
-      shopId: existingUser.shopId,
-      status: { $in: ['new', 'in_progress'] },
-      ...(oldSessionId ? { orderingSessionId: oldSessionId } : {}),
-    };
-    const activeOrder = await Order.findOne(orderQuery).session(session);
+  if (oldShopId !== newShopId) {
+    let activeOrder = null;
+
+    if (oldShopId) {
+      const orderQuery = {
+        buyerTelegramId: existingUser.telegramId,
+        shopId: existingUser.shopId,
+        status: { $in: ['new', 'in_progress'] },
+        ...(oldSessionId ? { orderingSessionId: oldSessionId } : {}),
+      };
+      activeOrder = await Order.findOne(orderQuery).session(session);
+    } else {
+      // Seller can be temporarily unassigned. In that case pick a parked active
+      // order (no shop attached) and move it into the newly assigned shop.
+      activeOrder = await Order.findOne({
+        buyerTelegramId: existingUser.telegramId,
+        status: { $in: ['new', 'in_progress'] },
+        $or: [
+          { shopId: null },
+          { 'buyerSnapshot.shopId': null },
+          { 'buyerSnapshot.shopId': '' },
+        ],
+      }).sort({ updatedAt: -1, createdAt: -1 }).session(session);
+    }
 
     if (activeOrder) {
       prevGroupId = activeOrder.buyerSnapshot?.deliveryGroupId
