@@ -180,6 +180,8 @@ router.post('/me', async (req, res) => {
 // PATCH /api/v1/telegram/me/shop — seller оновлює свій магазин.
 // Якщо є активне замовлення — воно автоматично переноситься до нового магазину.
 // Кошик (cartState.orderItems) НЕ очищається — слідує за продавцем.
+// Усі записи (User, Order, PickingTask) виконуються в одній транзакції MongoDB,
+// щоб збій між кроками не залишив User та Order у різних магазинах.
 router.patch('/me/shop', async (req, res) => {
   try {
     const user = req.telegramUser;
@@ -191,121 +193,70 @@ router.patch('/me/shop', async (req, res) => {
     const shop = await Shop.findById(shopId).populate('cityId', 'name').lean();
     if (!shop) return res.status(404).json({ error: 'Магазин не знайдено' });
 
-    const shopCity = shop.cityId?.name || '';
-    const shopName = shop.name || '';
-    const newDeliveryGroupId = shop.deliveryGroupId ? String(shop.deliveryGroupId) : null;
-
-    let warehouseZone = '';
-    let newSessionId = null;
-    let newGroup = null;
-    if (shop.deliveryGroupId) {
-      newGroup = await DeliveryGroup.findById(shop.deliveryGroupId).lean();
-      warehouseZone = newGroup?.name || '';
-      if (newGroup) {
-        const schedule = await getOrderingSchedule();
-        newSessionId = getCurrentOrderingSessionId(String(newGroup._id), newGroup.dayOfWeek, schedule);
-      }
-    }
-
-    // If switching to a different shop — always move the active order along with the seller.
-    // Warehouse/admin resolves any conflicts via the picking dashboard.
-    // Cart items also follow the seller (kept as-is, only navigation position resets).
-    let orderMoved = false;
-    if (user.shopId && String(user.shopId) !== String(shop._id)) {
-      const currentShop = await Shop.findById(user.shopId).lean();
-      let currentSessionId = null;
-      if (currentShop?.deliveryGroupId) {
-        const currentGroup = await DeliveryGroup.findById(currentShop.deliveryGroupId).lean();
-        if (currentGroup) {
-          const schedule = await getOrderingSchedule();
-          currentSessionId = getCurrentOrderingSessionId(String(currentGroup._id), currentGroup.dayOfWeek, schedule);
-        }
-      }
-
-      const activeOrder = await Order.findOne({
-        buyerTelegramId: user.telegramId,
-        shopId: user.shopId,
-        status: { $in: ['new', 'in_progress'] },
-        ...(currentSessionId ? { orderingSessionId: currentSessionId } : {}),
+    // Same shop — short-circuit, just return current state
+    if (user.shopId && String(user.shopId) === String(shop._id)) {
+      const fresh = await User.findById(user._id).lean();
+      return res.json({
+        shopId: String(shop._id),
+        shopName: shop.name || '',
+        shopCity: shop.cityId?.name || '',
+        deliveryGroupId: shop.deliveryGroupId ? String(shop.deliveryGroupId) : null,
+        warehouseZone: fresh?.warehouseZone || '',
+        cartState: normalizeCartState(fresh?.cartState ?? null),
       });
-      if (activeOrder) {
-        const prevGroupId = activeOrder.buyerSnapshot?.deliveryGroupId
-          ? String(activeOrder.buyerSnapshot.deliveryGroupId)
-          : null;
+    }
 
-        // Always move the order to the new shop — warehouse/admin resolves any conflicts.
-        // The picking dashboard flags orders that arrived via shop_reassigned so staff
-        // can see who moved where and decide whether to act.
-        activeOrder.shopId = shop._id;
-        if (!activeOrder.buyerSnapshot) activeOrder.buyerSnapshot = {};
-        activeOrder.buyerSnapshot.shopId = String(shop._id);
-        activeOrder.buyerSnapshot.shopName = shopName;
-        activeOrder.buyerSnapshot.shopCity = shopCity;
-        activeOrder.buyerSnapshot.deliveryGroupId = newDeliveryGroupId || '';
-        if (newSessionId) activeOrder.orderingSessionId = newSessionId;
-        activeOrder.markModified('buyerSnapshot');
-        activeOrder.history.push({
-          by: String(user.telegramId),
-          byName: [user.firstName, user.lastName].filter(Boolean).join(' '),
-          byRole: user.role,
-          action: 'shop_reassigned',
-          meta: {
-            from: { shopName: currentShop?.name || '', deliveryGroupId: prevGroupId || '' },
-            to: { shopName, shopCity, deliveryGroupId: newDeliveryGroupId || '' },
-            reason: 'seller_changed_shop',
-          },
+    const { migrateSellerShop } = require('../../services/migrateSellerShop');
+    const mongoose = require('mongoose');
+
+    let migrationResult = null;
+    const session = await mongoose.connection.startSession();
+    try {
+      await session.withTransaction(async () => {
+        migrationResult = await migrateSellerShop({
+          session,
+          existingUser: user,
+          newShopFull: shop,
+          actor: user,
+          reason: 'seller_changed_shop',
+          resetCartItems: false,
+          resetCartNavigation: true,
+          clearCartReservation: true,
+          pushHistory: false, // me/shop is a self-action — no admin audit entry
+          updateLastSeller: false,
         });
-        await activeOrder.save();
-        orderMoved = true;
+      });
+    } finally {
+      session.endSession();
+    }
 
-        // Sync shopName in any active PickingTask items referencing this order
-        const PickingTask = require('../../models/PickingTask');
-        await PickingTask.updateMany(
-          { 'items.orderId': activeOrder._id, status: { $in: ['pending', 'locked'] } },
-          { $set: { 'items.$[elem].shopName': shopName } },
-          { arrayFilters: [{ 'elem.orderId': activeOrder._id }] },
-        );
-
-        // Notify both picking dashboards (old group loses the order, new group gains it)
-        try {
-          const io = getIO();
-          if (io) {
-            if (prevGroupId) io.to(`picking_group_${prevGroupId}`).emit('shop_status_changed', { groupId: prevGroupId });
-            if (newDeliveryGroupId && newDeliveryGroupId !== prevGroupId) {
-              io.to(`picking_group_${newDeliveryGroupId}`).emit('shop_status_changed', { groupId: newDeliveryGroupId });
-              io.emit('delivery_groups_updated');
-            }
-            io.emit('user_order_updated', { buyerTelegramId: user.telegramId });
+    // Notify dashboards AFTER commit
+    if (migrationResult?.movedOrder) {
+      try {
+        const io = getIO();
+        if (io) {
+          const { prevGroupId, newGroupId } = migrationResult;
+          if (prevGroupId) io.to(`picking_group_${prevGroupId}`).emit('shop_status_changed', { groupId: prevGroupId });
+          if (newGroupId && newGroupId !== prevGroupId) {
+            io.to(`picking_group_${newGroupId}`).emit('shop_status_changed', { groupId: newGroupId });
+            io.emit('delivery_groups_updated');
           }
-        } catch (e) {
-          console.warn('[PATCH /me/shop] socket emit failed:', e?.message);
+          io.emit('user_order_updated', { buyerTelegramId: user.telegramId });
         }
+      } catch (e) {
+        console.warn('[PATCH /me/shop] socket emit failed:', e?.message);
       }
     }
 
-    // Update user: move to new shop. Cart items are kept — they follow the seller.
-    // Only navigation position is reset (new shop = start browsing from beginning).
-    const updatedUser = await User.findByIdAndUpdate(user._id, {
-      shopId: shop._id,
-      shopName,
-      shopCity,
-      deliveryGroupId: shop.deliveryGroupId || null,
-      warehouseZone,
-      'cartState.lastViewedProductId': '',
-      'cartState.currentIndex': 0,
-      'cartState.currentPage': 0,
-      'cartState.updatedAt': new Date(),
-      'cartState.reservedForGroupId': null,
-    }, { new: true });
-
+    const updatedUser = migrationResult?.updatedUser;
     res.json({
       shopId: String(shop._id),
-      shopName,
-      shopCity,
-      deliveryGroupId: newDeliveryGroupId,
-      warehouseZone,
+      shopName: shop.name || '',
+      shopCity: shop.cityId?.name || '',
+      deliveryGroupId: shop.deliveryGroupId ? String(shop.deliveryGroupId) : null,
+      warehouseZone: updatedUser?.warehouseZone || '',
       cartState: normalizeCartState(updatedUser?.cartState ?? null),
-      ...(orderMoved ? { orderMoved: true } : {}),
+      ...(migrationResult?.movedOrder ? { orderMoved: true } : {}),
     });
   } catch (err) {
     console.error('[PATCH /v1/telegram/me/shop]', err.message);
@@ -364,8 +315,33 @@ router.post('/mini-app/state', async (req, res) => {
   let cartState = normalizeCartState(null);
   if (user) {
     const modifierName = [user.firstName, user.lastName].filter(Boolean).join(' ') || String(telegramId);
+
+    // Optimistic concurrency control for cart writes.
+    // Two browser tabs can race: each holds its own snapshot, both POST a "full"
+    // orderItems object, and the later one silently overwrites the earlier one's
+    // additions. To prevent that, the client SHOULD send `clientCartUpdatedAt`
+    // (the value it last received from the server). If it is older than what's
+    // currently stored, we reject the write with 409 and return the latest cart
+    // so the client can merge and retry.
+    //
+    // Backwards compatible: if `clientCartUpdatedAt` is omitted, the request
+    // proceeds as before (last-write-wins). New client always sends it.
+    const clientCartUpdatedAtRaw = req.body?.clientCartUpdatedAt;
+    const clientCartUpdatedAt = clientCartUpdatedAtRaw ? new Date(clientCartUpdatedAtRaw) : null;
+    const enforceLock = clientCartUpdatedAt && !Number.isNaN(clientCartUpdatedAt.getTime());
+
+    const filter = { telegramId };
+    if (enforceLock) {
+      // Match if server's stored timestamp is null OR <= the client's snapshot.
+      // (A future bigger timestamp means another writer won the race.)
+      filter.$or = [
+        { 'cartState.updatedAt': null },
+        { 'cartState.updatedAt': { $lte: clientCartUpdatedAt } },
+      ];
+    }
+
     const updatedUser = await User.findOneAndUpdate(
-      { telegramId },
+      filter,
       {
         $set: {
           'cartState.orderItems': sanitizedOrderItems,
@@ -378,6 +354,21 @@ router.post('/mini-app/state', async (req, res) => {
       },
       { new: true }
     ).lean();
+
+    if (!updatedUser && enforceLock) {
+      // Either the user vanished (extremely unlikely — they passed auth) or the
+      // optimistic lock failed. Re-read and decide.
+      const current = await User.findOne({ telegramId }).lean();
+      if (current) {
+        return res.status(409).json({
+          error: 'cart_stale',
+          message: 'Кошик було оновлено в іншій вкладці. Стан синхронізовано — повторіть дію.',
+          cartState: normalizeCartState(current.cartState),
+          miniAppState: normalizeMiniAppState(current.miniAppState),
+        });
+      }
+    }
+
     if (updatedUser) {
       cartState = normalizeCartState(updatedUser.cartState);
       const io = getIO();

@@ -191,6 +191,21 @@ router.delete('/:id', telegramAuth, requireTelegramRole('admin'), async (req, re
       });
     }
 
+    // Refuse if any active order still references this shop. Without this check
+    // the order would be orphaned with a shopId pointing at a deleted document,
+    // and warehouse staff would see "Невідомий магазин" in the picking dashboard.
+    const activeOrderCount = await Order.countDocuments({
+      shopId: shop._id,
+      status: { $in: ['new', 'in_progress'] },
+    });
+    if (activeOrderCount > 0) {
+      return res.status(409).json({
+        error: 'shop_has_active_orders',
+        message: `Не можна видалити магазин: ${activeOrderCount} активне замовлення прив'язано. Спочатку завершіть або скасуйте їх.`,
+        activeOrders: activeOrderCount,
+      });
+    }
+
     await Shop.findByIdAndDelete(req.params.id);
     res.json({ message: 'Магазин видалено' });
   } catch (err) {

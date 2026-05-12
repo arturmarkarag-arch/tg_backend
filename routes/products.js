@@ -271,7 +271,16 @@ router.patch('/reorder', staffOnly, async (req, res) => {
     },
   }));
 
-  await Product.bulkWrite(bulkOps);
+  // bulkWrite is not atomic by itself — a partial failure would leave the catalog
+  // half-reordered. Wrap it in a transaction so the whole batch commits or none.
+  const session = await mongoose.connection.startSession();
+  try {
+    await session.withTransaction(async () => {
+      await Product.bulkWrite(bulkOps, { session });
+    });
+  } finally {
+    session.endSession();
+  }
   res.json({ message: 'Order updated' });
 });
 
@@ -471,24 +480,37 @@ router.post('/receive', staffOnly, async (req, res) => {
     const quantityPerPackage = body.quantityPerPackage !== undefined && body.quantityPerPackage !== '' ? Number(body.quantityPerPackage) : 0;
     const isConfirmed = price > 0 && quantityPerPackage > 0;
     const explicitPending = body.status === 'pending';
-
-    const maxProduct = await Product.findOne({ status: { $ne: 'archived' } }).sort({ orderNumber: -1 }).lean();
-    const nextOrderNumber = (maxProduct?.orderNumber ?? 0) + 1;
     const imageUrl = `/api/v1/products/images/${filename}`;
 
-    const product = new Product({
-      orderNumber: nextOrderNumber,
-      price,
-      quantity,
-      quantityPerPackage,
-      status: explicitPending ? 'pending' : isConfirmed ? 'active' : 'pending',
-      source: 'receive',
-      notes: body.notes ? String(body.notes) : '',
-      originalImageUrl: imageUrl,
-      imageUrls: [imageUrl],
-      imageNames: [filename],
-    });
-    await product.save();
+    // Read max orderNumber AND insert the new product inside the same transaction
+    // so two concurrent /receive requests cannot read the same max and produce
+    // duplicate orderNumbers (race — fixed by the transaction's snapshot read).
+    let product;
+    const session = await mongoose.connection.startSession();
+    try {
+      await session.withTransaction(async () => {
+        const maxProduct = await Product.findOne({ status: { $ne: 'archived' } }, 'orderNumber')
+          .sort({ orderNumber: -1 })
+          .session(session)
+          .lean();
+        const nextOrderNumber = (maxProduct?.orderNumber ?? 0) + 1;
+        const [created] = await Product.create([{
+          orderNumber: nextOrderNumber,
+          price,
+          quantity,
+          quantityPerPackage,
+          status: explicitPending ? 'pending' : isConfirmed ? 'active' : 'pending',
+          source: 'receive',
+          notes: body.notes ? String(body.notes) : '',
+          originalImageUrl: imageUrl,
+          imageUrls: [imageUrl],
+          imageNames: [filename],
+        }], { session });
+        product = created;
+      });
+    } finally {
+      session.endSession();
+    }
     res.status(201).json(product);
   } catch (err) {
     console.error('[products/receive] Error:', err);
@@ -510,8 +532,6 @@ router.post('/', staffOnly, async (req, res) => {
     return res.status(400).json({ error: "Порядковий номер, ціна та кількість є обов'язковими" });
   }
 
-  await shiftUp({ orderNumber: { $gte: parsedOrderNumber } });
-
   let imageUrls = [];
   let imageNames = [];
   const filenames = Array.isArray(fields.filenames) ? fields.filenames
@@ -521,20 +541,32 @@ router.post('/', staffOnly, async (req, res) => {
     if (safe) { imageUrls.push(`/api/v1/products/images/${safe}`); imageNames.push(safe); }
   }
 
-  const product = new Product({
-    orderNumber: parsedOrderNumber,
-    price,
-    quantity,
-    warehouse: warehouse || '',
-    category: category || '',
-    brand: currentBrand,
-    model: model || '',
-    status: status || 'pending',
-    imageUrls,
-    imageNames,
-  });
+  // shiftUp() and product.save() must be atomic — a crash between them would
+  // leave a hole in orderNumber sequence (everything shifted, but the new
+  // product never inserted). Wrap them in one transaction.
+  let product;
+  const session = await mongoose.connection.startSession();
+  try {
+    await session.withTransaction(async () => {
+      await shiftUp({ orderNumber: { $gte: parsedOrderNumber } }, session);
+      const [created] = await Product.create([{
+        orderNumber: parsedOrderNumber,
+        price,
+        quantity,
+        warehouse: warehouse || '',
+        category: category || '',
+        brand: currentBrand,
+        model: model || '',
+        status: status || 'pending',
+        imageUrls,
+        imageNames,
+      }], { session });
+      product = created;
+    });
+  } finally {
+    session.endSession();
+  }
 
-  await product.save();
   res.status(201).json(product);
 });
 
@@ -552,13 +584,17 @@ router.patch('/:id', staffOnly, async (req, res) => {
     return res.status(400).json({ error: 'Порядковий номер має бути цілим числом більше за 0' });
   }
 
-  if (orderNumber !== undefined && parsedOrderNumber !== product.orderNumber) {
-    if (parsedOrderNumber < product.orderNumber) {
-      await shiftUp({ _id: { $ne: product._id }, orderNumber: { $gte: parsedOrderNumber, $lt: product.orderNumber } });
-    } else {
-      await shiftDown({ _id: { $ne: product._id }, orderNumber: { $gt: product.orderNumber, $lte: parsedOrderNumber } });
-    }
+  if (status === 'archived') {
+    // Don't allow archiving via PATCH — use DELETE endpoint for proper soft-delete
+    return res.status(400).json({ error: 'Використовуйте DELETE для архівації товару' });
   }
+
+  // Apply mutations to the product object first (in-memory) — they are persisted
+  // inside the transaction below so that orderNumber shift and product.save()
+  // commit atomically. Without the transaction a crash between the two steps
+  // would leave the catalog with duplicate orderNumbers.
+  const orderChanged = orderNumber !== undefined && parsedOrderNumber !== product.orderNumber;
+  const previousOrderNumber = product.orderNumber;
 
   product.orderNumber = parsedOrderNumber;
   if (category !== undefined) product.category = category;
@@ -566,10 +602,6 @@ router.patch('/:id', staffOnly, async (req, res) => {
   if (model !== undefined) product.model = model;
   if (warehouse !== undefined) product.warehouse = warehouse;
   if (status !== undefined) {
-    if (status === 'archived') {
-      // Don't allow archiving via PATCH — use DELETE endpoint for proper soft-delete
-      return res.status(400).json({ error: 'Використовуйте DELETE для архівації товару' });
-    }
     product.status = status;
     product.archivedAt = null;
   }
@@ -602,7 +634,30 @@ router.patch('/:id', staffOnly, async (req, res) => {
     product.telegramMessageIds = [];
   }
 
-  await product.save();
+  if (orderChanged) {
+    const session = await mongoose.connection.startSession();
+    try {
+      await session.withTransaction(async () => {
+        if (parsedOrderNumber < previousOrderNumber) {
+          await shiftUp(
+            { _id: { $ne: product._id }, orderNumber: { $gte: parsedOrderNumber, $lt: previousOrderNumber } },
+            session,
+          );
+        } else {
+          await shiftDown(
+            { _id: { $ne: product._id }, orderNumber: { $gt: previousOrderNumber, $lte: parsedOrderNumber } },
+            session,
+          );
+        }
+        await product.save({ session });
+      });
+    } finally {
+      session.endSession();
+    }
+  } else {
+    await product.save();
+  }
+
   res.json(product);
 });
 

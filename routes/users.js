@@ -1,4 +1,5 @@
 const express = require('express');
+const mongoose = require('mongoose');
 const User = require('../models/User');
 const Order = require('../models/Order');
 const DeliveryGroup = require('../models/DeliveryGroup');
@@ -9,6 +10,7 @@ const { isOrderingOpen, getOrderingWindowOpenAt, getCurrentOrderingSessionId } =
 const { getOrderingSchedule } = require('../utils/getOrderingSchedule');
 const PickingTask = require('../models/PickingTask');
 const { getIO } = require('../socket');
+const { migrateSellerShop } = require('../services/migrateSellerShop');
 
 const router = express.Router();
 router.use(telegramAuth);
@@ -171,16 +173,11 @@ router.get('/', async (req, res) => {
   } else if (activityFilter && windowIsOpen && windowOpenAt) {
     // no_cart / no_visit: push filter to MongoDB query — no in-memory scan
     if (activityFilter === 'no_cart') {
-      // Cart is now on Shop — find shops with non-empty cart and exclude their sellers
-      const shopsWithCart = await Shop.find(
-        { 'cartState.orderItemIds.0': { $exists: true } },
-        '_id'
-      ).lean();
-      const shopIdsWithCart = shopsWithCart.map((s) => s._id);
+      // Cart is stored on User.cartState — sellers with an empty cart are those
+      // whose cartState.orderItemIds array is missing or empty.
       filter['$or'] = [
-        { shopId: { $exists: false } },
-        { shopId: null },
-        { shopId: { $nin: shopIdsWithCart } },
+        { 'cartState.orderItemIds': { $exists: false } },
+        { 'cartState.orderItemIds': { $size: 0 } },
       ];
     } else if (activityFilter === 'no_visit') {
       filter['$or'] = [
@@ -230,14 +227,9 @@ router.get('/', async (req, res) => {
     }
   }
 
-  // Batch-load shop cartState to compute cartItemCount
-  const shopIds = [...new Set(users.map((u) => u.shopId).filter(Boolean).map(String))];
-  const shopDocs = shopIds.length > 0 ? await Shop.find({ _id: { $in: shopIds } }, 'cartState').lean() : [];
-  const shopMap = new Map(shopDocs.map((s) => [String(s._id), s]));
+  // Cart lives on User.cartState — derive itemCount directly from each user doc.
   const getCartCount = (u) => {
-    if (!u.shopId) return 0;
-    const shop = shopMap.get(String(u.shopId));
-    const items = shop?.cartState?.orderItems;
+    const items = u?.cartState?.orderItems;
     if (!items) return 0;
     const obj = items instanceof Map ? Object.fromEntries(items) : items;
     return Object.values(obj).reduce((s, q) => s + (Number(q) || 0), 0);
@@ -294,7 +286,10 @@ router.post('/', async (req, res) => {
   res.status(existing ? 200 : 201).json(user);
 });
 
-// Lightweight endpoint — only updates shopId + syncs deliveryGroupId from the shop
+// Lightweight endpoint — only updates shopId + syncs deliveryGroupId from the shop.
+// All writes (User, Order, PickingTask, lastSeller, history) run inside a single
+// MongoDB transaction so a partial failure cannot leave User and Order pointing
+// to different shops.
 router.patch('/:telegramId/shop', async (req, res) => {
   try {
     const existing = await User.findOne({ telegramId: req.params.telegramId });
@@ -303,148 +298,108 @@ router.patch('/:telegramId/shop', async (req, res) => {
     const { shopId } = req.body;
     const oldShopId = existing.shopId ? String(existing.shopId) : '';
     const newShopId = shopId ? String(shopId) : '';
-    let deliveryGroupId = existing.deliveryGroupId || null;
 
-    if (shopId) {
-      const shop = await Shop.findById(shopId).lean();
-      if (!shop) return res.status(404).json({ error: 'Shop not found' });
-      deliveryGroupId = shop.deliveryGroupId || null;
-    } else {
-      deliveryGroupId = null;
-    }
-
-    const user = await User.findOneAndUpdate(
-      { telegramId: req.params.telegramId },
-      { shopId: shopId || null, deliveryGroupId },
-      { new: true }
-    );
-
-    if (oldShopId !== newShopId) {
-      const [oldShop, newShop, activeOrders] = await Promise.all([
-        oldShopId ? Shop.findById(oldShopId, 'name').lean() : Promise.resolve(null),
-        newShopId ? Shop.findById(newShopId, 'name').lean() : Promise.resolve(null),
-        Order.countDocuments({ buyerTelegramId: existing.telegramId, status: { $in: ['new', 'in_progress'] } }),
-      ]);
-      const actor = req.telegramUser;
-      await User.updateOne(
-        { telegramId: req.params.telegramId },
-        { $push: { history: {
-          at: new Date(),
-          by: String(actor.telegramId),
-          byName: [actor.firstName, actor.lastName].filter(Boolean).join(' '),
-          byRole: actor.role,
-          action: 'shop_changed',
-          meta: { fromShop: oldShop?.name || null, toShop: newShop?.name || null, activeOrders },
-        } } }
-      );
-      // Persist last-seller snapshot on the old shop so the hint survives user deletion
-      if (oldShopId) {
-        await Shop.findByIdAndUpdate(oldShopId, {
-          lastSeller: {
-            telegramId: existing.telegramId,
-            firstName:  existing.firstName  || '',
-            lastName:   existing.lastName   || '',
-            unassignedAt: new Date(),
-          },
-        }).catch(() => {});
+    // Special case: clearing the shop assignment (no destination shop).
+    if (!newShopId) {
+      if (!oldShopId) {
+        return res.json(existing);
       }
+      const session = await mongoose.connection.startSession();
+      try {
+        await session.withTransaction(async () => {
+          const actor = req.telegramUser;
+          const oldShop = await Shop.findById(oldShopId).session(session).lean();
 
-      // Mirror the order-migration logic from PATCH /me/shop:
-      // when admin moves a seller from one shop to another, their active order follows them.
-      // Without this the order stays orphaned at the old shop while the seller is now elsewhere,
-      // which creates a phantom conflict and a stale order that nobody can fulfil.
-      if (oldShopId && newShopId) {
-        // Resolve session IDs for both old and new shop so we query the right order
-        const [oldShopFull, newShopFull] = await Promise.all([
-          Shop.findById(oldShopId).populate('cityId', 'name').lean(),
-          Shop.findById(newShopId).populate('cityId', 'name').lean(),
-        ]);
-
-        let oldSessionId = null;
-        if (oldShopFull?.deliveryGroupId) {
-          const oldGroup = await DeliveryGroup.findById(oldShopFull.deliveryGroupId).lean();
-          if (oldGroup) {
-            const schedule = await getOrderingSchedule();
-            oldSessionId = getCurrentOrderingSessionId(String(oldGroup._id), oldGroup.dayOfWeek, schedule);
-          }
-        }
-
-        let newSessionId = null;
-        if (newShopFull?.deliveryGroupId) {
-          const newGroup = await DeliveryGroup.findById(newShopFull.deliveryGroupId).lean();
-          if (newGroup) {
-            const schedule = await getOrderingSchedule();
-            newSessionId = getCurrentOrderingSessionId(String(newGroup._id), newGroup.dayOfWeek, schedule);
-          }
-        }
-
-        const activeOrder = await Order.findOne({
-          buyerTelegramId: existing.telegramId,
-          shopId: existing.shopId,
-          status: { $in: ['new', 'in_progress'] },
-          ...(oldSessionId ? { orderingSessionId: oldSessionId } : {}),
-        });
-
-        if (activeOrder) {
-          const prevGroupId = activeOrder.buyerSnapshot?.deliveryGroupId
-            ? String(activeOrder.buyerSnapshot.deliveryGroupId)
-            : null;
-
-          activeOrder.shopId = newShopFull._id;
-          if (!activeOrder.buyerSnapshot) activeOrder.buyerSnapshot = {};
-          activeOrder.buyerSnapshot.shopId = String(newShopFull._id);
-          activeOrder.buyerSnapshot.shopName = newShopFull.name || '';
-          activeOrder.buyerSnapshot.shopCity = newShopFull.cityId?.name || '';
-          activeOrder.buyerSnapshot.deliveryGroupId = newShopFull.deliveryGroupId
-            ? String(newShopFull.deliveryGroupId) : '';
-          if (newSessionId) activeOrder.orderingSessionId = newSessionId;
-          activeOrder.markModified('buyerSnapshot');
-          activeOrder.history.push({
-            by: String(actor.telegramId),
-            byName: [actor.firstName, actor.lastName].filter(Boolean).join(' '),
-            byRole: actor.role,
-            action: 'shop_reassigned',
-            meta: {
-              from: { shopName: oldShopFull?.name || '', deliveryGroupId: existing.deliveryGroupId || '' },
-              to: { shopName: newShopFull.name || '', shopCity: newShopFull.cityId?.name || '' },
-              reason: 'admin_reassigned_seller',
+          // Detach order from this seller? No — we leave it where it is and let
+          // admins reassign it via /orders/:id/snapshot. We only detach the user.
+          await User.updateOne(
+            { telegramId: req.params.telegramId },
+            {
+              $set: {
+                shopId: null,
+                shopName: '',
+                shopCity: '',
+                deliveryGroupId: '',
+                ...(existing.role === 'seller' ? { warehouseZone: '' } : {}),
+                'cartState.reservedForGroupId': null,
+              },
+              $push: {
+                history: {
+                  at: new Date(),
+                  by: String(actor.telegramId),
+                  byName: [actor.firstName, actor.lastName].filter(Boolean).join(' '),
+                  byRole: actor.role,
+                  action: 'shop_changed',
+                  meta: { fromShop: oldShop?.name || null, toShop: null },
+                },
+              },
             },
-          });
-          await activeOrder.save();
+            { session },
+          );
 
-          // Sync shopName in any PickingTask items that reference this order
-          await PickingTask.updateMany(
-            { 'items.orderId': activeOrder._id, status: { $in: ['pending', 'locked'] } },
-            { $set: { 'items.$[elem].shopName': newShopFull.name || '' } },
-            { arrayFilters: [{ 'elem.orderId': activeOrder._id }] },
-          ).catch(() => {});
-
-          // Notify both picking dashboards
-          try {
-            const io = getIO();
-            if (io) {
-              const newGroupId = newShopFull.deliveryGroupId ? String(newShopFull.deliveryGroupId) : null;
-              if (prevGroupId) io.to(`picking_group_${prevGroupId}`).emit('shop_status_changed', { groupId: prevGroupId });
-              if (newGroupId && newGroupId !== prevGroupId) {
-                io.to(`picking_group_${newGroupId}`).emit('shop_status_changed', { groupId: newGroupId });
-                io.emit('delivery_groups_updated');
-              }
-              io.emit('user_order_updated', { buyerTelegramId: existing.telegramId });
-            }
-          } catch (emitErr) {
-            console.warn('[PATCH /users/:telegramId/shop] socket emit failed:', emitErr?.message);
-          }
-        }
+          await Shop.findByIdAndUpdate(
+            oldShopId,
+            {
+              lastSeller: {
+                telegramId:   existing.telegramId,
+                firstName:    existing.firstName  || '',
+                lastName:     existing.lastName   || '',
+                unassignedAt: new Date(),
+              },
+            },
+            { session },
+          );
+        });
+      } finally {
+        session.endSession();
       }
-
-      // Always clear any stale cross-group cart reservation when shop changes
-      await User.updateOne(
-        { telegramId: req.params.telegramId },
-        { $set: { 'cartState.reservedForGroupId': null } },
-      ).catch(() => {});
+      const refreshed = await User.findOne({ telegramId: req.params.telegramId });
+      return res.json(refreshed);
     }
 
-    res.json(user);
+    const newShop = await Shop.findById(newShopId).populate('cityId', 'name').lean();
+    if (!newShop) return res.status(404).json({ error: 'Shop not found' });
+
+    let migrationResult = null;
+    const session = await mongoose.connection.startSession();
+    try {
+      await session.withTransaction(async () => {
+        migrationResult = await migrateSellerShop({
+          session,
+          existingUser: existing,
+          newShopFull: newShop,
+          actor: req.telegramUser,
+          reason: 'admin_reassigned_seller',
+          resetCartItems: false,
+          resetCartNavigation: false,
+          clearCartReservation: true,
+          pushHistory: true,
+          updateLastSeller: true,
+        });
+      });
+    } finally {
+      session.endSession();
+    }
+
+    // Notify dashboards AFTER commit so listeners never see uncommitted state.
+    if (migrationResult?.movedOrder) {
+      try {
+        const io = getIO();
+        if (io) {
+          const { prevGroupId, newGroupId } = migrationResult;
+          if (prevGroupId) io.to(`picking_group_${prevGroupId}`).emit('shop_status_changed', { groupId: prevGroupId });
+          if (newGroupId && newGroupId !== prevGroupId) {
+            io.to(`picking_group_${newGroupId}`).emit('shop_status_changed', { groupId: newGroupId });
+            io.emit('delivery_groups_updated');
+          }
+          io.emit('user_order_updated', { buyerTelegramId: existing.telegramId });
+        }
+      } catch (emitErr) {
+        console.warn('[PATCH /users/:telegramId/shop] socket emit failed:', emitErr?.message);
+      }
+    }
+
+    res.json(migrationResult?.updatedUser || existing);
   } catch (err) {
     console.error('[PATCH /users/:telegramId/shop]', err);
     res.status(500).json({ error: 'Failed to update shop assignment' });
@@ -457,6 +412,39 @@ router.patch('/:telegramId', async (req, res) => {
     if (!existing) return res.status(404).json({ error: 'User not found' });
 
     const payload = await sanitizeUserPayload(req.body, existing);
+    const oldShopId = existing.shopId ? String(existing.shopId) : '';
+    const newShopId = payload.shopId ? String(payload.shopId) : '';
+    const shopChanged = oldShopId !== newShopId;
+
+    // If shop is changing AND the result is a real shop (not unassign), perform the
+    // migration in a transaction so Order/PickingTask/User stay consistent. Other
+    // payload fields are still applied via the standard update afterwards.
+    let migrationResult = null;
+    if (shopChanged && newShopId && payload.role === 'seller') {
+      const newShop = await Shop.findById(newShopId).populate('cityId', 'name').lean();
+      if (!newShop) return res.status(404).json({ error: 'Shop not found' });
+
+      const session = await mongoose.connection.startSession();
+      try {
+        await session.withTransaction(async () => {
+          migrationResult = await migrateSellerShop({
+            session,
+            existingUser: existing,
+            newShopFull: newShop,
+            actor: req.telegramUser,
+            reason: 'admin_user_patch',
+            resetCartItems: false,
+            resetCartNavigation: false,
+            clearCartReservation: true,
+            pushHistory: false, // history will be added by the role/shop diff logic below
+            updateLastSeller: true,
+          });
+        });
+      } finally {
+        session.endSession();
+      }
+    }
+
     const user = await User.findOneAndUpdate(
       { telegramId: req.params.telegramId },
       payload,
@@ -473,13 +461,23 @@ router.patch('/:telegramId', async (req, res) => {
       byRole: actor.role,
     };
 
-    if (String(existing.shopId || '') !== String(payload.shopId || '')) {
+    if (shopChanged) {
       const [oldShop, newShop, activeOrders] = await Promise.all([
         existing.shopId ? Shop.findById(existing.shopId, 'name').lean() : Promise.resolve(null),
         payload.shopId ? Shop.findById(payload.shopId, 'name').lean() : Promise.resolve(null),
         Order.countDocuments({ buyerTelegramId: existing.telegramId, status: { $in: ['new', 'in_progress'] } }),
       ]);
-      historyEntries.push({ at: new Date(), ...actorMeta, action: 'shop_changed', meta: { fromShop: oldShop?.name || null, toShop: newShop?.name || null, activeOrders } });
+      historyEntries.push({
+        at: new Date(),
+        ...actorMeta,
+        action: 'shop_changed',
+        meta: {
+          fromShop: oldShop?.name || null,
+          toShop: newShop?.name || null,
+          activeOrders,
+          orderMoved: !!migrationResult?.movedOrder,
+        },
+      });
     }
 
     if (existing.role !== payload.role) {
@@ -493,6 +491,24 @@ router.patch('/:telegramId', async (req, res) => {
       );
     }
 
+    // Notify dashboards if an order was moved during the migration
+    if (migrationResult?.movedOrder) {
+      try {
+        const io = getIO();
+        if (io) {
+          const { prevGroupId, newGroupId } = migrationResult;
+          if (prevGroupId) io.to(`picking_group_${prevGroupId}`).emit('shop_status_changed', { groupId: prevGroupId });
+          if (newGroupId && newGroupId !== prevGroupId) {
+            io.to(`picking_group_${newGroupId}`).emit('shop_status_changed', { groupId: newGroupId });
+            io.emit('delivery_groups_updated');
+          }
+          io.emit('user_order_updated', { buyerTelegramId: existing.telegramId });
+        }
+      } catch (emitErr) {
+        console.warn('[PATCH /users/:telegramId] socket emit failed:', emitErr?.message);
+      }
+    }
+
     res.json(updatedUser);
   } catch (err) {
     console.error('[PATCH /users/:telegramId]', err);
@@ -501,6 +517,38 @@ router.patch('/:telegramId', async (req, res) => {
 });
 
 router.delete('/:telegramId', async (req, res) => {
+  // Pre-flight: refuse hard-delete if the user has anything pending in the
+  // pipeline. Otherwise the Order/PickingTask rows would survive with a
+  // buyerTelegramId that no longer resolves to anyone (orphaned records).
+  const existing = await User.findOne({ telegramId: req.params.telegramId }).lean();
+  if (!existing) return res.status(404).json({ error: 'User not found' });
+
+  const [activeOrders, activePickingTasks] = await Promise.all([
+    Order.countDocuments({
+      buyerTelegramId: existing.telegramId,
+      status: { $in: ['new', 'in_progress'] },
+    }),
+    // Picking tasks reference orders by orderId — find any pending/locked task that
+    // contains an order belonging to this buyer.
+    (async () => {
+      const buyerOrderIds = await Order.find({ buyerTelegramId: existing.telegramId }, '_id').lean();
+      if (!buyerOrderIds.length) return 0;
+      return PickingTask.countDocuments({
+        'items.orderId': { $in: buyerOrderIds.map((o) => o._id) },
+        status: { $in: ['pending', 'locked'] },
+      });
+    })(),
+  ]);
+
+  if (activeOrders > 0 || activePickingTasks > 0) {
+    return res.status(409).json({
+      error: 'user_has_active_work',
+      message: `Не можна видалити користувача: ${activeOrders} активне замовлення, ${activePickingTasks} активний пакувальний таск. Спочатку завершіть або скасуйте їх.`,
+      activeOrders,
+      activePickingTasks,
+    });
+  }
+
   const user = await User.findOneAndDelete({ telegramId: req.params.telegramId });
   if (!user) return res.status(404).json({ error: 'User not found' });
   // Preserve seller identity on the shop so "Раніше тут був" hint survives deletion

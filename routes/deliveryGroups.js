@@ -404,9 +404,30 @@ router.delete('/:id', telegramAuth, requireTelegramRole('admin'), async (req, re
   const group = await DeliveryGroup.findById(req.params.id);
   if (!group) return res.status(404).json({ error: 'Group not found' });
 
-  const shopCount = await Shop.countDocuments({ deliveryGroupId: String(group._id), isActive: true });
+  // Count ALL shops, not just active ones — an inactive shop can still hold an
+  // active order (or get re-activated later) and we don't want to orphan its
+  // delivery-group reference.
+  const shopCount = await Shop.countDocuments({ deliveryGroupId: String(group._id) });
   if (shopCount > 0) {
-    return res.status(400).json({ error: `Не можна видалити групу: ${shopCount} магазин(ів) прив'язано` });
+    return res.status(400).json({
+      error: 'group_has_shops',
+      message: `Не можна видалити групу: ${shopCount} магазин(ів) прив'язано (включно з неактивними).`,
+      shopCount,
+    });
+  }
+
+  // Even with zero shops, refuse if any orders still reference this group via
+  // their snapshot — we'd lose the link otherwise.
+  const activeOrderCount = await Order.countDocuments({
+    'buyerSnapshot.deliveryGroupId': String(group._id),
+    status: { $in: ['new', 'in_progress'] },
+  });
+  if (activeOrderCount > 0) {
+    return res.status(409).json({
+      error: 'group_has_active_orders',
+      message: `Не можна видалити групу: ${activeOrderCount} активне замовлення прив'язано.`,
+      activeOrders: activeOrderCount,
+    });
   }
 
   await DeliveryGroup.findByIdAndDelete(req.params.id);

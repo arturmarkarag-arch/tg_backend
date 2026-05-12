@@ -698,29 +698,57 @@ router.patch('/:id/snapshot', staffOnly, async (req, res) => {
     action: 'shop_reassigned',
     meta: { from: prevSnapshot, to: { shopName: shop.name || '', shopCity: shop.cityId?.name || '' } },
   });
-  await order.save();
 
-  // Sync shopName in any active PickingTask items that reference this order.
-  // This ensures warehouse workers see the correct shop name if picking is already in progress.
-  await PickingTask.updateMany(
-    { 'items.orderId': order._id, status: { $in: ['pending', 'locked'] } },
-    { $set: { 'items.$[elem].shopName': shop.name || '' } },
-    { arrayFilters: [{ 'elem.orderId': order._id }] },
-  );
+  // All writes (Order, PickingTask, User) must commit atomically — partial commits
+  // would leave the buyer pointing at one shop while the order points at another,
+  // causing phantom conflicts and stale buyerSnapshot data on the next /orders POST.
+  let warehouseZone = '';
+  if (shop.deliveryGroupId) {
+    const newGroup = await DeliveryGroup.findById(shop.deliveryGroupId).lean();
+    warehouseZone = newGroup?.name || '';
+  }
 
-  // Update the buyer: move them to the new shop AND clear their cart
-  if (order.buyerTelegramId) {
-    await User.findOneAndUpdate(
-      { telegramId: order.buyerTelegramId },
-      {
-        $set: {
+  const session = await mongoose.connection.startSession();
+  try {
+    await session.withTransaction(async () => {
+      await order.save({ session });
+
+      // Sync shopName in any active PickingTask items that reference this order.
+      // Failure here MUST abort the transaction — picking workers would otherwise
+      // see a stale shop name on items they're packing.
+      await PickingTask.updateMany(
+        { 'items.orderId': order._id, status: { $in: ['pending', 'locked'] } },
+        { $set: { 'items.$[elem].shopName': shop.name || '' } },
+        { arrayFilters: [{ 'elem.orderId': order._id }], session },
+      );
+
+      // Update the buyer: move them to the new shop with the FULL set of derived
+      // fields (shopName/shopCity/deliveryGroupId/warehouseZone) so legacy fallbacks
+      // never read stale values, and clear their cart since the active order moved.
+      if (order.buyerTelegramId) {
+        const buyerUser = await User.findOne({ telegramId: order.buyerTelegramId }).session(session).lean();
+        const userUpdate = {
           shopId: shop._id,
+          shopName: shop.name || '',
+          shopCity: shop.cityId?.name || '',
+          deliveryGroupId: shop.deliveryGroupId ? String(shop.deliveryGroupId) : '',
           'cartState.orderItems': {},
           'cartState.orderItemIds': [],
           'cartState.updatedAt': new Date(),
-        },
-      },
-    );
+          'cartState.reservedForGroupId': null,
+        };
+        if (buyerUser?.role === 'seller') {
+          userUpdate.warehouseZone = warehouseZone;
+        }
+        await User.updateOne(
+          { telegramId: order.buyerTelegramId },
+          { $set: userUpdate },
+          { session },
+        );
+      }
+    });
+  } finally {
+    session.endSession();
   }
 
   // Notify picking dashboards: both the old group and the new group need to refresh
