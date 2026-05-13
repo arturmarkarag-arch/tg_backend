@@ -93,6 +93,7 @@ const ERRORS = {
   order_not_active:         { status: 409, message: ({ status } = {}) =>
                                 `Замовлення вже ${status === 'fulfilled' ? 'виконано' : 'скасовано'} — перенос неможливий.` },
   order_picking_started:    { status: 409, message: 'Замовлення вже в роботі на складі (пакування розпочато або підготовлено). Перенос/відв’язка заборонені.' },
+  order_picking_locked:     { status: 409, message: 'Замовлення зараз у активному пакуванні на складі. Дочекайтесь розблокування або підтвердження від складу.' },
   order_status_change_disabled: { status: 403, message: 'Ручна зміна статусу замовлення вимкнена. Статус змінюється лише автоматично під час збирання.' },
 
   // ── Cart (mini-app) ────────────────────────────────────────────────────────
@@ -157,9 +158,11 @@ const ERRORS = {
   picking_task_not_found:         { status: 404, message: 'Завдання не знайдено' },
   picking_product_not_found:      { status: 404, message: 'Товар не знайдено' },
   picking_current_block_invalid:  { status: 400, message: 'currentBlock має бути додатнім цілим числом' },
+  picking_block_invalid:          { status: 400, message: 'blockId має бути додатнім цілим числом' },
   picking_delivery_group_required:{ status: 400, message: 'Для старту сесії збирання потрібно передати deliveryGroupId' },
   picking_session_failed:         { status: 500, message: 'Помилка запуску сесії збирання' },
   picking_next_failed:            { status: 500, message: 'Помилка отримання задачі' },
+  picking_block_tasks_failed:     { status: 500, message: 'Помилка отримання задач блоку' },
   picking_complete_failed:        { status: 500, message: 'Помилка завершення задачі' },
   picking_progress_failed:        { status: 500, message: 'Помилка збереження прогресу' },
   picking_claim_unavailable:      { status: 409, message: 'Завдання більше недоступне' },

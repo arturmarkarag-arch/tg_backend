@@ -79,6 +79,17 @@ async function ensureOrderNotInPickingPipeline(orderId, session = null) {
   }
 }
 
+async function ensureOrderNotLockedByWarehouse(orderId, session = null) {
+  const query = PickingTask.exists({
+    'items.orderId': orderId,
+    status: 'locked',
+  });
+  const exists = session ? await query.session(session) : await query;
+  if (exists) {
+    throw appError('order_picking_locked');
+  }
+}
+
 /**
  * Middleware: returns 423 Locked when the ordering window is closed for a seller.
  * Staff (admin / warehouse) always pass through unchanged.
@@ -877,6 +888,7 @@ router.post('/:id/stale/restore-to-cart', telegramAuth, adminOnly, asyncHandler(
       }
 
       await ensureOrderIsStale(order, session);
+      await ensureOrderNotLockedByWarehouse(order._id, session);
 
       const buyerTelegramId = String(order.buyerTelegramId || '');
       if (!buyerTelegramId) throw appError('validation_failed', { field: 'buyerTelegramId' });
@@ -989,6 +1001,7 @@ router.post('/:id/stale/expire', telegramAuth, adminOnly, asyncHandler(async (re
       }
 
       await ensureOrderIsStale(order, session);
+      await ensureOrderNotLockedByWarehouse(order._id, session);
       await detachOrderFromPendingTasks(order._id, session);
 
       order.status = 'expired';

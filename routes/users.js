@@ -56,9 +56,6 @@ async function sanitizeUserPayload(payload, existing = null) {
   const data = {
     // telegramId — імьютабельний, не приймається тут; передається окремо тільки при створенні
     role,
-    firstName: payload.firstName,
-    lastName: payload.lastName,
-    phoneNumber: payload.phoneNumber,
     // Explicitly cast to Boolean so strings "true"/"false" or 1/0 from HTTP body never
     // reach MongoDB as a wrong type. Skip the field entirely when not provided.
     ...(payload.botBlocked !== undefined && payload.botBlocked !== null
@@ -66,19 +63,35 @@ async function sanitizeUserPayload(payload, existing = null) {
       : {}),
   };
 
+  // Prevent accidental erasure on partial updates.
+  if (payload.firstName !== undefined) data.firstName = payload.firstName;
+  else if (existing) data.firstName = existing.firstName;
+  if (payload.lastName !== undefined) data.lastName = payload.lastName;
+  else if (existing) data.lastName = existing.lastName;
+  if (payload.phoneNumber !== undefined) data.phoneNumber = payload.phoneNumber;
+  else if (existing) data.phoneNumber = existing.phoneNumber;
+
   // Seller-specific fields — clear when role is not seller
   if (role === 'seller') {
-    data.shopId = payload.shopId || null;
-    data.shopNumber = payload.shopNumber;
-    data.shopName = payload.shopName;
-    data.shopAddress = payload.shopAddress;
-    data.shopCity = payload.shopCity;
-    // deliveryGroupId is derived from the shop — never trust client-supplied value
+    data.shopId = payload.shopId !== undefined
+      ? (payload.shopId || null)
+      : (existing?.shopId || null);
+    data.shopNumber = payload.shopNumber !== undefined
+      ? payload.shopNumber
+      : (existing?.shopNumber || '');
+
+    // Derive denormalized shop fields from Shop source of truth.
     if (data.shopId) {
-      const shop = await Shop.findById(data.shopId).lean();
+      const shop = await Shop.findById(data.shopId).populate('cityId', 'name').lean();
       data.deliveryGroupId = shop?.deliveryGroupId || '';
+      data.shopName = shop?.name || '';
+      data.shopAddress = shop?.address || '';
+      data.shopCity = shop?.cityId?.name || shop?.city || '';
     } else {
       data.deliveryGroupId = '';
+      data.shopName = '';
+      data.shopAddress = '';
+      data.shopCity = '';
     }
   } else {
     data.shopId = null;
@@ -91,8 +104,12 @@ async function sanitizeUserPayload(payload, existing = null) {
 
   // Warehouse-specific fields — clear when role is not warehouse
   if (role === 'warehouse') {
-    data.isWarehouseManager = Boolean(payload.isWarehouseManager);
-    data.warehouseZone = payload.warehouseZone;
+    data.isWarehouseManager = payload.isWarehouseManager !== undefined
+      ? Boolean(payload.isWarehouseManager)
+      : Boolean(existing?.isWarehouseManager);
+    data.warehouseZone = payload.warehouseZone !== undefined
+      ? payload.warehouseZone
+      : (existing?.warehouseZone || '');
   } else {
     data.isWarehouseManager = false;
     data.isOnShift = false;

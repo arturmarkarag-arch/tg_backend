@@ -122,6 +122,96 @@ async function findAndLockNext(userTelegramId, fromBlock, deliveryGroupId = null
   return { task: null, wrappedAround: false };
 }
 
+async function releaseWorkerAndStaleLocks(userTelegramId, deliveryGroupId = null, options = {}) {
+  const { releaseOwnLocks = true } = options;
+  const LOCK_TIMEOUT_MS = 15 * 60 * 1000; // 15 minutes
+  const staleLockedAt = new Date(Date.now() - LOCK_TIMEOUT_MS);
+  const unlockConditions = [{ lockedAt: { $lt: staleLockedAt } }];
+  if (releaseOwnLocks && userTelegramId) {
+    unlockConditions.unshift({ lockedBy: String(userTelegramId) });
+  }
+  await PickingTask.updateMany(
+    {
+      status: 'locked',
+      ...(deliveryGroupId ? { deliveryGroupId: String(deliveryGroupId) } : {}),
+      $or: unlockConditions,
+    },
+    { $set: { status: 'pending', lockedBy: null, lockedAt: null } },
+  );
+}
+
+/**
+ * Keep active tasks aligned with one ordering session.
+ * Removes task items that belong to orders outside the target session and
+ * drops empty active tasks so old sessions cannot block a new picking start.
+ */
+async function reconcileActiveTasksForSession(deliveryGroupId, orderingSessionId) {
+  const groupId = String(deliveryGroupId || '');
+  const sessionId = String(orderingSessionId || '');
+  if (!groupId || !sessionId) return;
+
+  const currentOrders = await Order.find(
+    {
+      'buyerSnapshot.deliveryGroupId': groupId,
+      status: { $in: ['new', 'in_progress'] },
+      orderingSessionId: sessionId,
+    },
+    '_id',
+  ).lean();
+  const allowedOrderIds = new Set(currentOrders.map((o) => String(o._id)));
+
+  const activeTasks = await PickingTask.find(
+    { deliveryGroupId: groupId, status: { $in: ['pending', 'locked'] } },
+    '_id status items',
+  ).lean();
+
+  if (!activeTasks.length) return;
+
+  const ops = [];
+  for (const task of activeTasks) {
+    const keptItems = (task.items || []).filter((it) => allowedOrderIds.has(String(it.orderId)));
+    if (keptItems.length === (task.items || []).length) continue;
+
+    if (!keptItems.length) {
+      ops.push({
+        deleteOne: {
+          filter: { _id: task._id, status: { $in: ['pending', 'locked'] } },
+        },
+      });
+      continue;
+    }
+
+    ops.push({
+      updateOne: {
+        filter: { _id: task._id, status: { $in: ['pending', 'locked'] } },
+        update: { $set: { items: keptItems } },
+      },
+    });
+  }
+
+  if (ops.length) {
+    await PickingTask.bulkWrite(ops, { ordered: false });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/picking/schedule
+// Returns current ordering schedule used for picking gate UI.
+// ---------------------------------------------------------------------------
+router.get('/schedule', requireTelegramRoles(['warehouse', 'admin']), async (req, res, next) => {
+  try {
+    const schedule = await getOrderingSchedule();
+    res.json({
+      openHour: Number(schedule.openHour),
+      openMinute: Number(schedule.openMinute),
+      closeHour: Number(schedule.closeHour),
+      closeMinute: Number(schedule.closeMinute),
+    });
+  } catch (err) {
+    next(appError('picking_session_failed'));
+  }
+});
+
 // ---------------------------------------------------------------------------
 // POST /api/picking/start-session
 // Body: { deliveryGroupId?: string }
@@ -130,6 +220,7 @@ async function findAndLockNext(userTelegramId, fromBlock, deliveryGroupId = null
 // ---------------------------------------------------------------------------
 router.post('/start-session', requireTelegramRoles(['warehouse', 'admin']), async (req, res, next) => {
   try {
+    const user = req.telegramUser;
     const { deliveryGroupId = null } = req.body;
     if (!deliveryGroupId) {
       return next(appError('picking_delivery_group_required'));
@@ -157,21 +248,39 @@ router.post('/start-session', requireTelegramRoles(['warehouse', 'admin']), asyn
     }
 
     // 2. Idempotent: if tasks already exist, return their count.
+    await releaseWorkerAndStaleLocks(user.telegramId, deliveryGroupId);
+
+    const groupForSession = await DeliveryGroup.findById(deliveryGroupId, 'dayOfWeek').lean();
+    let currentSessionId = null;
+    if (groupForSession) {
+      const schedule = await getOrderingSchedule();
+      currentSessionId = getCurrentOrderingSessionId(String(deliveryGroupId), groupForSession.dayOfWeek, schedule);
+      await reconcileActiveTasksForSession(deliveryGroupId, currentSessionId);
+    }
+
     const activeFilter = {
       status: { $in: ['pending', 'locked'] },
       deliveryGroupId: String(deliveryGroupId),
     };
-    const existingCount = await PickingTask.countDocuments(activeFilter);
-    if (existingCount > 0) {
-      return res.json({ alreadyStarted: true, taskCount: existingCount });
+    const pendingFilter = {
+      status: 'pending',
+      deliveryGroupId: String(deliveryGroupId),
+    };
+
+    const existingActiveCount = await PickingTask.countDocuments(activeFilter);
+    const availableCount = await PickingTask.countDocuments(pendingFilter);
+    if (existingActiveCount > 0) {
+      return res.json({ alreadyStarted: true, taskCount: availableCount });
     }
 
     // 3. Detect stale orders from previous sessions.
     // These orders should NOT block warehouse flow; admins resolve them separately.
-    const group2 = await DeliveryGroup.findById(deliveryGroupId, 'dayOfWeek').lean();
+    const group2 = groupForSession;
     if (group2) {
-      const schedule2 = await getOrderingSchedule();
-      const currentSessionId = getCurrentOrderingSessionId(String(deliveryGroupId), group2.dayOfWeek, schedule2);
+      if (!currentSessionId) {
+        const schedule2 = await getOrderingSchedule();
+        currentSessionId = getCurrentOrderingSessionId(String(deliveryGroupId), group2.dayOfWeek, schedule2);
+      }
       const staleOrders = await Order.find(
         {
           'buyerSnapshot.deliveryGroupId': String(deliveryGroupId),
@@ -192,7 +301,7 @@ router.post('/start-session', requireTelegramRoles(['warehouse', 'admin']), asyn
         buyerTelegramId: String(o.buyerTelegramId),
       }));
 
-      const taskCount = await PickingTask.countDocuments(activeFilter);
+      const taskCount = await PickingTask.countDocuments(pendingFilter);
       if (taskCount === 0) {
         return res.json({ noOrders: true, staleWarnings });
       }
@@ -205,7 +314,7 @@ router.post('/start-session', requireTelegramRoles(['warehouse', 'admin']), asyn
     // Return current count. The unique partial index on PickingTask(productId, deliveryGroupId)
     // causes insertMany(ordered:false) to silently skip duplicates, so concurrent calls from
     // multiple server instances never create phantom tasks — no in-process flag needed.
-    const taskCount = await PickingTask.countDocuments(activeFilter);
+    const taskCount = await PickingTask.countDocuments(pendingFilter);
 
     if (taskCount === 0) {
       return res.json({ noOrders: true });
@@ -233,21 +342,9 @@ router.get('/next-task', requireTelegramRoles(['warehouse', 'admin']), async (re
 
     // Release stale locks:
     //  - always release this worker's own locks (from a previous request / page reload)
-    //  - release any worker's lock that is older than LOCK_TIMEOUT_MS (abandoned tasks)
+    //  - release any worker's lock that is older than timeout (abandoned tasks)
     // Does NOT touch items[].packed so partial progress is preserved for the next worker.
-    const LOCK_TIMEOUT_MS = 15 * 60 * 1000; // 15 minutes
-    const staleLockedAt = new Date(Date.now() - LOCK_TIMEOUT_MS);
-    await PickingTask.updateMany(
-      {
-        status: 'locked',
-        ...(deliveryGroupId ? { deliveryGroupId: String(deliveryGroupId) } : {}),
-        $or: [
-          { lockedBy: user.telegramId },
-          { lockedAt: { $lt: staleLockedAt } },
-        ],
-      },
-      { $set: { status: 'pending', lockedBy: null, lockedAt: null } },
-    );
+    await releaseWorkerAndStaleLocks(user.telegramId, deliveryGroupId);
 
     const { task, wrappedAround } = await findAndLockNext(user.telegramId, currentBlock, deliveryGroupId);
     if (!task) {
@@ -270,12 +367,106 @@ router.get('/next-task', requireTelegramRoles(['warehouse', 'admin']), async (re
       const pendingFilter = { status: 'pending' };
       if (deliveryGroupId) pendingFilter.deliveryGroupId = String(deliveryGroupId);
       const pendingCount = await PickingTask.countDocuments(pendingFilter);
-      return res.json({ task: null, reviewMode: pendingCount > 0, message: 'Немає задач для збирання' });
+      return res.json({
+        task: null,
+        reviewMode: pendingCount > 0,
+        message: pendingCount > 0 ? 'Залишились пропущені задачі' : 'Немає задач для збирання',
+      });
     }
 
     res.json({ task: taskData });
   } catch (err) {
     console.error('[picking/next-task]', err);
+    next(appError('picking_next_failed'));
+  }
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/picking/block-tasks?blockId=N&deliveryGroupId=...
+// Returns active tasks from one block for picker modal (start from specific product).
+// ---------------------------------------------------------------------------
+router.get('/block-tasks', requireTelegramRoles(['warehouse', 'admin']), async (req, res, next) => {
+  try {
+    const user = req.telegramUser;
+    const blockId = parseInt(req.query.blockId, 10);
+    const deliveryGroupId = req.query.deliveryGroupId || null;
+
+    if (!Number.isInteger(blockId) || blockId < 1) {
+      return next(appError('picking_block_invalid'));
+    }
+
+    await releaseWorkerAndStaleLocks(user.telegramId, deliveryGroupId);
+
+    const filter = {
+      blockId,
+      status: { $in: ['pending', 'locked'] },
+      ...(deliveryGroupId ? { deliveryGroupId: String(deliveryGroupId) } : {}),
+    };
+
+    const tasks = await PickingTask.find(filter)
+      .sort({ positionIndex: 1 })
+      .lean();
+
+    const previewTasks = [];
+    for (const task of tasks) {
+      const taskData = await buildTaskResponse(task);
+      if (!taskData) continue;
+      const totalQty = (task.items || []).reduce((sum, item) => sum + Number(item.quantity || 0), 0);
+      const lockedBy = task.lockedBy ? String(task.lockedBy) : null;
+      const lockedByMe = task.status === 'locked' && lockedBy === String(user.telegramId);
+      const lockedByOther = task.status === 'locked' && !lockedByMe;
+
+      previewTasks.push({
+        taskId: taskData.taskId,
+        productId: taskData.productId,
+        productTitle: taskData.productTitle,
+        imageUrl: taskData.imageUrl,
+        blockId: taskData.blockId,
+        positionIndex: taskData.positionIndex,
+        totalQty,
+        shopCount: (task.items || []).length,
+        status: task.status,
+        lockedBy,
+        lockedByOther,
+      });
+    }
+
+    res.json({ tasks: previewTasks });
+  } catch (err) {
+    console.error('[picking/block-tasks]', err);
+    next(appError('picking_block_tasks_failed'));
+  }
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/picking/queue-stats?deliveryGroupId=...
+// Live queue counters for UI (pending/locked split).
+// ---------------------------------------------------------------------------
+router.get('/queue-stats', requireTelegramRoles(['warehouse', 'admin']), async (req, res, next) => {
+  try {
+    const user = req.telegramUser;
+    const deliveryGroupId = req.query.deliveryGroupId || null;
+
+    if (!deliveryGroupId) {
+      return res.json({ pendingCount: 0, lockedByMeCount: 0, lockedByOtherCount: 0, activeCount: 0 });
+    }
+
+    // Queue polling must NOT release current worker's active lock.
+    // Otherwise the worker gets `expired_lock` while completing a task.
+    await releaseWorkerAndStaleLocks(user.telegramId, deliveryGroupId, { releaseOwnLocks: false });
+
+    const base = { deliveryGroupId: String(deliveryGroupId) };
+
+    const [pendingCount, lockedByMeCount, lockedByOtherCount] = await Promise.all([
+      PickingTask.countDocuments({ ...base, status: 'pending' }),
+      PickingTask.countDocuments({ ...base, status: 'locked', lockedBy: String(user.telegramId) }),
+      PickingTask.countDocuments({ ...base, status: 'locked', lockedBy: { $ne: String(user.telegramId) } }),
+    ]);
+
+    const activeCount = pendingCount + lockedByMeCount + lockedByOtherCount;
+    res.json({ pendingCount, lockedByMeCount, lockedByOtherCount, activeCount });
+  } catch (err) {
+    console.error('[picking/queue-stats]', err);
     next(appError('picking_next_failed'));
   }
 });
@@ -291,7 +482,7 @@ router.post('/tasks/:taskId/complete', requireTelegramRoles(['warehouse', 'admin
 
     const task = await PickingTask.findById(req.params.taskId);
     if (!task) return next(appError('picking_task_not_found'));
-    if (task.lockedBy !== user.telegramId) return next(appError('expired_lock'));
+    if (String(task.lockedBy || '') !== String(user.telegramId || '')) return next(appError('expired_lock'));
 
     // Apply actual packed quantities
     for (const item of task.items) {
@@ -344,7 +535,7 @@ router.patch('/tasks/:taskId/progress', requireTelegramRoles(['warehouse', 'admi
 
     const task = await PickingTask.findById(req.params.taskId);
     if (!task) return next(appError('picking_task_not_found'));
-    if (task.lockedBy !== user.telegramId) return next(appError('expired_lock'));
+    if (String(task.lockedBy || '') !== String(user.telegramId || '')) return next(appError('expired_lock'));
 
     const packedSet = new Set(packedOrderIds.map(String));
     for (const item of task.items) {
@@ -371,7 +562,18 @@ router.post('/tasks/:taskId/claim', requireTelegramRoles(['warehouse', 'admin'])
       { $set: { status: 'locked', lockedBy: user.telegramId, lockedAt: new Date() } },
       { new: true },
     );
-    if (!claimed) return next(appError('picking_claim_unavailable'));
+    if (!claimed) {
+      const existing = await PickingTask.findById(req.params.taskId).lean();
+      if (!existing) return next(appError('picking_claim_unavailable'));
+
+      if (existing.status === 'locked' && String(existing.lockedBy || '') === String(user.telegramId || '')) {
+        const mine = await buildTaskResponse(existing);
+        if (mine) return res.json({ task: mine });
+      }
+
+      if (existing.status === 'locked') return next(appError('picking_claim_taken_by_other'));
+      return next(appError('picking_claim_unavailable'));
+    }
 
     const taskData = await buildTaskResponse(claimed);
     if (!taskData) {
@@ -419,7 +621,7 @@ router.post('/tasks/:taskId/out-of-stock', requireTelegramRoles(['warehouse', 'a
       );
       if (!claimed) return next(appError('picking_claim_taken_by_other'));
       task = claimed;
-    } else if (task.lockedBy !== user.telegramId) {
+    } else if (String(task.lockedBy || '') !== String(user.telegramId || '')) {
       return next(appError('expired_lock'));
     }
 

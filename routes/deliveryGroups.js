@@ -240,14 +240,15 @@ router.get('/:groupId/shop-status', telegramAuth, requireTelegramRoles(['admin',
     const shopOrders = ordersByShop[shopId] || [];
     const uniqueBuyers = new Set(shopOrders.map((o) => o.buyerTelegramId));
     const shopSellerObjs = sellersByShop[shopId] || [];
+    const assignedStaff = shopSellerObjs.filter((s) => s.role === 'seller' || s.role === 'admin');
     const orderedBuyers = orderedBuyersByShop[shopId] || new Set();
     const sellersWithStatus = shopSellerObjs.map((s) => ({ ...s, hasOrder: orderedBuyers.has(s.telegramId) }));
     // hasConflict: 2+ separate buyers placed orders in this shop this session
-    // hasMultipleSellers: 2+ sellers are assigned to this shop (unusual, possible mistake)
-    // hasSellerOrderMismatch: multiple sellers but only some (not all) placed orders — likely someone forgot
-    const hasMultipleSellers = shopSellerObjs.length > 1;
-    const sellersWithOrder = shopSellerObjs.filter((s) => orderedBuyers.has(s.telegramId));
-    const hasSellerOrderMismatch = hasMultipleSellers && shopOrders.length > 0 && sellersWithOrder.length !== shopSellerObjs.length;
+    // hasMultipleSellers: 2+ seller/admin users are assigned to this shop.
+    // hasSellerOrderMismatch: multiple assigned users but only some placed orders.
+    const hasMultipleSellers = assignedStaff.length > 1;
+    const sellersWithOrder = assignedStaff.filter((s) => orderedBuyers.has(s.telegramId));
+    const hasSellerOrderMismatch = hasMultipleSellers && shopOrders.length > 0 && sellersWithOrder.length !== assignedStaff.length;
     return {
       shopId,
       shopName: shop.name,
