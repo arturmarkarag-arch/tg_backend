@@ -8,6 +8,7 @@ const ShopTransferRequest = require('../models/ShopTransferRequest');
 const Shop  = require('../models/Shop');
 const User  = require('../models/User');
 const Order = require('../models/Order');
+const PickingTask = require('../models/PickingTask');
 const { migrateSellerShop } = require('../services/migrateSellerShop');
 const { getIO } = require('../socket');
 
@@ -263,6 +264,57 @@ router.post('/:id/approve', telegramAuth, requireTelegramRole('admin'), asyncHan
           { $set: displacedPatch },
           { session }
         );
+
+        // Якщо замовлення витісненого продавця вже в PickingTask (склад взяв в роботу) —
+        // воно вже "знято" зі snapshot магазину і нікуди не рухається. Не чіпаємо.
+        // Якщо ще не в pipeline — паркуємо: відв'язуємо від магазину, щоб замовлення
+        // пішло за продавцем після наступного призначення через migrateSellerShop.
+        const displacedActiveOrder = await Order.findOne(
+          {
+            buyerTelegramId: targetCurrentSeller.telegramId,
+            shopId: String(effectiveToShopId),
+            status: { $in: ['new', 'in_progress'] },
+          },
+          '_id',
+        ).session(session).lean();
+
+        if (displacedActiveOrder) {
+          const inPipeline = await PickingTask.exists({
+            'items.orderId': displacedActiveOrder._id,
+            status: { $in: ['pending', 'locked', 'completed'] },
+          }).session(session);
+
+          if (!inPipeline) {
+            // Не в роботі складу — паркуємо, щоб migrateSellerShop підхопив при наступному призначенні
+            await Order.updateOne(
+              { _id: displacedActiveOrder._id },
+              {
+                $set: {
+                  shopId: null,
+                  'buyerSnapshot.shopId': null,
+                  'buyerSnapshot.shopName': '',
+                  'buyerSnapshot.shopCity': '',
+                },
+                $push: {
+                  history: {
+                    at: new Date(),
+                    by: String(admin.telegramId),
+                    byName: [admin.firstName, admin.lastName].filter(Boolean).join(' '),
+                    byRole: admin.role,
+                    action: 'seller_displaced_order_parked',
+                    meta: {
+                      fromShop: toShop.name || '',
+                      reason: `shop_transfer_approved:${String(request._id)}`,
+                      incomingSeller: request.sellerName || '',
+                    },
+                  },
+                },
+              },
+              { session },
+            );
+          }
+          // Якщо inPipeline — замовлення залишається на магазині, склад доробляє його як є
+        }
       }
 
       // Apply profile updates if seller requested them

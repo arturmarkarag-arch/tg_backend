@@ -221,6 +221,14 @@ router.get('/next-task', requireTelegramRoles(['warehouse', 'admin']), async (re
     // Does NOT touch items[].packed so partial progress is preserved for the next worker.
     await releaseWorkerAndStaleLocks(user.telegramId, deliveryGroupId);
 
+    // Recovery: якщо сервер упав між фазою 1 (task completed) і фазою 2 (archiveProduct)
+    // в out-of-stock flow — довиконуємо архівування тут, а не тільки в start-session.
+    if (deliveryGroupId) {
+      archiveOrphanedOutOfStockProducts(deliveryGroupId).catch((e) =>
+        console.warn('[picking/next-task] archiveOrphaned failed:', e?.message),
+      );
+    }
+
     const { task, wrappedAround } = await findAndLockNext(user.telegramId, currentBlock, deliveryGroupId);
     if (!task) {
       const pendingFilter = { status: 'pending' };

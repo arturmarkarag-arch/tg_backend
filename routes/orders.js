@@ -755,41 +755,11 @@ router.patch('/:id/snapshot', staffOnly, async (req, res) => {
     ? { shopName: order.buyerSnapshot.shopName, shopCity: order.buyerSnapshot.shopCity }
     : null;
 
-  if (!order.buyerSnapshot) order.buyerSnapshot = {};
-  order.buyerSnapshot.shopId = String(shop._id);
-  order.buyerSnapshot.shopName = shop.name || '';
-  order.buyerSnapshot.shopCity = shop.cityId?.name || '';
-  order.buyerSnapshot.deliveryGroupId = shop.deliveryGroupId ? String(shop.deliveryGroupId) : '';
-
-  // Also update the primary shopId field so queries/grouping reflect the reassignment
-  order.shopId = shop._id;
-
-  // Update orderingSessionId if the new shop belongs to a different delivery group
-  if (shop.deliveryGroupId) {
-    const newGroup = await DeliveryGroup.findById(shop.deliveryGroupId).lean();
-    if (newGroup) {
-      const schedule = await getOrderingSchedule();
-      const newSessionId = getCurrentOrderingSessionId(String(newGroup._id), newGroup.dayOfWeek, schedule);
-      order.orderingSessionId = newSessionId;
-    }
-  }
-
-  order.markModified('buyerSnapshot');
-  order.history.push({
-    ...actorFromReq(req),
-    action: 'shop_reassigned',
-    meta: { from: prevSnapshot, to: { shopName: shop.name || '', shopCity: shop.cityId?.name || '' } },
-  });
-
   // All writes (Order, PickingTask, User) must commit atomically — partial commits
   // would leave the buyer pointing at one shop while the order points at another,
   // causing phantom conflicts and stale buyerSnapshot data on the next /orders POST.
-  let warehouseZone = '';
-  if (shop.deliveryGroupId) {
-    const newGroup = await DeliveryGroup.findById(shop.deliveryGroupId).lean();
-    warehouseZone = newGroup?.name || '';
-  }
-
+  // Всі мутації order виконуються ВСЕРЕДИНІ транзакції, щоб abort залишав
+  // in-memory об'єкт незміненим і не провокував помилкових повторних збережень.
   const session = await mongoose.connection.startSession();
   let txConflict = null;
   try {
@@ -811,6 +781,33 @@ router.patch('/:id/snapshot', staffOnly, async (req, res) => {
 
       // Re-check in transaction to close the race with the picking board.
       await ensureOrderNotInPickingPipeline(order._id, session);
+
+      // Resolve delivery group data once inside the transaction
+      let newSessionId = null;
+      let warehouseZone = '';
+      if (shop.deliveryGroupId) {
+        const newGroup = await DeliveryGroup.findById(shop.deliveryGroupId).session(session).lean();
+        if (newGroup) {
+          const schedule = await getOrderingSchedule();
+          newSessionId = getCurrentOrderingSessionId(String(newGroup._id), newGroup.dayOfWeek, schedule);
+          warehouseZone = newGroup.name || '';
+        }
+      }
+
+      // Mutate order document here so abort leaves the in-memory object untouched
+      if (!order.buyerSnapshot) order.buyerSnapshot = {};
+      order.buyerSnapshot.shopId = String(shop._id);
+      order.buyerSnapshot.shopName = shop.name || '';
+      order.buyerSnapshot.shopCity = shop.cityId?.name || '';
+      order.buyerSnapshot.deliveryGroupId = shop.deliveryGroupId ? String(shop.deliveryGroupId) : '';
+      order.shopId = shop._id;
+      if (newSessionId) order.orderingSessionId = newSessionId;
+      order.markModified('buyerSnapshot');
+      order.history.push({
+        ...actorFromReq(req),
+        action: 'shop_reassigned',
+        meta: { from: prevSnapshot, to: { shopName: shop.name || '', shopCity: shop.cityId?.name || '' } },
+      });
 
       await order.save({ session });
 

@@ -257,7 +257,23 @@ router.post('/:id/items', staffOnly, asyncHandler(async (req, res) => {
     warehousePending: isWarehousePending,
   });
 
-  await receiptItem.save();
+  // Save item AND re-check receipt.status='draft' in the SAME transaction so that
+  // a concurrent commit (which CAS-flips status to 'completed') will either run
+  // before us (we abort with 409) or run after us (it sees our changes).
+  // Аналогічний захист є в PATCH і DELETE — тепер і тут.
+  const addItemSession = await mongoose.connection.startSession();
+  try {
+    await addItemSession.withTransaction(async () => {
+      const liveReceipt = await Receipt.findOne(
+        { _id: req.params.id, status: 'draft' },
+        '_id status',
+      ).session(addItemSession);
+      if (!liveReceipt) throw appError('receipt_already_completed');
+      await receiptItem.save({ session: addItemSession });
+    });
+  } finally {
+    addItemSession.endSession();
+  }
 
   // Log: who added this item
   ReceiptItemLog.create({
