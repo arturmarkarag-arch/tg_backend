@@ -55,12 +55,4 @@ const UserSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-UserSchema.post('findOneAndDelete', async function () {
-  // No-op: DeliveryGroup.members tracking removed.
-});
-
-UserSchema.post('deleteOne', { document: true, query: false }, async function () {
-  // No-op: DeliveryGroup.members tracking removed.
-});
-
 module.exports = mongoose.model('User', UserSchema);

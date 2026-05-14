@@ -7,8 +7,8 @@ const RegistrationRequestSchema = new mongoose.Schema(
     lastName: { type: String, required: true },
     phoneNumber: { type: String, default: '' },
     shopId: { type: String, default: null },
-    shopName: { type: String, default: '' },
-    shopCity: { type: String, default: '' },
+    // shopName/shopCity were dropped — always resolved at read time via Shop.findById(shopId)
+    // so renaming a shop does not leave stale strings on pending requests.
     deliveryGroupId: { type: String, default: '' },
     role: { type: String, enum: ['seller', 'warehouse'], default: 'seller' },
     status: { type: String, enum: ['pending', 'approved', 'rejected', 'blocked'], default: 'pending' },

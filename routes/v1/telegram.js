@@ -12,6 +12,9 @@ const { normalizeDeliveryGroup } = require('../../utils/deliveryGroupHelpers');
 const { getOrderingSchedule } = require('../../utils/getOrderingSchedule');
 const Order = require('../../models/Order');
 const { getIO } = require('../../socket');
+const { appError, asyncHandler } = require('../../utils/errors');
+const { withLock } = require('../../utils/lock');
+const { getShop, getDeliveryGroup } = require('../../utils/modelCache');
 
 const router = express.Router();
 const adminOnly = requireTelegramRole('admin');
@@ -60,82 +63,43 @@ async function resolveWarehouseZone(user) {
 }
 
 // POST /api/v1/telegram/validate — перевірити підпис initData
-router.post('/validate', (req, res) => {
+router.post('/validate', asyncHandler(async (req, res) => {
   const initData = getInitDataFromRequest(req);
-  if (!initData) {
-    return res.status(400).json({ error: 'initData is required' });
-  }
+  if (!initData) throw appError('init_data_required');
 
   const { valid, parsedData, error } = validateTelegramInitData(initData, process.env.TELEGRAM_BOT_TOKEN);
-  if (!valid) {
-    return res.status(401).json({ error: error || 'Invalid initData' });
-  }
+  if (!valid) throw appError('auth_invalid_init_data', { reason: error });
 
-  // Only trust parsedData.user.id — Telegram never puts id at root level
   const telegramId = parsedData.user?.id;
-  if (!telegramId) {
-    return res.status(400).json({ error: 'Telegram user id is missing' });
-  }
+  if (!telegramId) throw appError('auth_telegram_id_missing');
 
   res.json({ telegramId: String(telegramId), user: parsedData.user || null });
-});
+}));
 
 // POST /api/v1/telegram/me — перевірити initData І чи є користувач у системі
 // Повертає профіль якщо є, 403 якщо немає, 401 якщо initData невалідна
-router.post('/me', async (req, res) => {
+router.post('/me', asyncHandler(async (req, res) => {
   const initData = getInitDataFromRequest(req);
-  if (!initData) {
-    return res.status(400).json({ error: 'initData is required' });
-  }
+  if (!initData) throw appError('init_data_required');
 
-  const { valid, parsedData, telegramId, error } = getTelegramAuth(req, process.env.TELEGRAM_BOT_TOKEN);
-  if (!valid) {
-    return res.status(401).json({ error: error || 'Invalid initData' });
-  }
+  const { valid, telegramId, error } = getTelegramAuth(req, process.env.TELEGRAM_BOT_TOKEN);
+  if (!valid) throw appError('auth_invalid_init_data', { reason: error });
+  if (!telegramId) throw appError('auth_telegram_id_missing');
 
-  if (!telegramId) {
-    return res.status(400).json({ error: 'Telegram user id is missing' });
-  }
-
-  // 2. Шукаємо в нашій базі
   const user = await User.findOne({ telegramId }).lean();
   if (!user) {
-    const pendingRequest = await RegistrationRequest.findOne({ telegramId, status: 'pending' }).lean();
-    if (pendingRequest) {
-      return res.status(403).json({
-        error: 'pending_registration',
-        telegramId,
-        message: 'Ваша заявка на реєстрацію прийнята. Очікуйте підтвердження адміністратора.',
-      });
-    }
-
-    const blockedRequest = await RegistrationRequest.findOne({ telegramId, status: 'blocked' }).lean();
-    if (blockedRequest) {
-      return res.status(403).json({
-        error: 'blocked_registration',
-        telegramId,
-        message: 'Ваша реєстрація заблокована. Зверніться до адміністратора.',
-      });
-    }
-
-    const rejectedRequest = await RegistrationRequest.findOne({ telegramId, status: 'rejected' }).lean();
-    if (rejectedRequest) {
-      return res.status(403).json({
-        error: 'rejected_registration',
-        telegramId,
-        message: 'Вашу заявку було відхилено. Ви можете надіслати нову заявку.',
-      });
-    }
-
-    return res.status(403).json({
-      error: 'not_registered',
+    const request = await RegistrationRequest.findOne({
       telegramId,
-      message: 'Вас не знайдено в системі. Зверніться до адміністратора.',
-    });
+      status: { $in: ['pending', 'blocked', 'rejected'] },
+    }).lean();
+    if (request?.status === 'pending')  throw appError('registration_pending');
+    if (request?.status === 'blocked')  throw appError('registration_blocked');
+    if (request?.status === 'rejected') throw appError('registration_rejected');
+    throw appError('not_registered');
   }
 
-  // 3. Повертаємо профіль (без чутливих полів)
-  const userShop = user.shopId ? await Shop.findById(user.shopId).populate('cityId', 'name').lean() : null;
+  // 3. Повертаємо профіль (без чутливих полів). Shop резолвиться з кешу.
+  const userShop = user.shopId ? await getShop(user.shopId) : null;
   const resolvedGroupId = userShop?.deliveryGroupId || user.deliveryGroupId || '';
 
   // Обчислити sessionOpenAt для продавця та адміна з магазином (для визначення нової сесії на клієнті)
@@ -186,106 +150,105 @@ router.post('/me', async (req, res) => {
       updatedAt: null,
     }),
   });
-});
+}));
 
 // PATCH /api/v1/telegram/me/shop — seller оновлює свій магазин.
 // Якщо є активне замовлення — воно автоматично переноситься до нового магазину.
 // Кошик (cartState.orderItems) НЕ очищається — слідує за продавцем.
 // Усі записи (User, Order, PickingTask) виконуються в одній транзакції MongoDB,
 // щоб збій між кроками не залишив User та Order у різних магазинах.
-router.patch('/me/shop', async (req, res) => {
-  try {
-    const user = req.telegramUser;
-    if (!user) return res.status(401).json({ error: 'Not authenticated' });
+router.patch('/me/shop', asyncHandler(async (req, res) => {
+  const user = req.telegramUser;
+  if (!user) throw appError('auth_required');
 
-    const { shopId } = req.body;
-    if (!shopId) return res.status(400).json({ error: 'shopId є обовʼязковим' });
+  const { shopId } = req.body;
+  if (!shopId) throw appError('me_shop_required');
 
-    const shop = await Shop.findById(shopId).populate('cityId', 'name').lean();
-    if (!shop) return res.status(404).json({ error: 'Магазин не знайдено' });
+  const shop = await Shop.findById(shopId).populate('cityId', 'name').lean();
+  if (!shop) throw appError('shop_not_found');
 
-    // Same shop — short-circuit, just return current state
-    if (user.shopId && String(user.shopId) === String(shop._id)) {
-      const fresh = await User.findById(user._id).lean();
-      return res.json({
-        shopId: String(shop._id),
-        shopName: shop.name || '',
-        shopCity: shop.cityId?.name || '',
-        deliveryGroupId: shop.deliveryGroupId ? String(shop.deliveryGroupId) : null,
-        warehouseZone: fresh?.warehouseZone || '',
-        cartState: normalizeCartState(fresh?.cartState ?? null),
-      });
-    }
+  // Same shop — short-circuit, just return current state
+  if (user.shopId && String(user.shopId) === String(shop._id)) {
+    const fresh = await User.findById(user._id).lean();
+    return res.json({
+      shopId: String(shop._id),
+      shopName: shop.name || '',
+      shopCity: shop.cityId?.name || '',
+      deliveryGroupId: shop.deliveryGroupId ? String(shop.deliveryGroupId) : null,
+      warehouseZone: fresh?.warehouseZone || '',
+      cartState: normalizeCartState(fresh?.cartState ?? null),
+    });
+  }
 
-    const { migrateSellerShop } = require('../../services/migrateSellerShop');
-    const mongoose = require('mongoose');
+  const { migrateSellerShop } = require('../../services/migrateSellerShop');
+  const mongoose = require('mongoose');
 
-    let migrationResult = null;
+  const migrationResult = await withLock(`user:${user.telegramId}:shop`, async () => {
     const session = await mongoose.connection.startSession();
     try {
+      let out = null;
       await session.withTransaction(async () => {
-        migrationResult = await migrateSellerShop({
+        const fresh = await User.findOne({ telegramId: user.telegramId }).session(session).lean();
+        if (!fresh) throw appError('user_not_found');
+        out = await migrateSellerShop({
           session,
-          existingUser: user,
+          existingUser: fresh,
           newShopFull: shop,
           actor: user,
           reason: 'seller_changed_shop',
           resetCartItems: false,
           resetCartNavigation: true,
           clearCartReservation: true,
-          pushHistory: false, // me/shop is a self-action — no admin audit entry
+          pushHistory: false,
           updateLastSeller: false,
         });
       });
+      return out;
     } finally {
       session.endSession();
     }
+  });
 
-    // Notify dashboards AFTER commit
-    if (migrationResult?.movedOrder) {
-      try {
-        const io = getIO();
-        if (io) {
-          const { prevGroupId, newGroupId } = migrationResult;
-          if (prevGroupId) io.to(`picking_group_${prevGroupId}`).emit('shop_status_changed', { groupId: prevGroupId });
-          if (newGroupId && newGroupId !== prevGroupId) {
-            io.to(`picking_group_${newGroupId}`).emit('shop_status_changed', { groupId: newGroupId });
-            io.emit('delivery_groups_updated');
-          }
-          io.emit('user_order_updated', { buyerTelegramId: user.telegramId });
+  if (migrationResult?.movedOrder) {
+    try {
+      const io = getIO();
+      if (io) {
+        const { prevGroupId, newGroupId } = migrationResult;
+        if (prevGroupId) io.to(`picking_group_${prevGroupId}`).emit('shop_status_changed', { groupId: prevGroupId });
+        if (newGroupId && newGroupId !== prevGroupId) {
+          io.to(`picking_group_${newGroupId}`).emit('shop_status_changed', { groupId: newGroupId });
+          io.emit('delivery_groups_updated');
         }
-      } catch (e) {
-        console.warn('[PATCH /me/shop] socket emit failed:', e?.message);
+        io.emit('user_order_updated', { buyerTelegramId: user.telegramId });
       }
+    } catch (e) {
+      console.warn('[PATCH /me/shop] socket emit failed:', e?.message);
     }
-
-    const updatedUser = migrationResult?.updatedUser;
-    res.json({
-      shopId: String(shop._id),
-      shopName: shop.name || '',
-      shopCity: shop.cityId?.name || '',
-      deliveryGroupId: shop.deliveryGroupId ? String(shop.deliveryGroupId) : null,
-      warehouseZone: updatedUser?.warehouseZone || '',
-      cartState: normalizeCartState(updatedUser?.cartState ?? null),
-      ...(migrationResult?.movedOrder ? { orderMoved: true } : {}),
-    });
-  } catch (err) {
-    console.error('[PATCH /v1/telegram/me/shop]', err.message);
-    res.status(500).json({ error: err.message });
   }
-});
+
+  const updatedUser = migrationResult?.updatedUser;
+  res.json({
+    shopId: String(shop._id),
+    shopName: shop.name || '',
+    shopCity: shop.cityId?.name || '',
+    deliveryGroupId: shop.deliveryGroupId ? String(shop.deliveryGroupId) : null,
+    warehouseZone: updatedUser?.warehouseZone || '',
+    cartState: normalizeCartState(updatedUser?.cartState ?? null),
+    ...(migrationResult?.movedOrder ? { orderMoved: true } : {}),
+  });
+}));
 
 // POST /api/v1/telegram/mini-app/state — зберегти навігаційний стан (User) і кошик (Shop)
 // Захищено telegramAuth middleware — telegramId береться ТІЛЬКИ з req.telegramId
-router.post('/mini-app/state', async (req, res) => {
+router.post('/mini-app/state', asyncHandler(async (req, res) => {
   const { currentIndex, currentPage, productId, orderItems, orderItemIds, viewMode } = req.body;
   const telegramId = req.telegramId;
 
   if (!Number.isInteger(currentIndex) || currentIndex < 0) {
-    return res.status(400).json({ error: 'currentIndex must be a non-negative integer' });
+    throw appError('me_state_invalid_index', { field: 'currentIndex' });
   }
   if (!Number.isInteger(currentPage) || currentPage < 0) {
-    return res.status(400).json({ error: 'currentPage must be a non-negative integer' });
+    throw appError('me_state_invalid_index', { field: 'currentPage' });
   }
 
   const MAX_CART_ITEMS = 200; // reasonable upper bound per user cart
@@ -316,10 +279,8 @@ router.post('/mini-app/state', async (req, res) => {
 
   if (!user) {
     const pendingRequest = await RegistrationRequest.findOne({ telegramId, status: 'pending' }).lean();
-    if (pendingRequest) {
-      return res.status(403).json({ error: 'pending_registration', message: 'Ваша заявка на реєстрацію очікує підтвердження' });
-    }
-    return res.status(403).json({ error: 'User not found' });
+    if (pendingRequest) throw appError('registration_pending');
+    throw appError('user_not_found');
   }
 
   // Кошик зберігається на продавці (User), а не на магазині — кожен має ізольований кошик
@@ -407,11 +368,11 @@ router.post('/mini-app/state', async (req, res) => {
   }
 
   res.json({ miniAppState: normalizeMiniAppState(user.miniAppState), cartState });
-});
+}));
 
 // POST /api/v1/telegram/mini-app/reset-state — очистити кошик магазину і навігаційний стан продавця
 // Захищено telegramAuth middleware — telegramId береться ТІЛЬКИ з req.telegramId
-router.post('/mini-app/reset-state', async (req, res) => {
+router.post('/mini-app/reset-state', asyncHandler(async (req, res) => {
   const telegramId = req.telegramId;
 
   const user = await User.findOneAndUpdate(
@@ -428,10 +389,8 @@ router.post('/mini-app/reset-state', async (req, res) => {
 
   if (!user) {
     const pendingRequest = await RegistrationRequest.findOne({ telegramId, status: 'pending' }).lean();
-    if (pendingRequest) {
-      return res.status(403).json({ error: 'pending_registration', message: 'Ваша заявка на реєстрацію очікує підтвердження' });
-    }
-    return res.status(403).json({ error: 'User not found' });
+    if (pendingRequest) throw appError('registration_pending');
+    throw appError('user_not_found');
   }
 
   // Очищаємо кошик продавця (тепер зберігається в User)
@@ -478,48 +437,33 @@ router.post('/mini-app/reset-state', async (req, res) => {
   }
 
   res.json({ miniAppState: normalizeMiniAppState(user.miniAppState), cartState });
-});
+}));
 
-router.post('/register-request', async (req, res) => {
+router.post('/register-request', asyncHandler(async (req, res) => {
   const { firstName, lastName, phoneNumber, shopId, role } = req.body;
 
-  const { valid, parsedData, telegramId, error } = getTelegramAuth(req, process.env.TELEGRAM_BOT_TOKEN);
-  if (!valid) {
-    return res.status(401).json({ error: error || 'Invalid initData' });
-  }
+  const { valid, telegramId, error } = getTelegramAuth(req, process.env.TELEGRAM_BOT_TOKEN);
+  if (!valid) throw appError('auth_invalid_init_data', { reason: error });
+  if (!telegramId) throw appError('auth_telegram_id_missing');
 
-  if (!telegramId) {
-    return res.status(400).json({ error: 'Telegram user id is missing' });
-  }
-
-  if (!firstName || !lastName || !role) {
-    return res.status(400).json({ error: "Будь ласка, заповніть всі обов'язкові поля" });
-  }
-  if (!['seller', 'warehouse'].includes(role)) {
-    return res.status(400).json({ error: 'Invalid role selected' });
-  }
-  if (role === 'seller' && !shopId) {
-    return res.status(400).json({ error: "Магазин є обов'язковим для продавця" });
-  }
+  if (!firstName || !lastName || !role) throw appError('registration_required_fields');
+  if (!['seller', 'warehouse'].includes(role)) throw appError('registration_invalid_role');
+  if (role === 'seller' && !shopId) throw appError('registration_seller_shop_required');
 
   const existingUser = await User.findOne({ telegramId }).lean();
-  if (existingUser) {
-    return res.status(409).json({ error: 'User already registered' });
-  }
+  if (existingUser) throw appError('registration_user_exists');
 
   const existingRequest = await RegistrationRequest.findOne({
     telegramId,
     status: { $in: ['pending', 'blocked', 'rejected'] },
   }).lean();
   if (existingRequest) {
-    if (existingRequest.status === 'blocked') {
-      return res.status(403).json({ error: 'Registration request blocked', message: 'Ваша реєстрація заблокована.' });
-    }
+    if (existingRequest.status === 'blocked')  throw appError('registration_blocked');
     if (existingRequest.status === 'rejected') {
       // Allow re-submission: delete old rejected request first
       await RegistrationRequest.findByIdAndDelete(existingRequest._id);
     } else {
-      return res.status(409).json({ error: 'Registration request already exists' });
+      throw appError('registration_request_exists');
     }
   }
 
@@ -527,16 +471,10 @@ router.post('/register-request', async (req, res) => {
   let group = null;
   if (role === 'seller') {
     shop = await Shop.findById(shopId).populate('cityId', 'name').lean();
-    if (!shop || !shop.isActive) {
-      return res.status(400).json({ error: 'Магазин не знайдено' });
-    }
-    if (!shop.deliveryGroupId) {
-      return res.status(400).json({ error: "Магазин не прив'язаний до групи доставки" });
-    }
+    if (!shop || !shop.isActive) throw appError('registration_shop_inactive');
+    if (!shop.deliveryGroupId)   throw appError('registration_shop_no_group');
     group = await DeliveryGroup.findById(shop.deliveryGroupId).lean();
-    if (!group) {
-      return res.status(400).json({ error: 'Групу доставки магазину не знайдено' });
-    }
+    if (!group) throw appError('registration_group_not_found');
   }
 
   const cleanPhone = normalizePhoneNumber(phoneNumber);
@@ -547,8 +485,6 @@ router.post('/register-request', async (req, res) => {
     lastName,
     phoneNumber: cleanPhone,
     shopId:          role === 'seller' ? String(shop._id) : null,
-    shopName:        role === 'seller' ? shop.name        : '',
-    shopCity:        role === 'seller' ? (shop.cityId?.name || '') : '',
     deliveryGroupId: role === 'seller' ? shop.deliveryGroupId : '',
     role,
     status: 'pending',
@@ -558,7 +494,7 @@ router.post('/register-request', async (req, res) => {
   const roleLabel = role === 'warehouse' ? 'Склад' : 'Продавець';
   const message = `📥 Нова заявка на реєстрацію (${roleLabel}):\n` +
     `Telegram ID: ${telegramId}\n` +
-    `Ім'я: ${firstName}\n` +
+    `Імʼя: ${firstName}\n` +
     `Прізвище: ${lastName}\n` +
     (cleanPhone ? `Телефон: ${cleanPhone}\n` : '') +
     `Роль: ${roleLabel}\n` +
@@ -570,59 +506,45 @@ router.post('/register-request', async (req, res) => {
   sendAdminNotification(message, request._id.toString()).catch(() => {});
 
   res.status(201).json({ requestId: request._id, status: 'pending' });
-});
+}));
 
-router.get('/register-requests', adminOnly, async (req, res) => {
+router.get('/register-requests', adminOnly, asyncHandler(async (req, res) => {
   const status = String(req.query.status || 'pending');
   const allowedStatuses = ['pending', 'rejected', 'blocked', 'approved', 'all'];
-  if (!allowedStatuses.includes(status)) {
-    return res.status(400).json({ error: 'Invalid status filter' });
-  }
+  if (!allowedStatuses.includes(status)) throw appError('registration_status_invalid');
 
   const filter = status === 'all' ? {} : { status };
   const requests = await RegistrationRequest.find(filter).sort({ createdAt: -1 }).lean();
   res.json(requests);
-});
+}));
 
-router.post('/register-requests/:id/approve', adminOnly, async (req, res) => {
+router.post('/register-requests/:id/approve', adminOnly, asyncHandler(async (req, res) => {
   const request = await RegistrationRequest.findById(req.params.id).lean();
-  if (!request || request.status !== 'pending') {
-    return res.status(404).json({ error: 'Pending registration request not found' });
-  }
+  if (!request) throw appError('registration_not_found');
+  if (request.status !== 'pending') throw appError('registration_not_pending');
+
   // Admin may override shopId at approve time (e.g. seller picked wrong shop)
-  if (req.body.shopId) {
-    request.shopId = req.body.shopId;
-  }
+  if (req.body.shopId) request.shopId = req.body.shopId;
 
   const existingUser = await User.findOne({ telegramId: request.telegramId }).lean();
   if (existingUser) {
     await RegistrationRequest.findByIdAndUpdate(req.params.id, { status: 'rejected' });
-    return res.status(409).json({ error: 'User already registered' });
+    throw appError('registration_user_exists');
   }
 
-  if (!request.role) {
-    return res.status(400).json({ error: 'Role is missing in registration request' });
-  }
+  if (!request.role) throw appError('registration_role_missing');
+  if (request.role === 'seller' && !request.deliveryGroupId) throw appError('registration_group_missing');
 
-  if (request.role === 'seller' && !request.deliveryGroupId) {
-    return res.status(400).json({ error: 'Delivery group is missing for seller' });
-  }
-
-  // Resolve shopId → actual Shop document to get fresh data and validate it still exists
+  // Resolve shopId → actual Shop document to get fresh data and validate it still exists.
+  // shopName/shopCity are no longer stored on User — only shopId, deliveryGroupId, warehouseZone.
   let resolvedShopId = null;
-  let resolvedShopName = request.shopName || '';
-  let resolvedShopCity = request.shopCity || '';
   let resolvedDeliveryGroupId = request.role === 'seller' ? request.deliveryGroupId || '' : '';
   let resolvedWarehouseZone = '';
 
   if (request.role === 'seller' && request.shopId) {
     const shop = await Shop.findOne({ _id: request.shopId, isActive: true }).populate('cityId', 'name').lean();
-    if (!shop) {
-      return res.status(400).json({ error: 'shop_not_found', message: 'Магазин не знайдено або він неактивний. Оновіть заявку.' });
-    }
+    if (!shop) throw appError('registration_shop_inactive');
     resolvedShopId = shop._id;
-    resolvedShopName = shop.name || '';
-    resolvedShopCity = shop.cityId?.name || '';
     resolvedDeliveryGroupId = shop.deliveryGroupId || resolvedDeliveryGroupId;
     if (resolvedDeliveryGroupId) {
       const grp = await DeliveryGroup.findById(resolvedDeliveryGroupId).lean();
@@ -640,63 +562,50 @@ router.post('/register-requests/:id/approve', adminOnly, async (req, res) => {
         lastName: request.lastName,
         phoneNumber: request.phoneNumber || '',
         shopId: resolvedShopId,
-        shopName: resolvedShopName,
-        shopCity: resolvedShopCity,
         deliveryGroupId: resolvedDeliveryGroupId,
         warehouseZone: resolvedWarehouseZone,
       },
     },
     { upsert: true, new: true, setDefaultsOnInsert: true }
   );
-  if (!user) {
-    return res.status(409).json({ error: 'User already registered' });
-  }
+  if (!user) throw appError('registration_user_exists');
   await RegistrationRequest.findByIdAndDelete(req.params.id);
 
   await sendRegistrationApprovedMessage(user.telegramId, user.role).catch((err) => {
-    console.warn('Failed to send registration approval notification', err?.message || err);
+    console.warn('[approve] sendRegistrationApprovedMessage failed:', err?.message || err);
   });
 
-  res.json({ message: 'User approved', telegramId: user.telegramId, role: user.role });
-});
+  res.json({ message: 'Заявку схвалено', telegramId: user.telegramId, role: user.role });
+}));
 
-router.post('/register-requests/:id/reject', adminOnly, async (req, res) => {
+router.post('/register-requests/:id/reject', adminOnly, asyncHandler(async (req, res) => {
   const request = await RegistrationRequest.findById(req.params.id).lean();
-  if (!request || request.status !== 'pending') {
-    return res.status(404).json({ error: 'Pending registration request not found' });
-  }
-  // Mark as rejected so the user sees "заявку відхилено" in Mini App and can re-submit
+  if (!request) throw appError('registration_not_found');
+  if (request.status !== 'pending') throw appError('registration_not_pending');
   await RegistrationRequest.findByIdAndUpdate(req.params.id, { status: 'rejected' });
-  res.json({ message: 'Registration request rejected', telegramId: request.telegramId });
-});
+  res.json({ message: 'Заявку відхилено', telegramId: request.telegramId });
+}));
 
-router.post('/register-requests/:id/block', adminOnly, async (req, res) => {
+router.post('/register-requests/:id/block', adminOnly, asyncHandler(async (req, res) => {
   const request = await RegistrationRequest.findById(req.params.id).lean();
-  if (!request || request.status !== 'pending') {
-    return res.status(404).json({ error: 'Pending registration request not found' });
-  }
-
+  if (!request) throw appError('registration_not_found');
+  if (request.status !== 'pending') throw appError('registration_not_pending');
   await RegistrationRequest.findByIdAndUpdate(req.params.id, { status: 'blocked' });
-  res.json({ message: 'Registration request blocked', telegramId: request.telegramId });
-});
+  res.json({ message: 'Заявку заблоковано', telegramId: request.telegramId });
+}));
 
-router.post('/register-requests/:id/unblock', adminOnly, async (req, res) => {
+router.post('/register-requests/:id/unblock', adminOnly, asyncHandler(async (req, res) => {
   const request = await RegistrationRequest.findById(req.params.id).lean();
-  if (!request || request.status !== 'blocked') {
-    return res.status(404).json({ error: 'Blocked registration request not found' });
-  }
-
+  if (!request) throw appError('registration_not_found');
+  if (request.status !== 'blocked') throw appError('registration_not_pending');
   await RegistrationRequest.findByIdAndUpdate(req.params.id, { status: 'pending' });
-  res.json({ message: 'Registration request unblocked', telegramId: request.telegramId });
-});
+  res.json({ message: 'Заявку розблоковано', telegramId: request.telegramId });
+}));
 
-router.delete('/register-requests/:id', adminOnly, async (req, res) => {
+router.delete('/register-requests/:id', adminOnly, asyncHandler(async (req, res) => {
   const request = await RegistrationRequest.findByIdAndDelete(req.params.id).lean();
-  if (!request) {
-    return res.status(404).json({ error: 'Registration request not found' });
-  }
-
-  res.json({ message: 'Registration request deleted', telegramId: request.telegramId });
-});
+  if (!request) throw appError('registration_not_found');
+  res.json({ message: 'Заявку видалено', telegramId: request.telegramId });
+}));
 
 module.exports = router;

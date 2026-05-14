@@ -8,6 +8,7 @@ const User = require('../models/User');
 const Order = require('../models/Order');
 const { telegramAuth, requireTelegramRole } = require('../middleware/telegramAuth');
 const cache = require('../utils/cache');
+const { invalidateShop } = require('../utils/modelCache');
 
 const router = express.Router();
 
@@ -76,10 +77,10 @@ router.get('/', asyncHandler(async (req, res) => {
 // ─── GET /api/shops/cities ────────────────────────────────────────────────────
 // Публічний список міст (для реєстрації та seller)
 router.get('/cities', asyncHandler(async (req, res) => {
-  let cities = cache.get(cache.KEYS.CITIES);
+  let cities = await cache.get(cache.KEYS.CITIES);
   if (!cities) {
     cities = await City.find().sort({ name: 1 }).lean();
-    cache.set(cache.KEYS.CITIES, cities);
+    await cache.set(cache.KEYS.CITIES, cities);
   }
   res.json(cities);
 }));
@@ -147,6 +148,7 @@ router.patch('/:id', telegramAuth, requireTelegramRole('admin'), asyncHandler(as
   }
 
   await shop.save();
+  await invalidateShop(shop._id);
   res.json(shop);
 }));
 
@@ -175,8 +177,12 @@ router.delete('/:id', telegramAuth, requireTelegramRole('admin'), asyncHandler(a
       if (activeOrders > 0) throw appError('shop_has_active_orders', { activeOrders });
 
       await Shop.deleteOne({ _id: shop._id }, { session });
-      result = { message: 'Магазин видалено' };
+      result = { message: 'Магазин видалено', _shopId: String(shop._id) };
     });
+    if (result?._shopId) {
+      await invalidateShop(result._shopId);
+      delete result._shopId;
+    }
     return res.json(result);
   } finally {
     session.endSession();
@@ -245,6 +251,7 @@ router.patch('/:id/sellers', telegramAuth, requireTelegramRole('admin'), asyncHa
     } finally {
       session.endSession();
     }
+    await invalidateShop(req.params.id);
   }
 
   // Повертаємо оновлений список

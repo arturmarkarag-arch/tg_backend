@@ -23,6 +23,9 @@
 const ERRORS = {
   // ── Generic ────────────────────────────────────────────────────────────────
   internal_error:           { status: 500, message: 'Внутрішня помилка сервера' },
+  lock_busy:                { status: 409, message: ({ resource } = {}) => resource
+                                ? `Ресурс «${resource}» зараз змінюється іншим користувачем. Спробуйте ще раз за кілька секунд.`
+                                : 'Ресурс зараз змінюється іншим користувачем. Спробуйте ще раз за кілька секунд.' },
   validation_failed:        { status: 400, message: ({ field } = {}) => field
                                 ? `Невалідне значення поля «${field}»`
                                 : 'Невалідні дані запиту' },
@@ -48,6 +51,9 @@ const ERRORS = {
 
   // ── Users ──────────────────────────────────────────────────────────────────
   user_not_found:           { status: 404, message: 'Користувача не знайдено' },
+  user_telegram_id_taken:   { status: 409, message: ({ telegramId } = {}) =>
+                                `Користувач з Telegram ID ${telegramId || ''} вже існує. Оновіть сторінку і повторіть.` },
+  user_create_failed:       { status: 500, message: 'Не вдалося створити користувача' },
   user_has_active_work:     { status: 409, message: ({ activeOrders = 0, activePickingTasks = 0 } = {}) =>
                                 `Не можна видалити користувача: ${activeOrders} активне замовлення, ${activePickingTasks} активний пакувальний таск. Спочатку завершіть або скасуйте їх.` },
 
@@ -216,7 +222,30 @@ const ERRORS = {
   block_search_query_required:{ status: 400, message: 'Не вказано пошуковий запит' },
 
   // ── Admin / OpenAI / cities ────────────────────────────────────────────────
+  openai_connection_failed: { status: 500, message: ({ reason } = {}) => reason
+                                ? `Не вдалося підключитися до OpenAI: ${reason}`
+                                : 'Не вдалося підключитися до OpenAI' },
   openai_models_failed:     { status: 500, message: 'Не вдалося отримати список моделей OpenAI' },
+  me_shop_required:         { status: 400, message: 'shopId є обовʼязковим' },
+  me_state_invalid_index:   { status: 400, message: ({ field } = {}) =>
+                                `Поле «${field || 'currentIndex'}» має бути цілим невідʼємним числом` },
+  init_data_required:       { status: 400, message: 'Відсутні дані Telegram (initData)' },
+  registration_pending:     { status: 403, message: 'Ваша заявка на реєстрацію очікує підтвердження адміністратора' },
+  registration_blocked:     { status: 403, message: 'Ваша реєстрація заблокована. Зверніться до адміністратора.' },
+  registration_rejected:    { status: 403, message: 'Вашу заявку було відхилено. Ви можете надіслати нову заявку.' },
+  registration_required_fields: { status: 400, message: 'Будь ласка, заповніть всі обовʼязкові поля' },
+  registration_invalid_role:{ status: 400, message: 'Невірно вибрана роль' },
+  registration_seller_shop_required: { status: 400, message: 'Магазин є обовʼязковим для продавця' },
+  registration_shop_inactive: { status: 400, message: 'Магазин не знайдено або він неактивний' },
+  registration_shop_no_group: { status: 400, message: 'Магазин не привʼязаний до групи доставки' },
+  registration_group_not_found: { status: 400, message: 'Групу доставки магазину не знайдено' },
+  registration_request_exists: { status: 409, message: 'У вас вже є активна заявка на реєстрацію' },
+  registration_user_exists: { status: 409, message: 'Користувач уже зареєстрований у системі' },
+  registration_not_found:   { status: 404, message: 'Заявку на реєстрацію не знайдено' },
+  registration_not_pending: { status: 409, message: 'Заявка вже оброблена (схвалена/відхилена/заблокована)' },
+  registration_status_invalid: { status: 400, message: 'Невірний фільтр статусу заявок' },
+  registration_role_missing:{ status: 400, message: 'У заявці відсутня роль користувача' },
+  registration_group_missing:{ status: 400, message: 'У заявці продавця відсутня група доставки' },
   openai_settings_read_failed:{ status: 500, message: 'Не вдалося прочитати налаштування OpenAI' },
   openai_settings_save_failed:{ status: 500, message: 'Не вдалося зберегти налаштування OpenAI' },
   openai_model_required:    { status: 400, message: 'Поле model обовʼязкове' },

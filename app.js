@@ -59,7 +59,12 @@ app.get('/api/openai-status', async (req, res) => {
     const result = await verifyOpenAIConnection();
     res.json(result);
   } catch (error) {
-    res.status(500).json({ status: 'error', message: error.message || 'OpenAI connection failed' });
+    const { t } = require('./utils/errors');
+    res.status(500).json({
+      status: 'error',
+      error: 'openai_connection_failed',
+      message: t('openai_connection_failed', { reason: error?.message }),
+    });
   }
 });
 
@@ -89,7 +94,10 @@ app.use(errorHandler);
 // Serve built React client
 const clientDist = path.join(__dirname, '../client/dist');
 app.use(express.static(clientDist));
-app.get('/{*path}', (req, res) => {
+app.get('/{*path}', (req, res, next) => {
+  if (req.path.startsWith('/api/')) {
+    return res.status(404).json({ error: 'not_found', message: 'Не знайдено' });
+  }
   res.sendFile(path.join(clientDist, 'index.html'));
 });
 

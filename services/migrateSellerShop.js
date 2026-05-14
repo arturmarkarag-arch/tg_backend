@@ -12,6 +12,7 @@ const PickingTask = require('../models/PickingTask');
 const { getCurrentOrderingSessionId } = require('../utils/orderingSchedule');
 const { getOrderingSchedule } = require('../utils/getOrderingSchedule');
 const { appError } = require('../utils/errors');
+const { invalidateShop, getShop, getDeliveryGroup } = require('../utils/modelCache');
 
 async function ensureOrderNotInPickingPipeline(orderId, session) {
   const exists = await PickingTask.exists({
@@ -56,17 +57,19 @@ async function migrateSellerShop({
     ? String(newShopFull.deliveryGroupId)
     : '';
 
-  // Resolve session ids and warehouse zone for both shops
+  // Resolve session ids and warehouse zone for both shops.
+  // Shop + DeliveryGroup are pulled from the hot cache — they almost never change
+  // and are read on every shop migration. The session is NOT passed because the
+  // cached version is read-only; any writes go through Shop.findByIdAndUpdate with
+  // session below and invalidate the cache afterwards.
   const [oldShopFull, schedule] = await Promise.all([
-    oldShopId
-      ? Shop.findById(oldShopId).populate('cityId', 'name').session(session).lean()
-      : Promise.resolve(null),
+    oldShopId ? getShop(oldShopId) : Promise.resolve(null),
     getOrderingSchedule(),
   ]);
 
   let oldSessionId = null;
   if (oldShopFull?.deliveryGroupId) {
-    const oldGroup = await DeliveryGroup.findById(oldShopFull.deliveryGroupId).session(session).lean();
+    const oldGroup = await getDeliveryGroup(oldShopFull.deliveryGroupId);
     if (oldGroup) {
       oldSessionId = getCurrentOrderingSessionId(String(oldGroup._id), oldGroup.dayOfWeek, schedule);
     }
@@ -75,7 +78,7 @@ async function migrateSellerShop({
   let newSessionId = null;
   let warehouseZone = '';
   if (newDeliveryGroupId) {
-    const newGroup = await DeliveryGroup.findById(newDeliveryGroupId).session(session).lean();
+    const newGroup = await getDeliveryGroup(newDeliveryGroupId);
     if (newGroup) {
       warehouseZone = newGroup.name || '';
       newSessionId = getCurrentOrderingSessionId(String(newGroup._id), newGroup.dayOfWeek, schedule);
@@ -232,6 +235,13 @@ async function migrateSellerShop({
       { session },
     );
   }
+
+  // Hot-cache invalidation — fired after writes so the next read sees fresh data.
+  // Safe to await even if no session.commitTransaction has run yet; the writes are
+  // captured in the transaction and become visible on commit (which the caller
+  // performs immediately after this helper returns).
+  if (oldShopId) await invalidateShop(oldShopId);
+  if (newShopId) await invalidateShop(newShopId);
 
   return {
     updatedUser,

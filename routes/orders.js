@@ -18,12 +18,14 @@ const { getOrderingSchedule } = require('../utils/getOrderingSchedule');
 const { appError, asyncHandler } = require('../utils/errors');
 const { normalizeDeliveryGroup } = require('../utils/deliveryGroupHelpers');
 const cache = require('../utils/cache');
+const { getShop, getDeliveryGroup } = require('../utils/modelCache');
+const { withLock } = require('../utils/lock');
 
 async function getAllDeliveryGroups() {
-  let groups = cache.get(cache.KEYS.DELIVERY_GROUPS);
+  let groups = await cache.get(cache.KEYS.DELIVERY_GROUPS);
   if (!groups) {
     groups = await DeliveryGroup.find().lean();
-    cache.set(cache.KEYS.DELIVERY_GROUPS, groups);
+    await cache.set(cache.KEYS.DELIVERY_GROUPS, groups);
   }
   return groups;
 }
@@ -407,7 +409,26 @@ router.get('/:id', async (req, res) => {
   res.json(obj);
 });
 
-router.post('/', async (req, res) => {
+router.post('/', asyncHandler(async (req, res) => {
+  const { idempotencyKey } = req.body;
+  const sanitizedKeyEarly = typeof idempotencyKey === 'string' && idempotencyKey.trim() ? idempotencyKey.trim() : null;
+
+  // Idempotency: serialise duplicate POSTs on the same key so the second waits
+  // for the first commit and returns the existing order, without burning an
+  // orderNumber. If no key is supplied, fall back to the old behaviour.
+  if (sanitizedKeyEarly) {
+    return withLock(`order:idem:${sanitizedKeyEarly}`, async () => {
+      const existing = await Order.findOne({ idempotencyKey: sanitizedKeyEarly }).lean();
+      if (existing) {
+        return res.status(200).json(existing);
+      }
+      return placeOrderImpl(req, res);
+    }, { ttlMs: 30_000, waitMs: 20_000 });
+  }
+  return placeOrderImpl(req, res);
+}));
+
+async function placeOrderImpl(req, res) {
   const { initData, buyerTelegramId, items, shippingAddress, contactInfo, emojiType, idempotencyKey } = req.body;
 
   const validation = getTelegramAuth(req, process.env.TELEGRAM_BOT_TOKEN);
@@ -447,14 +468,14 @@ router.post('/', async (req, res) => {
     });
   }
   if (buyer.role === 'seller' || buyer.role === 'admin' || buyer.role === 'warehouse') {
-    shop = await Shop.findById(buyer.shopId).populate('cityId', 'name').lean();
+    shop = await getShop(buyer.shopId);
     if (!shop || !shop.deliveryGroupId) {
       return res.status(403).json({
         error: 'no_delivery_group',
         message: 'Ваш магазин не прив\'язано до групи доставки. Зверніться до адміністратора.',
       });
     }
-    group = await DeliveryGroup.findById(shop.deliveryGroupId).lean();
+    group = await getDeliveryGroup(shop.deliveryGroupId);
     if (!group) {
       return res.status(403).json({
         error: 'delivery_group_not_found',
@@ -717,8 +738,8 @@ router.post('/', async (req, res) => {
   // явно перепідтягнути стан (refetch), бо real-time оновлення не дійде.
   responseBody._meta = { socketDelivered, ...(socketError ? { socketError } : {}) };
 
-  res.status(201).json(responseBody);
-});
+  return res.status(201).json(responseBody);
+}
 
 // PATCH /:id/snapshot — admin reassigns order to a different shop
 router.patch('/:id/snapshot', staffOnly, async (req, res) => {

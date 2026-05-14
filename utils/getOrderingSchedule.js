@@ -23,8 +23,8 @@ const ORDERING_SCHEDULE_KEY = 'ordering.schedule';
  * @returns {Promise<{ openHour: number, openMinute: number, closeHour: number, closeMinute: number }>}
  */
 async function getOrderingSchedule() {
-  const cached = cache.get(cache.KEYS.ORDERING_SCHEDULE);
-  if (cached) return cached;
+  const cached = await cache.get(cache.KEYS.ORDERING_SCHEDULE);
+  if (cached) return structuredClone(cached);
 
   const doc = await AppSetting.findOne({ key: ORDERING_SCHEDULE_KEY }).lean();
   if (!doc || !doc.value) {
@@ -34,12 +34,13 @@ async function getOrderingSchedule() {
     );
   }
 
-  cache.set(cache.KEYS.ORDERING_SCHEDULE, doc.value);
-  return doc.value;
+  const value = structuredClone(doc.value);
+  await cache.set(cache.KEYS.ORDERING_SCHEDULE, value);
+  return structuredClone(value);
 }
 
-function invalidateOrderingScheduleCache() {
-  cache.invalidate(cache.KEYS.ORDERING_SCHEDULE);
+async function invalidateOrderingScheduleCache() {
+  await cache.invalidate(cache.KEYS.ORDERING_SCHEDULE);
 }
 
 module.exports = { getOrderingSchedule, invalidateOrderingScheduleCache, ORDERING_SCHEDULE_KEY };

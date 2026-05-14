@@ -16,12 +16,13 @@ const { normalizeDeliveryGroup } = require('../utils/deliveryGroupHelpers');
 
 const { getOrderingSchedule } = require('../utils/getOrderingSchedule');
 const cache = require('../utils/cache');
+const { invalidateDeliveryGroup } = require('../utils/modelCache');
 
 async function getAllDeliveryGroups() {
-  let groups = cache.get(cache.KEYS.DELIVERY_GROUPS);
+  let groups = await cache.get(cache.KEYS.DELIVERY_GROUPS);
   if (!groups) {
     groups = await DeliveryGroup.find().lean();
-    cache.set(cache.KEYS.DELIVERY_GROUPS, groups);
+    await cache.set(cache.KEYS.DELIVERY_GROUPS, groups);
   }
   return groups;
 }
@@ -442,7 +443,8 @@ router.post('/', telegramAuth, requireTelegramRole('admin'), asyncHandler(async 
 
   const group = new DeliveryGroup({ name, dayOfWeek });
   await group.save();
-  cache.invalidate(cache.KEYS.DELIVERY_GROUPS);
+  await cache.invalidate(cache.KEYS.DELIVERY_GROUPS);
+  await invalidateDeliveryGroup(group._id);
   res.status(201).json(group);
 }));
 
@@ -455,7 +457,8 @@ router.patch('/:id', telegramAuth, requireTelegramRole('admin'), asyncHandler(as
   if (dayOfWeek !== undefined) group.dayOfWeek = dayOfWeek;
 
   await group.save();
-  cache.invalidate(cache.KEYS.DELIVERY_GROUPS);
+  await cache.invalidate(cache.KEYS.DELIVERY_GROUPS);
+  await invalidateDeliveryGroup(group._id);
   res.json(group);
 }));
 
@@ -482,9 +485,13 @@ router.delete('/:id', telegramAuth, requireTelegramRole('admin'), asyncHandler(a
       if (activeOrders > 0) throw appError('group_has_active_orders', { activeOrders });
 
       await DeliveryGroup.deleteOne({ _id: group._id }, { session });
-      cache.invalidate(cache.KEYS.DELIVERY_GROUPS);
-      result = { message: 'Group deleted' };
+      result = { message: 'Групу видалено', _groupId: String(group._id) };
     });
+    await cache.invalidate(cache.KEYS.DELIVERY_GROUPS);
+    if (result?._groupId) {
+      await invalidateDeliveryGroup(result._groupId);
+      delete result._groupId;
+    }
     return res.json(result);
   } finally {
     session.endSession();

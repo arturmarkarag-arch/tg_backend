@@ -216,7 +216,14 @@ async function handleBotBlocked(telegramId) {
     const name = [blockedUser?.firstName, blockedUser?.lastName].filter(Boolean).join(' ') || telegramId;
     const roleLabels = { seller: 'Продавець', warehouse: 'Склад', admin: 'Адмін' };
     const roleLabel = roleLabels[blockedUser?.role] || blockedUser?.role || 'Невідома роль';
-    const shopParts = [blockedUser?.shopName, blockedUser?.shopCity].filter(Boolean);
+    // shopName/shopCity are no longer on User — look up via shopId (cached)
+    let shopDisplayName = '';
+    if (blockedUser?.shopId) {
+      const { getShop } = require('./utils/modelCache');
+      const blockedShop = await getShop(blockedUser.shopId);
+      if (blockedShop) shopDisplayName = [blockedShop.name, blockedShop.cityId?.name].filter(Boolean).join(', ');
+    }
+    const shopParts = shopDisplayName ? [shopDisplayName] : [];
     const lines = [`⛔ БОТ ЗАБЛОКОВАНО!`, `${roleLabel}: ${name}`];
     if (shopParts.length) lines.push(`Магазин: ${shopParts.join(', ')}`);
     lines.push(`заблокував бота.`);
@@ -450,17 +457,14 @@ async function initBot(token) {
             await RegistrationRequest.findByIdAndUpdate(requestId, { status: 'rejected' });
             await bot.answerCallbackQuery(query.id, { text: 'Користувач вже зареєстрований', show_alert: true });
           } else {
-            // Resolve shop & legacy fields
+            // Resolve shop fresh — shopName/shopCity are NOT stored on User anymore,
+            // they are always read via shopId → Shop lookup at display time.
             let shopId          = request.shopId || null;
-            let shopName        = request.shopName || '';
-            let shopCity        = request.shopCity  || '';
             let deliveryGroupId = request.deliveryGroupId || '';
             let warehouseZone   = '';
             if (shopId) {
               const shop = await Shop.findById(shopId).populate('cityId', 'name').lean();
               if (shop) {
-                shopName        = shop.name;
-                shopCity        = shop.cityId?.name || '';
                 deliveryGroupId = shop.deliveryGroupId || '';
                 if (deliveryGroupId) {
                   const grp = await DeliveryGroup.findById(deliveryGroupId).lean();
@@ -474,8 +478,6 @@ async function initBot(token) {
               firstName: request.firstName,
               lastName: request.lastName,
               shopId:          request.role === 'seller' ? shopId          : null,
-              shopName:        request.role === 'seller' ? shopName        : '',
-              shopCity:        request.role === 'seller' ? shopCity        : '',
               deliveryGroupId: request.role === 'seller' ? deliveryGroupId : '',
               warehouseZone:   request.role === 'seller' ? warehouseZone   : '',
             });

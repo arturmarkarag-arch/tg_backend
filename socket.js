@@ -3,6 +3,8 @@ const mongoose = require('mongoose');
 const Block = require('./models/Block');
 const User = require('./models/User');
 const { validateTelegramInitData } = require('./utils/validateTelegramInitData');
+const { pubClient, subClient, isEnabled: redisEnabled } = require('./utils/redis');
+const { createAdapter } = require('@socket.io/redis-adapter');
 
 let io = null;
 
@@ -43,6 +45,19 @@ function initSocket(httpServer) {
   io = new Server(httpServer, {
     cors: { origin: '*', methods: ['GET', 'POST'] },
   });
+
+  // Cross-worker Socket.IO via Redis pub/sub. Without this, an emit on worker A
+  // never reaches a client connected to worker B.
+  if (redisEnabled() && pubClient && subClient) {
+    try {
+      io.adapter(createAdapter(pubClient, subClient));
+      console.log('[Socket] Redis adapter active — events broadcast across all workers');
+    } catch (err) {
+      console.warn('[Socket] Redis adapter init failed, falling back to single-process:', err.message);
+    }
+  } else {
+    console.warn('[Socket] Running without Redis adapter — single-process only');
+  }
 
   // Auth middleware — verify initData on every socket connection
   io.use(async (socket, next) => {

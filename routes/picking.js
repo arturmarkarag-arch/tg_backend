@@ -11,6 +11,7 @@ const { isOrderingOpen, getWarsawNow, DAY_FULL_UK, getCurrentOrderingSessionId, 
 const { normalizeDeliveryGroup } = require('../utils/deliveryGroupHelpers');
 const { getOrderingSchedule } = require('../utils/getOrderingSchedule');
 const { appError } = require('../utils/errors');
+const { withLock } = require('../utils/lock');
 
 const {
   findAndLockNext,
@@ -424,31 +425,37 @@ router.patch('/tasks/:taskId/progress', requireTelegramRoles(['warehouse', 'admi
 router.post('/tasks/:taskId/claim', requireTelegramRoles(['warehouse', 'admin']), async (req, res, next) => {
   try {
     const user = req.telegramUser;
+    const taskId = String(req.params.taskId);
 
-    const claimed = await PickingTask.findOneAndUpdate(
-      { _id: req.params.taskId, status: 'pending' },
-      { $set: { status: 'locked', lockedBy: user.telegramId, lockedAt: new Date() } },
-      { new: true },
-    );
-    if (!claimed) {
-      const existing = await PickingTask.findById(req.params.taskId).lean();
-      if (!existing) return next(appError('picking_claim_unavailable'));
+    // Lock prevents a worker who taps "Взяти" twice across the network from
+    // both racing the Mongo findOneAndUpdate. The first wins, the second sees
+    // status='locked' with lockedBy=themselves and gets the same task back.
+    await withLock(`picking:${taskId}:claim`, async () => {
+      const claimed = await PickingTask.findOneAndUpdate(
+        { _id: taskId, status: 'pending' },
+        { $set: { status: 'locked', lockedBy: user.telegramId, lockedAt: new Date() } },
+        { new: true },
+      );
+      if (!claimed) {
+        const existing = await PickingTask.findById(taskId).lean();
+        if (!existing) return next(appError('picking_claim_unavailable'));
 
-      if (existing.status === 'locked' && String(existing.lockedBy || '') === String(user.telegramId || '')) {
-        const mine = await buildTaskResponse(existing);
-        if (mine) return res.json({ task: mine });
+        if (existing.status === 'locked' && String(existing.lockedBy || '') === String(user.telegramId || '')) {
+          const mine = await buildTaskResponse(existing);
+          if (mine) return res.json({ task: mine });
+        }
+
+        if (existing.status === 'locked') return next(appError('picking_claim_taken_by_other'));
+        return next(appError('picking_claim_unavailable'));
       }
 
-      if (existing.status === 'locked') return next(appError('picking_claim_taken_by_other'));
-      return next(appError('picking_claim_unavailable'));
-    }
-
-    const taskData = await buildTaskResponse(claimed);
-    if (!taskData) {
-      await PickingTask.findByIdAndUpdate(claimed._id, { $set: { status: 'pending', lockedBy: null, lockedAt: null } });
-      return next(appError('picking_product_not_found'));
-    }
-    res.json({ task: taskData });
+      const taskData = await buildTaskResponse(claimed);
+      if (!taskData) {
+        await PickingTask.findByIdAndUpdate(claimed._id, { $set: { status: 'pending', lockedBy: null, lockedAt: null } });
+        return next(appError('picking_product_not_found'));
+      }
+      res.json({ task: taskData });
+    }, { ttlMs: 10_000, waitMs: 5_000 });
   } catch (err) {
     console.error('[picking/claim]', err);
     next(appError('picking_claim_failed'));
