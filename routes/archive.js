@@ -123,7 +123,7 @@ router.post('/:id/restore', asyncHandler(async (req, res) => {
       product.archivedAt = null;
       product.originalOrderNumber = null;
       product.restoredFromArchive = true;
-      product.source = 'receive'; // повертається в надходження, не в блок
+      product.source = 'receive';
       product.orderNumber = restoreOrder;
       await product.save({ session });
     });

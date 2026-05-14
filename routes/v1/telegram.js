@@ -8,12 +8,22 @@ const DeliveryGroup = require('../../models/DeliveryGroup');
 const Shop = require('../../models/Shop');
 const { sendAdminNotification, sendRegistrationApprovedMessage } = require('../../telegramBot');
 const { getOrderingWindowOpenAt, getCurrentOrderingSessionId } = require('../../utils/orderingSchedule');
+const { normalizeDeliveryGroup } = require('../../utils/deliveryGroupHelpers');
 const { getOrderingSchedule } = require('../../utils/getOrderingSchedule');
 const Order = require('../../models/Order');
 const { getIO } = require('../../socket');
 
 const router = express.Router();
 const adminOnly = requireTelegramRole('admin');
+
+function normalizePhoneNumber(raw) {
+  if (!raw) return '';
+  const digits = String(raw).replace(/\D/g, '');
+  if (!digits) return '';
+  if (digits.startsWith('48')  && digits.length === 11) return '+' + digits;
+  if (digits.startsWith('380') && digits.length === 12) return '+' + digits;
+  return '+' + digits;
+}
 
 function normalizeMiniAppState(miniAppState) {
   if (!miniAppState || typeof miniAppState !== 'object') return miniAppState;
@@ -132,7 +142,7 @@ router.post('/me', async (req, res) => {
   let sessionOpenAt = null;
   if ((user.role === 'seller' || user.role === 'admin') && resolvedGroupId) {
     try {
-      const group = await DeliveryGroup.findById(resolvedGroupId).lean();
+      const group = normalizeDeliveryGroup(await DeliveryGroup.findById(resolvedGroupId).lean());
       if (group) {
         const schedule = await getOrderingSchedule();
         sessionOpenAt = getOrderingWindowOpenAt(group.dayOfWeek, schedule).toISOString();
@@ -158,6 +168,7 @@ router.post('/me', async (req, res) => {
     role: user.role,
     firstName: user.firstName,
     lastName: user.lastName,
+    phoneNumber: user.phoneNumber || '',
     shopId: userShop ? String(userShop._id) : null,
     shop: userShop ? { _id: userShop._id, name: userShop.name, city: userShop.cityId?.name || '', deliveryGroupId: userShop.deliveryGroupId, cartState: normalizedCartState } : null,
     shopName: userShop?.name || user.shopName || '',
@@ -528,7 +539,7 @@ router.post('/register-request', async (req, res) => {
     }
   }
 
-  const cleanPhone = phoneNumber ? String(phoneNumber).trim() : '';
+  const cleanPhone = normalizePhoneNumber(phoneNumber);
 
   const request = await RegistrationRequest.create({
     telegramId,

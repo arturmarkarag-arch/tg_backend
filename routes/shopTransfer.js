@@ -13,6 +13,15 @@ const { getIO } = require('../socket');
 
 const router = express.Router();
 
+function normalizePhone(raw) {
+  if (!raw) return '';
+  const digits = String(raw).replace(/\D/g, '');
+  if (!digits) return '';
+  if (digits.startsWith('48')  && digits.length === 11) return '+' + digits;
+  if (digits.startsWith('380') && digits.length === 12) return '+' + digits;
+  return '+' + digits;
+}
+
 // ─── helpers ──────────────────────────────────────────────────────────────────
 
 async function buildConflictSnapshot(toShopId, fromShopId, sellerCartState) {
@@ -71,18 +80,20 @@ router.post('/', telegramAuth, requireTelegramRole('seller'), asyncHandler(async
   const seller = req.telegramUser;
   const { toShopId, firstName, lastName, phoneNumber } = req.body;
 
-  if (!toShopId) throw appError('transfer_shop_required');
+  const hasProfileUpdate = (firstName || lastName || phoneNumber);
+  if (!toShopId && !hasProfileUpdate) throw appError('transfer_shop_required');
 
-  const isAssignment = !seller.shopId; // true = initial assignment, false = shop change
+  const isProfileOnly = !toShopId && !!hasProfileUpdate;
+  const isAssignment = !isProfileOnly && !seller.shopId;
 
-  if (!isAssignment && String(toShopId) === String(seller.shopId)) throw appError('transfer_same_shop');
+  if (!isProfileOnly && !isAssignment && String(toShopId) === String(seller.shopId)) throw appError('transfer_same_shop');
 
   const [fromShop, toShop] = await Promise.all([
     seller.shopId ? Shop.findById(seller.shopId, 'name deliveryGroupId').lean() : Promise.resolve(null),
-    Shop.findById(toShopId, 'name deliveryGroupId isActive').lean(),
+    toShopId ? Shop.findById(toShopId, 'name deliveryGroupId isActive').lean() : Promise.resolve(null),
   ]);
-  if (!isAssignment && !fromShop) throw appError('shop_not_found');
-  if (!toShop || !toShop.isActive) throw appError('transfer_target_not_found');
+  if (!isProfileOnly && !isAssignment && !fromShop) throw appError('shop_not_found');
+  if (!isProfileOnly && (!toShop || !toShop.isActive)) throw appError('transfer_target_not_found');
 
   // One pending request per seller at a time (partial unique index handles the DB race,
   // but we throw a nicer error here for the common case)
@@ -92,24 +103,25 @@ router.post('/', telegramAuth, requireTelegramRole('seller'), asyncHandler(async
   }).lean();
   if (existing) throw appError('transfer_already_pending');
 
-  const sellerFull = await User.findOne({ telegramId: seller.telegramId }, 'cartState').lean();
-  const conflictSnapshot = await buildConflictSnapshot(toShopId, seller.shopId, sellerFull?.cartState);
+  const sellerFull = isProfileOnly ? null : await User.findOne({ telegramId: seller.telegramId }, 'cartState').lean();
+  const conflictSnapshot = isProfileOnly ? {} : await buildConflictSnapshot(toShopId, seller.shopId, sellerFull?.cartState);
 
   const request = await ShopTransferRequest.create({
     sellerTelegramId: seller.telegramId,
     sellerName: [seller.firstName, seller.lastName].filter(Boolean).join(' '),
     isAssignment,
+    isProfileOnly,
     fromShopId: seller.shopId || null,
     fromShopName: fromShop?.name || '',
     fromDeliveryGroupId: fromShop?.deliveryGroupId || '',
-    toShopId,
-    toShopName: toShop.name,
-    toDeliveryGroupId: toShop.deliveryGroupId || '',
+    toShopId: toShopId || null,
+    toShopName: toShop?.name || '',
+    toDeliveryGroupId: toShop?.deliveryGroupId || '',
     conflictSnapshot,
     profileUpdate: {
-      firstName:   firstName   ? String(firstName).trim()   : '',
-      lastName:    lastName    ? String(lastName).trim()    : '',
-      phoneNumber: phoneNumber ? String(phoneNumber).trim() : '',
+      firstName:   firstName   ? String(firstName).trim()  : '',
+      lastName:    lastName    ? String(lastName).trim()   : '',
+      phoneNumber: normalizePhone(phoneNumber),
     },
   });
 
@@ -154,14 +166,22 @@ router.get('/', telegramAuth, requireTelegramRole('admin'), asyncHandler(async (
 // ─── POST /api/shop-transfer/:id/approve  (admin approves) ───────────────────
 router.post('/:id/approve', telegramAuth, requireTelegramRole('admin'), asyncHandler(async (req, res) => {
   const admin = req.telegramUser;
-  const { cartDecision, displacedSellerDecision } = req.body;
+  const { cartDecision, displacedSellerDecision, overrideToShopId } = req.body;
 
   // Pre-load the request before starting session (read-only, no race risk here)
   const requestDoc = await ShopTransferRequest.findById(req.params.id).lean();
   if (!requestDoc) throw appError('transfer_not_found');
   if (requestDoc.status !== 'pending') throw appError('transfer_not_pending');
 
-  const snap = requestDoc.conflictSnapshot || {};
+  // Admin may override the target shop — validate it exists and is active
+  const effectiveToShopId = overrideToShopId || requestDoc.toShopId;
+  if (overrideToShopId) {
+    const overrideShop = await Shop.findById(overrideToShopId, 'isActive').lean();
+    if (!overrideShop || !overrideShop.isActive) throw appError('transfer_target_not_found');
+  }
+
+  // When admin overrides the shop the original conflict snapshot is stale — skip snap-based guards
+  const snap = overrideToShopId ? {} : (requestDoc.conflictSnapshot || {});
 
   // Require cart decision for requesting seller when their cart has items
   if (snap.cartHasItems && !['clear', 'keep'].includes(cartDecision)) {
@@ -186,18 +206,39 @@ router.post('/:id/approve', telegramAuth, requireTelegramRole('admin'), asyncHan
       // Re-check seller's current shop matches what was recorded (race guard)
       const seller = await User.findOne({ telegramId: request.sellerTelegramId }).session(session);
       if (!seller) throw appError('user_not_found');
-      const isAssignment = request.isAssignment || !request.fromShopId;
-      if (!isAssignment && String(seller.shopId) !== String(request.fromShopId)) {
+      const isProfileOnly = request.isProfileOnly || false;
+      const isAssignment = !isProfileOnly && (request.isAssignment || !request.fromShopId);
+      if (!isProfileOnly && !isAssignment && String(seller.shopId) !== String(request.fromShopId)) {
         throw appError('transfer_seller_moved');
       }
 
-      // Re-check target shop still active (race guard)
-      const toShop = await Shop.findById(request.toShopId).populate('cityId', 'name').session(session);
+      // Profile-only: just apply profile patch and skip shop logic entirely
+      if (isProfileOnly) {
+        const profilePatch = {};
+        const pu = request.profileUpdate || {};
+        if (pu.firstName)   profilePatch.firstName   = pu.firstName;
+        if (pu.lastName)    profilePatch.lastName    = pu.lastName;
+        if (pu.phoneNumber) profilePatch.phoneNumber = normalizePhone(pu.phoneNumber);
+        if (Object.keys(profilePatch).length > 0) {
+          await User.updateOne({ telegramId: seller.telegramId }, { $set: profilePatch }, { session });
+        }
+        request.status = 'approved';
+        request.resolvedAt = new Date();
+        request.resolvedBy = admin.telegramId;
+        request.resolvedByName = [admin.firstName, admin.lastName].filter(Boolean).join(' ');
+        await request.save({ session });
+        resolvedRequest = request.toObject();
+        migrationResult = { prevGroupId: null, newGroupId: null, movedOrder: false };
+        return; // exit withTransaction callback
+      }
+
+      // Re-check target shop still active (use admin override if provided)
+      const toShop = await Shop.findById(effectiveToShopId).populate('cityId', 'name').session(session);
       if (!toShop || !toShop.isActive) throw appError('transfer_target_not_found');
 
       // Handle displaced seller (if target shop is occupied)
       const targetCurrentSeller = await User.findOne({
-        shopId: String(request.toShopId),
+        shopId: String(effectiveToShopId),
         role: 'seller',
         telegramId: { $ne: request.sellerTelegramId },
       }).session(session);
@@ -230,7 +271,7 @@ router.post('/:id/approve', telegramAuth, requireTelegramRole('admin'), asyncHan
         const profilePatch = {};
         if (profileUpdate.firstName)   profilePatch.firstName   = profileUpdate.firstName;
         if (profileUpdate.lastName)    profilePatch.lastName    = profileUpdate.lastName;
-        if (profileUpdate.phoneNumber) profilePatch.phoneNumber = profileUpdate.phoneNumber;
+        if (profileUpdate.phoneNumber) profilePatch.phoneNumber = normalizePhone(profileUpdate.phoneNumber);
         if (Object.keys(profilePatch).length > 0) {
           await User.updateOne({ telegramId: request.sellerTelegramId }, { $set: profilePatch }, { session });
           // Keep seller object in sync for migrateSellerShop
@@ -303,6 +344,13 @@ router.post('/:id/approve', telegramAuth, requireTelegramRole('admin'), asyncHan
       }
       if (movedOrder) {
         io.emit('user_order_updated', { buyerTelegramId: requestDoc.sellerTelegramId });
+      }
+      // Notify the approved seller that their shop changed
+      io.emit('user_shop_changed', { telegramId: requestDoc.sellerTelegramId });
+      // Notify displaced seller (if any) that they were removed from their shop
+      const displacedId = resolvedRequest?.displacedSellerTelegramId;
+      if (displacedId) {
+        io.emit('user_shop_changed', { telegramId: displacedId });
       }
     }
   } catch (e) {

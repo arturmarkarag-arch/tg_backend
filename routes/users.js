@@ -9,6 +9,7 @@ const City = require('../models/City');
 const { telegramAuth, requireTelegramRole } = require('../middleware/telegramAuth');
 const { isOrderingOpen, getOrderingWindowOpenAt, getCurrentOrderingSessionId } = require('../utils/orderingSchedule');
 const { getOrderingSchedule } = require('../utils/getOrderingSchedule');
+const { normalizeDeliveryGroup } = require('../utils/deliveryGroupHelpers');
 const PickingTask = require('../models/PickingTask');
 const { getIO } = require('../socket');
 const { migrateSellerShop } = require('../services/migrateSellerShop');
@@ -126,9 +127,20 @@ router.get('/', asyncHandler(async (req, res) => {
   const groupFilter    = req.query.deliveryGroupId || null;
   const cityFilter     = req.query.shopCity || null;
   const activityFilter = req.query.activityFilter || null; // 'no_cart' | 'no_order' | 'no_visit'
+  const search         = req.query.search ? String(req.query.search).trim() : null;
 
   const filter = {};
   if (roleFilter && roleFilter !== 'all') filter.role = roleFilter;
+  if (search) {
+    const re = new RegExp(search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+    filter.$or = [
+      { firstName: re },
+      { lastName: re },
+      { telegramId: re },
+      { shopName: re },
+      { phoneNumber: re },
+    ];
+  }
   if (groupFilter && groupFilter !== 'all') filter.deliveryGroupId = groupFilter;
   if (cityFilter && cityFilter !== 'all') {
     const city = await City.findOne({ name: cityFilter }).lean();
@@ -147,7 +159,7 @@ router.get('/', asyncHandler(async (req, res) => {
   const isSellerGroupView = roleFilter === 'seller' && groupFilter && groupFilter !== 'all';
 
   if (isSellerGroupView) {
-    const group = await DeliveryGroup.findById(groupFilter).lean();
+    const group = normalizeDeliveryGroup(await DeliveryGroup.findById(groupFilter).lean());
     if (group) {
       const { isOpen } = isOrderingOpen(group.dayOfWeek);
       windowIsOpen = isOpen;

@@ -16,6 +16,7 @@ const { isOrderingOpen, getOrderingWindowOpenAt, getCurrentOrderingSessionId } =
 
 const { getOrderingSchedule } = require('../utils/getOrderingSchedule');
 const { appError, asyncHandler } = require('../utils/errors');
+const { normalizeDeliveryGroup } = require('../utils/deliveryGroupHelpers');
 
 const router = express.Router();
 const staffOnly = requireTelegramRoles(['admin', 'warehouse']);
@@ -48,8 +49,9 @@ async function ensureOrderIsStale(order, session = null) {
   const group = session ? await groupQuery.session(session) : await groupQuery;
   if (!group) return;
 
+  const normalizedGroup = normalizeDeliveryGroup(group);
   const schedule = await getOrderingSchedule();
-  const currentSessionId = getCurrentOrderingSessionId(String(group._id), group.dayOfWeek, schedule);
+  const currentSessionId = getCurrentOrderingSessionId(String(normalizedGroup._id), normalizedGroup.dayOfWeek, schedule);
   if (String(order.orderingSessionId || '') === String(currentSessionId || '')) {
     throw appError('validation_failed', { field: 'orderingSessionId', details: 'order_is_current_session' });
   }
@@ -115,7 +117,7 @@ async function requireOrderingWindowOpen(req, res, next) {
       });
     }
 
-    const group = await DeliveryGroup.findById(shop.deliveryGroupId).lean();
+    const group = normalizeDeliveryGroup(await DeliveryGroup.findById(shop.deliveryGroupId).lean());
     if (!group) {
       return res.status(403).json({
         error: 'delivery_group_not_found',
@@ -157,7 +159,7 @@ router.get('/conflicts', staffOnly, async (req, res) => {
   // Collect all active delivery groups with their current sessionId so we can filter
   // only orders that belong to the CURRENT ordering session — stale unresolved orders
   // from previous sessions should not pollute today's picking dashboard.
-  const allGroups = await DeliveryGroup.find().lean();
+  const allGroups = (await DeliveryGroup.find().lean()).map(normalizeDeliveryGroup);
   const schedule = await getOrderingSchedule();
 
   const currentSessionIds = new Set();

@@ -29,7 +29,6 @@ const { telegramAuth } = require('./middleware/telegramAuth');
 const publicApiPaths = [
   /^\/api\/search-products(\/.*)?$/,
   /^\/api\/v1\/products\/report-missing$/,
-  /^\/api\/v1\/products\/images(\/.*)?$/,
   /^\/api\/v1\/telegram\/validate$/,
   /^\/api\/v1\/telegram\/register-request$/,
   /^\/api\/v1\/telegram\/me$/,

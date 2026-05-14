@@ -227,7 +227,7 @@ router.post('/:id/items', staffOnly, asyncHandler(async (req, res) => {
   let photoName;
   if (file) {
     const filename = await uploadToR2(file.buffer, file.originalname, file.mimetype);
-    photoUrl = `/api/v1/products/images/${filename}`;
+    photoUrl = `${process.env.R2_PUBLIC_URL.replace(/\/$/, '')}/products/${filename}`;
     photoName = file.originalname || filename;
   }
 
@@ -382,7 +382,7 @@ router.patch('/:id/items/:itemId', staffOnly, asyncHandler(async (req, res) => {
   const file = parsed.files?.[0];
   if (file) {
     const filename = await uploadToR2(file.buffer, file.originalname, file.mimetype);
-    item.photoUrl = `/api/v1/products/images/${filename}`;
+    item.photoUrl = `${process.env.R2_PUBLIC_URL.replace(/\/$/, '')}/products/${filename}`;
     item.photoName = file.originalname || filename;
   } else if (!item.photoUrl && existingProductId) {
     const existingProduct = await Product.findById(existingProductId).lean();

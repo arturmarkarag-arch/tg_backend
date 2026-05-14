@@ -1,7 +1,7 @@
 const express = require('express');
 const crypto = require('crypto');
 const mongoose = require('mongoose');
-const { S3Client, PutObjectCommand, HeadBucketCommand, GetObjectCommand } = require('@aws-sdk/client-s3');
+const { S3Client, PutObjectCommand, HeadBucketCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 const { shiftUp, shiftDown } = require('../utils/shiftOrderNumbers');
 const { normalizeBarcode } = require('../utils/barcodeScanner');
@@ -37,11 +37,19 @@ const s3Client = new S3Client({
   }
 })();
 
+const ALLOWED_UPLOAD_FOLDERS = ['products', 'originals'];
+
+function r2PublicUrl(folder, filename) {
+  const base = process.env.R2_PUBLIC_URL.replace(/\/$/, '');
+  return `${base}/${folder}/${filename}`;
+}
+
 // Generate a presigned PUT URL for direct client-to-R2 upload
-async function getUploadPresignedUrl(ext = 'jpg') {
+async function getUploadPresignedUrl(ext = 'jpg', folder = 'products') {
   const safeExt = ext.replace(/[^a-zA-Z0-9]/g, '').toLowerCase() || 'jpg';
+  const safeFolder = ALLOWED_UPLOAD_FOLDERS.includes(folder) ? folder : 'products';
   const filename = `${crypto.randomUUID()}.${safeExt}`;
-  const key = `products/${filename}`;
+  const key = `${safeFolder}/${filename}`;
   const contentType = safeExt === 'gif' ? 'image/gif' : 'image/jpeg';
   const command = new PutObjectCommand({
     Bucket: process.env.R2_BUCKET_NAME,
@@ -49,7 +57,17 @@ async function getUploadPresignedUrl(ext = 'jpg') {
     ContentType: contentType,
   });
   const uploadUrl = await getSignedUrl(s3Client, command, { expiresIn: 300 });
-  return { uploadUrl, filename, key, contentType };
+  return { uploadUrl, filename, key, folder: safeFolder, contentType };
+}
+
+async function deleteR2Objects(keys = []) {
+  for (const key of keys) {
+    try {
+      await s3Client.send(new DeleteObjectCommand({ Bucket: process.env.R2_BUCKET_NAME, Key: key }));
+    } catch (err) {
+      console.error(`[deleteR2Objects] Failed to delete ${key}:`, err.message);
+    }
+  }
 }
 
 function getProductTitle(product) {
@@ -76,30 +94,16 @@ router.get('/upload-url-public', asyncHandler(async (req, res) => {
   res.json({ uploadUrl, filename, key, contentType });
 }));
 
-// GET /api/v1/products/upload-url?ext=jpg — returns a presigned PUT URL for direct R2 upload
+// GET /api/v1/products/upload-url?ext=jpg&folder=products — returns a presigned PUT URL for direct R2 upload
 router.get('/upload-url', staffOnly, asyncHandler(async (req, res) => {
   const ext = String(req.query.ext || 'jpg').replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
+  const folder = String(req.query.folder || 'products');
   const allowed = ['jpg', 'jpeg', 'png', 'webp', 'gif'];
   if (!allowed.includes(ext)) throw appError('product_image_unsupported');
-  const result = await getUploadPresignedUrl(ext === 'jpeg' ? 'jpg' : ext);
+  const result = await getUploadPresignedUrl(ext === 'jpeg' ? 'jpg' : ext, folder);
   res.json(result);
 }));
 
-router.get('/images/:filename', async (req, res) => {
-  const filename = req.params.filename.replace(/[^a-zA-Z0-9._-]/g, '');
-  try {
-    const data = await s3Client.send(new GetObjectCommand({
-      Bucket: process.env.R2_BUCKET_NAME,
-      Key: `products/${filename}`,
-    }));
-    res.set('Content-Type', data.ContentType || 'image/jpeg');
-    res.set('Cache-Control', 'public, max-age=31536000, immutable');
-    res.set('Access-Control-Allow-Origin', '*');
-    data.Body.pipe(res);
-  } catch {
-    res.status(404).json({ error: 'product_image_not_found', message: 'Зображення не знайдено' });
-  }
-});
 
 // GET /api/products/drafts — pending (unconfirmed) products
 router.get('/drafts', staffOnly, asyncHandler(async (req, res) => {
@@ -391,7 +395,7 @@ router.post('/block-upload-photos', staffOnly, asyncHandler(async (req, res) => 
 
       for (const filename of filenames) {
         const safeFilename = String(filename).replace(/[^a-zA-Z0-9._-]/g, '');
-        const imageUrl = `/api/v1/products/images/${safeFilename}`;
+        const imageUrl = r2PublicUrl('products', safeFilename);
         const [product] = await Product.create([{
           orderNumber: nextOrderNumber,
           price: 0,
@@ -400,6 +404,7 @@ router.post('/block-upload-photos', staffOnly, asyncHandler(async (req, res) => 
           source: 'block_photo',
           imageUrls: [imageUrl],
           imageNames: [safeFilename],
+          originalImageUrl: imageUrl,
         }], { session });
         block.productIds.push(product._id);
         nextOrderNumber += 1;
@@ -442,6 +447,9 @@ router.post('/receive', staffOnly, asyncHandler(async (req, res) => {
   const body = req.body;
   const filename = String(body?.filename || '').replace(/[^a-zA-Z0-9._-]/g, '');
   if (!filename) throw appError('product_photo_required');
+  const originalFilename = body?.originalFilename
+    ? String(body.originalFilename).replace(/[^a-zA-Z0-9._-]/g, '')
+    : null;
 
   const quantity = Number(body.quantity ?? 0);
   if (!Number.isInteger(quantity) || quantity < 0) throw appError('product_quantity_invalid');
@@ -450,7 +458,8 @@ router.post('/receive', staffOnly, asyncHandler(async (req, res) => {
   const quantityPerPackage = body.quantityPerPackage !== undefined && body.quantityPerPackage !== '' ? Number(body.quantityPerPackage) : 0;
   const isConfirmed = price > 0 && quantityPerPackage > 0;
   const explicitPending = body.status === 'pending';
-  const imageUrl = `/api/v1/products/images/${filename}`;
+  const imageUrl = r2PublicUrl('products', filename);
+  const origImageUrl = originalFilename ? r2PublicUrl('originals', originalFilename) : imageUrl;
 
   // Read max orderNumber AND insert the new product inside the same transaction
   // so two concurrent /receive requests cannot read the same max and produce
@@ -472,7 +481,7 @@ router.post('/receive', staffOnly, asyncHandler(async (req, res) => {
         status: explicitPending ? 'pending' : isConfirmed ? 'active' : 'pending',
         source: 'receive',
         notes: body.notes ? String(body.notes) : '',
-        originalImageUrl: imageUrl,
+        originalImageUrl: origImageUrl,
         imageUrls: [imageUrl],
         imageNames: [filename],
       }], { session });
@@ -508,7 +517,7 @@ router.post('/', staffOnly, asyncHandler(async (req, res) => {
     : (fields.filename ? [fields.filename] : []);
   for (const fn of filenames) {
     const safe = String(fn).replace(/[^a-zA-Z0-9._-]/g, '');
-    if (safe) { imageUrls.push(`/api/v1/products/images/${safe}`); imageNames.push(safe); }
+    if (safe) { imageUrls.push(r2PublicUrl('products', safe)); imageNames.push(safe); }
   }
 
   // shiftUp() and product.save() must be atomic — a crash between them would
@@ -591,12 +600,18 @@ router.patch('/:id', staffOnly, asyncHandler(async (req, res) => {
 
   const patchFilenames = Array.isArray(fields.filenames) ? fields.filenames
     : (fields.filename ? [fields.filename] : []);
+  const oldImageNames = patchFilenames.length > 0 ? [...(product.imageNames || [])] : [];
   if (patchFilenames.length > 0) {
     const imageUrls = [];
     const imageNames = [];
     for (const fn of patchFilenames) {
       const safe = String(fn).replace(/[^a-zA-Z0-9._-]/g, '');
-      if (safe) { imageUrls.push(`/api/v1/products/images/${safe}`); imageNames.push(safe); }
+      if (safe) { imageUrls.push(r2PublicUrl('products', safe)); imageNames.push(safe); }
+    }
+    // Preserve originalImageUrl — it always points to the clean, un-annotated photo.
+    // On first edit the current imageUrls[0] becomes the original; on subsequent edits keep it.
+    if (!product.originalImageUrl && product.imageUrls?.[0]) {
+      product.originalImageUrl = product.imageUrls[0];
     }
     product.imageUrls = imageUrls;
     product.imageNames = imageNames;
@@ -626,6 +641,16 @@ router.patch('/:id', staffOnly, asyncHandler(async (req, res) => {
     }
   } else {
     await product.save();
+  }
+
+  // Delete replaced R2 images after successful DB save — orphaned objects are
+  // acceptable if deletion fails; DB is the source of truth.
+  if (oldImageNames.length > 0) {
+    const newNameSet = new Set(product.imageNames || []);
+    const toDelete = oldImageNames.filter((n) => !newNameSet.has(n));
+    if (toDelete.length) {
+      deleteR2Objects(toDelete.map((n) => `products/${n}`)).catch(() => {});
+    }
   }
 
   try {

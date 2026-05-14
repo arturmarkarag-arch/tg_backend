@@ -12,15 +12,17 @@ const {
   getCurrentOrderingSessionId,
   getOrderingWindowOpenAt,
 } = require('../utils/orderingSchedule');
+const { normalizeDeliveryGroup } = require('../utils/deliveryGroupHelpers');
 
 const { getOrderingSchedule } = require('../utils/getOrderingSchedule');
 
 const router = express.Router();
 
 function buildDeliveryGroupSessionSummary(group, schedule, ordersByGroup) {
-  const status = isOrderingOpen(group.dayOfWeek, schedule);
-  const currentSessionId = getCurrentOrderingSessionId(String(group._id), group.dayOfWeek, schedule);
-  const sessionOpenAt = getOrderingWindowOpenAt(group.dayOfWeek, schedule);
+  const normalizedGroup = normalizeDeliveryGroup(group);
+  const status = isOrderingOpen(normalizedGroup.dayOfWeek, schedule);
+  const currentSessionId = getCurrentOrderingSessionId(String(normalizedGroup._id), normalizedGroup.dayOfWeek, schedule);
+  const sessionOpenAt = getOrderingWindowOpenAt(normalizedGroup.dayOfWeek, schedule);
   const orders = ordersByGroup[String(group._id)] || [];
   const summary = orders.reduce(
     (acc, order) => {
@@ -35,9 +37,9 @@ function buildDeliveryGroupSessionSummary(group, schedule, ordersByGroup) {
   );
 
   return {
-    groupId: String(group._id),
-    groupName: group.name,
-    dayOfWeek: group.dayOfWeek,
+    groupId: String(normalizedGroup._id),
+    groupName: normalizedGroup.name,
+    dayOfWeek: normalizedGroup.dayOfWeek,
     isOpen: status.isOpen,
     statusMessage: status.message,
     sessionOpenAt: sessionOpenAt.toISOString(),
@@ -94,7 +96,7 @@ router.get('/ordering-status', telegramAuth, async (req, res) => {
     });
   }
 
-  const group = await DeliveryGroup.findById(shop.deliveryGroupId).lean();
+  const group = normalizeDeliveryGroup(await DeliveryGroup.findById(shop.deliveryGroupId).lean());
   if (!group) {
     return res.json({
       isOpen: false,
@@ -129,7 +131,8 @@ router.get('/summary', async (req, res) => {
   ]);
   const sellerCountMap = Object.fromEntries(sellerCounts.map(({ _id, count }) => [String(_id), count]));
 
-  const result = groups.map((g) => ({
+  const normalizedGroups = groups.map(normalizeDeliveryGroup);
+  const result = normalizedGroups.map((g) => ({
     _id: g._id,
     name: g.name,
     dayOfWeek: g.dayOfWeek,
@@ -150,7 +153,7 @@ router.get('/summary', async (req, res) => {
  * Returns per-shop cart and ordered item counts for the current ordering session.
  */
 router.get('/:groupId/shop-status', telegramAuth, requireTelegramRoles(['admin', 'warehouse']), asyncHandler(async (req, res) => {
-  const group = await DeliveryGroup.findById(req.params.groupId).lean();
+  const group = normalizeDeliveryGroup(await DeliveryGroup.findById(req.params.groupId).lean());
   if (!group) throw appError('group_not_found');
 
   const schedule = await getOrderingSchedule();
@@ -367,7 +370,8 @@ router.post('/:id/close-ordering-session', telegramAuth, requireTelegramRole('ad
 
 router.get('/', async (req, res) => {
   const groups = await DeliveryGroup.find().lean();
-  groups.sort((a, b) => {
+  const normalizedGroups = groups.map(normalizeDeliveryGroup);
+  normalizedGroups.sort((a, b) => {
     const orderA = a.dayOfWeek === 0 ? 7 : a.dayOfWeek;
     const orderB = b.dayOfWeek === 0 ? 7 : b.dayOfWeek;
     if (orderA !== orderB) return orderA - orderB;
@@ -379,7 +383,7 @@ router.get('/', async (req, res) => {
   // This covers any case — seller switched shop, admin moved order, whatever.
   // Orders in an OPEN session are resolved (normal or conflict), no badge needed.
   const closedGroupIds = [];
-  for (const g of groups) {
+  for (const g of normalizedGroups) {
     const { isOpen } = isOrderingOpen(g.dayOfWeek, schedule);
     if (!isOpen) {
       closedGroupIds.push(String(g._id));
@@ -412,7 +416,7 @@ router.get('/', async (req, res) => {
   const shopCountMap = Object.fromEntries(shopCounts.map(({ _id, count }) => [String(_id), count]));
   const sellerCountMap = Object.fromEntries(sellerCounts.map(({ _id, count }) => [String(_id), count]));
 
-  const result = groups.map((g) => ({
+  const result = normalizedGroups.map((g) => ({
     ...g,
     isOpen: isOrderingOpen(g.dayOfWeek, schedule).isOpen,
     shopCount: shopCountMap[String(g._id)] || 0,

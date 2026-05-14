@@ -8,6 +8,7 @@ const { requireTelegramRoles } = require('../middleware/telegramAuth');
 const { getProductTitle } = require('../services/archiveProduct');
 const { buildPickingTasksFromOrders } = require('../services/taskBuilder');
 const { isOrderingOpen, getWarsawNow, DAY_FULL_UK, getCurrentOrderingSessionId, getOrderingWindowCloseAt } = require('../utils/orderingSchedule');
+const { normalizeDeliveryGroup } = require('../utils/deliveryGroupHelpers');
 const { getOrderingSchedule } = require('../utils/getOrderingSchedule');
 const { appError } = require('../utils/errors');
 
@@ -99,7 +100,7 @@ router.post('/start-session', requireTelegramRoles(['warehouse', 'admin']), asyn
     }
 
     // 1. Check ordering window and delivery day.
-    const group = await DeliveryGroup.findById(deliveryGroupId, 'dayOfWeek name').lean();
+    const group = normalizeDeliveryGroup(await DeliveryGroup.findById(deliveryGroupId, 'dayOfWeek name').lean());
     if (group) {
       // getOrderingSchedule() throws if the key is absent from DB — error propagates to catch below.
       const schedule = await getOrderingSchedule();
@@ -122,7 +123,7 @@ router.post('/start-session', requireTelegramRoles(['warehouse', 'admin']), asyn
     // 2. Idempotent: if tasks already exist, return their count.
     await releaseWorkerAndStaleLocks(user.telegramId, deliveryGroupId);
 
-    const groupForSession = await DeliveryGroup.findById(deliveryGroupId, 'dayOfWeek').lean();
+    const groupForSession = normalizeDeliveryGroup(await DeliveryGroup.findById(deliveryGroupId, 'dayOfWeek name').lean());
     let currentSessionId = null;
     if (groupForSession) {
       const schedule = await getOrderingSchedule();
