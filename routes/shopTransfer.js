@@ -17,8 +17,8 @@ function normalizePhone(raw) {
   if (!raw) return '';
   const digits = String(raw).replace(/\D/g, '');
   if (!digits) return '';
-  if (digits.startsWith('48')  && digits.length === 11) return '+' + digits;
-  if (digits.startsWith('380') && digits.length === 12) return '+' + digits;
+  if (digits.startsWith('48')  && digits.length === 11) return '+48'  + digits.slice(2);
+  if (digits.startsWith('380') && digits.length === 12) return '+380' + digits.slice(3);
   return '+' + digits;
 }
 
