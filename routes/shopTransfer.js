@@ -382,6 +382,13 @@ router.post('/:id/approve', telegramAuth, requireTelegramRole('admin'), asyncHan
     session.endSession();
   }
 
+  // Post-commit cache invalidation — outside withTransaction so other workers
+  // don't repopulate L1 with pre-commit reads.
+  if (migrationResult?.invalidate) {
+    try { await migrationResult.invalidate(); }
+    catch (e) { console.warn('[shopTransfer approve] cache invalidate failed:', e?.message); }
+  }
+
   // Notify dashboards AFTER commit (same pattern as /me/shop)
   try {
     const io = getIO();

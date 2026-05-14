@@ -12,7 +12,7 @@ const PickingTask = require('../models/PickingTask');
 const { getCurrentOrderingSessionId } = require('../utils/orderingSchedule');
 const { getOrderingSchedule } = require('../utils/getOrderingSchedule');
 const { appError } = require('../utils/errors');
-const { invalidateShop, getShop, getDeliveryGroup } = require('../utils/modelCache');
+const { invalidateShop } = require('../utils/modelCache');
 
 async function ensureOrderNotInPickingPipeline(orderId, session) {
   const exists = await PickingTask.exists({
@@ -58,18 +58,20 @@ async function migrateSellerShop({
     : '';
 
   // Resolve session ids and warehouse zone for both shops.
-  // Shop + DeliveryGroup are pulled from the hot cache — they almost never change
-  // and are read on every shop migration. The session is NOT passed because the
-  // cached version is read-only; any writes go through Shop.findByIdAndUpdate with
-  // session below and invalidate the cache afterwards.
+  // CRITICAL: read Shop + DeliveryGroup with the session, NOT from cache.
+  // A stale cache here would compute the wrong oldSessionId and orphan the
+  // active order in the previous group. Hot cache is fine for high-frequency
+  // reads (buyerSnapshot, /me, bot) but not for the one-shot migration path.
   const [oldShopFull, schedule] = await Promise.all([
-    oldShopId ? getShop(oldShopId) : Promise.resolve(null),
+    oldShopId
+      ? Shop.findById(oldShopId).populate('cityId', 'name').session(session).lean()
+      : Promise.resolve(null),
     getOrderingSchedule(),
   ]);
 
   let oldSessionId = null;
   if (oldShopFull?.deliveryGroupId) {
-    const oldGroup = await getDeliveryGroup(oldShopFull.deliveryGroupId);
+    const oldGroup = await DeliveryGroup.findById(oldShopFull.deliveryGroupId).session(session).lean();
     if (oldGroup) {
       oldSessionId = getCurrentOrderingSessionId(String(oldGroup._id), oldGroup.dayOfWeek, schedule);
     }
@@ -78,7 +80,7 @@ async function migrateSellerShop({
   let newSessionId = null;
   let warehouseZone = '';
   if (newDeliveryGroupId) {
-    const newGroup = await getDeliveryGroup(newDeliveryGroupId);
+    const newGroup = await DeliveryGroup.findById(newDeliveryGroupId).session(session).lean();
     if (newGroup) {
       warehouseZone = newGroup.name || '';
       newSessionId = getCurrentOrderingSessionId(String(newGroup._id), newGroup.dayOfWeek, schedule);
@@ -236,18 +238,20 @@ async function migrateSellerShop({
     );
   }
 
-  // Hot-cache invalidation — fired after writes so the next read sees fresh data.
-  // Safe to await even if no session.commitTransaction has run yet; the writes are
-  // captured in the transaction and become visible on commit (which the caller
-  // performs immediately after this helper returns).
-  if (oldShopId) await invalidateShop(oldShopId);
-  if (newShopId) await invalidateShop(newShopId);
-
+  // IMPORTANT: cache invalidation is intentionally NOT done here.
+  // Doing it inside withTransaction would publish a stale-read window:
+  // workers drop L1, read pre-commit state from the primary, and repopulate
+  // the cache with the OLD value. The caller MUST call `invalidate()` from
+  // the returned object AFTER session.withTransaction(...) resolves.
   return {
     updatedUser,
     movedOrder,
     prevGroupId,
     newGroupId: newDeliveryGroupId || null,
+    invalidate: async () => {
+      if (oldShopId) await invalidateShop(oldShopId);
+      if (newShopId) await invalidateShop(newShopId);
+    },
   };
 }
 

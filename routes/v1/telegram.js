@@ -209,6 +209,13 @@ router.patch('/me/shop', asyncHandler(async (req, res) => {
     }
   });
 
+  // Post-commit cache invalidation — done OUTSIDE withTransaction so other
+  // workers don't repopulate L1 with pre-commit reads.
+  if (migrationResult?.invalidate) {
+    try { await migrationResult.invalidate(); }
+    catch (e) { console.warn('[PATCH /me/shop] cache invalidate failed:', e?.message); }
+  }
+
   if (migrationResult?.movedOrder) {
     try {
       const io = getIO();

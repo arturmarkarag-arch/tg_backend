@@ -94,9 +94,13 @@ async function invalidateAll() {
   local.clear();
   if (isEnabled()) {
     try {
-      // Conservative: only clear our namespace
-      const keys = await redis.keys('cache:*');
-      if (keys.length) await redis.del(...keys);
+      // Use SCAN instead of KEYS to avoid blocking Redis on large datasets
+      let cursor = 0;
+      do {
+        const [nextCursor, batch] = await redis.scan(cursor, 'MATCH', 'cache:*', 'COUNT', 100);
+        cursor = Number(nextCursor);
+        if (batch.length) await redis.del(...batch);
+      } while (cursor !== 0);
       await pubClient.publish(CHANNEL, '*');
     } catch (err) {
       console.warn('[Cache] L2 invalidateAll failed:', err.message);

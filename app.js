@@ -35,6 +35,9 @@ const publicApiPaths = [
   /^\/api\/delivery-groups\/summary$/,
   /^\/api\/shops\/cities$/,
   /^\/api\/shops$/,
+  /^\/api\/health$/,
+  /^\/api\/bot-status$/,
+  /^\/api\/openai-status$/,
 ];
 
 function requireAuthForApi(req, res, next) {

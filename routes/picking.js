@@ -82,6 +82,7 @@ router.get('/schedule', requireTelegramRoles(['warehouse', 'admin']), async (req
       closeMinute: Number(schedule.closeMinute),
     });
   } catch (err) {
+    if (err && err.name === 'AppError') return next(err);
     next(appError('picking_session_failed'));
   }
 });
@@ -198,6 +199,7 @@ router.post('/start-session', requireTelegramRoles(['warehouse', 'admin']), asyn
 
     res.json({ started: true, taskCount });
   } catch (err) {
+    if (err && err.name === 'AppError') return next(err);
     console.error('[picking/start-session]', err);
     next(appError('picking_session_failed'));
   }
@@ -260,6 +262,7 @@ router.get('/next-task', requireTelegramRoles(['warehouse', 'admin']), async (re
 
     res.json({ task: taskData });
   } catch (err) {
+    if (err && err.name === 'AppError') return next(err);
     console.error('[picking/next-task]', err);
     next(appError('picking_next_failed'));
   }
@@ -325,6 +328,7 @@ router.get('/block-tasks', requireTelegramRoles(['warehouse', 'admin']), async (
 
     res.json({ tasks: previewTasks });
   } catch (err) {
+    if (err && err.name === 'AppError') return next(err);
     console.error('[picking/block-tasks]', err);
     next(appError('picking_block_tasks_failed'));
   }
@@ -358,6 +362,7 @@ router.get('/queue-stats', requireTelegramRoles(['warehouse', 'admin']), async (
     const activeCount = pendingCount + lockedByMeCount + lockedByOtherCount;
     res.json({ pendingCount, lockedByMeCount, lockedByOtherCount, activeCount });
   } catch (err) {
+    if (err && err.name === 'AppError') return next(err);
     console.error('[picking/queue-stats]', err);
     next(appError('picking_next_failed'));
   }
@@ -385,6 +390,7 @@ router.post('/tasks/:taskId/complete', requireTelegramRoles(['warehouse', 'admin
     const nextTaskData = nextRaw ? await buildTaskResponse(nextRaw, { wrappedAround: nwa }) : null;
     res.json({ message: 'Task completed', nextTask: nextTaskData });
   } catch (err) {
+    if (err && err.name === 'AppError') return next(err);
     console.error('[picking/complete]', err);
     if (err.code === 'picking_task_not_found') return next(appError('picking_task_not_found'));
     if (err.code === 'expired_lock') return next(appError('expired_lock'));
@@ -414,6 +420,7 @@ router.patch('/tasks/:taskId/progress', requireTelegramRoles(['warehouse', 'admi
 
     res.json({ ok: true });
   } catch (err) {
+    if (err && err.name === 'AppError') return next(err);
     console.error('[picking/progress]', err);
     next(appError('picking_progress_failed'));
   }
@@ -457,6 +464,7 @@ router.post('/tasks/:taskId/claim', requireTelegramRoles(['warehouse', 'admin'])
       res.json({ task: taskData });
     }, { ttlMs: 10_000, waitMs: 5_000 });
   } catch (err) {
+    if (err && err.name === 'AppError') return next(err);
     console.error('[picking/claim]', err);
     next(appError('picking_claim_failed'));
   }
@@ -485,6 +493,7 @@ router.post('/tasks/:taskId/out-of-stock', requireTelegramRoles(['warehouse', 'a
 
     res.json({ message: 'Out-of-stock recorded', nextTask: nextTaskData });
   } catch (err) {
+    if (err && err.name === 'AppError') return next(err);
     console.error('[picking/out-of-stock]', err);
     next(appError('picking_oos_failed'));
   }
@@ -562,6 +571,7 @@ router.post('/tasks/:taskId/force-claim', requireTelegramRoles(['warehouse', 'ad
         message: `Задача заблокована ${Math.round((err.lockedAgo || 0) / 1000)} с тому. Перехоплення доступне після 3 хвилин.`,
       });
     }
+    if (err && err.name === 'AppError') return next(err);
     console.error('[picking/force-claim]', err);
     if (err.code === 'picking_task_not_found') return next(appError('picking_task_not_found'));
     if (err.code === 'picking_claim_unavailable') return next(appError('picking_claim_unavailable'));
