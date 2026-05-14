@@ -154,8 +154,6 @@ async function migrateSellerShop({
   // 2. Update User
   const userUpdate = {
     shopId: newShopFull._id,
-    shopName: newShopName,
-    shopCity: newShopCity,
     deliveryGroupId: newDeliveryGroupId,
   };
   // Only sellers carry a warehouseZone-derived-from-shop; preserve other roles' values
@@ -209,6 +207,7 @@ async function migrateSellerShop({
   }
 
   // 4. Persist last-seller snapshot on the OLD shop so the hint survives reassignment
+  const now = new Date();
   if (updateLastSeller && oldShopId && oldShopId !== newShopId) {
     await Shop.findByIdAndUpdate(
       oldShopId,
@@ -217,9 +216,19 @@ async function migrateSellerShop({
           telegramId:   existingUser.telegramId,
           firstName:    existingUser.firstName  || '',
           lastName:     existingUser.lastName   || '',
-          unassignedAt: new Date(),
+          unassignedAt: now,
         },
+        lastSellerChangedAt: now,
       },
+      { session },
+    );
+  }
+
+  // 5. Mark the new shop as recently changed
+  if (newShopId && newShopId !== oldShopId) {
+    await Shop.findByIdAndUpdate(
+      newShopId,
+      { $set: { lastSellerChangedAt: now } },
       { session },
     );
   }

@@ -7,6 +7,7 @@ const DeliveryGroup = require('../models/DeliveryGroup');
 const User = require('../models/User');
 const Order = require('../models/Order');
 const { telegramAuth, requireTelegramRole } = require('../middleware/telegramAuth');
+const cache = require('../utils/cache');
 
 const router = express.Router();
 
@@ -22,16 +23,14 @@ router.get('/', asyncHandler(async (req, res) => {
     if (req.query.cityId) {
       filter.cityId = req.query.cityId;
     } else if (req.query.city) {
-      // Legacy string filter — resolve to cityId
       const cityDoc = await City.findOne({ name: req.query.city.trim() }).lean();
       if (cityDoc) filter.cityId = cityDoc._id;
-      else filter.city = req.query.city.trim(); // fallback
     }
     if (req.query.deliveryGroupId) {
       filter.deliveryGroupId = req.query.deliveryGroupId;
     }
 
-    const shops = await Shop.find(filter).populate('cityId', 'name country').sort({ city: 1, name: 1 }).lean();
+    const shops = await Shop.find(filter).populate('cityId', 'name country').sort({ name: 1 }).lean();
 
     // Seller names per shop
     const shopIds = shops.map((s) => s._id);
@@ -77,7 +76,11 @@ router.get('/', asyncHandler(async (req, res) => {
 // ─── GET /api/shops/cities ────────────────────────────────────────────────────
 // Публічний список міст (для реєстрації та seller)
 router.get('/cities', asyncHandler(async (req, res) => {
-  const cities = await City.find().sort({ name: 1 }).lean();
+  let cities = cache.get(cache.KEYS.CITIES);
+  if (!cities) {
+    cities = await City.find().sort({ name: 1 }).lean();
+    cache.set(cache.KEYS.CITIES, cities);
+  }
   res.json(cities);
 }));
 
@@ -92,7 +95,7 @@ router.get('/:id', asyncHandler(async (req, res) => {
     .lean();
 
   const cityId = shop.cityId?._id ? String(shop.cityId._id) : (shop.cityId || null);
-  res.json({ ...shop, cityId, city: shop.cityId?.name || '', sellers });
+  res.json({ ...shop, cityId, city: shop.cityId?.name || '', sellers }); // city computed from populate, not stored field
 }));
 
 // ─── POST /api/shops ──────────────────────────────────────────────────────────
@@ -111,7 +114,6 @@ router.post('/', telegramAuth, requireTelegramRole('admin'), asyncHandler(async 
   const shop = await Shop.create({
     name: String(name).trim(),
     cityId: cityDoc._id,
-    city: cityDoc.name,
     deliveryGroupId: deliveryGroupId ? String(deliveryGroupId) : '',
     address: address ? String(address).trim() : '',
   });
@@ -134,7 +136,6 @@ router.patch('/:id', telegramAuth, requireTelegramRole('admin'), asyncHandler(as
     const cityDoc = await City.findById(cityId).lean();
     if (!cityDoc) throw appError('shop_city_not_found');
     shop.cityId = cityDoc._id;
-    shop.city = cityDoc.name;
   }
 
   if (deliveryGroupId !== undefined) {
@@ -235,6 +236,11 @@ router.patch('/:id/sellers', telegramAuth, requireTelegramRole('admin'), asyncHa
             { session }
           );
         }
+        await Shop.findByIdAndUpdate(
+          req.params.id,
+          { $set: { lastSellerChangedAt: new Date() } },
+          { session }
+        );
       });
     } finally {
       session.endSession();

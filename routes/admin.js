@@ -6,6 +6,8 @@ const AppSetting = require('../models/AppSetting');
 const City = require('../models/City');
 const Shop = require('../models/Shop');
 const { listOpenAIModels, initOpenAI } = require('../openaiClient');
+const { invalidateOrderingScheduleCache } = require('../utils/getOrderingSchedule');
+const cache = require('../utils/cache');
 
 const router = express.Router();
 const OPENAI_MODEL_SETTING_KEY = 'openai.defaultModel';
@@ -76,6 +78,7 @@ router.post('/ordering-schedule', telegramAuth, requireTelegramRole('admin'), as
   const closeMins = schedule.closeHour * 60 + schedule.closeMinute;
   if (openMins === closeMins) throw appError('schedule_zero_duration');
   const saved = await setAppSetting(ORDERING_SCHEDULE_KEY, schedule);
+  invalidateOrderingScheduleCache();
 
   res.json(saved);
 }));
@@ -92,6 +95,7 @@ router.post('/cities', telegramAuth, requireTelegramRole('admin'), asyncHandler(
   if (!name) throw appError('city_name_required');
   try {
     const city = await City.create({ name, country: req.body?.country || 'PL' });
+    cache.invalidate(cache.KEYS.CITIES);
     res.status(201).json(city);
   } catch (err) {
     if (err.code === 11000) throw appError('city_already_exists', { name });
@@ -110,6 +114,7 @@ router.patch('/cities/:id', telegramAuth, requireTelegramRole('admin'), asyncHan
       { new: true, runValidators: true }
     );
     if (!city) throw appError('city_not_found');
+    cache.invalidate(cache.KEYS.CITIES);
     res.json(city);
   } catch (err) {
     if (err && err.name === 'AppError') throw err;
@@ -130,6 +135,7 @@ router.delete('/cities/:id', telegramAuth, requireTelegramRole('admin'), asyncHa
       if (shopCount > 0) throw appError('city_has_shops', { shopCount });
       const deleted = await City.findByIdAndDelete(req.params.id, { session });
       if (!deleted) throw appError('city_not_found');
+      cache.invalidate(cache.KEYS.CITIES);
       result = { message: 'Місто видалено' };
     });
     return res.json(result);

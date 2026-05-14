@@ -102,7 +102,7 @@ async function buildPickingTasksFromOrders(targetDeliveryGroupId = null, options
         };
         group.items.push({
           orderId: order._id,
-          shopName: order.buyerSnapshot?.shopName || buyer?.shopName || 'невідомий магазин',
+          shopName: order.buyerSnapshot?.shopName || 'невідомий магазин',
           quantity: item.quantity || 0,
           packed: false,
         });

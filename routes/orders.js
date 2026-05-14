@@ -17,6 +17,16 @@ const { isOrderingOpen, getOrderingWindowOpenAt, getCurrentOrderingSessionId } =
 const { getOrderingSchedule } = require('../utils/getOrderingSchedule');
 const { appError, asyncHandler } = require('../utils/errors');
 const { normalizeDeliveryGroup } = require('../utils/deliveryGroupHelpers');
+const cache = require('../utils/cache');
+
+async function getAllDeliveryGroups() {
+  let groups = cache.get(cache.KEYS.DELIVERY_GROUPS);
+  if (!groups) {
+    groups = await DeliveryGroup.find().lean();
+    cache.set(cache.KEYS.DELIVERY_GROUPS, groups);
+  }
+  return groups;
+}
 
 const router = express.Router();
 const staffOnly = requireTelegramRoles(['admin', 'warehouse']);
@@ -159,7 +169,7 @@ router.get('/conflicts', staffOnly, async (req, res) => {
   // Collect all active delivery groups with their current sessionId so we can filter
   // only orders that belong to the CURRENT ordering session — stale unresolved orders
   // from previous sessions should not pollute today's picking dashboard.
-  const allGroups = (await DeliveryGroup.find().lean()).map(normalizeDeliveryGroup);
+  const allGroups = (await getAllDeliveryGroups()).map(normalizeDeliveryGroup);
   const schedule = await getOrderingSchedule();
 
   const currentSessionIds = new Set();
@@ -552,15 +562,15 @@ router.post('/', async (req, res) => {
   // Build buyerSnapshot — reflects the shop at the moment of the order
   const buyerSnapshot = group ? {
     shopId: buyer.shopId || null,
-    shopName: shop?.name || buyer.shopName || '',
+    shopName: shop?.name || '',
     shopCity: shop?.cityId?.name || '',
-    shopAddress: buyer.shopAddress || '',
+    shopAddress: shop?.address || '',
     deliveryGroupId: String(group._id),
   } : {
     shopId: buyer.shopId || null,
-    shopName: buyer.shopName || '',
-    shopCity: buyer.shopCity || '',
-    shopAddress: buyer.shopAddress || '',
+    shopName: shop?.name || '',
+    shopCity: shop?.cityId?.name || '',
+    shopAddress: shop?.address || '',
     deliveryGroupId: buyer.deliveryGroupId || '',
   };
 
@@ -827,8 +837,6 @@ router.patch('/:id/snapshot', staffOnly, async (req, res) => {
         const buyerUser = await User.findOne({ telegramId: order.buyerTelegramId }).session(session).lean();
         const userUpdate = {
           shopId: shop._id,
-          shopName: shop.name || '',
-          shopCity: shop.cityId?.name || '',
           deliveryGroupId: shop.deliveryGroupId ? String(shop.deliveryGroupId) : '',
           'cartState.orderItems': {},
           'cartState.orderItemIds': [],

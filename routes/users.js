@@ -1,22 +1,20 @@
 const express = require('express');
-const mongoose = require('mongoose');
-const { appError, asyncHandler } = require('../utils/errors');
 const User = require('../models/User');
 const Order = require('../models/Order');
 const DeliveryGroup = require('../models/DeliveryGroup');
 const Shop = require('../models/Shop');
-const City = require('../models/City');
 const { telegramAuth, requireTelegramRole } = require('../middleware/telegramAuth');
-const { isOrderingOpen, getOrderingWindowOpenAt, getCurrentOrderingSessionId } = require('../utils/orderingSchedule');
-const { getOrderingSchedule } = require('../utils/getOrderingSchedule');
-const { normalizeDeliveryGroup } = require('../utils/deliveryGroupHelpers');
-const PickingTask = require('../models/PickingTask');
-const { getIO } = require('../socket');
-const { migrateSellerShop } = require('../services/migrateSellerShop');
+const { isOrderingOpen, getOrderingWindowOpenAt } = require('../utils/orderingSchedule');
 
 const router = express.Router();
 router.use(telegramAuth);
 router.use(requireTelegramRole('admin'));
+
+// eslint-disable-next-line no-unused-vars
+async function syncDeliveryGroupMembership(_telegramId, _groupId) {
+  // No-op: DeliveryGroup.members has been removed.
+  // Membership is now determined via User.shopId -> Shop.deliveryGroupId.
+}
 
 async function syncUserWarehouseZone(user) {
   if (user.role === 'seller') {
@@ -41,22 +39,14 @@ async function syncUserWarehouseZone(user) {
   return user;
 }
 
-async function ensureOrderNotInPickingPipeline(orderId, session = null) {
-  const query = PickingTask.exists({
-    'items.orderId': orderId,
-    status: { $in: ['pending', 'locked', 'completed'] },
-  });
-  const exists = session ? await query.session(session) : await query;
-  if (exists) {
-    throw appError('order_picking_started');
-  }
-}
-
 async function sanitizeUserPayload(payload, existing = null) {
   const role = payload.role ?? existing?.role ?? 'seller';
   const data = {
     // telegramId — імьютабельний, не приймається тут; передається окремо тільки при створенні
     role,
+    firstName: payload.firstName,
+    lastName: payload.lastName,
+    phoneNumber: payload.phoneNumber,
     // Explicitly cast to Boolean so strings "true"/"false" or 1/0 from HTTP body never
     // reach MongoDB as a wrong type. Skip the field entirely when not provided.
     ...(payload.botBlocked !== undefined && payload.botBlocked !== null
@@ -64,35 +54,19 @@ async function sanitizeUserPayload(payload, existing = null) {
       : {}),
   };
 
-  // Prevent accidental erasure on partial updates.
-  if (payload.firstName !== undefined) data.firstName = payload.firstName;
-  else if (existing) data.firstName = existing.firstName;
-  if (payload.lastName !== undefined) data.lastName = payload.lastName;
-  else if (existing) data.lastName = existing.lastName;
-  if (payload.phoneNumber !== undefined) data.phoneNumber = payload.phoneNumber;
-  else if (existing) data.phoneNumber = existing.phoneNumber;
-
   // Seller-specific fields — clear when role is not seller
   if (role === 'seller') {
-    data.shopId = payload.shopId !== undefined
-      ? (payload.shopId || null)
-      : (existing?.shopId || null);
-    data.shopNumber = payload.shopNumber !== undefined
-      ? payload.shopNumber
-      : (existing?.shopNumber || '');
-
-    // Derive denormalized shop fields from Shop source of truth.
+    data.shopId = payload.shopId || null;
+    data.shopNumber = payload.shopNumber;
+    data.shopName = payload.shopName;
+    data.shopAddress = payload.shopAddress;
+    data.shopCity = payload.shopCity;
+    // deliveryGroupId is derived from the shop — never trust client-supplied value
     if (data.shopId) {
-      const shop = await Shop.findById(data.shopId).populate('cityId', 'name').lean();
+      const shop = await Shop.findById(data.shopId).lean();
       data.deliveryGroupId = shop?.deliveryGroupId || '';
-      data.shopName = shop?.name || '';
-      data.shopAddress = shop?.address || '';
-      data.shopCity = shop?.cityId?.name || shop?.city || '';
     } else {
       data.deliveryGroupId = '';
-      data.shopName = '';
-      data.shopAddress = '';
-      data.shopCity = '';
     }
   } else {
     data.shopId = null;
@@ -105,12 +79,8 @@ async function sanitizeUserPayload(payload, existing = null) {
 
   // Warehouse-specific fields — clear when role is not warehouse
   if (role === 'warehouse') {
-    data.isWarehouseManager = payload.isWarehouseManager !== undefined
-      ? Boolean(payload.isWarehouseManager)
-      : Boolean(existing?.isWarehouseManager);
-    data.warehouseZone = payload.warehouseZone !== undefined
-      ? payload.warehouseZone
-      : (existing?.warehouseZone || '');
+    data.isWarehouseManager = Boolean(payload.isWarehouseManager);
+    data.warehouseZone = payload.warehouseZone;
   } else {
     data.isWarehouseManager = false;
     data.isOnShift = false;
@@ -120,38 +90,19 @@ async function sanitizeUserPayload(payload, existing = null) {
   return data;
 }
 
-router.get('/', asyncHandler(async (req, res) => {
+router.get('/', async (req, res) => {
+  try {
   const page     = Math.max(1, parseInt(req.query.page) || 1);
   const pageSize = Math.min(500, Math.max(1, parseInt(req.query.pageSize) || 20));
   const roleFilter     = req.query.role || null;
   const groupFilter    = req.query.deliveryGroupId || null;
   const cityFilter     = req.query.shopCity || null;
   const activityFilter = req.query.activityFilter || null; // 'no_cart' | 'no_order' | 'no_visit'
-  const search         = req.query.search ? String(req.query.search).trim() : null;
 
   const filter = {};
   if (roleFilter && roleFilter !== 'all') filter.role = roleFilter;
-  if (search) {
-    const re = new RegExp(search.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
-    filter.$or = [
-      { firstName: re },
-      { lastName: re },
-      { telegramId: re },
-      { shopName: re },
-      { phoneNumber: re },
-    ];
-  }
   if (groupFilter && groupFilter !== 'all') filter.deliveryGroupId = groupFilter;
-  if (cityFilter && cityFilter !== 'all') {
-    const city = await City.findOne({ name: cityFilter }).lean();
-    if (city) {
-      const shopsInCity = await Shop.find({ cityId: city._id }, '_id').lean();
-      filter.shopId = { $in: shopsInCity.map((s) => s._id) };
-    } else {
-      // No city found — return empty
-      filter.shopId = { $in: [] };
-    }
-  }
+  if (cityFilter && cityFilter !== 'all') filter.shopCity = cityFilter;
 
   // Window info — only when filtering sellers in a specific group
   let windowIsOpen = false;
@@ -159,7 +110,7 @@ router.get('/', asyncHandler(async (req, res) => {
   const isSellerGroupView = roleFilter === 'seller' && groupFilter && groupFilter !== 'all';
 
   if (isSellerGroupView) {
-    const group = normalizeDeliveryGroup(await DeliveryGroup.findById(groupFilter).lean());
+    const group = await DeliveryGroup.findById(groupFilter).lean();
     if (group) {
       const { isOpen } = isOrderingOpen(group.dayOfWeek);
       windowIsOpen = isOpen;
@@ -213,11 +164,16 @@ router.get('/', asyncHandler(async (req, res) => {
   } else if (activityFilter && windowIsOpen && windowOpenAt) {
     // no_cart / no_visit: push filter to MongoDB query — no in-memory scan
     if (activityFilter === 'no_cart') {
-      // Cart is stored on User.cartState — sellers with an empty cart are those
-      // whose cartState.orderItemIds array is missing or empty.
+      // Cart is now on Shop — find shops with non-empty cart and exclude their sellers
+      const shopsWithCart = await Shop.find(
+        { 'cartState.orderItemIds.0': { $exists: true } },
+        '_id'
+      ).lean();
+      const shopIdsWithCart = shopsWithCart.map((s) => s._id);
       filter['$or'] = [
-        { 'cartState.orderItemIds': { $exists: false } },
-        { 'cartState.orderItemIds': { $size: 0 } },
+        { shopId: { $exists: false } },
+        { shopId: null },
+        { shopId: { $nin: shopIdsWithCart } },
       ];
     } else if (activityFilter === 'no_visit') {
       filter['$or'] = [
@@ -267,9 +223,14 @@ router.get('/', asyncHandler(async (req, res) => {
     }
   }
 
-  // Cart lives on User.cartState — derive itemCount directly from each user doc.
+  // Batch-load shop cartState to compute cartItemCount
+  const shopIds = [...new Set(users.map((u) => u.shopId).filter(Boolean).map(String))];
+  const shopDocs = shopIds.length > 0 ? await Shop.find({ _id: { $in: shopIds } }, 'cartState').lean() : [];
+  const shopMap = new Map(shopDocs.map((s) => [String(s._id), s]));
   const getCartCount = (u) => {
-    const items = u?.cartState?.orderItems;
+    if (!u.shopId) return 0;
+    const shop = shopMap.get(String(u.shopId));
+    const items = shop?.cartState?.orderItems;
     if (!items) return 0;
     const obj = items instanceof Map ? Object.fromEntries(items) : items;
     return Object.values(obj).reduce((s, q) => s + (Number(q) || 0), 0);
@@ -297,15 +258,19 @@ router.get('/', asyncHandler(async (req, res) => {
     windowIsOpen,
     windowOpenAt: windowOpenAt?.toISOString() || null,
   });
-}));
+  } catch (err) {
+    console.error('[GET /users]', err);
+    res.status(500).json({ error: 'Failed to fetch users' });
+  }
+});
 
-router.get('/:telegramId', asyncHandler(async (req, res) => {
+router.get('/:telegramId', async (req, res) => {
   const user = await User.findOne({ telegramId: req.params.telegramId });
-  if (!user) throw appError('user_not_found');
+  if (!user) return res.status(404).json({ error: 'User not found' });
   res.json(user);
-}));
+});
 
-router.post('/', asyncHandler(async (req, res) => {
+router.post('/', async (req, res) => {
   const existing = await User.findOne({ telegramId: req.body.telegramId });
   const payload = await sanitizeUserPayload(req.body, existing);
   // telegramId береться з body тільки при створенні нового юзера
@@ -318,371 +283,82 @@ router.post('/', asyncHandler(async (req, res) => {
     await user.save();
   }
 
+  await syncDeliveryGroupMembership(user.telegramId, user.deliveryGroupId);
   user = await syncUserWarehouseZone(user);
   res.status(existing ? 200 : 201).json(user);
-}));
+});
 
-// Lightweight endpoint — only updates shopId + syncs deliveryGroupId from the shop.
-// All writes (User, Order, PickingTask, lastSeller, history) run inside a single
-// MongoDB transaction so a partial failure cannot leave User and Order pointing
-// to different shops.
-router.patch('/:telegramId/shop', asyncHandler(async (req, res) => {
-  const existing = await User.findOne({ telegramId: req.params.telegramId });
-  if (!existing) throw appError('user_not_found');
+// Lightweight endpoint — only updates shopId + syncs deliveryGroupId from the shop
+router.patch('/:telegramId/shop', async (req, res) => {
+  try {
+    const existing = await User.findOne({ telegramId: req.params.telegramId });
+    if (!existing) return res.status(404).json({ error: 'User not found' });
 
     const { shopId } = req.body;
-    const oldShopId = existing.shopId ? String(existing.shopId) : '';
-    const newShopId = shopId ? String(shopId) : '';
+    let deliveryGroupId = existing.deliveryGroupId || null;
 
-    // Special case: clearing the shop assignment (no destination shop).
-    // Keep cart and keep active order, but detach order from the shop so conflict
-    // dashboards no longer treat it as attached to the old shop.
-    if (!newShopId) {
-      if (!oldShopId) {
-        return res.json(existing);
-      }
-      let parkedOrderMeta = null;
-      let unassignedPrevGroupId = null;
-      const session = await mongoose.connection.startSession();
-      try {
-        await session.withTransaction(async () => {
-          const actor = req.telegramUser;
-          const oldShop = await Shop.findById(oldShopId).session(session).lean();
-          unassignedPrevGroupId = oldShop?.deliveryGroupId ? String(oldShop.deliveryGroupId) : null;
-
-          const activeOrder = await Order.findOne({
-            buyerTelegramId: existing.telegramId,
-            shopId: existing.shopId,
-            status: { $in: ['new', 'in_progress'] },
-          }).sort({ createdAt: -1 }).session(session);
-
-          if (activeOrder) {
-            await ensureOrderNotInPickingPipeline(activeOrder._id, session);
-
-            const prevGroupId = activeOrder.buyerSnapshot?.deliveryGroupId
-              ? String(activeOrder.buyerSnapshot.deliveryGroupId)
-              : null;
-
-            activeOrder.shopId = null;
-            if (!activeOrder.buyerSnapshot) activeOrder.buyerSnapshot = {};
-            activeOrder.buyerSnapshot.shopId = null;
-            activeOrder.buyerSnapshot.shopName = '';
-            activeOrder.buyerSnapshot.shopCity = '';
-            activeOrder.buyerSnapshot.deliveryGroupId = '';
-            activeOrder.orderingSessionId = '';
-            activeOrder.markModified('buyerSnapshot');
-            activeOrder.history.push({
-              by: String(actor.telegramId),
-              byName: [actor.firstName, actor.lastName].filter(Boolean).join(' '),
-              byRole: actor.role,
-              action: 'shop_unassigned',
-              meta: {
-                from: {
-                  shopName: oldShop?.name || '',
-                  shopCity: oldShop?.cityId?.name || '',
-                  deliveryGroupId: oldShop?.deliveryGroupId || '',
-                },
-                reason: 'admin_unassigned_seller',
-              },
-            });
-            await activeOrder.save({ session });
-
-            await PickingTask.updateMany(
-              { 'items.orderId': activeOrder._id, status: { $in: ['pending', 'locked'] } },
-              { $set: { 'items.$[elem].shopName': '' } },
-              { arrayFilters: [{ 'elem.orderId': activeOrder._id }], session },
-            );
-
-            parkedOrderMeta = {
-              buyerTelegramId: existing.telegramId,
-              prevGroupId,
-            };
-          }
-
-          await User.updateOne(
-            { telegramId: req.params.telegramId },
-            {
-              $set: {
-                shopId: null,
-                shopName: '',
-                shopCity: '',
-                deliveryGroupId: '',
-                ...(existing.role === 'seller' ? { warehouseZone: '' } : {}),
-                'cartState.reservedForGroupId': null,
-              },
-              $push: {
-                history: {
-                  at: new Date(),
-                  by: String(actor.telegramId),
-                  byName: [actor.firstName, actor.lastName].filter(Boolean).join(' '),
-                  byRole: actor.role,
-                  action: 'shop_changed',
-                  meta: { fromShop: oldShop?.name || null, toShop: null },
-                },
-              },
-            },
-            { session },
-          );
-
-          await Shop.findByIdAndUpdate(
-            oldShopId,
-            {
-              lastSeller: {
-                telegramId:   existing.telegramId,
-                firstName:    existing.firstName  || '',
-                lastName:     existing.lastName   || '',
-                unassignedAt: new Date(),
-              },
-            },
-            { session },
-          );
-        });
-      } finally {
-        session.endSession();
-      }
-
-      if (parkedOrderMeta) {
-        try {
-          const io = getIO();
-          if (io) {
-            const groupIdToNotify = parkedOrderMeta.prevGroupId || unassignedPrevGroupId;
-            if (groupIdToNotify) {
-              io.to(`picking_group_${groupIdToNotify}`).emit('shop_status_changed', { groupId: groupIdToNotify });
-            }
-            io.emit('user_order_updated', { buyerTelegramId: parkedOrderMeta.buyerTelegramId });
-          }
-        } catch (emitErr) {
-          console.warn('[PATCH /users/:telegramId/shop][unassign] socket emit failed:', emitErr?.message);
-        }
-      } else if (unassignedPrevGroupId) {
-        try {
-          const io = getIO();
-          if (io) {
-            io.to(`picking_group_${unassignedPrevGroupId}`).emit('shop_status_changed', { groupId: unassignedPrevGroupId });
-          }
-        } catch (emitErr) {
-          console.warn('[PATCH /users/:telegramId/shop][unassign] socket emit failed:', emitErr?.message);
-        }
-      }
-
-      const refreshed = await User.findOne({ telegramId: req.params.telegramId });
-      return res.json(refreshed);
+    if (shopId) {
+      const shop = await Shop.findById(shopId).lean();
+      if (!shop) return res.status(404).json({ error: 'Shop not found' });
+      deliveryGroupId = shop.deliveryGroupId || null;
+    } else {
+      deliveryGroupId = null;
     }
 
-    const newShop = await Shop.findById(newShopId).populate('cityId', 'name').lean();
-    if (!newShop) throw appError('shop_not_found');
+    const oldShopId = existing.shopId ? String(existing.shopId) : null;
+    const newShopId = shopId ? String(shopId) : null;
 
-    let migrationResult = null;
-    const session = await mongoose.connection.startSession();
-    try {
-      await session.withTransaction(async () => {
-        migrationResult = await migrateSellerShop({
-          session,
-          existingUser: existing,
-          newShopFull: newShop,
-          actor: req.telegramUser,
-          reason: 'admin_reassigned_seller',
-          resetCartItems: false,
-          resetCartNavigation: false,
-          clearCartReservation: true,
-          pushHistory: true,
-          updateLastSeller: true,
-        });
-      });
-    } finally {
-      session.endSession();
+    const user = await User.findOneAndUpdate(
+      { telegramId: req.params.telegramId },
+      { shopId: shopId || null, deliveryGroupId },
+      { new: true }
+    );
+    await syncDeliveryGroupMembership(user.telegramId, user.deliveryGroupId);
+
+    const now = new Date();
+    if (oldShopId && oldShopId !== newShopId) {
+      await Shop.findByIdAndUpdate(oldShopId, { $set: { lastSellerChangedAt: now } });
+    }
+    if (newShopId && newShopId !== oldShopId) {
+      await Shop.findByIdAndUpdate(newShopId, { $set: { lastSellerChangedAt: now } });
     }
 
-    // Notify dashboards AFTER commit so listeners never see uncommitted state.
-    if (migrationResult?.movedOrder) {
-      try {
-        const io = getIO();
-        if (io) {
-          const { prevGroupId, newGroupId } = migrationResult;
-          if (prevGroupId) io.to(`picking_group_${prevGroupId}`).emit('shop_status_changed', { groupId: prevGroupId });
-          if (newGroupId && newGroupId !== prevGroupId) {
-            io.to(`picking_group_${newGroupId}`).emit('shop_status_changed', { groupId: newGroupId });
-            io.emit('delivery_groups_updated');
-          }
-          io.emit('user_order_updated', { buyerTelegramId: existing.telegramId });
-        }
-      } catch (emitErr) {
-        console.warn('[PATCH /users/:telegramId/shop] socket emit failed:', emitErr?.message);
-      }
-    }
+    res.json(user);
+  } catch (err) {
+    console.error('[PATCH /users/:telegramId/shop]', err);
+    res.status(500).json({ error: 'Failed to update shop assignment' });
+  }
+});
 
-    res.json(migrationResult?.updatedUser || existing);
-}));
-
-router.patch('/:telegramId', asyncHandler(async (req, res) => {
-  const existing = await User.findOne({ telegramId: req.params.telegramId });
-  if (!existing) throw appError('user_not_found');
+router.patch('/:telegramId', async (req, res) => {
+  try {
+    const existing = await User.findOne({ telegramId: req.params.telegramId });
+    if (!existing) return res.status(404).json({ error: 'User not found' });
 
     const payload = await sanitizeUserPayload(req.body, existing);
-    const oldShopId = existing.shopId ? String(existing.shopId) : '';
-    const newShopId = payload.shopId ? String(payload.shopId) : '';
-    const shopChanged = oldShopId !== newShopId;
-
-    // If shop is changing AND the result is a real shop (not unassign), perform the
-    // migration in a transaction so Order/PickingTask/User stay consistent. Other
-    // payload fields are still applied via the standard update afterwards.
-    let migrationResult = null;
-    if (shopChanged && newShopId && payload.role === 'seller') {
-      const newShop = await Shop.findById(newShopId).populate('cityId', 'name').lean();
-      if (!newShop) throw appError('shop_not_found');
-
-      const session = await mongoose.connection.startSession();
-      try {
-        await session.withTransaction(async () => {
-          migrationResult = await migrateSellerShop({
-            session,
-            existingUser: existing,
-            newShopFull: newShop,
-            actor: req.telegramUser,
-            reason: 'admin_user_patch',
-            resetCartItems: false,
-            resetCartNavigation: false,
-            clearCartReservation: true,
-            pushHistory: false, // history will be added by the role/shop diff logic below
-            updateLastSeller: true,
-          });
-        });
-      } finally {
-        session.endSession();
-      }
-    }
-
     const user = await User.findOneAndUpdate(
       { telegramId: req.params.telegramId },
       payload,
       { new: true, runValidators: true }
     );
+    await syncDeliveryGroupMembership(user.telegramId, user.deliveryGroupId);
     const updatedUser = await syncUserWarehouseZone(user);
-
-    // Log shop and role changes
-    const historyEntries = [];
-    const actor = req.telegramUser;
-    const actorMeta = {
-      by: String(actor.telegramId),
-      byName: [actor.firstName, actor.lastName].filter(Boolean).join(' '),
-      byRole: actor.role,
-    };
-
-    if (shopChanged) {
-      const [oldShop, newShop, activeOrders] = await Promise.all([
-        existing.shopId ? Shop.findById(existing.shopId, 'name').lean() : Promise.resolve(null),
-        payload.shopId ? Shop.findById(payload.shopId, 'name').lean() : Promise.resolve(null),
-        Order.countDocuments({ buyerTelegramId: existing.telegramId, status: { $in: ['new', 'in_progress'] } }),
-      ]);
-      historyEntries.push({
-        at: new Date(),
-        ...actorMeta,
-        action: 'shop_changed',
-        meta: {
-          fromShop: oldShop?.name || null,
-          toShop: newShop?.name || null,
-          activeOrders,
-          orderMoved: !!migrationResult?.movedOrder,
-        },
-      });
-    }
-
-    if (existing.role !== payload.role) {
-      historyEntries.push({ at: new Date(), ...actorMeta, action: 'role_changed', meta: { from: existing.role, to: payload.role } });
-    }
-
-    if (historyEntries.length > 0) {
-      await User.updateOne(
-        { telegramId: req.params.telegramId },
-        { $push: { history: { $each: historyEntries } } }
-      );
-    }
-
-    // Notify dashboards if an order was moved during the migration
-    if (migrationResult?.movedOrder) {
-      try {
-        const io = getIO();
-        if (io) {
-          const { prevGroupId, newGroupId } = migrationResult;
-          if (prevGroupId) io.to(`picking_group_${prevGroupId}`).emit('shop_status_changed', { groupId: prevGroupId });
-          if (newGroupId && newGroupId !== prevGroupId) {
-            io.to(`picking_group_${newGroupId}`).emit('shop_status_changed', { groupId: newGroupId });
-            io.emit('delivery_groups_updated');
-          }
-          io.emit('user_order_updated', { buyerTelegramId: existing.telegramId });
-        }
-      } catch (emitErr) {
-        console.warn('[PATCH /users/:telegramId] socket emit failed:', emitErr?.message);
-      }
-    }
-
     res.json(updatedUser);
-}));
-
-router.delete('/:telegramId', asyncHandler(async (req, res) => {
-  // Перевірку «активних робіт» і саме видалення робимо в одній транзакції,
-  // щоб у вікні між count і findOneAndDelete не з'явилося нове замовлення/
-  // пакувальний таск (інакше отримаємо «висячі» посилання на видаленого user'а).
-  const session = await mongoose.connection.startSession();
-  try {
-    let result;
-    await session.withTransaction(async () => {
-      const existing = await User.findOne({ telegramId: req.params.telegramId }).session(session);
-      if (!existing) throw appError('user_not_found');
-
-      const [activeOrders, activePickingTasks] = await Promise.all([
-        Order.countDocuments({
-          buyerTelegramId: existing.telegramId,
-          status: { $in: ['new', 'in_progress'] },
-        }).session(session),
-        // Picking tasks reference orders by orderId — find any pending/locked task that
-        // contains an order belonging to this buyer.
-        (async () => {
-          const buyerOrderIds = await Order.find(
-            { buyerTelegramId: existing.telegramId },
-            '_id',
-          ).session(session).lean();
-          if (!buyerOrderIds.length) return 0;
-          return PickingTask.countDocuments({
-            'items.orderId': { $in: buyerOrderIds.map((o) => o._id) },
-            status: { $in: ['pending', 'locked'] },
-          }).session(session);
-        })(),
-      ]);
-
-      if (activeOrders > 0 || activePickingTasks > 0) {
-        throw appError('user_has_active_work', { activeOrders, activePickingTasks });
-      }
-
-      const shopId = existing.shopId;
-      await User.deleteOne({ _id: existing._id }, { session });
-
-      // Зберігаємо «слід» продавця на магазині — у тій самій транзакції,
-      // щоб або обидва записи з'явилися, або жодного.
-      if (shopId) {
-        await Shop.updateOne(
-          { _id: shopId },
-          {
-            $set: {
-              lastSeller: {
-                telegramId: existing.telegramId,
-                firstName: existing.firstName || '',
-                lastName: existing.lastName || '',
-                unassignedAt: new Date(),
-              },
-            },
-          },
-          { session },
-        );
-      }
-
-      result = { message: 'Користувача видалено' };
-    });
-
-    return res.json(result);
-  } finally {
-    session.endSession();
+  } catch (err) {
+    console.error('[PATCH /users/:telegramId]', err);
+    res.status(500).json({ error: 'Failed to update user' });
   }
-}));
+});
+
+router.delete('/:telegramId', async (req, res) => {
+  const user = await User.findOneAndDelete({ telegramId: req.params.telegramId });
+  if (!user) return res.status(404).json({ error: 'User not found' });
+  // Remove from all delivery groups
+  await DeliveryGroup.updateMany(
+    { members: user.telegramId },
+    { $pull: { members: user.telegramId } }
+  );
+  res.json({ message: 'User deleted' });
+});
 
 module.exports = router;

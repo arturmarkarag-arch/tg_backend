@@ -12,15 +12,20 @@
  */
 
 const AppSetting = require('../models/AppSetting');
+const cache = require('./cache');
 
 const ORDERING_SCHEDULE_KEY = 'ordering.schedule';
 
 /**
- * Reads the ordering schedule from the database.
+ * Reads the ordering schedule from the database (cached in memory).
+ * Call invalidateOrderingScheduleCache() after admin update to refresh.
  * @throws {Error} if the 'ordering.schedule' key is not present in AppSetting.
  * @returns {Promise<{ openHour: number, openMinute: number, closeHour: number, closeMinute: number }>}
  */
 async function getOrderingSchedule() {
+  const cached = cache.get(cache.KEYS.ORDERING_SCHEDULE);
+  if (cached) return cached;
+
   const doc = await AppSetting.findOne({ key: ORDERING_SCHEDULE_KEY }).lean();
   if (!doc || !doc.value) {
     throw new Error(
@@ -28,7 +33,13 @@ async function getOrderingSchedule() {
       'Адміністратор має їх налаштувати через розділ Налаштування → Розклад замовлень.'
     );
   }
+
+  cache.set(cache.KEYS.ORDERING_SCHEDULE, doc.value);
   return doc.value;
 }
 
-module.exports = { getOrderingSchedule, ORDERING_SCHEDULE_KEY };
+function invalidateOrderingScheduleCache() {
+  cache.invalidate(cache.KEYS.ORDERING_SCHEDULE);
+}
+
+module.exports = { getOrderingSchedule, invalidateOrderingScheduleCache, ORDERING_SCHEDULE_KEY };

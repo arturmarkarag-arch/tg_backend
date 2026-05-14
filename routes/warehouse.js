@@ -22,7 +22,6 @@ router.get('/workers', requireTelegramRoles(['admin', 'warehouse']), asyncHandle
     _id: worker._id,
     firstName: worker.firstName,
     lastName: worker.lastName,
-    shopName: worker.shopName,
     isWarehouseManager: worker.isWarehouseManager || false,
     isOnShift: worker.isOnShift || false,
     shiftZone: worker.shiftZone || { startBlock: null, endBlock: null },

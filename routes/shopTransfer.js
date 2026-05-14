@@ -251,7 +251,7 @@ router.post('/:id/approve', telegramAuth, requireTelegramRole('admin'), asyncHan
           throw appError('transfer_target_occupied');
         }
 
-        const displacedPatch = { shopId: null, shopName: '', shopCity: '', deliveryGroupId: '', warehouseZone: '' };
+        const displacedPatch = { shopId: null, deliveryGroupId: '', warehouseZone: '' };
 
         if (displacedSellerDecision === 'clear_cart') {
           displacedPatch['cartState.orderItems'] = {};
@@ -341,8 +341,6 @@ router.post('/:id/approve', telegramAuth, requireTelegramRole('admin'), asyncHan
           { telegramId: seller.telegramId },
           { $set: {
             shopId: toShop._id,
-            shopName: toShop.name,
-            shopCity: toShop.cityId?.name || '',
             deliveryGroupId: toShop.deliveryGroupId || '',
             warehouseZone,
           }},

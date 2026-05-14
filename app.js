@@ -86,4 +86,11 @@ app.use('/api/v1/telegram', telegramV1Router);
 const { errorHandler } = require('./utils/errors');
 app.use(errorHandler);
 
+// Serve built React client
+const clientDist = path.join(__dirname, '../client/dist');
+app.use(express.static(clientDist));
+app.get('/{*path}', (req, res) => {
+  res.sendFile(path.join(clientDist, 'index.html'));
+});
+
 module.exports = app;

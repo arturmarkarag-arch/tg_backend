@@ -290,22 +290,30 @@ router.get('/block-tasks', requireTelegramRoles(['warehouse', 'admin']), async (
       .sort({ positionIndex: 1 })
       .lean();
 
+    const productIds = [...new Set(tasks.map((t) => String(t.productId)))];
+    const products = await Product.find({ _id: { $in: productIds } }).lean();
+    const productMap = new Map(products.map((p) => [String(p._id), p]));
+
     const previewTasks = [];
     for (const task of tasks) {
-      const taskData = await buildTaskResponse(task);
-      if (!taskData) continue;
+      const product = productMap.get(String(task.productId));
+      if (!product) continue;
+      const imageUrl =
+        (Array.isArray(product.imageUrls) && product.imageUrls[0]) ||
+        product.localImageUrl ||
+        null;
       const totalQty = (task.items || []).reduce((sum, item) => sum + Number(item.quantity || 0), 0);
       const lockedBy = task.lockedBy ? String(task.lockedBy) : null;
       const lockedByMe = task.status === 'locked' && lockedBy === String(user.telegramId);
       const lockedByOther = task.status === 'locked' && !lockedByMe;
 
       previewTasks.push({
-        taskId: taskData.taskId,
-        productId: taskData.productId,
-        productTitle: taskData.productTitle,
-        imageUrl: taskData.imageUrl,
-        blockId: taskData.blockId,
-        positionIndex: taskData.positionIndex,
+        taskId: String(task._id),
+        productId: String(product._id),
+        productTitle: getProductTitle(product),
+        imageUrl,
+        blockId: task.blockId,
+        positionIndex: task.positionIndex,
         totalQty,
         shopCount: (task.items || []).length,
         status: task.status,
@@ -495,21 +503,26 @@ router.get('/locked-tasks', requireTelegramRoles(['warehouse', 'admin']), async 
       '_id productId blockId positionIndex lockedBy lockedAt items'
     ).lean();
 
-    const result = await Promise.all(
-      tasks.map(async (task) => {
-        const product = await Product.findById(task.productId, 'brand model category').lean();
-        return {
-          taskId: String(task._id),
-          productTitle: product
-            ? (product.brand || product.model || product.category || '—')
-            : '—',
-          blockId: task.blockId,
-          positionIndex: task.positionIndex,
-          lockedAt: task.lockedAt,
-          shopCount: (task.items || []).length,
-        };
-      })
-    );
+    const productIds = [...new Set(tasks.map((t) => String(t.productId)))];
+    const products = await Product.find(
+      { _id: { $in: productIds } },
+      'brand model category'
+    ).lean();
+    const productMap = new Map(products.map((p) => [String(p._id), p]));
+
+    const result = tasks.map((task) => {
+      const product = productMap.get(String(task.productId));
+      return {
+        taskId: String(task._id),
+        productTitle: product
+          ? (product.brand || product.model || product.category || '—')
+          : '—',
+        blockId: task.blockId,
+        positionIndex: task.positionIndex,
+        lockedAt: task.lockedAt,
+        shopCount: (task.items || []).length,
+      };
+    });
 
     res.json({ tasks: result });
   } catch (err) {

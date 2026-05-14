@@ -18,10 +18,6 @@ const UserSchema = new mongoose.Schema(
     phoneNumber: { type: String, default: '' },
     shopNumber: { type: String, default: '' },
     shopId: { type: mongoose.Schema.Types.ObjectId, ref: 'Shop', default: null },
-    // Legacy fields — kept for backward compatibility during migration, will be removed after
-    shopName: { type: String, default: '' },
-    shopAddress: { type: String, default: '' },
-    shopCity: { type: String, default: '' },
     deliveryGroupId: { type: String, default: '' },
     warehouseZone: { type: String, default: '' },
     isWarehouseManager: { type: Boolean, default: false },

@@ -171,7 +171,7 @@ router.post('/me', async (req, res) => {
     phoneNumber: user.phoneNumber || '',
     shopId: userShop ? String(userShop._id) : null,
     shop: userShop ? { _id: userShop._id, name: userShop.name, city: userShop.cityId?.name || '', deliveryGroupId: userShop.deliveryGroupId, cartState: normalizedCartState } : null,
-    shopName: userShop?.name || user.shopName || '',
+    shopName: userShop?.name || '',
     shopNumber: user.shopNumber,
     shopCity: userShop?.cityId?.name || '',
     deliveryGroupId: resolvedGroupId,

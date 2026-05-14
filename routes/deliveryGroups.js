@@ -15,6 +15,16 @@ const {
 const { normalizeDeliveryGroup } = require('../utils/deliveryGroupHelpers');
 
 const { getOrderingSchedule } = require('../utils/getOrderingSchedule');
+const cache = require('../utils/cache');
+
+async function getAllDeliveryGroups() {
+  let groups = cache.get(cache.KEYS.DELIVERY_GROUPS);
+  if (!groups) {
+    groups = await DeliveryGroup.find().lean();
+    cache.set(cache.KEYS.DELIVERY_GROUPS, groups);
+  }
+  return groups;
+}
 
 const router = express.Router();
 
@@ -113,7 +123,7 @@ router.get('/ordering-status', telegramAuth, async (req, res) => {
 });
 
 router.get('/summary', async (req, res) => {
-  const groups = await DeliveryGroup.find().select('name dayOfWeek').lean();
+  const groups = await getAllDeliveryGroups();
 
   // Кількість активних магазинів по кожній групі
   const shopCounts = await Shop.aggregate([
@@ -312,7 +322,7 @@ router.get('/:groupId/shop-status', telegramAuth, requireTelegramRoles(['admin',
 }));
 
 router.get('/session-summaries', telegramAuth, requireTelegramRole('admin'), async (req, res) => {
-  const groups = await DeliveryGroup.find().lean();
+  const groups = await getAllDeliveryGroups();
   const schedule = await getOrderingSchedule();
   const groupIds = groups.map((group) => String(group._id));
 
@@ -369,7 +379,7 @@ router.post('/:id/close-ordering-session', telegramAuth, requireTelegramRole('ad
 }));
 
 router.get('/', async (req, res) => {
-  const groups = await DeliveryGroup.find().lean();
+  const groups = await getAllDeliveryGroups();
   const normalizedGroups = groups.map(normalizeDeliveryGroup);
   normalizedGroups.sort((a, b) => {
     const orderA = a.dayOfWeek === 0 ? 7 : a.dayOfWeek;
@@ -432,6 +442,7 @@ router.post('/', telegramAuth, requireTelegramRole('admin'), asyncHandler(async 
 
   const group = new DeliveryGroup({ name, dayOfWeek });
   await group.save();
+  cache.invalidate(cache.KEYS.DELIVERY_GROUPS);
   res.status(201).json(group);
 }));
 
@@ -444,6 +455,7 @@ router.patch('/:id', telegramAuth, requireTelegramRole('admin'), asyncHandler(as
   if (dayOfWeek !== undefined) group.dayOfWeek = dayOfWeek;
 
   await group.save();
+  cache.invalidate(cache.KEYS.DELIVERY_GROUPS);
   res.json(group);
 }));
 
@@ -470,6 +482,7 @@ router.delete('/:id', telegramAuth, requireTelegramRole('admin'), asyncHandler(a
       if (activeOrders > 0) throw appError('group_has_active_orders', { activeOrders });
 
       await DeliveryGroup.deleteOne({ _id: group._id }, { session });
+      cache.invalidate(cache.KEYS.DELIVERY_GROUPS);
       result = { message: 'Group deleted' };
     });
     return res.json(result);
