@@ -73,17 +73,15 @@ router.post('/', telegramAuth, requireTelegramRole('seller'), asyncHandler(async
 
   if (!toShopId) throw appError('transfer_shop_required');
 
-  // Seller must already be in a shop
-  if (!seller.shopId) throw appError('transfer_no_source_shop');
+  const isAssignment = !seller.shopId; // true = initial assignment, false = shop change
 
-  const fromShopIdStr = String(seller.shopId);
-  if (String(toShopId) === fromShopIdStr) throw appError('transfer_same_shop');
+  if (!isAssignment && String(toShopId) === String(seller.shopId)) throw appError('transfer_same_shop');
 
   const [fromShop, toShop] = await Promise.all([
-    Shop.findById(seller.shopId, 'name deliveryGroupId').lean(),
+    seller.shopId ? Shop.findById(seller.shopId, 'name deliveryGroupId').lean() : Promise.resolve(null),
     Shop.findById(toShopId, 'name deliveryGroupId isActive').lean(),
   ]);
-  if (!fromShop) throw appError('shop_not_found');
+  if (!isAssignment && !fromShop) throw appError('shop_not_found');
   if (!toShop || !toShop.isActive) throw appError('transfer_target_not_found');
 
   // One pending request per seller at a time (partial unique index handles the DB race,
@@ -100,9 +98,10 @@ router.post('/', telegramAuth, requireTelegramRole('seller'), asyncHandler(async
   const request = await ShopTransferRequest.create({
     sellerTelegramId: seller.telegramId,
     sellerName: [seller.firstName, seller.lastName].filter(Boolean).join(' '),
-    fromShopId: seller.shopId,
-    fromShopName: fromShop.name,
-    fromDeliveryGroupId: fromShop.deliveryGroupId || '',
+    isAssignment,
+    fromShopId: seller.shopId || null,
+    fromShopName: fromShop?.name || '',
+    fromDeliveryGroupId: fromShop?.deliveryGroupId || '',
     toShopId,
     toShopName: toShop.name,
     toDeliveryGroupId: toShop.deliveryGroupId || '',
@@ -184,10 +183,11 @@ router.post('/:id/approve', telegramAuth, requireTelegramRole('admin'), asyncHan
       const request = await ShopTransferRequest.findById(requestDoc._id).session(session);
       if (!request || request.status !== 'pending') throw appError('transfer_not_pending');
 
-      // Re-check seller still in fromShop (race guard)
+      // Re-check seller's current shop matches what was recorded (race guard)
       const seller = await User.findOne({ telegramId: request.sellerTelegramId }).session(session);
       if (!seller) throw appError('user_not_found');
-      if (String(seller.shopId) !== String(request.fromShopId)) {
+      const isAssignment = request.isAssignment || !request.fromShopId;
+      if (!isAssignment && String(seller.shopId) !== String(request.fromShopId)) {
         throw appError('transfer_seller_moved');
       }
 
@@ -238,19 +238,42 @@ router.post('/:id/approve', telegramAuth, requireTelegramRole('admin'), asyncHan
         }
       }
 
-      // Delegate the full migration (order transfer, history, lastSeller, warehouseZone, etc.)
-      migrationResult = await migrateSellerShop({
-        session,
-        existingUser: seller,
-        newShopFull: toShop,
-        actor: admin,
-        reason: `admin_transfer_approved:${String(request._id)}`,
-        resetCartItems: cartDecision === 'clear',
-        resetCartNavigation: true,
-        clearCartReservation: true,
-        pushHistory: true,
-        updateLastSeller: true,
-      });
+      // For initial assignment: just set the shop directly (no order to migrate, no lastSeller, no history)
+      // For shop change: use full migration service
+      if (isAssignment) {
+        const warehouseZone = toShop.deliveryGroupId
+          ? (await require('../models/DeliveryGroup').findById(toShop.deliveryGroupId).lean())?.name || ''
+          : '';
+        await User.updateOne(
+          { telegramId: seller.telegramId },
+          { $set: {
+            shopId: toShop._id,
+            shopName: toShop.name,
+            shopCity: toShop.cityId?.name || '',
+            deliveryGroupId: toShop.deliveryGroupId || '',
+            warehouseZone,
+          }},
+          { session }
+        );
+        migrationResult = {
+          prevGroupId: null,
+          newGroupId: toShop.deliveryGroupId || null,
+          movedOrder: false,
+        };
+      } else {
+        migrationResult = await migrateSellerShop({
+          session,
+          existingUser: seller,
+          newShopFull: toShop,
+          actor: admin,
+          reason: `admin_transfer_approved:${String(request._id)}`,
+          resetCartItems: cartDecision === 'clear',
+          resetCartNavigation: true,
+          clearCartReservation: true,
+          pushHistory: true,
+          updateLastSeller: true,
+        });
+      }
 
       // Mark request resolved
       request.status = 'approved';

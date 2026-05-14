@@ -24,9 +24,10 @@ const ShopTransferRequestSchema = new mongoose.Schema({
   // Who is requesting
   sellerTelegramId: { type: String, required: true, index: true },
   sellerName: { type: String, default: '' },
+  isAssignment: { type: Boolean, default: false }, // true = first-time assignment, false = shop change
 
-  // From which shop
-  fromShopId: { type: mongoose.Schema.Types.ObjectId, ref: 'Shop', required: true },
+  // From which shop (null when seller has no shop yet — initial assignment request)
+  fromShopId: { type: mongoose.Schema.Types.ObjectId, ref: 'Shop', default: null },
   fromShopName: { type: String, default: '' },
   fromDeliveryGroupId: { type: String, default: '' },
 
