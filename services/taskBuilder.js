@@ -152,7 +152,8 @@ async function buildPickingTasksFromOrders(targetDeliveryGroupId = null, options
         Array.from(toAppend.values()).map(({ taskId, newItems }) =>
           PickingTask.updateOne(
             { _id: taskId },
-            { $push: { items: { $each: newItems } } }
+            // addToSet by orderId to prevent duplicates in multi-process environments
+            { $addToSet: { items: { $each: newItems } } }
           )
         )
       );

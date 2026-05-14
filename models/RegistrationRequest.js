@@ -5,6 +5,7 @@ const RegistrationRequestSchema = new mongoose.Schema(
     telegramId: { type: String, required: true, index: true },
     firstName: { type: String, required: true },
     lastName: { type: String, required: true },
+    phoneNumber: { type: String, default: '' },
     shopId: { type: String, default: null },
     shopName: { type: String, default: '' },
     shopCity: { type: String, default: '' },

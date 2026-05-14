@@ -229,6 +229,18 @@ const ERRORS = {
   city_already_exists:      { status: 409, message: ({ name } = {}) => `Місто "${name || ''}" вже існує` },
   city_create_failed:       { status: 500, message: 'Не вдалося створити місто' },
 
+  // ── Shop Transfer Requests ─────────────────────────────────────────────────
+  transfer_shop_required:       { status: 400, message: 'Не вказано цільовий магазин (toShopId)' },
+  transfer_no_source_shop:      { status: 400, message: 'Ви не прив\'язані до жодного магазину' },
+  transfer_same_shop:           { status: 400, message: 'Цільовий магазин збігається з поточним' },
+  transfer_target_not_found:    { status: 404, message: 'Цільовий магазин не знайдено або неактивний' },
+  transfer_already_pending:     { status: 409, message: 'У вас вже є активний запит на зміну магазину. Скасуйте його перед створенням нового.' },
+  transfer_not_found:           { status: 404, message: 'Запит на зміну магазину не знайдено' },
+  transfer_not_pending:         { status: 409, message: 'Запит вже оброблений (схвалений/відхилений/скасований)' },
+  transfer_seller_moved:        { status: 409, message: 'Продавець вже змінив магазин поки запит очікував' },
+  transfer_target_occupied:     { status: 409, message: 'Цільовий магазин вже зайнятий іншим продавцем' },
+  transfer_cart_decision_required: { status: 400, message: 'Необхідно вказати рішення щодо кошика (cartDecision: "clear" або "keep")' },
+
   // ── Shops (extra) ──────────────────────────────────────────────────────────
   shop_list_failed:         { status: 500, message: 'Не вдалося отримати список магазинів' },
   shop_cities_failed:       { status: 500, message: 'Не вдалося отримати список міст' },

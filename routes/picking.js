@@ -1,61 +1,32 @@
 const express = require('express');
-const mongoose = require('mongoose');
 const PickingTask = require('../models/PickingTask');
 const Product = require('../models/Product');
 const Order = require('../models/Order');
 const Block = require('../models/Block');
-const User = require('../models/User');
 const DeliveryGroup = require('../models/DeliveryGroup');
 const { requireTelegramRoles } = require('../middleware/telegramAuth');
-const { archiveProduct, getProductTitle } = require('../services/archiveProduct');
+const { getProductTitle } = require('../services/archiveProduct');
 const { buildPickingTasksFromOrders } = require('../services/taskBuilder');
 const { isOrderingOpen, getWarsawNow, DAY_FULL_UK, getCurrentOrderingSessionId, getOrderingWindowCloseAt } = require('../utils/orderingSchedule');
-
 const { getOrderingSchedule } = require('../utils/getOrderingSchedule');
 const { appError } = require('../utils/errors');
+
+const {
+  findAndLockNext,
+  releaseWorkerAndStaleLocks,
+  completePickingTask,
+  outOfStockPickingTask,
+  forceClaimPickingTask,
+  reconcileActiveTasksForSession,
+  archiveOrphanedOutOfStockProducts,
+  FORCE_CLAIM_AFTER_MS,
+} = require('../services/pickingService');
 
 const router = express.Router();
 
 // ---------------------------------------------------------------------------
-// Helpers
+// Local helpers (route-layer only — not business logic)
 // ---------------------------------------------------------------------------
-
-/**
- * Mark Order items as packed and auto-fulfil the Order if all items are done.
- * Call after a PickingTask is completed or out-of-stocked.
- */
-async function markOrderItemsPacked(taskItems, productId, actor = { by: 'system', byName: '', byRole: 'system' }, session = null) {
-  // Only mark packed for items that were actually packed by the worker.
-  // Items with packed=false are left untouched so archiveProduct can cancel them.
-  const orderIds = [...new Set(taskItems.filter((i) => i.packed).map((i) => String(i.orderId)))];
-  await Promise.all(
-    orderIds.map(async (orderId) => {
-      const opts = session ? { session } : {};
-      // Step 1: mark this product's item as packed
-      const result = await Order.updateOne(
-        { _id: orderId, 'items.productId': productId },
-        { $set: { 'items.$.packed': true } },
-        opts,
-      );
-      if (result.matchedCount === 0) return;
-
-      // Step 2: atomically fulfil if every non-cancelled item is now packed.
-      // The filter condition is evaluated by MongoDB in one operation — no race.
-      await Order.updateOne(
-        {
-          _id: orderId,
-          status: { $in: ['new', 'in_progress'] },
-          'items': { $not: { $elemMatch: { packed: false, cancelled: false } } },
-        },
-        {
-          $set: { status: 'fulfilled' },
-          $push: { history: { at: new Date(), ...actor, action: 'status_changed', meta: { from: 'in_progress', to: 'fulfilled', via: 'picking' } } },
-        },
-        opts,
-      );
-    })
-  );
-}
 
 async function buildTaskResponse(task, { wrappedAround = false, isSecondChance = false } = {}) {
   if (!task) return null;
@@ -88,111 +59,12 @@ async function buildTaskResponse(task, { wrappedAround = false, isSecondChance =
   };
 }
 
-/**
- * Atomically lock the next pending task for a given worker.
- *
- * Normal flow (ignores tasks this worker already skipped):
- *   Pass 1: fromBlock → end of warehouse
- *   Pass 2: wrap-around 1 → fromBlock-1
- */
-/**
- * @returns {{ task: object|null, wrappedAround: boolean }}
- */
-async function findAndLockNext(userTelegramId, fromBlock, deliveryGroupId = null) {
-  const lock = { $set: { status: 'locked', lockedBy: userTelegramId, lockedAt: new Date() } };
-  const opts = { sort: { blockId: 1, positionIndex: 1 }, new: true };
-
-  const fresh = { status: 'pending' };
-  if (deliveryGroupId) fresh.deliveryGroupId = String(deliveryGroupId);
-
-  // Pass 1: fresh tasks fromBlock onwards
-  let task = await PickingTask.findOneAndUpdate(
-    { ...fresh, blockId: { $gte: fromBlock } }, lock, opts,
-  );
-  if (task) return { task, wrappedAround: false };
-
-  // Pass 2: fresh tasks wrap-around
-  if (fromBlock > 1) {
-    task = await PickingTask.findOneAndUpdate(
-      { ...fresh, blockId: { $gte: 1, $lt: fromBlock } }, lock, opts,
-    );
-    if (task) return { task, wrappedAround: true };
-  }
-
-  return { task: null, wrappedAround: false };
-}
-
-async function releaseWorkerAndStaleLocks(userTelegramId, deliveryGroupId = null, options = {}) {
-  const { releaseOwnLocks = true } = options;
-  const LOCK_TIMEOUT_MS = 15 * 60 * 1000; // 15 minutes
-  const staleLockedAt = new Date(Date.now() - LOCK_TIMEOUT_MS);
-  const unlockConditions = [{ lockedAt: { $lt: staleLockedAt } }];
-  if (releaseOwnLocks && userTelegramId) {
-    unlockConditions.unshift({ lockedBy: String(userTelegramId) });
-  }
-  await PickingTask.updateMany(
-    {
-      status: 'locked',
-      ...(deliveryGroupId ? { deliveryGroupId: String(deliveryGroupId) } : {}),
-      $or: unlockConditions,
-    },
-    { $set: { status: 'pending', lockedBy: null, lockedAt: null } },
-  );
-}
 
 /**
  * Keep active tasks aligned with one ordering session.
  * Removes task items that belong to orders outside the target session and
  * drops empty active tasks so old sessions cannot block a new picking start.
  */
-async function reconcileActiveTasksForSession(deliveryGroupId, orderingSessionId) {
-  const groupId = String(deliveryGroupId || '');
-  const sessionId = String(orderingSessionId || '');
-  if (!groupId || !sessionId) return;
-
-  const currentOrders = await Order.find(
-    {
-      'buyerSnapshot.deliveryGroupId': groupId,
-      status: { $in: ['new', 'in_progress'] },
-      orderingSessionId: sessionId,
-    },
-    '_id',
-  ).lean();
-  const allowedOrderIds = new Set(currentOrders.map((o) => String(o._id)));
-
-  const activeTasks = await PickingTask.find(
-    { deliveryGroupId: groupId, status: { $in: ['pending', 'locked'] } },
-    '_id status items',
-  ).lean();
-
-  if (!activeTasks.length) return;
-
-  const ops = [];
-  for (const task of activeTasks) {
-    const keptItems = (task.items || []).filter((it) => allowedOrderIds.has(String(it.orderId)));
-    if (keptItems.length === (task.items || []).length) continue;
-
-    if (!keptItems.length) {
-      ops.push({
-        deleteOne: {
-          filter: { _id: task._id, status: { $in: ['pending', 'locked'] } },
-        },
-      });
-      continue;
-    }
-
-    ops.push({
-      updateOne: {
-        filter: { _id: task._id, status: { $in: ['pending', 'locked'] } },
-        update: { $set: { items: keptItems } },
-      },
-    });
-  }
-
-  if (ops.length) {
-    await PickingTask.bulkWrite(ops, { ordered: false });
-  }
-}
 
 // ---------------------------------------------------------------------------
 // GET /api/picking/schedule
@@ -255,6 +127,8 @@ router.post('/start-session', requireTelegramRoles(['warehouse', 'admin']), asyn
     if (groupForSession) {
       const schedule = await getOrderingSchedule();
       currentSessionId = getCurrentOrderingSessionId(String(deliveryGroupId), groupForSession.dayOfWeek, schedule);
+      // Fix any products left un-archived from a previous crashed out-of-stock flow
+      await archiveOrphanedOutOfStockProducts(deliveryGroupId);
       await reconcileActiveTasksForSession(deliveryGroupId, currentSessionId);
     }
 
@@ -480,45 +354,22 @@ router.post('/tasks/:taskId/complete', requireTelegramRoles(['warehouse', 'admin
     const user = req.telegramUser;
     const { items = [], nextBlock } = req.body;
 
-    const task = await PickingTask.findById(req.params.taskId);
-    if (!task) return next(appError('picking_task_not_found'));
-    if (String(task.lockedBy || '') !== String(user.telegramId || '')) return next(appError('expired_lock'));
+    const { completedTask, nextTask: nextRaw, wrappedAround: nwa } = await completePickingTask({
+      taskId: req.params.taskId,
+      userTelegramId: user.telegramId,
+      userFirstName:  user.firstName,
+      userLastName:   user.lastName,
+      userRole:       user.role,
+      items,
+      nextBlock,
+    });
 
-    // Apply actual packed quantities
-    for (const item of task.items) {
-      const input = items.find((i) => String(i.orderId) === String(item.orderId));
-      if (input !== undefined) {
-        item.packedQuantity = Math.max(0, Number(input.actualQty) || 0);
-      } else {
-        item.packedQuantity = item.quantity; // default: assume fully packed
-      }
-      item.packed = item.packedQuantity > 0;
-    }
-
-    task.status = 'completed';
-    task.lockedBy = null;
-    task.lockedAt = null;
-
-    // Atomically save task + mark order items in one transaction so they
-    // can't diverge if the server crashes between the two writes.
-    const completeActor = { by: String(user.telegramId), byName: [user.firstName, user.lastName].filter(Boolean).join(' '), byRole: user.role };
-    const completeSess = await mongoose.connection.startSession();
-    try {
-      await completeSess.withTransaction(async () => {
-        await task.save({ session: completeSess });
-        await markOrderItemsPacked(task.items, task.productId, completeActor, completeSess);
-      });
-    } finally {
-      await completeSess.endSession();
-    }
-
-    const fromBlock = typeof nextBlock === 'number' ? nextBlock : task.blockId;
-    const { task: nextTask, wrappedAround: nwa } = await findAndLockNext(user.telegramId, fromBlock, task.deliveryGroupId || null);
-    const nextTaskData = await buildTaskResponse(nextTask, { wrappedAround: nwa });
-
+    const nextTaskData = nextRaw ? await buildTaskResponse(nextRaw, { wrappedAround: nwa }) : null;
     res.json({ message: 'Task completed', nextTask: nextTaskData });
   } catch (err) {
     console.error('[picking/complete]', err);
+    if (err.code === 'picking_task_not_found') return next(appError('picking_task_not_found'));
+    if (err.code === 'expired_lock') return next(appError('expired_lock'));
     next(appError('picking_complete_failed'));
   }
 });
@@ -596,85 +447,96 @@ router.post('/tasks/:taskId/out-of-stock', requireTelegramRoles(['warehouse', 'a
     const user = req.telegramUser;
     const { nextBlock, packedOrderIds = [] } = req.body;
 
-    let task = await PickingTask.findById(req.params.taskId);
-    if (!task) return next(appError('picking_task_not_found'));
+    const { nextTask: nextRaw, wrappedAround: nwa } = await outOfStockPickingTask({
+      taskId: req.params.taskId,
+      userTelegramId: user.telegramId,
+      userFirstName:  user.firstName,
+      userLastName:   user.lastName,
+      userRole:       user.role,
+      packedOrderIds,
+      nextBlock,
+    });
 
-    // Idempotency: if a previous request saved the task but archiveProduct crashed,
-    // retry the archive now and return success.
-    if (task.status === 'completed') {
-      const productForRetry = await Product.findById(task.productId);
-      if (productForRetry && productForRetry.status !== 'archived') {
-        await archiveProduct(productForRetry, { notifyBuyers: false, bot: null });
-      }
-      const fromBlockRetry = typeof nextBlock === 'number' ? nextBlock : task.blockId;
-      const { task: nextTask, wrappedAround: nwa } = await findAndLockNext(user.telegramId, fromBlockRetry, task.deliveryGroupId || null);
-      const nextTaskData = await buildTaskResponse(nextTask, { wrappedAround: nwa });
-      return res.json({ message: 'Out-of-stock recorded', nextTask: nextTaskData });
-    }
-
-    // Auto-claim if called from review list (task still pending)
-    if (task.status === 'pending') {
-      const claimed = await PickingTask.findOneAndUpdate(
-        { _id: task._id, status: 'pending' },
-        { $set: { status: 'locked', lockedBy: user.telegramId, lockedAt: new Date() } },
-        { new: true },
-      );
-      if (!claimed) return next(appError('picking_claim_taken_by_other'));
-      task = claimed;
-    } else if (String(task.lockedBy || '') !== String(user.telegramId || '')) {
-      return next(appError('expired_lock'));
-    }
-
-    await task.populate('productId');
-
-    const productTitle = getProductTitle(task.productId) || 'Невідомий товар';
-    const blockId = task.blockId;
-    const packedSet = new Set(packedOrderIds.map(String));
-
-    const packedShops = [];
-    const missedShops = [];
-
-    for (const item of task.items) {
-      const wasPacked = packedSet.has(String(item.orderId));
-      item.packedQuantity = wasPacked ? item.quantity : 0;
-      item.packed = wasPacked;
-      if (wasPacked) packedShops.push(item.shopName || String(item.orderId));
-      else missedShops.push(item.shopName || String(item.orderId));
-    }
-
-    task.status = 'completed';
-    task.lockedBy = null;
-    task.lockedAt = null;
-
-    // Phase 1: atomically save task + mark order items so they can't diverge
-    // on a mid-request server crash.
-    const outOfStockActor = { by: String(user.telegramId), byName: [user.firstName, user.lastName].filter(Boolean).join(' '), byRole: user.role };
-    const oosSess = await mongoose.connection.startSession();
-    try {
-      await oosSess.withTransaction(async () => {
-        await task.save({ session: oosSess });
-        await markOrderItemsPacked(task.items, task.productId, outOfStockActor, oosSess);
-      });
-    } finally {
-      await oosSess.endSession();
-    }
-
-    // Phase 2: archive product (runs its own internal transaction).
-    // NOT wrapped in try-catch — if this fails, the client receives 500 and
-    // can retry; the idempotency block above will re-attempt the archive.
-    const productDoc = await Product.findById(task.productId._id || task.productId);
-    if (productDoc && productDoc.status !== 'archived') {
-      await archiveProduct(productDoc, { notifyBuyers: false, bot: null });
-    }
-
-    const fromBlock = typeof nextBlock === 'number' ? nextBlock : blockId;
-    const { task: nextTask, wrappedAround: nwa } = await findAndLockNext(user.telegramId, fromBlock, task.deliveryGroupId || null);
-    const nextTaskData = await buildTaskResponse(nextTask, { wrappedAround: nwa });
+    const nextTaskData = nextRaw ? await buildTaskResponse(nextRaw, { wrappedAround: nwa }) : null;
 
     res.json({ message: 'Out-of-stock recorded', nextTask: nextTaskData });
   } catch (err) {
     console.error('[picking/out-of-stock]', err);
     next(appError('picking_oos_failed'));
+  }
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/picking/locked-tasks?deliveryGroupId=...
+// Returns tasks currently locked by other workers (for end-of-queue UI).
+// ---------------------------------------------------------------------------
+router.get('/locked-tasks', requireTelegramRoles(['warehouse', 'admin']), async (req, res, next) => {
+  try {
+    const user = req.telegramUser;
+    const deliveryGroupId = req.query.deliveryGroupId || null;
+
+    const filter = {
+      status: 'locked',
+      lockedBy: { $ne: String(user.telegramId) },
+      ...(deliveryGroupId ? { deliveryGroupId: String(deliveryGroupId) } : {}),
+    };
+
+    const tasks = await PickingTask.find(
+      filter,
+      '_id productId blockId positionIndex lockedBy lockedAt items'
+    ).lean();
+
+    const result = await Promise.all(
+      tasks.map(async (task) => {
+        const product = await Product.findById(task.productId, 'brand model category').lean();
+        return {
+          taskId: String(task._id),
+          productTitle: product
+            ? (product.brand || product.model || product.category || '—')
+            : '—',
+          blockId: task.blockId,
+          positionIndex: task.positionIndex,
+          lockedAt: task.lockedAt,
+          shopCount: (task.items || []).length,
+        };
+      })
+    );
+
+    res.json({ tasks: result });
+  } catch (err) {
+    console.error('[picking/locked-tasks]', err);
+    next(appError('picking_next_failed'));
+  }
+});
+
+// ---------------------------------------------------------------------------
+// POST /api/picking/tasks/:taskId/force-claim
+// Force-release a stale lock and claim the task for the current worker.
+// Only allowed if the task has been locked for more than FORCE_CLAIM_AFTER_MS.
+// ---------------------------------------------------------------------------
+router.post('/tasks/:taskId/force-claim', requireTelegramRoles(['warehouse', 'admin']), async (req, res, next) => {
+  try {
+    const user = req.telegramUser;
+
+    const { task: claimed } = await forceClaimPickingTask({
+      taskId: req.params.taskId,
+      userTelegramId: user.telegramId,
+    });
+
+    const taskData = await buildTaskResponse(claimed);
+    if (!taskData) return next(appError('picking_product_not_found'));
+    res.json({ task: taskData });
+  } catch (err) {
+    if (err.code === 'picking_claim_too_soon') {
+      return res.status(409).json({
+        code: 'picking_claim_too_soon',
+        message: `Задача заблокована ${Math.round((err.lockedAgo || 0) / 1000)} с тому. Перехоплення доступне після 3 хвилин.`,
+      });
+    }
+    console.error('[picking/force-claim]', err);
+    if (err.code === 'picking_task_not_found') return next(appError('picking_task_not_found'));
+    if (err.code === 'picking_claim_unavailable') return next(appError('picking_claim_unavailable'));
+    next(appError('picking_claim_failed'));
   }
 });
 

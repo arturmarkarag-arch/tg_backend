@@ -55,16 +55,33 @@ function buildDeliveryGroupSessionSummary(group, schedule, ordersByGroup) {
 router.get('/ordering-status', telegramAuth, async (req, res) => {
   const user = req.telegramUser;
 
+  const transferEvent = Array.isArray(user.history)
+    ? [...user.history].reverse().find((entry) =>
+        entry.action === 'shop_changed'
+        && entry.meta?.fromShop
+        && entry.meta?.toShop
+        && ['admin', 'warehouse'].includes(entry.byRole)
+      )
+    : null;
+  const transferNote = transferEvent
+    ? `Вас переміщено з магазину "${transferEvent.meta.fromShop}" на магазин "${transferEvent.meta.toShop}", ви робите замовлення на інший магазин. Якщо ви нічого не знаєте про це, зверніться до вашого менеджера або в групу в телеграмі!`
+    : null;
+  const transferNoteId = transferEvent
+    ? `shop_changed:${transferEvent.at ? new Date(transferEvent.at).toISOString() : 'unknown'}`
+    : null;
+  const transferPayload = transferNote ? { note: transferNote, transferNoteId } : {};
+
   // Warehouse is always unrestricted. Admin without a shopId is also unrestricted.
   // Admin WITH a shopId goes through the same ordering window check as a seller.
   if (user.role === 'warehouse' || (user.role === 'admin' && !user.shopId)) {
-    return res.json({ isOpen: true, message: 'Персонал складу — без обмежень' });
+    return res.json({ isOpen: true, ...transferPayload });
   }
 
   if (!user.shopId) {
     return res.json({
       isOpen: false,
       message: 'Вас не призначено до жодного магазину. Зверніться до адміністратора.',
+      ...transferPayload,
     });
   }
 
@@ -73,6 +90,7 @@ router.get('/ordering-status', telegramAuth, async (req, res) => {
     return res.json({
       isOpen: false,
       message: 'Ваш магазин не прив\'язано до групи доставки. Зверніться до адміністратора.',
+      ...transferPayload,
     });
   }
 
@@ -81,6 +99,7 @@ router.get('/ordering-status', telegramAuth, async (req, res) => {
     return res.json({
       isOpen: false,
       message: 'Групу доставки не знайдено. Зверніться до адміністратора.',
+      ...transferPayload,
     });
   }
 
@@ -88,7 +107,7 @@ router.get('/ordering-status', telegramAuth, async (req, res) => {
   const status = isOrderingOpen(group.dayOfWeek, schedule);
   const window = getWindowDescription(group.dayOfWeek, schedule);
   const sessionOpenAt = getOrderingWindowOpenAt(group.dayOfWeek, schedule).toISOString();
-  return res.json({ ...status, groupName: group.name, window, sessionOpenAt });
+  return res.json({ ...status, groupName: group.name, window, sessionOpenAt, ...transferPayload });
 });
 
 router.get('/summary', async (req, res) => {

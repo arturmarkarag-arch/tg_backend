@@ -470,7 +470,7 @@ router.post('/mini-app/reset-state', async (req, res) => {
 });
 
 router.post('/register-request', async (req, res) => {
-  const { firstName, lastName, shopId, role } = req.body;
+  const { firstName, lastName, phoneNumber, shopId, role } = req.body;
 
   const { valid, parsedData, telegramId, error } = getTelegramAuth(req, process.env.TELEGRAM_BOT_TOKEN);
   if (!valid) {
@@ -482,13 +482,13 @@ router.post('/register-request', async (req, res) => {
   }
 
   if (!firstName || !lastName || !role) {
-    return res.status(400).json({ error: 'Будь ласка, заповніть всі обов’язкові поля' });
+    return res.status(400).json({ error: "Будь ласка, заповніть всі обов'язкові поля" });
   }
   if (!['seller', 'warehouse'].includes(role)) {
     return res.status(400).json({ error: 'Invalid role selected' });
   }
   if (role === 'seller' && !shopId) {
-    return res.status(400).json({ error: 'Магазин є обов’язковим для продавця' });
+    return res.status(400).json({ error: "Магазин є обов'язковим для продавця" });
   }
 
   const existingUser = await User.findOne({ telegramId }).lean();
@@ -520,7 +520,7 @@ router.post('/register-request', async (req, res) => {
       return res.status(400).json({ error: 'Магазин не знайдено' });
     }
     if (!shop.deliveryGroupId) {
-      return res.status(400).json({ error: 'Магазин не прив’язаний до групи доставки' });
+      return res.status(400).json({ error: "Магазин не прив'язаний до групи доставки" });
     }
     group = await DeliveryGroup.findById(shop.deliveryGroupId).lean();
     if (!group) {
@@ -528,10 +528,13 @@ router.post('/register-request', async (req, res) => {
     }
   }
 
+  const cleanPhone = phoneNumber ? String(phoneNumber).trim() : '';
+
   const request = await RegistrationRequest.create({
     telegramId,
     firstName,
     lastName,
+    phoneNumber: cleanPhone,
     shopId:          role === 'seller' ? String(shop._id) : null,
     shopName:        role === 'seller' ? shop.name        : '',
     shopCity:        role === 'seller' ? (shop.cityId?.name || '') : '',
@@ -544,12 +547,13 @@ router.post('/register-request', async (req, res) => {
   const roleLabel = role === 'warehouse' ? 'Склад' : 'Продавець';
   const message = `📥 Нова заявка на реєстрацію (${roleLabel}):\n` +
     `Telegram ID: ${telegramId}\n` +
-    `Ім’я: ${firstName}\n` +
+    `Ім'я: ${firstName}\n` +
     `Прізвище: ${lastName}\n` +
+    (cleanPhone ? `Телефон: ${cleanPhone}\n` : '') +
     `Роль: ${roleLabel}\n` +
-    `Назва магазину: ${role === 'seller' ? shop.name : 'не вказано'}\n` +
-    `Місто: ${role === 'seller' ? (shop.cityId?.name || 'не вказано') : 'не вказано'}\n` +
-    `Група доставки: ${role === 'seller' ? `${group.name} (${DAY_SHORT[group.dayOfWeek] || 'День'})` : 'не вказано'}\n` +
+    (role === 'seller'
+      ? `Назва магазину: ${shop.name}\nМісто: ${shop.cityId?.name || 'не вказано'}\nГрупа доставки: ${group.name} (${DAY_SHORT[group.dayOfWeek] || 'День'})\n`
+      : '') +
     `Запит створено: ${new Date().toLocaleString()}`;
 
   sendAdminNotification(message, request._id.toString()).catch(() => {});
@@ -623,6 +627,7 @@ router.post('/register-requests/:id/approve', adminOnly, async (req, res) => {
         role: request.role,
         firstName: request.firstName,
         lastName: request.lastName,
+        phoneNumber: request.phoneNumber || '',
         shopId: resolvedShopId,
         shopName: resolvedShopName,
         shopCity: resolvedShopCity,

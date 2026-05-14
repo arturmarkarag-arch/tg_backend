@@ -17,6 +17,7 @@ const { verifyOpenAIConnection } = require('./openaiClient');
 const receiptsRouter = require('./routes/receipts');
 const pickingRouter = require('./routes/picking');
 const shopsRouter = require('./routes/shops');
+const shopTransferRouter = require('./routes/shopTransfer');
 
 const app = express();
 app.use(cors());
@@ -76,6 +77,7 @@ app.use('/api/receipts', receiptsRouter);
 app.use('/api/picking', pickingRouter);
 app.use('/api/admin', adminRouter);
 app.use('/api/shops', shopsRouter);
+app.use('/api/shop-transfer', shopTransferRouter);
 app.use('/api/v1/telegram', telegramV1Router);
 
 
