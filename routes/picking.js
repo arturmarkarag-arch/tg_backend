@@ -4,6 +4,7 @@ const Product = require('../models/Product');
 const Order = require('../models/Order');
 const Block = require('../models/Block');
 const DeliveryGroup = require('../models/DeliveryGroup');
+const User = require('../models/User');
 const { requireTelegramRoles } = require('../middleware/telegramAuth');
 const { getProductTitle } = require('../services/archiveProduct');
 const { buildPickingTasksFromOrders } = require('../services/taskBuilder');
@@ -96,7 +97,7 @@ router.get('/schedule', requireTelegramRoles(['warehouse', 'admin']), async (req
 router.post('/start-session', requireTelegramRoles(['warehouse', 'admin']), async (req, res, next) => {
   try {
     const user = req.telegramUser;
-    const { deliveryGroupId = null } = req.body;
+    const { deliveryGroupId = null, confirm = false } = req.body;
     if (!deliveryGroupId) {
       return next(appError('picking_delivery_group_required'));
     }
@@ -109,6 +110,8 @@ router.post('/start-session', requireTelegramRoles(['warehouse', 'admin']), asyn
       const { isOpen, message } = isOrderingOpen(group.dayOfWeek, schedule);
       if (isOpen) {
         const windowCloseAt = getOrderingWindowCloseAt(group.dayOfWeek, schedule).toISOString();
+        // Reset confirmed flag so next picking session starts fresh
+        await DeliveryGroup.updateOne({ _id: deliveryGroupId }, { $set: { pickingConfirmedAt: null } });
         return res.json({ windowOpen: true, message, windowCloseAt });
       }
       // Picking is only allowed on the actual delivery day.
@@ -147,7 +150,21 @@ router.post('/start-session', requireTelegramRoles(['warehouse', 'admin']), asyn
     const existingActiveCount = await PickingTask.countDocuments(activeFilter);
     const availableCount = await PickingTask.countDocuments(pendingFilter);
     if (existingActiveCount > 0) {
-      return res.json({ alreadyStarted: true, taskCount: availableCount });
+      const inProgressCount = await PickingTask.countDocuments({
+        status: { $in: ['locked', 'completed'] },
+        deliveryGroupId: String(deliveryGroupId),
+      });
+      if (confirm) {
+        await DeliveryGroup.updateOne({ _id: deliveryGroupId }, { $set: { pickingConfirmedAt: new Date() } });
+      }
+      const confirmedGroup = await DeliveryGroup.findById(deliveryGroupId, 'pickingConfirmedAt').lean();
+      const sessionConfirmed = !!(confirmedGroup?.pickingConfirmedAt);
+      return res.json({ alreadyStarted: true, taskCount: availableCount, sessionActive: inProgressCount > 0, sessionConfirmed });
+    }
+
+    // Without explicit confirmation, don't build tasks — user must press the button.
+    if (!confirm) {
+      return res.json({ preStart: true });
     }
 
     // 3. Detect stale orders from previous sessions.
@@ -182,26 +199,53 @@ router.post('/start-session', requireTelegramRoles(['warehouse', 'admin']), asyn
       if (taskCount === 0) {
         return res.json({ noOrders: true, staleWarnings });
       }
+      await DeliveryGroup.updateOne({ _id: deliveryGroupId }, { $set: { pickingConfirmedAt: new Date() } });
       return res.json({ started: true, taskCount, staleWarnings });
     }
 
     // Fallback: if group lookup failed, keep previous behavior without session scoping.
     await buildPickingTasksFromOrders(deliveryGroupId);
 
-    // Return current count. The unique partial index on PickingTask(productId, deliveryGroupId)
-    // causes insertMany(ordered:false) to silently skip duplicates, so concurrent calls from
-    // multiple server instances never create phantom tasks — no in-process flag needed.
     const taskCount = await PickingTask.countDocuments(pendingFilter);
 
     if (taskCount === 0) {
       return res.json({ noOrders: true });
     }
 
+    await DeliveryGroup.updateOne({ _id: deliveryGroupId }, { $set: { pickingConfirmedAt: new Date() } });
     res.json({ started: true, taskCount });
   } catch (err) {
     if (err && err.name === 'AppError') return next(err);
     console.error('[picking/start-session]', err);
     next(appError('picking_session_failed'));
+  }
+});
+
+// ---------------------------------------------------------------------------
+// GET /api/picking/my-task?deliveryGroupId=...
+// Returns the worker's currently locked task without releasing anything.
+// Used on page load to restore interrupted picking sessions.
+// ---------------------------------------------------------------------------
+router.get('/my-task', requireTelegramRoles(['warehouse', 'admin']), async (req, res, next) => {
+  try {
+    const user = req.telegramUser;
+    const deliveryGroupId = req.query.deliveryGroupId || null;
+
+    const task = await PickingTask.findOne({
+      status: 'locked',
+      lockedBy: String(user.telegramId),
+      ...(deliveryGroupId ? { deliveryGroupId: String(deliveryGroupId) } : {}),
+    }).lean();
+
+    if (!task) return res.json({ task: null });
+
+    const taskData = await buildTaskResponse(task);
+    if (!taskData) return res.json({ task: null });
+
+    res.json({ task: taskData });
+  } catch (err) {
+    if (err && err.name === 'AppError') return next(err);
+    next(appError('picking_next_failed'));
   }
 });
 
@@ -298,6 +342,16 @@ router.get('/block-tasks', requireTelegramRoles(['warehouse', 'admin']), async (
     const products = await Product.find({ _id: { $in: productIds } }).lean();
     const productMap = new Map(products.map((p) => [String(p._id), p]));
 
+    // Fetch names for workers who locked tasks
+    const lockerIds = [...new Set(tasks.filter((t) => t.lockedBy).map((t) => String(t.lockedBy)))];
+    const lockers = lockerIds.length
+      ? await User.find({ telegramId: { $in: lockerIds } }, 'telegramId firstName lastName').lean()
+      : [];
+    const lockerNameMap = new Map(lockers.map((u) => [
+      String(u.telegramId),
+      [u.firstName, u.lastName].filter(Boolean).join(' ') || String(u.telegramId),
+    ]));
+
     const previewTasks = [];
     for (const task of tasks) {
       const product = productMap.get(String(task.productId));
@@ -323,6 +377,8 @@ router.get('/block-tasks', requireTelegramRoles(['warehouse', 'admin']), async (
         status: task.status,
         lockedBy,
         lockedByOther,
+        lockedAt: task.lockedAt ? task.lockedAt.toISOString() : null,
+        lockedByName: lockedByOther && lockedBy ? (lockerNameMap.get(lockedBy) || null) : null,
       });
     }
 
@@ -416,6 +472,7 @@ router.patch('/tasks/:taskId/progress', requireTelegramRoles(['warehouse', 'admi
     for (const item of task.items) {
       item.packed = packedSet.has(String(item.orderId));
     }
+    task.lockedAt = new Date();
     await task.save();
 
     res.json({ ok: true });

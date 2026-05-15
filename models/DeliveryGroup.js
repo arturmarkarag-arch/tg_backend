@@ -10,6 +10,7 @@ const DeliveryGroupSchema = new mongoose.Schema(
       max: 6,
     },
     members: [{ type: String }],
+    pickingConfirmedAt: { type: Date, default: null },
   },
   { timestamps: true }
 );

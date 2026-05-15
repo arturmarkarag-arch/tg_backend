@@ -227,6 +227,7 @@ const ERRORS = {
                                 : 'Не вдалося підключитися до OpenAI' },
   openai_models_failed:     { status: 500, message: 'Не вдалося отримати список моделей OpenAI' },
   me_shop_required:         { status: 400, message: 'shopId є обовʼязковим' },
+  me_profile_no_changes:    { status: 400, message: 'Немає змін для збереження' },
   me_state_invalid_index:   { status: 400, message: ({ field } = {}) =>
                                 `Поле «${field || 'currentIndex'}» має бути цілим невідʼємним числом` },
   init_data_required:       { status: 400, message: 'Відсутні дані Telegram (initData)' },

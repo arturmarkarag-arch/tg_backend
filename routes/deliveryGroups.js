@@ -184,7 +184,10 @@ router.get('/:groupId/shop-status', telegramAuth, requireTelegramRoles(['admin',
     status: { $in: ['new', 'in_progress'] },
   }).select('buyerSnapshot shopId buyerTelegramId items orderNumber _id createdAt history').lean();
 
-  const staleOrders = await Order.find({
+  // Don't report stale orders while the ordering window is still open — during
+  // that window the sessionId in DB may differ from currentSessionId (e.g. when a
+  // test overrides the schedule), which causes false-positive "stale" warnings.
+  const staleOrders = status.isOpen ? [] : await Order.find({
     'buyerSnapshot.deliveryGroupId': String(group._id),
     status: { $in: ['new', 'in_progress'] },
     orderingSessionId: { $ne: currentSessionId },

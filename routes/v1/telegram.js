@@ -245,6 +245,39 @@ router.patch('/me/shop', asyncHandler(async (req, res) => {
   });
 }));
 
+// PATCH /api/v1/telegram/me/profile — seller/warehouse оновлює власні дані
+// (firstName, lastName, phoneNumber) без створення shop transfer request.
+// Адмін-апрув не потрібен — це лише особисті контактні дані.
+router.patch('/me/profile', asyncHandler(async (req, res) => {
+  const user = req.telegramUser;
+  if (!user) throw appError('auth_required');
+  if (!['seller', 'warehouse'].includes(user.role)) throw appError('forbidden');
+
+  const { firstName, lastName, phoneNumber } = req.body || {};
+  const patch = {};
+  if (typeof firstName === 'string') {
+    const v = firstName.trim();
+    if (v) patch.firstName = v;
+  }
+  if (typeof lastName === 'string') {
+    const v = lastName.trim();
+    if (v) patch.lastName = v;
+  }
+  if (phoneNumber !== undefined && phoneNumber !== null) {
+    patch.phoneNumber = normalizePhoneNumber(phoneNumber);
+  }
+
+  if (Object.keys(patch).length === 0) throw appError('me_profile_no_changes');
+
+  await User.updateOne({ telegramId: user.telegramId }, { $set: patch });
+  const fresh = await User.findOne({ telegramId: user.telegramId }).lean();
+  res.json({
+    firstName: fresh?.firstName || '',
+    lastName: fresh?.lastName || '',
+    phoneNumber: fresh?.phoneNumber || '',
+  });
+}));
+
 // POST /api/v1/telegram/mini-app/state — зберегти навігаційний стан (User) і кошик (Shop)
 // Захищено telegramAuth middleware — telegramId береться ТІЛЬКИ з req.telegramId
 router.post('/mini-app/state', asyncHandler(async (req, res) => {

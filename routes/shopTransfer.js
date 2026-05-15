@@ -81,20 +81,17 @@ router.post('/', telegramAuth, requireTelegramRole('seller'), asyncHandler(async
   const seller = req.telegramUser;
   const { toShopId, firstName, lastName, phoneNumber } = req.body;
 
-  const hasProfileUpdate = (firstName || lastName || phoneNumber);
-  if (!toShopId && !hasProfileUpdate) throw appError('transfer_shop_required');
+  if (!toShopId) throw appError('transfer_shop_required');
 
-  const isProfileOnly = !toShopId && !!hasProfileUpdate;
-  const isAssignment = !isProfileOnly && !seller.shopId;
-
-  if (!isProfileOnly && !isAssignment && String(toShopId) === String(seller.shopId)) throw appError('transfer_same_shop');
+  const isAssignment = !seller.shopId;
+  if (!isAssignment && String(toShopId) === String(seller.shopId)) throw appError('transfer_same_shop');
 
   const [fromShop, toShop] = await Promise.all([
     seller.shopId ? Shop.findById(seller.shopId, 'name deliveryGroupId').lean() : Promise.resolve(null),
-    toShopId ? Shop.findById(toShopId, 'name deliveryGroupId isActive').lean() : Promise.resolve(null),
+    Shop.findById(toShopId, 'name deliveryGroupId isActive').lean(),
   ]);
-  if (!isProfileOnly && !isAssignment && !fromShop) throw appError('shop_not_found');
-  if (!isProfileOnly && (!toShop || !toShop.isActive)) throw appError('transfer_target_not_found');
+  if (!isAssignment && !fromShop) throw appError('shop_not_found');
+  if (!toShop || !toShop.isActive) throw appError('transfer_target_not_found');
 
   // One pending request per seller at a time (partial unique index handles the DB race,
   // but we throw a nicer error here for the common case)
@@ -104,14 +101,13 @@ router.post('/', telegramAuth, requireTelegramRole('seller'), asyncHandler(async
   }).lean();
   if (existing) throw appError('transfer_already_pending');
 
-  const sellerFull = isProfileOnly ? null : await User.findOne({ telegramId: seller.telegramId }, 'cartState').lean();
-  const conflictSnapshot = isProfileOnly ? {} : await buildConflictSnapshot(toShopId, seller.shopId, sellerFull?.cartState);
+  const sellerFull = await User.findOne({ telegramId: seller.telegramId }, 'cartState').lean();
+  const conflictSnapshot = await buildConflictSnapshot(toShopId, seller.shopId, sellerFull?.cartState);
 
   const request = await ShopTransferRequest.create({
     sellerTelegramId: seller.telegramId,
     sellerName: [seller.firstName, seller.lastName].filter(Boolean).join(' '),
     isAssignment,
-    isProfileOnly,
     fromShopId: seller.shopId || null,
     fromShopName: fromShop?.name || '',
     fromDeliveryGroupId: fromShop?.deliveryGroupId || '',

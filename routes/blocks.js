@@ -7,6 +7,18 @@ const Product = require('../models/Product');
 const { getIO } = require('../socket');
 const { requireTelegramRoles } = require('../middleware/telegramAuth');
 const { appError, asyncHandler } = require('../utils/errors');
+const { refreshPickingTaskPositions } = require('../services/taskBuilder');
+
+async function emitPositionUpdates() {
+  try {
+    const changed = await refreshPickingTaskPositions();
+    if (changed.length) {
+      getIO()?.emit('picking_tasks_positions_updated', changed);
+    }
+  } catch (err) {
+    console.error('[blocks] position refresh error:', err);
+  }
+}
 
 function slimBlock(block) {
   return {
@@ -238,6 +250,7 @@ router.post('/move', staffOnly, asyncHandler(async (req, res) => {
     }
   } catch (_) {}
 
+  emitPositionUpdates();
   res.json({ source: updatedSource, target: updatedTarget });
 }));
 
@@ -298,10 +311,10 @@ router.delete('/:number/products/:productId', staffOnly, asyncHandler(async (req
     const io = getIO();
     io.emit('block_updated', slimBlock(updated));
     io.emit('incoming_updated');
-    // Product left the block → may disappear from seller catalogue
     io.emit('catalogue_updated');
   } catch (_) {}
 
+  emitPositionUpdates();
   res.json(updated);
 }));
 
@@ -388,6 +401,7 @@ router.post('/:number/add', staffOnly, asyncHandler(async (req, res) => {
     io.emit('catalogue_updated');
   } catch (_) { /* socket not initialized yet */ }
 
+  emitPositionUpdates();
   res.json(updated);
 }));
 

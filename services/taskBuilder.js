@@ -193,4 +193,41 @@ async function buildPickingTasksFromOrders(targetDeliveryGroupId = null, options
   }
 }
 
-module.exports = { getShippingBlockPositions, buildPickingTasksFromOrders };
+/**
+ * Recalculates blockId/positionIndex for all active (pending/locked) picking tasks
+ * based on current block layout. Updates DB for tasks whose position changed.
+ * Returns array of changed tasks: [{ taskId, blockId, positionIndex }]
+ */
+async function refreshPickingTaskPositions() {
+  const activeTasks = await PickingTask.find(
+    { status: { $in: ['pending', 'locked'] } },
+    'productId blockId positionIndex'
+  ).lean();
+
+  if (!activeTasks.length) return [];
+
+  const positions = await getShippingBlockPositions(activeTasks.map((t) => String(t.productId)));
+  const changed = [];
+  const bulkOps = [];
+
+  for (const t of activeTasks) {
+    const pos = positions.get(String(t.productId));
+    if (!pos) continue;
+    const newBlockId = pos.blockId;
+    const newPosIdx = pos.index + 1;
+    if (t.blockId === newBlockId && t.positionIndex === newPosIdx) continue;
+    bulkOps.push({
+      updateOne: {
+        filter: { _id: t._id },
+        update: { $set: { blockId: newBlockId, positionIndex: newPosIdx } },
+      },
+    });
+    changed.push({ taskId: String(t._id), blockId: newBlockId, positionIndex: newPosIdx });
+  }
+
+  if (bulkOps.length) await PickingTask.bulkWrite(bulkOps, { ordered: false });
+
+  return changed;
+}
+
+module.exports = { getShippingBlockPositions, buildPickingTasksFromOrders, refreshPickingTaskPositions };

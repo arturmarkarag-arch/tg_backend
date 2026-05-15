@@ -18,11 +18,13 @@ const receiptsRouter = require('./routes/receipts');
 const pickingRouter = require('./routes/picking');
 const shopsRouter = require('./routes/shops');
 const shopTransferRouter = require('./routes/shopTransfer');
+const warehouseTestRouter = require('./routes/warehouseTest');
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+app.use('/warehouse-test', express.static(path.join(__dirname, '../Тести Е2Е/test-warehouse')));
 
 const { telegramAuth } = require('./middleware/telegramAuth');
 
@@ -38,6 +40,7 @@ const publicApiPaths = [
   /^\/api\/health$/,
   /^\/api\/bot-status$/,
   /^\/api\/openai-status$/,
+  /^\/api\/warehouse-test(\/.*)?$/,
 ];
 
 function requireAuthForApi(req, res, next) {
@@ -86,7 +89,7 @@ app.use('/api/admin', adminRouter);
 app.use('/api/shops', shopsRouter);
 app.use('/api/shop-transfer', shopTransferRouter);
 app.use('/api/v1/telegram', telegramV1Router);
-
+app.use('/api/warehouse-test', warehouseTestRouter);
 
 // Centralised error handler — converts AppError (and known Mongoose errors)
 // into a consistent JSON envelope { error: <code>, message: <ukrainian text>, ... }.
