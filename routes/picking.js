@@ -8,7 +8,8 @@ const User = require('../models/User');
 const { requireTelegramRoles } = require('../middleware/telegramAuth');
 const { getProductTitle } = require('../services/archiveProduct');
 const { buildPickingTasksFromOrders } = require('../services/taskBuilder');
-const { isOrderingOpen, getWarsawNow, DAY_FULL_UK, getCurrentOrderingSessionId, getOrderingWindowCloseAt } = require('../utils/orderingSchedule');
+const { isOrderingOpen, getWarsawNow, DAY_FULL_UK, getOrderingWindowCloseAt } = require('../utils/orderingSchedule');
+const { getOrCreateSessionId } = require('../utils/getOrCreateSession');
 const { normalizeDeliveryGroup } = require('../utils/deliveryGroupHelpers');
 const { getOrderingSchedule } = require('../utils/getOrderingSchedule');
 const { appError } = require('../utils/errors');
@@ -132,7 +133,7 @@ router.post('/start-session', requireTelegramRoles(['warehouse', 'admin']), asyn
     let currentSessionId = null;
     if (groupForSession) {
       const schedule = await getOrderingSchedule();
-      currentSessionId = getCurrentOrderingSessionId(String(deliveryGroupId), groupForSession.dayOfWeek, schedule);
+      currentSessionId = await getOrCreateSessionId(String(deliveryGroupId), groupForSession.dayOfWeek, schedule);
       // Fix any products left un-archived from a previous crashed out-of-stock flow
       await archiveOrphanedOutOfStockProducts(deliveryGroupId);
       await reconcileActiveTasksForSession(deliveryGroupId, currentSessionId);
@@ -173,7 +174,7 @@ router.post('/start-session', requireTelegramRoles(['warehouse', 'admin']), asyn
     if (group2) {
       if (!currentSessionId) {
         const schedule2 = await getOrderingSchedule();
-        currentSessionId = getCurrentOrderingSessionId(String(deliveryGroupId), group2.dayOfWeek, schedule2);
+        currentSessionId = await getOrCreateSessionId(String(deliveryGroupId), group2.dayOfWeek, schedule2);
       }
       const staleOrders = await Order.find(
         {

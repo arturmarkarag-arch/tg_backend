@@ -11,7 +11,6 @@ const Product     = require('../models/Product');
 const Order       = require('../models/Order');
 const DeliveryGroup = require('../models/DeliveryGroup');
 const { archiveProduct, getProductTitle } = require('./archiveProduct');
-const { getCurrentOrderingSessionId } = require('../utils/orderingSchedule');
 const { getOrderingSchedule } = require('../utils/getOrderingSchedule');
 const { getIO } = require('../socket');
 

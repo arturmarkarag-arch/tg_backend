@@ -9,7 +9,7 @@ const User = require('../models/User');
 const Order = require('../models/Order');
 const DeliveryGroup = require('../models/DeliveryGroup');
 const PickingTask = require('../models/PickingTask');
-const { getCurrentOrderingSessionId } = require('../utils/orderingSchedule');
+const { getOrCreateSessionId } = require('../utils/getOrCreateSession');
 const { getOrderingSchedule } = require('../utils/getOrderingSchedule');
 const { appError } = require('../utils/errors');
 const { invalidateShop } = require('../utils/modelCache');
@@ -73,7 +73,7 @@ async function migrateSellerShop({
   if (oldShopFull?.deliveryGroupId) {
     const oldGroup = await DeliveryGroup.findById(oldShopFull.deliveryGroupId).session(session).lean();
     if (oldGroup) {
-      oldSessionId = getCurrentOrderingSessionId(String(oldGroup._id), oldGroup.dayOfWeek, schedule);
+      oldSessionId = await getOrCreateSessionId(String(oldGroup._id), oldGroup.dayOfWeek, schedule);
     }
   }
 
@@ -83,7 +83,7 @@ async function migrateSellerShop({
     const newGroup = await DeliveryGroup.findById(newDeliveryGroupId).session(session).lean();
     if (newGroup) {
       warehouseZone = newGroup.name || '';
-      newSessionId = getCurrentOrderingSessionId(String(newGroup._id), newGroup.dayOfWeek, schedule);
+      newSessionId = await getOrCreateSessionId(String(newGroup._id), newGroup.dayOfWeek, schedule);
     }
   }
 

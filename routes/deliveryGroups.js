@@ -9,9 +9,9 @@ const { telegramAuth, requireTelegramRole, requireTelegramRoles } = require('../
 const {
   isOrderingOpen,
   getWindowDescription,
-  getCurrentOrderingSessionId,
   getOrderingWindowOpenAt,
 } = require('../utils/orderingSchedule');
+const { getOrCreateSessionId } = require('../utils/getOrCreateSession');
 const { normalizeDeliveryGroup } = require('../utils/deliveryGroupHelpers');
 
 const { getOrderingSchedule } = require('../utils/getOrderingSchedule');
@@ -29,10 +29,10 @@ async function getAllDeliveryGroups() {
 
 const router = express.Router();
 
-function buildDeliveryGroupSessionSummary(group, schedule, ordersByGroup) {
+async function buildDeliveryGroupSessionSummary(group, schedule, ordersByGroup) {
   const normalizedGroup = normalizeDeliveryGroup(group);
   const status = isOrderingOpen(normalizedGroup.dayOfWeek, schedule);
-  const currentSessionId = getCurrentOrderingSessionId(String(normalizedGroup._id), normalizedGroup.dayOfWeek, schedule);
+  const currentSessionId = await getOrCreateSessionId(String(normalizedGroup._id), normalizedGroup.dayOfWeek, schedule);
   const sessionOpenAt = getOrderingWindowOpenAt(normalizedGroup.dayOfWeek, schedule);
   const orders = ordersByGroup[String(group._id)] || [];
   const summary = orders.reduce(
@@ -169,7 +169,7 @@ router.get('/:groupId/shop-status', telegramAuth, requireTelegramRoles(['admin',
 
   const schedule = await getOrderingSchedule();
   const status = isOrderingOpen(group.dayOfWeek, schedule);
-  const currentSessionId = getCurrentOrderingSessionId(String(group._id), group.dayOfWeek, schedule);
+  const currentSessionId = await getOrCreateSessionId(String(group._id), group.dayOfWeek, schedule);
 
   const shops = await Shop.find({ deliveryGroupId: String(group._id), isActive: true })
     .select('name cityId')
@@ -345,7 +345,7 @@ router.get('/session-summaries', telegramAuth, requireTelegramRole('admin'), asy
     return acc;
   }, {});
 
-  const summaries = groups.map((group) => buildDeliveryGroupSessionSummary(group, schedule, ordersByGroup));
+  const summaries = await Promise.all(groups.map((group) => buildDeliveryGroupSessionSummary(group, schedule, ordersByGroup)));
   summaries.sort((a, b) => {
     const orderA = a.dayOfWeek === 0 ? 7 : a.dayOfWeek;
     const orderB = b.dayOfWeek === 0 ? 7 : b.dayOfWeek;
@@ -361,7 +361,7 @@ router.post('/:id/close-ordering-session', telegramAuth, requireTelegramRole('ad
 
   const schedule = await getOrderingSchedule();
   const status = isOrderingOpen(group.dayOfWeek, schedule);
-  const currentSessionId = getCurrentOrderingSessionId(String(group._id), group.dayOfWeek, schedule);
+  const currentSessionId = await getOrCreateSessionId(String(group._id), group.dayOfWeek, schedule);
 
   const staleOrderFilter = {
     'buyerSnapshot.deliveryGroupId': String(group._id),

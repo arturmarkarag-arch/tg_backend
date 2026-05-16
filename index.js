@@ -14,6 +14,7 @@ const { initBot } = require('./telegramBot');
 const { initOpenAI } = require('./openaiClient');
 const { initSocket } = require('./socket');
 const AppSetting = require('./models/AppSetting');
+const { migrateOrdersToSessionIds } = require('./utils/getOrCreateSession');
 
 const PORT = Number(process.env.PORT) || 5000;
 const MONGODB_URI = process.env.MONGODB_URI || (process.env.NODE_ENV === 'production' ? null : 'mongodb://localhost:27017/tg_manager');
@@ -26,6 +27,7 @@ async function startServer() {
     }
     await mongoose.connect(MONGODB_URI, { useNewUrlParser: true, useUnifiedTopology: true });
     console.log('Connected to MongoDB');
+    await migrateOrdersToSessionIds();
 
     // Prefer key stored in DB (via admin settings), fall back to env
     const keyFromDb = await AppSetting.findOne({ key: 'openai.apiKey' }).lean();

@@ -8,9 +8,17 @@ const { normalizeBarcode } = require('../utils/barcodeScanner');
 const Block = require('../models/Block');
 const { getIO } = require('../socket');
 const Product = require('../models/Product');
+const Order = require('../models/Order');
+const User = require('../models/User');
+const Shop = require('../models/Shop');
+const DeliveryGroup = require('../models/DeliveryGroup');
 const SearchProduct = require('../models/SearchProduct');
 const { requireTelegramRoles } = require('../middleware/telegramAuth');
 const { appError, asyncHandler } = require('../utils/errors');
+const { getOrCreateSessionId } = require('../utils/getOrCreateSession');
+const { getOrderingSchedule } = require('../utils/getOrderingSchedule');
+const { normalizeDeliveryGroup } = require('../utils/deliveryGroupHelpers');
+const cache = require('../utils/cache');
 
 const staffOnly = requireTelegramRoles(['admin', 'warehouse']);
 
@@ -359,6 +367,97 @@ router.post('/report-missing', asyncHandler(async (req, res) => {
   }));
 
   return res.json({ barcode: barcodeValue, caption, sent: sendResults });
+}));
+
+async function getActiveDeliveryGroups() {
+  let groups = await cache.get(cache.KEYS.DELIVERY_GROUPS);
+  if (!groups) {
+    groups = await DeliveryGroup.find().lean();
+    await cache.set(cache.KEYS.DELIVERY_GROUPS, groups);
+  }
+  return groups.map(normalizeDeliveryGroup);
+}
+
+// GET /api/v1/products/:id/who-ordered — shops with active-session orders for this product
+router.get('/:id/who-ordered', staffOnly, asyncHandler(async (req, res) => {
+  const allGroups = await getActiveDeliveryGroups();
+  const schedule = await getOrderingSchedule();
+
+  const sessionIdResults = await Promise.all(
+    allGroups.map((group) => getOrCreateSessionId(String(group._id), group.dayOfWeek, schedule)),
+  );
+  const currentSessionIds = new Set(sessionIdResults.filter(Boolean));
+
+  if (currentSessionIds.size === 0) {
+    return res.json({ shops: [] });
+  }
+
+  const orders = await Order.find({
+    'items.productId': req.params.id,
+    status: { $in: ['new', 'in_progress', 'confirmed'] },
+    orderingSessionId: { $in: [...currentSessionIds] },
+  }).select('buyerSnapshot').lean();
+
+  const byShop = new Map();
+  for (const order of orders) {
+    const shopId = String(order.buyerSnapshot?.shopId || '');
+    if (!shopId || byShop.has(shopId)) continue;
+    byShop.set(shopId, {
+      shopName: order.buyerSnapshot?.shopName || '?',
+      shopCity: order.buyerSnapshot?.shopCity || '',
+    });
+  }
+
+  const activeGroupIds = new Set(allGroups.map((group) => String(group._id)));
+  const activeShopIds = await Shop.find(
+    { deliveryGroupId: { $in: [...activeGroupIds] } },
+    '_id'
+  ).lean().then((shops) => shops.map((shop) => String(shop._id)));
+
+  const cartKey = `cartState.orderItems.${req.params.id}`;
+  const cartUsers = await User.find(
+    {
+      role: 'seller',
+      $and: [
+        {
+          $or: [
+            { deliveryGroupId: { $in: [...activeGroupIds] } },
+            { shopId: { $in: activeShopIds } },
+          ],
+        },
+        {
+          $or: [
+            { [cartKey]: { $gt: 0 } },
+            { 'cartState.orderItemIds': req.params.id },
+          ],
+        },
+      ],
+    },
+    'shopId'
+  ).lean();
+
+  const missingShopIds = new Set();
+  for (const user of cartUsers) {
+    const shopId = String(user.shopId || '');
+    if (shopId && !byShop.has(shopId)) missingShopIds.add(shopId);
+  }
+
+  if (missingShopIds.size > 0) {
+    const shops = await Shop.find({ _id: { $in: [...missingShopIds] } }).populate('cityId', 'name').lean();
+    const shopById = new Map(shops.map((shop) => [String(shop._id), shop]));
+
+    for (const user of cartUsers) {
+      const shopId = String(user.shopId || '');
+      if (!shopId || byShop.has(shopId)) continue;
+      const shop = shopById.get(shopId);
+      byShop.set(shopId, {
+        shopName: shop?.name || '?',
+        shopCity: shop?.cityId?.name || '',
+      });
+    }
+  }
+
+  res.json({ shops: [...byShop.values()] });
 }));
 
 router.get('/:id', asyncHandler(async (req, res) => {

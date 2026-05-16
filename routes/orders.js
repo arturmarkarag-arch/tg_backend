@@ -12,7 +12,8 @@ const Block = require('../models/Block');
 const { getTelegramAuth } = require('../utils/validateTelegramInitData');
 const { telegramAuth, requireTelegramRoles } = require('../middleware/telegramAuth');
 const { getIO } = require('../socket');
-const { isOrderingOpen, getOrderingWindowOpenAt, getCurrentOrderingSessionId } = require('../utils/orderingSchedule');
+const { isOrderingOpen, getOrderingWindowOpenAt } = require('../utils/orderingSchedule');
+const { getOrCreateSessionId } = require('../utils/getOrCreateSession');
 
 const { getOrderingSchedule } = require('../utils/getOrderingSchedule');
 const { appError, asyncHandler } = require('../utils/errors');
@@ -63,7 +64,7 @@ async function ensureOrderIsStale(order, session = null) {
 
   const normalizedGroup = normalizeDeliveryGroup(group);
   const schedule = await getOrderingSchedule();
-  const currentSessionId = getCurrentOrderingSessionId(String(normalizedGroup._id), normalizedGroup.dayOfWeek, schedule);
+  const currentSessionId = await getOrCreateSessionId(String(normalizedGroup._id), normalizedGroup.dayOfWeek, schedule);
   if (String(order.orderingSessionId || '') === String(currentSessionId || '')) {
     throw appError('validation_failed', { field: 'orderingSessionId', details: 'order_is_current_session' });
   }
@@ -174,11 +175,10 @@ router.get('/conflicts', staffOnly, async (req, res) => {
   const allGroups = (await getAllDeliveryGroups()).map(normalizeDeliveryGroup);
   const schedule = await getOrderingSchedule();
 
-  const currentSessionIds = new Set();
-  for (const group of allGroups) {
-    const sid = getCurrentOrderingSessionId(String(group._id), group.dayOfWeek, schedule);
-    if (sid) currentSessionIds.add(sid);
-  }
+  const sessionIdResults = await Promise.all(
+    allGroups.map((group) => getOrCreateSessionId(String(group._id), group.dayOfWeek, schedule)),
+  );
+  const currentSessionIds = new Set(sessionIdResults.filter(Boolean));
 
   const sessionFilter = currentSessionIds.size > 0
     ? { orderingSessionId: { $in: [...currentSessionIds] } }
@@ -243,212 +243,6 @@ router.get('/conflicts', staffOnly, async (req, res) => {
 
   res.json({ conflicts });
 });
-
-/**
- * GET /history — returns order history, optionally grouped/filtered by shop or session.
- * Admin and warehouse only.
- */
-router.get('/history', staffOnly, asyncHandler(async (req, res) => {
-  const page = Math.max(1, parseInt(req.query.page) || 1);
-  const pageSize = Math.max(1, parseInt(req.query.pageSize) || 50);
-  const shopId = req.query.shopId;
-  const sessionId = req.query.sessionId;
-  const from = req.query.from;
-  const to = req.query.to;
-
-  const filter = {
-    status: { $ne: 'cancelled' },
-  };
-
-  if (shopId) {
-    filter.$or = [
-      { 'shopId': mongoose.Types.ObjectId.isValid(shopId) ? shopId : null },
-      { 'buyerSnapshot.shopId': shopId },
-    ];
-  }
-
-  if (sessionId) {
-    filter.orderingSessionId = sessionId;
-  }
-
-  if (from || to) {
-    const dateQuery = {};
-    if (from) {
-      const parsedFrom = new Date(from);
-      if (!Number.isNaN(parsedFrom.getTime())) {
-        dateQuery.$gte = parsedFrom;
-      }
-    }
-    if (to) {
-      const parsedTo = new Date(to);
-      if (!Number.isNaN(parsedTo.getTime())) {
-        dateQuery.$lt = parsedTo;
-      }
-    }
-    if (Object.keys(dateQuery).length) {
-      filter.createdAt = dateQuery;
-    }
-  }
-
-  const total = await Order.countDocuments(filter);
-  const orders = await Order.find(filter)
-    .populate('items.productId')
-    .populate('shopId', 'name address cityId')
-    .sort({ createdAt: -1 })
-    .skip((page - 1) * pageSize)
-    .limit(pageSize)
-    .lean();
-
-  const buyerIds = [...new Set(orders.map((o) => o.buyerTelegramId))];
-  const buyers = await User.find({ telegramId: { $in: buyerIds } }).lean();
-  const buyerMap = new Map(buyers.map((b) => [b.telegramId, b]));
-
-  // Group by session
-  const bySession = new Map();
-  for (const order of orders) {
-    const sid = order.orderingSessionId || 'unknown';
-    if (!bySession.has(sid)) {
-      bySession.set(sid, []);
-    }
-    bySession.get(sid).push(order);
-  }
-
-  const sessions = Array.from(bySession.entries()).map(([sessionId, sessionOrders]) => ({
-    sessionId,
-    orderCount: sessionOrders.length,
-    totalRevenue: sessionOrders.reduce((sum, o) => sum + o.totalPrice, 0),
-    shops: Array.from(
-      sessionOrders.reduce((acc, order) => {
-        const shopId = String(order.shopId?._id || order.buyerSnapshot?.shopId || 'unknown');
-        if (!acc.has(shopId)) {
-          acc.set(shopId, {
-            shopId,
-            shopName: order.shopId?.name || order.buyerSnapshot?.shopName || 'Unknown',
-            shopAddress: order.shopId?.address || order.buyerSnapshot?.shopAddress || '',
-            shopCity: order.shopId?.cityId?.name || order.buyerSnapshot?.shopCity || '',
-            orders: [],
-          });
-        }
-        acc.get(shopId).orders.push(order);
-        return acc;
-      }, new Map()).values()
-    ).map((shop) => ({
-      ...shop,
-      orders: shop.orders.map((order) => {
-        const buyer = buyerMap.get(order.buyerTelegramId);
-        return {
-          orderId: String(order._id),
-          orderNumber: order.orderNumber,
-          buyerTelegramId: order.buyerTelegramId,
-          buyerName: [buyer?.firstName, buyer?.lastName].filter(Boolean).join(' ') || order.buyerTelegramId,
-          status: order.status,
-          totalPrice: order.totalPrice,
-          itemCount: (order.items || []).filter((i) => !i.cancelled).length,
-          createdAt: order.createdAt,
-        };
-      }),
-    })),
-  }));
-
-  res.json({
-    sessions,
-    total,
-    page,
-    pageSize,
-    pageCount: Math.ceil(total / pageSize),
-  });
-}));
-
-/**
- * GET /session/current — returns current session orders grouped by shop.
- * Admin and warehouse only. Groups orders by shop and returns them with buyer/product details.
- */
-router.get('/session/current', staffOnly, asyncHandler(async (req, res) => {
-  const { shopId: filterShopId } = req.query;
-
-  // Get all delivery groups and current session IDs
-  const allGroups = (await getAllDeliveryGroups()).map(normalizeDeliveryGroup);
-  const schedule = await getOrderingSchedule();
-
-  const currentSessionIds = new Set();
-  for (const group of allGroups) {
-    const sid = getCurrentOrderingSessionId(String(group._id), group.dayOfWeek, schedule);
-    if (sid) currentSessionIds.add(sid);
-  }
-
-  const sessionFilter = currentSessionIds.size > 0
-    ? { orderingSessionId: { $in: [...currentSessionIds] } }
-    : {};
-
-  // Get all orders from current session (excluding cancelled)
-  const orders = await Order.find({
-    status: { $ne: 'cancelled' },
-    ...sessionFilter,
-  })
-    .populate('items.productId')
-    .populate('shopId', 'name address cityId')
-    .lean();
-
-  // Filter by shop if requested
-  let filteredOrders = orders;
-  if (filterShopId) {
-    filteredOrders = orders.filter((o) => String(o.shopId?._id || o.buyerSnapshot?.shopId || '') === String(filterShopId));
-  }
-
-  // Get unique buyer IDs
-  const buyerIds = [...new Set(filteredOrders.map((o) => o.buyerTelegramId))];
-  const buyers = await User.find({ telegramId: { $in: buyerIds } }).lean();
-  const buyerMap = new Map(buyers.map((b) => [b.telegramId, b]));
-
-  // Group orders by shop
-  const byShop = new Map();
-  for (const order of filteredOrders) {
-    const shopId = String(order.shopId?._id || order.buyerSnapshot?.shopId || 'unknown');
-    if (!byShop.has(shopId)) {
-      byShop.set(shopId, {
-        shopId,
-        shopName: order.shopId?.name || order.buyerSnapshot?.shopName || 'Unknown',
-        shopAddress: order.shopId?.address || order.buyerSnapshot?.shopAddress || '',
-        shopCity: order.shopId?.cityId?.name || order.buyerSnapshot?.shopCity || '',
-        orders: [],
-      });
-    }
-    byShop.get(shopId).orders.push(order);
-  }
-
-  // Format response
-  const shops = Array.from(byShop.values()).map((shopGroup) => ({
-    ...shopGroup,
-    orders: shopGroup.orders.map((order) => {
-      const buyer = buyerMap.get(order.buyerTelegramId);
-      const items = (order.items || [])
-        .filter((item) => !item.cancelled)
-        .map((item) => ({
-          productId: String(item.productId?._id || item.productId || ''),
-          productName: item.name || item.productId?.model || 'Unknown',
-          quantity: item.quantity,
-          price: item.price,
-          packed: item.packed,
-        }));
-
-      return {
-        orderId: String(order._id),
-        orderNumber: order.orderNumber,
-        buyerTelegramId: order.buyerTelegramId,
-        buyerName: [buyer?.firstName, buyer?.lastName].filter(Boolean).join(' ') || order.buyerTelegramId,
-        status: order.status,
-        totalPrice: order.totalPrice,
-        createdAt: order.createdAt,
-        items,
-      };
-    }),
-  }));
-
-  res.json({
-    shops,
-    sessionIds: Array.from(currentSessionIds),
-  });
-}));
 
 router.get('/', async (req, res) => {
   const telegramId = req.telegramId;
@@ -774,7 +568,7 @@ async function placeOrderImpl(req, res) {
   if (group && schedule) {
     // All roles with a delivery group: merge within the active ordering session.
     // This includes warehouse, which now also gets orderingSessionId for conflict detection.
-    currentSessionId = getCurrentOrderingSessionId(String(group._id), group.dayOfWeek, schedule);
+    currentSessionId = await getOrCreateSessionId(String(group._id), group.dayOfWeek, schedule);
     existingOrderQuery.buyerTelegramId = buyer.telegramId;
     existingOrderQuery['buyerSnapshot.shopId'] = buyer.shopId;
     existingOrderQuery.orderingSessionId = currentSessionId;
@@ -1026,7 +820,7 @@ router.patch('/:id/snapshot', staffOnly, async (req, res) => {
         const newGroup = await DeliveryGroup.findById(shop.deliveryGroupId).session(session).lean();
         if (newGroup) {
           const schedule = await getOrderingSchedule();
-          newSessionId = getCurrentOrderingSessionId(String(newGroup._id), newGroup.dayOfWeek, schedule);
+          newSessionId = await getOrCreateSessionId(String(newGroup._id), newGroup.dayOfWeek, schedule);
           warehouseZone = newGroup.name || '';
         }
       }
@@ -1278,5 +1072,53 @@ router.post('/:id/stale/expire', telegramAuth, adminOnly, asyncHandler(async (re
 router.patch('/:id', requireOrderingWindowOpen, async (req, res) => {
   throw appError('order_status_change_disabled');
 });
+
+// POST /set-item-qty — seller sets the exact quantity for a product in their active session order.
+// Handles both increase and decrease. Only the buyer themselves can call this.
+router.post('/set-item-qty', telegramAuth, requireOrderingWindowOpen, asyncHandler(async (req, res) => {
+  const user = req.telegramUser;
+  const productId = String(req.body?.productId || '').trim();
+  const newQty = parseInt(req.body?.quantity, 10);
+
+  if (!productId) throw appError('validation_failed', { field: 'productId' });
+  if (!Number.isFinite(newQty) || newQty < 1) throw appError('validation_failed', { field: 'quantity' });
+
+  if (!user.shopId) throw appError('no_shop');
+  const shop = await getShop(user.shopId);
+  if (!shop?.deliveryGroupId) throw appError('no_delivery_group');
+  const group = normalizeDeliveryGroup(await getDeliveryGroup(shop.deliveryGroupId));
+  if (!group) throw appError('delivery_group_not_found');
+
+  const schedule = await getOrderingSchedule();
+  const currentSessionId = await getOrCreateSessionId(String(group._id), group.dayOfWeek, schedule);
+
+  const order = await Order.findOne({
+    buyerTelegramId: user.telegramId,
+    orderingSessionId: currentSessionId,
+    status: { $in: ['new', 'in_progress'] },
+  });
+  if (!order) throw appError('order_not_found');
+
+  const item = order.items.find((i) => String(i.productId) === productId && !i.cancelled);
+  if (!item) throw appError('order_not_found');
+
+  const oldQty = item.quantity;
+  item.quantity = newQty;
+  order.totalPrice = order.items
+    .filter((i) => !i.cancelled)
+    .reduce((sum, i) => sum + Number(i.price || 0) * Number(i.quantity || 0), 0);
+
+  order.history.push({
+    at: new Date(),
+    by: String(user.telegramId),
+    byName: [user.firstName, user.lastName].filter(Boolean).join(' '),
+    byRole: user.role,
+    action: 'quantity_adjusted',
+    meta: { productId, oldQty, newQty },
+  });
+
+  await order.save();
+  res.json({ ok: true, productId, newQty });
+}));
 
 module.exports = router;
