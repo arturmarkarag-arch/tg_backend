@@ -1,6 +1,8 @@
 const express = require('express');
 const crypto = require('crypto');
 const mongoose = require('mongoose');
+const path = require('path');
+const { spawn } = require('child_process');
 const { asyncHandler } = require('../utils/errors');
 const DeliveryGroup = require('../models/DeliveryGroup');
 const Shop = require('../models/Shop');
@@ -150,6 +152,25 @@ router.post('/cleanup', asyncHandler(async (req, res) => {
     getIO()?.emit?.('delivery_groups_updated');
   } catch { /* non-critical */ }
 
+  // If a temporary test ordering schedule was left behind, restore the original
+  // schedule now that the test data is removed.
+  let scheduleRestored = false;
+  try {
+    const backupRow = await AppSetting.findOne({ key: `${ORDERING_SCHEDULE_KEY}.backup` }).lean();
+    if (backupRow?.value) {
+      await AppSetting.updateOne(
+        { key: ORDERING_SCHEDULE_KEY },
+        { $set: { value: backupRow.value } },
+        { upsert: true },
+      );
+      await AppSetting.deleteOne({ key: `${ORDERING_SCHEDULE_KEY}.backup` });
+      await invalidateOrderingScheduleCache();
+      scheduleRestored = true;
+    }
+  } catch {
+    scheduleRestored = false;
+  }
+
   res.json({
     deletedUsers: users.deletedCount || 0,
     deletedShops: shops.deletedCount || 0,
@@ -158,6 +179,7 @@ router.post('/cleanup', asyncHandler(async (req, res) => {
     deletedOrders: orders.deletedCount || 0,
     deletedBlocks: blocks.deletedCount || 0,
     deletedTransferRequests: transfers.deletedCount || 0,
+    scheduleRestored,
   });
 }));
 
@@ -241,9 +263,29 @@ router.post('/run', asyncHandler(async (req, res) => {
       job.status = 'running';
       appendLog(job, '=== START warehouse flow test ===');
 
-      // Always load the real schedule upfront so sessionId computation uses
-      // the production openHour, not the modified test schedule or hardcoded defaults.
-      originalSchedule = (await AppSetting.findOne({ key: ORDERING_SCHEDULE_KEY }).lean())?.value || null;
+      // Load the TRUE original schedule. If a previous test crashed (server
+      // restarted mid-run before `finally`), the live key still holds a test
+      // schedule. The `ordering.schedule.backup` key holds the last clean value
+      // captured before any override — use it to break the corruption cascade.
+      {
+        const liveSchedule = (await AppSetting.findOne({ key: ORDERING_SCHEDULE_KEY }).lean())?.value || null;
+        const backupRow = await AppSetting.findOne({ key: `${ORDERING_SCHEDULE_KEY}.backup` }).lean();
+        if (backupRow?.value) {
+          // A backup exists → a prior test set it. Live key may be corrupt; trust backup.
+          originalSchedule = backupRow.value;
+          appendLog(job, `Оригінальний розклад взято з backup: ${JSON.stringify(originalSchedule)}`);
+        } else {
+          // No backup yet → live key is clean. Capture it as the immutable baseline.
+          originalSchedule = liveSchedule;
+          if (originalSchedule) {
+            await AppSetting.updateOne(
+              { key: `${ORDERING_SCHEDULE_KEY}.backup` },
+              { $set: { value: originalSchedule } },
+              { upsert: true },
+            );
+          }
+        }
+      }
       if (!originalSchedule) appendLog(job, 'УВАГА: налаштування розкладу відсутні в БД — sessionId буде з дефолтами (16:00)');
 
       if (autoScheduleMinutes > 0) {
@@ -526,10 +568,9 @@ router.post('/run', asyncHandler(async (req, res) => {
           job.progress = { step: 4, total: 6, label: `Очікування закриття вікна (${waitSec}s)` };
           appendLog(job, `Чекаємо закриття вікна замовлень: ~${waitSec}s до ${autoCloseHour}:${String(autoCloseMinute).padStart(2,'0')} Warsaw...`);
           await new Promise((r) => setTimeout(r, waitMs + 5000)); // +5s grace
-          appendLog(job, 'Вікно замовлень закрито. Мігруємо sessionId...');
-          // Migrate orders from test-schedule sessionId → original-schedule sessionId
-          // so the picking page (which uses the restored schedule) finds them correctly.
-          if (originalSchedule) {
+          appendLog(job, 'Вікно замовлень закрито.');
+          if (!keepData && originalSchedule) {
+            appendLog(job, 'Мігруємо sessionId до оригінального розкладу...');
             const originalSessionId = getCurrentOrderingSessionId(String(deliveryGroup._id), effectiveDayOfWeek, originalSchedule);
             if (originalSessionId !== sessionId) {
               const migrated = await Order.updateMany(
@@ -540,6 +581,8 @@ router.post('/run', asyncHandler(async (req, res) => {
               job.cleanup.sessionId = originalSessionId;
               appendLog(job, `sessionId мігровано → ${originalSessionId} (${migrated.modifiedCount} замовлень)`);
             }
+          } else if (keepData) {
+            appendLog(job, 'keepData=true — залишаємо замовлення в тестовій сесії (міграція не виконується).');
           }
         }
       } else if (keepData) {
@@ -675,8 +718,10 @@ router.post('/run', asyncHandler(async (req, res) => {
       job.error = err?.message || String(err);
       appendLog(job, `FATAL: ${job.error}`);
     } finally {
-      // Restore ordering schedule if we overrode it.
-      if (originalSchedule) {
+      // Restore ordering schedule if we overrode it and the operator did not
+      // request to keep the test data alive. When keepData=true, preserve the
+      // temporary test schedule so the group can be inspected / started manually.
+      if (originalSchedule && !keepData) {
         try {
           await AppSetting.updateOne(
             { key: ORDERING_SCHEDULE_KEY },
@@ -684,10 +729,15 @@ router.post('/run', asyncHandler(async (req, res) => {
             { upsert: true },
           );
           await invalidateOrderingScheduleCache();
+          // Restore succeeded → drop the crash-recovery backup so a future
+          // legitimate admin schedule change becomes the new baseline.
+          await AppSetting.deleteOne({ key: `${ORDERING_SCHEDULE_KEY}.backup` });
           appendLog(job, 'Розклад замовлень відновлено до оригінального значення.');
         } catch (e) {
           appendLog(job, `Не вдалось відновити розклад: ${e.message || e}`);
         }
+      } else if (originalSchedule && keepData) {
+        appendLog(job, 'keepData=true — тимчасовий тестовий розклад залишено в БД для ручного запуску. Оригінальний розклад відновлюється при очищенні тесту.');
       }
       if (keepData) {
         appendLog(job, '⏸ keepData=true — тестові дані ЗАЛИШЕНО в БД. Очистіть вручну кнопкою "Очистити тестові дані".');
@@ -785,8 +835,12 @@ router.post('/seed-conflicts', asyncHandler(async (req, res) => {
 
   // group2 is auxiliary — only used as the SOURCE side of scenario D.
   const group2 = await DeliveryGroup.create({ name: `WT-CFaux${suffix}`, dayOfWeek, members: [] });
-  const sessionId1 = getCurrentOrderingSessionId(String(group1._id), dayOfWeek);
-  const sessionId2 = getCurrentOrderingSessionId(String(group2._id), dayOfWeek);
+  // Use the real DB schedule so conflict orders land in the SAME ordering
+  // session the app considers current — otherwise they default to 16:00 and
+  // immediately look stale on the picking board.
+  const cfSchedule = await getOrderingSchedule().catch(() => undefined);
+  const sessionId1 = getCurrentOrderingSessionId(String(group1._id), dayOfWeek, cfSchedule);
+  const sessionId2 = getCurrentOrderingSessionId(String(group2._id), dayOfWeek, cfSchedule);
 
   // Each scenario gets its OWN shops so they don't share sellers/conflicts.
   // CF shops do NOT get the main group's deliveryGroupId — they are "incoming
@@ -1020,6 +1074,131 @@ router.get('/jobs', asyncHandler(async (req, res) => {
       finishedAt: j.finishedAt,
       params: j.params,
       error: j.error,
+    }));
+  res.json(list);
+}));
+
+// ════════════════════════════════════════════════════════════════════════════
+//  AUTOMATED SUITE RUNNER — run test-e2e.js / test-http.js / test-audit.js as
+//  child processes straight from the HTML control panel, with live logs,
+//  pass/fail analytics and a stop button.
+// ════════════════════════════════════════════════════════════════════════════
+
+const REPO_ROOT  = path.join(__dirname, '..', '..');
+const SERVER_NM  = path.join(__dirname, '..', 'node_modules');
+const TESTS_DIR  = path.join(REPO_ROOT, 'Тести Е2Е');
+const SUITE_FILES = {
+  e2e:   { file: path.join(TESTS_DIR, 'test-e2e.js'),  label: 'E2E (логіка складу)' },
+  http:  { file: path.join(TESTS_DIR, 'test-http.js'), label: 'HTTP (start-session + merge)' },
+  audit: { file: path.join(TESTS_DIR, 'test-audit.js'), label: 'Аудит цілісності даних' },
+};
+
+const suiteJobs = new Map(); // jobId → job
+
+function parseSuiteOutput(text) {
+  const m = text.match(/Results:\s*(\d+)\s*passed\s+(\d+)\s*failed/i);
+  const summary = m ? { passed: Number(m[1]), failed: Number(m[2]) } : null;
+  const failures = [];
+  let inFailures = false;
+  for (const raw of text.split('\n')) {
+    const line = raw.trim();
+    if (/^(Failed assertions|FAILURES)/i.test(line)) { inFailures = true; continue; }
+    if (inFailures) {
+      if (line.startsWith('✗')) failures.push(line.replace(/^✗\s*/, ''));
+      else if (line && !line.startsWith('╔') && !line.startsWith('║') && !line.startsWith('╚')) inFailures = false;
+    }
+  }
+  return { summary, failures };
+}
+
+// ─── POST /api/warehouse-test/suite/run  { suite: 'e2e'|'http'|'audit' } ──────
+router.post('/suite/run', asyncHandler(async (req, res) => {
+  const suite = String(req.body?.suite || '');
+  const def = SUITE_FILES[suite];
+  if (!def) return res.status(400).json({ error: 'unknown_suite', message: 'Невідомий набір тестів' });
+
+  const running = [...suiteJobs.values()].find((j) => j.status === 'running');
+  if (running) {
+    return res.status(409).json({ error: 'suite_already_running', message: `Вже виконується: ${running.suite}`, jobId: running.id });
+  }
+
+  const jobId = makeJobId();
+  const job = {
+    id: jobId, suite, label: def.label, status: 'running',
+    startedAt: new Date().toISOString(), finishedAt: null,
+    logs: [], summary: null, failures: [], exitCode: null, child: null,
+  };
+  suiteJobs.set(jobId, job);
+
+  const child = spawn(process.execPath, [def.file], {
+    cwd: REPO_ROOT,
+    env: { ...process.env, NODE_PATH: SERVER_NM, FORCE_COLOR: '0' },
+  });
+  job.child = child;
+
+  const onChunk = (buf) => {
+    for (const line of buf.toString().split('\n')) {
+      if (line.length) job.logs.push(line);
+    }
+    if (job.logs.length > 5000) job.logs.splice(0, job.logs.length - 5000);
+  };
+  child.stdout.on('data', onChunk);
+  child.stderr.on('data', onChunk);
+
+  child.on('error', (err) => {
+    job.logs.push(`[spawn error] ${err.message}`);
+    job.status = 'failed';
+    job.finishedAt = new Date().toISOString();
+    job.child = null;
+  });
+  child.on('close', (code, signal) => {
+    job.exitCode = code;
+    const parsed = parseSuiteOutput(job.logs.join('\n'));
+    job.summary = parsed.summary;
+    job.failures = parsed.failures;
+    if (job.status === 'running') {
+      job.status = signal ? 'stopped' : (code === 0 ? 'completed' : 'failed');
+    }
+    job.finishedAt = new Date().toISOString();
+    job.child = null;
+  });
+
+  res.json({ jobId, suite, label: def.label });
+}));
+
+// ─── GET /api/warehouse-test/suite/status/:jobId ─────────────────────────────
+router.get('/suite/status/:jobId', asyncHandler(async (req, res) => {
+  const job = suiteJobs.get(req.params.jobId);
+  if (!job) return res.status(404).json({ error: 'job_not_found' });
+  res.json({
+    id: job.id, suite: job.suite, label: job.label, status: job.status,
+    startedAt: job.startedAt, finishedAt: job.finishedAt,
+    exitCode: job.exitCode, summary: job.summary, failures: job.failures,
+    logs: job.logs,
+  });
+}));
+
+// ─── POST /api/warehouse-test/suite/stop/:jobId ──────────────────────────────
+router.post('/suite/stop/:jobId', asyncHandler(async (req, res) => {
+  const job = suiteJobs.get(req.params.jobId);
+  if (!job) return res.status(404).json({ error: 'job_not_found' });
+  if (job.child && job.status === 'running') {
+    job.status = 'stopped';
+    job.logs.push('[stopped by operator]');
+    try { job.child.kill('SIGTERM'); } catch { /* already gone */ }
+    setTimeout(() => { try { job.child?.kill('SIGKILL'); } catch { /* ignore */ } }, 3000);
+  }
+  res.json({ ok: true, status: job.status });
+}));
+
+// ─── GET /api/warehouse-test/suite/list ──────────────────────────────────────
+router.get('/suite/list', asyncHandler(async (req, res) => {
+  const list = [...suiteJobs.values()]
+    .sort((a, b) => (b.startedAt || '').localeCompare(a.startedAt || ''))
+    .slice(0, 20)
+    .map((j) => ({
+      id: j.id, suite: j.suite, label: j.label, status: j.status,
+      startedAt: j.startedAt, finishedAt: j.finishedAt, summary: j.summary,
     }));
   res.json(list);
 }));

@@ -214,6 +214,19 @@ const ERRORS = {
   receipt_transit_exceeds_total: { status: 400, message: 'Кількість в магазини не може перевищувати загальну' },
   receipt_log_action_required: { status: 400, message: 'Поле action обовʼязкове' },
 
+  // ── Receipts (multi-worker) ────────────────────────────────────────────────
+  receipt_item_forbidden_edit: { status: 403, message: ({ owner } = {}) =>
+                                `Цю позицію додав інший працівник${owner ? ` (${owner})` : ''}. Ви можете редагувати лише ціну та кількість в упаковці.` },
+  receipt_item_forbidden_delete: { status: 403, message: 'Видалити позицію може лише працівник, який її додав' },
+  receipt_item_forbidden_confirm: { status: 403, message: 'Підтвердити позицію може лише працівник, який її додав' },
+  receipt_item_already_confirmed: { status: 409, message: 'Позицію вже підтверджено — зміни заборонені. Зніміть підтвердження, щоб редагувати.' },
+  receipt_item_not_confirmed_yet: { status: 409, message: 'Позиція ще не підтверджена' },
+  receipt_items_not_all_confirmed: { status: 409, message: ({ pending } = {}) =>
+                                `Не всі позиції підтверджені (${pending ?? '?'} без підпису). Кожен працівник має підтвердити свої позиції перед проведенням.` },
+  receipt_structure_invalid: { status: 400, message: 'Невалідна розбивка кількості (палети/коробки/шт мають бути додатними цілими)' },
+  receipt_destination_required: { status: 400, message: 'Вкажіть призначення: «Склад» або «Магазини»' },
+  receipt_shops_groups_required: { status: 400, message: 'Для призначення «Магазини» потрібно вибрати хоча б одну групу доставки' },
+
   // ── Blocks (extra) ─────────────────────────────────────────────────────────
   block_id_conflict:        { status: 409, message: 'Конфлікт ID блока, повторіть спробу' },
   block_create_failed:      { status: 500, message: 'Не вдалося створити блок' },

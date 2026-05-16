@@ -15,6 +15,13 @@ const DeliveryGroup = require('../models/DeliveryGroup');
 const Shop = require('../models/Shop');
 const { getIO } = require('../socket');
 const { appError, asyncHandler } = require('../utils/errors');
+const {
+  assertCanEditItem,
+  assertCanDeleteItem,
+  assertCanConfirmItem,
+  resolveStructure,
+  deriveSplit,
+} = require('../utils/receiptPermissions');
 
 const staffOnly = requireTelegramRoles(['admin', 'warehouse']);
 
@@ -78,7 +85,7 @@ function parseMultipart(req) {
         if (stream.truncated) {
           return reject(new Error('File size limit exceeded'));
         }
-        files.push({ buffer: Buffer.concat(chunks), originalname: info.filename, mimetype: info.mimeType });
+        files.push({ field: name, buffer: Buffer.concat(chunks), originalname: info.filename, mimetype: info.mimeType });
       });
     });
 
@@ -118,6 +125,17 @@ function safeParseArray(val) {
   }
 }
 
+/** Parses a JSON object field. Returns null when absent, object on success, undefined on bad JSON. */
+function safeParseObject(val) {
+  if (val === undefined || val === '' || val === null) return null;
+  try {
+    const obj = JSON.parse(val);
+    return obj && typeof obj === 'object' && !Array.isArray(obj) ? obj : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 const router = express.Router();
 
 router.get('/', staffOnly, asyncHandler(async (req, res) => {
@@ -128,10 +146,33 @@ router.get('/', staffOnly, asyncHandler(async (req, res) => {
   const query = {};
   if (statusFilter) query.status = statusFilter;
 
+  // Date range filter on createdAt. dateTo is treated as inclusive end-of-day.
+  const createdAt = {};
+  const fromMs = Date.parse(req.query.dateFrom || '');
+  const toMs = Date.parse(req.query.dateTo || '');
+  if (Number.isFinite(fromMs)) createdAt.$gte = new Date(fromMs);
+  if (Number.isFinite(toMs)) createdAt.$lte = new Date(toMs + 24 * 60 * 60 * 1000 - 1);
+  if (Object.keys(createdAt).length) query.createdAt = createdAt;
+
+  // Free-text search by receipt number (escaped, case-insensitive).
+  const q = String(req.query.q || '').trim();
+  if (q) {
+    const escaped = q.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    query.receiptNumber = { $regex: escaped, $options: 'i' };
+  }
+
+  const SORTS = {
+    date_desc: { createdAt: -1 },
+    date_asc: { createdAt: 1 },
+    number_desc: { receiptNumber: -1 },
+    number_asc: { receiptNumber: 1 },
+  };
+  const sortSpec = SORTS[req.query.sort] || SORTS.date_desc;
+
   const [total, receipts] = await Promise.all([
     Receipt.countDocuments(query),
     Receipt.find(query)
-      .sort({ createdAt: -1 })
+      .sort(sortSpec)
       .skip((page - 1) * pageSize)
       .limit(pageSize)
       .lean(),
@@ -203,7 +244,9 @@ router.post('/:id/items', staffOnly, asyncHandler(async (req, res) => {
   if (!req.is('multipart/form-data')) throw appError('receipt_multipart_required');
 
   const parsed = await parseMultipart(req);
-  const file = parsed.files?.[0];
+  const file = parsed.files.find((f) => f.field === 'photo') || parsed.files?.[0];
+  const originalFile = parsed.files.find((f) => f.field === 'originalPhoto') || null;
+  const photoMeta = safeParseObject(parsed.fields.photoMeta) || null;
   const existingProductId = parsed.fields.existingProductId ? String(parsed.fields.existingProductId).trim() : null;
   const isWarehousePending = parsed.fields.warehousePending === 'true';
   const deliveryGroupIds = safeParseArray(parsed.fields.deliveryGroupIds);
@@ -216,19 +259,31 @@ router.post('/:id/items', staffOnly, asyncHandler(async (req, res) => {
 
   if (!file && !existingProductId) throw appError('receipt_photo_required');
 
-  const totalQty = parseIntField(parsed.fields.totalQty);
-  const transitQty = parseIntField(parsed.fields.transitQty);
-  const shelfQty = totalQty - transitQty;
+  // Destination is the UI-level choice; it derives the shelf/transit split.
+  const destination = String(parsed.fields.destination || 'shelf');
+  if (!['shelf', 'shops'].includes(destination)) throw appError('receipt_destination_required');
+  // NOTE: destination is currently just a bookkeeping marker — the delivery-group
+  // / transit UI was removed for now, so we no longer hard-require groups here.
 
-  if (totalQty < 1) throw appError('receipt_qty_invalid');
-  if (shelfQty < 0) throw appError('receipt_transit_exceeds_total');
+  // Quantity: either a manual total ('direct') or computed from a structure.
+  const rawStructure = safeParseObject(parsed.fields.structure);
+  if (rawStructure === undefined) throw appError('receipt_structure_invalid');
+  const manualTotalQty = parseIntField(parsed.fields.totalQty);
+  const { totalQty, structure } = resolveStructure(rawStructure, manualTotalQty);
+
+  const { shelfQty, transitQty } = deriveSplit(destination, totalQty);
 
   let photoUrl;
   let photoName;
+  let originalPhotoUrl = '';
   if (file) {
     const filename = await uploadToR2(file.buffer, file.originalname, file.mimetype);
     photoUrl = `${process.env.R2_PUBLIC_URL.replace(/\/$/, '')}/products/${filename}`;
     photoName = file.originalname || filename;
+  }
+  if (originalFile) {
+    const origName = await uploadToR2(originalFile.buffer, originalFile.originalname, originalFile.mimetype);
+    originalPhotoUrl = `${process.env.R2_PUBLIC_URL.replace(/\/$/, '')}/products/${origName}`;
   }
 
   // Pull photo from existingProduct if item has no photo
@@ -242,8 +297,22 @@ router.post('/:id/items', staffOnly, asyncHandler(async (req, res) => {
 
   const receiptItem = new ReceiptItem({
     receiptId: receipt._id,
+    createdBy: String(req.user.telegramId),
+    status: 'draft',
+    destination,
+    structure,
     photoUrl: photoUrl || '',
     photoName: photoName || '',
+    originalPhotoUrl,
+    photoMeta: photoMeta && typeof photoMeta === 'object'
+      ? {
+          comment: String(photoMeta.comment || ''),
+          commentPos: {
+            x: Number(photoMeta?.commentPos?.x) || 0.5,
+            y: Number(photoMeta?.commentPos?.y) || 0.5,
+          },
+        }
+      : undefined,
     totalQty,
     transitQty: transitQty || 0,
     deliveryGroupIds: Array.isArray(deliveryGroupIds) ? deliveryGroupIds : [],
@@ -347,13 +416,6 @@ router.patch('/:id/items/:itemId', staffOnly, asyncHandler(async (req, res) => {
 
   const parsed = await parseMultipart(req);
 
-  const totalQty = parsed.fields.totalQty !== undefined ? parseIntField(parsed.fields.totalQty, item.totalQty) : item.totalQty;
-  const transitQty = parsed.fields.transitQty !== undefined ? parseIntField(parsed.fields.transitQty, item.transitQty) : item.transitQty;
-  const shelfQty = totalQty - transitQty;
-
-  if (totalQty < 1) throw appError('validation_failed', { field: 'totalQty' });
-  if (shelfQty < 0) throw appError('validation_failed', { field: 'transitQty' });
-
   const existingProductId = parsed.fields.existingProductId ? String(parsed.fields.existingProductId).trim() : null;
   if (existingProductId) {
     const exists = await Product.exists({ _id: existingProductId });
@@ -371,6 +433,71 @@ router.patch('/:id/items/:itemId', staffOnly, asyncHandler(async (req, res) => {
   }
   const qtyPerShop = parseIntField(parsed.fields.qtyPerShop);
 
+  // ── Resolve destination + structure → derived shelf/transit split ──────────
+  const prevStructure = item.structure && item.structure.toObject
+    ? item.structure.toObject()
+    : (item.structure || { type: 'direct' });
+
+  let nextDestination = item.destination || 'shelf';
+  if (parsed.fields.destination !== undefined) {
+    nextDestination = String(parsed.fields.destination);
+    if (!['shelf', 'shops'].includes(nextDestination)) throw appError('receipt_destination_required');
+  }
+  // Groups intentionally not required — destination is a marker for now.
+
+  let nextStructure = prevStructure;
+  let totalQty = item.totalQty;
+  if (parsed.fields.structure !== undefined) {
+    const rawStructure = safeParseObject(parsed.fields.structure);
+    if (rawStructure === undefined) throw appError('receipt_structure_invalid');
+    const manual = parsed.fields.totalQty !== undefined
+      ? parseIntField(parsed.fields.totalQty, item.totalQty)
+      : item.totalQty;
+    const resolved = resolveStructure(rawStructure || { type: 'direct' }, manual);
+    nextStructure = resolved.structure;
+    totalQty = resolved.totalQty;
+  } else if (parsed.fields.totalQty !== undefined) {
+    totalQty = parseIntField(parsed.fields.totalQty, item.totalQty);
+    if (!Number.isInteger(totalQty) || totalQty < 1) throw appError('receipt_qty_invalid');
+  }
+
+  // Only re-derive the shelf/transit split when a split-relevant input was
+  // actually submitted. Otherwise preserve the stored values — this protects
+  // legacy items (no destination field) from being silently zeroed when a
+  // non-owner edits only price/qtyPerPackage.
+  const splitInputsChanged =
+    parsed.fields.destination !== undefined ||
+    parsed.fields.structure !== undefined ||
+    parsed.fields.totalQty !== undefined;
+  const { shelfQty, transitQty } = splitInputsChanged
+    ? deriveSplit(nextDestination, totalQty)
+    : { shelfQty: item.shelfQty, transitQty: item.transitQty };
+
+  // ── Build the set of fields this request actually changes, then enforce
+  // the multi-worker ownership rules (also blocks edits to confirmed items).
+  const arraysEqual = (a = [], b = []) =>
+    a.length === b.length && a.every((v, i) => String(v) === String(b[i]));
+  const changedFields = [];
+  if (parsed.fields.name !== undefined && String(parsed.fields.name).trim() !== (item.name || '')) changedFields.push('name');
+  if (parsed.fields.price !== undefined) {
+    const np = parsed.fields.price !== '' ? Number(parsed.fields.price) : null;
+    if (np !== item.price) changedFields.push('price');
+  }
+  if (parsed.fields.qtyPerPackage !== undefined && (Number(parsed.fields.qtyPerPackage) || 1) !== item.qtyPerPackage) changedFields.push('qtyPerPackage');
+  if (parsed.fields.barcode !== undefined && String(parsed.fields.barcode).trim() !== (item.barcode || '')) changedFields.push('barcode');
+  if (nextDestination !== (item.destination || 'shelf')) changedFields.push('destination');
+  if (totalQty !== item.totalQty) changedFields.push('totalQty');
+  if (JSON.stringify(nextStructure) !== JSON.stringify(prevStructure)) changedFields.push('structure');
+  if (parsed.fields.deliveryGroupIds !== undefined && !arraysEqual(deliveryGroupIds, item.deliveryGroupIds || [])) changedFields.push('deliveryGroupIds');
+  if (parsed.fields.qtyPerShop !== undefined && qtyPerShop !== (item.qtyPerShop || 0)) changedFields.push('qtyPerShop');
+  if (parsed.files?.[0]) changedFields.push('photoUrl');
+  if (parsed.fields.existingProductId !== undefined &&
+      (existingProductId || null) !== (item.existingProductId ? String(item.existingProductId) : null)) {
+    changedFields.push('existingProductId');
+  }
+
+  assertCanEditItem(req.user, item, changedFields);
+
   // Capture values before changes for diff
   const _oldSnapshot = {
     name: item.name,
@@ -387,6 +514,8 @@ router.patch('/:id/items/:itemId', staffOnly, asyncHandler(async (req, res) => {
   item.totalQty = totalQty;
   item.transitQty = transitQty;
   item.shelfQty = shelfQty;
+  item.destination = nextDestination;
+  item.structure = nextStructure;
   item.deliveryGroupIds = deliveryGroupIds;
   item.qtyPerShop = qtyPerShop;
   if (parsed.fields.name !== undefined) item.name = String(parsed.fields.name).trim();
@@ -395,7 +524,26 @@ router.patch('/:id/items/:itemId', staffOnly, asyncHandler(async (req, res) => {
   if (parsed.fields.barcode !== undefined) item.barcode = String(parsed.fields.barcode).trim();
   item.existingProductId = existingProductId || null;
 
-  const file = parsed.files?.[0];
+  // Re-rendered overlay metadata (comment + its position). Owner-only when it
+  // changes; a non-owner price edit re-sends the SAME meta so it won't trip.
+  const photoMeta = safeParseObject(parsed.fields.photoMeta) || null;
+  if (photoMeta && typeof photoMeta === 'object') {
+    item.photoMeta = {
+      comment: String(photoMeta.comment || ''),
+      commentPos: {
+        x: Number(photoMeta?.commentPos?.x) || 0.5,
+        y: Number(photoMeta?.commentPos?.y) || 0.5,
+      },
+    };
+  }
+
+  const originalFile = parsed.files.find((f) => f.field === 'originalPhoto') || null;
+  if (originalFile) {
+    const origName = await uploadToR2(originalFile.buffer, originalFile.originalname, originalFile.mimetype);
+    item.originalPhotoUrl = `${process.env.R2_PUBLIC_URL.replace(/\/$/, '')}/products/${origName}`;
+  }
+
+  const file = parsed.files.find((f) => f.field === 'photo') || parsed.files?.[0];
   if (file) {
     const filename = await uploadToR2(file.buffer, file.originalname, file.mimetype);
     item.photoUrl = `${process.env.R2_PUBLIC_URL.replace(/\/$/, '')}/products/${filename}`;
@@ -484,11 +632,17 @@ router.delete('/:id/items/:itemId', staffOnly, asyncHandler(async (req, res) => 
       if (!receipt) throw appError('receipt_not_found');
       if (receipt.status !== 'draft') throw appError('receipt_completed_no_delete');
 
-      const item = await ReceiptItem.findOneAndDelete(
+      const item = await ReceiptItem.findOne(
         { _id: req.params.itemId, receiptId: req.params.id },
-        { session },
-      );
+      ).session(session);
       if (!item) throw appError('receipt_item_not_found');
+
+      // Only the worker who added it (or admin) may delete, and never once
+      // it has been confirmed. Checked inside the txn so a concurrent
+      // confirm/commit cannot slip between the check and the delete.
+      assertCanDeleteItem(req.user, item);
+
+      await item.deleteOne({ session });
       deletedItem = item;
     });
 
@@ -514,6 +668,71 @@ router.delete('/:id/items/:itemId', staffOnly, asyncHandler(async (req, res) => 
   } finally {
     session.endSession();
   }
+}));
+
+// ── CONFIRM / UNCONFIRM A SINGLE ITEM ─────────────────────────────────────
+// Only the worker who added the item (or an admin) may sign it off. A receipt
+// can only be committed once every non-deleted item is confirmed.
+router.post('/:id/items/:itemId/confirm', staffOnly, asyncHandler(async (req, res) => {
+  const [receipt, item] = await Promise.all([
+    Receipt.findById(req.params.id).lean(),
+    ReceiptItem.findOne({ _id: req.params.itemId, receiptId: req.params.id }),
+  ]);
+  if (!item) throw appError('receipt_item_not_found');
+  if (!receipt || receipt.status !== 'draft') throw appError('receipt_completed_locked');
+
+  assertCanConfirmItem(req.user, item);
+
+  if (item.status !== 'confirmed') {
+    item.status = 'confirmed';
+    await item.save();
+    ReceiptItemLog.create({
+      receiptId: receipt._id,
+      itemId: item._id,
+      itemName: item.name,
+      action: 'confirm',
+      actor: getActor(req),
+      changes: [{ field: 'status', label: 'Статус', from: 'draft', to: 'confirmed' }],
+    }).catch((e) => console.error('[ReceiptItemLog] confirm error:', e));
+  }
+
+  const io = getIO();
+  if (io) io.to(`receipt_${req.params.id}`).emit('receipt_item_confirmed', item);
+
+  res.json(item);
+}));
+
+// Reverse a confirmation so the owner can fix a mistake before the receipt is
+// committed. Without this, one wrong confirm would permanently block the whole
+// receipt (confirmed items can't be edited/deleted) with no non-admin recovery.
+router.post('/:id/items/:itemId/unconfirm', staffOnly, asyncHandler(async (req, res) => {
+  const [receipt, item] = await Promise.all([
+    Receipt.findById(req.params.id).lean(),
+    ReceiptItem.findOne({ _id: req.params.itemId, receiptId: req.params.id }),
+  ]);
+  if (!item) throw appError('receipt_item_not_found');
+  if (!receipt || receipt.status !== 'draft') throw appError('receipt_completed_locked');
+
+  // Same ownership rule as confirm: owner or admin.
+  assertCanConfirmItem(req.user, item);
+
+  if (item.status === 'confirmed') {
+    item.status = 'draft';
+    await item.save();
+    ReceiptItemLog.create({
+      receiptId: receipt._id,
+      itemId: item._id,
+      itemName: item.name,
+      action: 'confirm',
+      actor: getActor(req),
+      changes: [{ field: 'status', label: 'Статус', from: 'confirmed', to: 'draft' }],
+    }).catch((e) => console.error('[ReceiptItemLog] unconfirm error:', e));
+  }
+
+  const io = getIO();
+  if (io) io.to(`receipt_${req.params.id}`).emit('receipt_item_confirmed', item);
+
+  res.json(item);
 }));
 
 router.post('/:id/commit', staffOnly, asyncHandler(async (req, res) => {
@@ -546,6 +765,12 @@ router.post('/:id/commit', staffOnly, asyncHandler(async (req, res) => {
     // стан), або заблоковані статус-CAS-ом у власних транзакціях.
     const items = await ReceiptItem.find({ receiptId: receipt._id }).session(session);
     if (!items.length) throw appError('receipt_no_items');
+
+    // Multi-worker gate: every item must be signed off by its owner first.
+    const pendingConfirm = items.filter((item) => item.status !== 'confirmed').length;
+    if (pendingConfirm > 0) {
+      throw appError('receipt_items_not_all_confirmed', { pending: pendingConfirm });
+    }
 
     const invalidItem = items.find((item) => !item.name || item.price === null || item.price <= 0);
     if (invalidItem) throw appError('receipt_items_incomplete');
