@@ -38,6 +38,72 @@ const FIELD_LABELS = {
   photoUrl: 'Фото',
 };
 
+async function ensureReceiptItemProduct(item, session) {
+  let product = null;
+  if (item.existingProductId) {
+    product = await Product.findById(item.existingProductId).session(session);
+    if (product) {
+      if (item.shelfQty > 0) {
+        product.quantity += item.shelfQty;
+      }
+      if (item.price !== null) {
+        product.price = item.price;
+      }
+      if (item.qtyPerPackage) {
+        product.quantityPerPackage = item.qtyPerPackage;
+      }
+      if (item.shelfQty > 0 && product.status !== 'active') {
+        product.status = 'active';
+      }
+      await product.save({ session });
+      return product;
+    }
+  }
+
+  if (item.createdProductId) {
+    product = await Product.findById(item.createdProductId).session(session);
+    if (product) {
+      if (item.shelfQty > 0) {
+        product.quantity = item.shelfQty;
+      }
+      if (item.price !== null) {
+        product.price = item.price;
+      }
+      if (item.qtyPerPackage) {
+        product.quantityPerPackage = item.qtyPerPackage;
+      }
+      if (item.shelfQty > 0 && product.status !== 'active') {
+        product.status = 'active';
+      }
+      await product.save({ session });
+      return product;
+    }
+  }
+
+  const maxProduct = await Product.findOne({}, 'orderNumber').sort({ orderNumber: -1 }).session(session).lean();
+  const nextOrderNumber = (maxProduct?.orderNumber ?? 0) + 1;
+  product = new Product({
+    orderNumber: nextOrderNumber,
+    price: item.price ?? 0,
+    quantity: item.shelfQty,
+    warehouse: '',
+    category: '',
+    brand: item.name || '',
+    model: '',
+    status: item.shelfQty > 0 ? 'active' : 'pending',
+    source: 'receipt',
+    imageUrls: [item.photoUrl],
+    imageNames: [item.photoName],
+    barcode: item.barcode || '',
+    quantityPerPackage: item.qtyPerPackage || 0,
+  });
+
+  await product.save({ session });
+  item.createdProductId = product._id;
+  await item.save({ session });
+  return product;
+}
+
 function getActor(req) {
   const u = req.telegramUser || {};
   return {
@@ -737,69 +803,114 @@ router.delete('/:id/items/:itemId', staffOnly, asyncHandler(async (req, res) => 
 // Only the worker who added the item (or an admin) may sign it off. A receipt
 // can only be committed once every non-deleted item is confirmed.
 router.post('/:id/items/:itemId/confirm', staffOnly, asyncHandler(async (req, res) => {
-  const [receipt, item] = await Promise.all([
-    Receipt.findById(req.params.id).lean(),
-    ReceiptItem.findOne({ _id: req.params.itemId, receiptId: req.params.id }),
-  ]);
-  if (!item) throw appError('receipt_item_not_found');
-  if (!receipt || receipt.status !== 'draft') throw appError('receipt_completed_locked');
+  const session = await mongoose.connection.startSession();
+  try {
+    let confirmedItem = null;
+    await session.withTransaction(async () => {
+      const receipt = await Receipt.findById(req.params.id).session(session);
+      const item = await ReceiptItem.findOne({ _id: req.params.itemId, receiptId: req.params.id }).session(session);
+      if (!item) throw appError('receipt_item_not_found');
+      if (!receipt || receipt.status !== 'draft') throw appError('receipt_completed_locked');
 
-  assertCanConfirmItem(req.user, item);
-  // CONFIRM tier: signing the line off (its annotated photo then flows to the
-  // warehouse "Надходження" strip) requires the full shop-facing dataset —
-  // price + qty-per-package on top of the SAVE-tier photo/quantities.
-  assertItemReadyToConfirm(item);
+      assertCanConfirmItem(req.user, item);
+      assertItemReadyToConfirm(item);
 
-  if (item.status !== 'confirmed') {
-    item.status = 'confirmed';
-    await item.save();
-    ReceiptItemLog.create({
-      receiptId: receipt._id,
-      itemId: item._id,
-      itemName: item.name,
-      action: 'confirm',
-      actor: getActor(req),
-      changes: [{ field: 'status', label: 'Статус', from: 'draft', to: 'confirmed' }],
-    }).catch((e) => console.error('[ReceiptItemLog] confirm error:', e));
+      if (item.status !== 'confirmed') {
+        item.status = 'confirmed';
+        await item.save({ session });
+      }
+
+      const product = await ensureReceiptItemProduct(item, session);
+      confirmedItem = item.toObject();
+      confirmedItem.currentLocation = {
+        blockId: null,
+        status: product?.status ?? null,
+      };
+      confirmedItem.productCurrentQty = product?.quantity ?? null;
+      confirmedItem.barcodeChecked = product?.barcodeChecked ?? false;
+
+      ReceiptItemLog.create({
+        receiptId: receipt._id,
+        itemId: item._id,
+        itemName: item.name,
+        action: 'confirm',
+        actor: getActor(req),
+        changes: [{ field: 'status', label: 'Статус', from: 'draft', to: 'confirmed' }],
+      }).catch((e) => console.error('[ReceiptItemLog] confirm error:', e));
+    });
+    const io = getIO();
+    if (io) {
+      io.to(`receipt_${req.params.id}`).emit('receipt_item_confirmed', confirmedItem);
+      io.emit('incoming_updated');
+    }
+    res.json(confirmedItem);
+  } finally {
+    session.endSession();
   }
-
-  const io = getIO();
-  if (io) io.to(`receipt_${req.params.id}`).emit('receipt_item_confirmed', item);
-
-  res.json(item);
 }));
 
 // Reverse a confirmation so the owner can fix a mistake before the receipt is
 // committed. Without this, one wrong confirm would permanently block the whole
 // receipt (confirmed items can't be edited/deleted) with no non-admin recovery.
 router.post('/:id/items/:itemId/unconfirm', staffOnly, asyncHandler(async (req, res) => {
-  const [receipt, item] = await Promise.all([
-    Receipt.findById(req.params.id).lean(),
-    ReceiptItem.findOne({ _id: req.params.itemId, receiptId: req.params.id }),
-  ]);
-  if (!item) throw appError('receipt_item_not_found');
-  if (!receipt || receipt.status !== 'draft') throw appError('receipt_completed_locked');
+  const session = await mongoose.connection.startSession();
+  try {
+    let updatedItem = null;
+    await session.withTransaction(async () => {
+      const receipt = await Receipt.findById(req.params.id).session(session);
+      const item = await ReceiptItem.findOne({ _id: req.params.itemId, receiptId: req.params.id }).session(session);
+      if (!item) throw appError('receipt_item_not_found');
+      if (!receipt || receipt.status !== 'draft') throw appError('receipt_completed_locked');
 
-  // Same ownership rule as confirm: owner or admin.
-  assertCanConfirmItem(req.user, item);
+      assertCanConfirmItem(req.user, item);
 
-  if (item.status === 'confirmed') {
-    item.status = 'draft';
-    await item.save();
-    ReceiptItemLog.create({
-      receiptId: receipt._id,
-      itemId: item._id,
-      itemName: item.name,
-      action: 'confirm',
-      actor: getActor(req),
-      changes: [{ field: 'status', label: 'Статус', from: 'confirmed', to: 'draft' }],
-    }).catch((e) => console.error('[ReceiptItemLog] unconfirm error:', e));
+      if (item.status === 'confirmed') {
+        if (item.existingProductId) {
+          const product = await Product.findById(item.existingProductId).session(session);
+          if (product) {
+            product.quantity = Math.max(0, product.quantity - item.shelfQty);
+            if (product.quantity === 0) {
+              product.status = 'pending';
+            }
+            await product.save({ session });
+          }
+        } else if (item.createdProductId) {
+          const product = await Product.findById(item.createdProductId).session(session);
+          if (product && product.source === 'receipt') {
+            const inBlock = await Block.exists({ productIds: product._id }).session(session);
+            if (!inBlock) {
+              await product.deleteOne({ session });
+              item.createdProductId = null;
+            }
+          }
+        }
+
+        item.status = 'draft';
+        await item.save({ session });
+
+        ReceiptItemLog.create({
+          receiptId: receipt._id,
+          itemId: item._id,
+          itemName: item.name,
+          action: 'confirm',
+          actor: getActor(req),
+          changes: [{ field: 'status', label: 'Статус', from: 'confirmed', to: 'draft' }],
+        }).catch((e) => console.error('[ReceiptItemLog] unconfirm error:', e));
+      }
+
+      updatedItem = item.toObject();
+    });
+
+    const io = getIO();
+    if (io) {
+      io.to(`receipt_${req.params.id}`).emit('receipt_item_confirmed', updatedItem);
+      io.emit('incoming_updated');
+    }
+
+    res.json(updatedItem);
+  } finally {
+    session.endSession();
   }
-
-  const io = getIO();
-  if (io) io.to(`receipt_${req.params.id}`).emit('receipt_item_confirmed', item);
-
-  res.json(item);
 }));
 
 router.post('/:id/commit', staffOnly, asyncHandler(async (req, res) => {
@@ -861,7 +972,10 @@ router.post('/:id/commit', staffOnly, asyncHandler(async (req, res) => {
     // 4.1: Pre-determine how many NEW products will be created (no existingProductId or not found),
     // then do ONE bulk shiftUp instead of one per new product.
     const existingIdSet = new Set(
-      items.filter((i) => i.existingProductId).map((i) => String(i.existingProductId))
+      items
+        .map((i) => i.existingProductId || i.createdProductId)
+        .filter(Boolean)
+        .map(String)
     );
     let resolvedExistingCount = 0;
     if (existingIdSet.size > 0) {
@@ -886,16 +1000,36 @@ router.post('/:id/commit', staffOnly, asyncHandler(async (req, res) => {
       let currentProduct;
 
       // 1. Update or create the product
-      if (item.existingProductId && !usedExistingProductIds.has(String(item.existingProductId))) {
+      if (
+        item.existingProductId &&
+        !item.createdProductId &&
+        !usedExistingProductIds.has(String(item.existingProductId))
+      ) {
         usedExistingProductIds.add(String(item.existingProductId));
         currentProduct = await Product.findById(item.existingProductId).session(session);
         if (currentProduct) {
           currentProduct.quantity += item.shelfQty;
           if (item.price !== null) currentProduct.price = item.price;
           if (item.qtyPerPackage) currentProduct.quantityPerPackage = item.qtyPerPackage;
+          if (item.shelfQty > 0 && currentProduct.status !== 'active') {
+            currentProduct.status = 'active';
+          }
           await currentProduct.save({ session });
           item.createdProductId = currentProduct._id;
           await item.save({ session });
+        }
+      }
+
+      if (!currentProduct && item.createdProductId) {
+        currentProduct = await Product.findById(item.createdProductId).session(session);
+        if (currentProduct) {
+          if (item.price !== null) currentProduct.price = item.price;
+          if (item.qtyPerPackage) currentProduct.quantityPerPackage = item.qtyPerPackage;
+          if (item.shelfQty > 0) {
+            currentProduct.quantity = item.shelfQty;
+            if (currentProduct.status !== 'active') currentProduct.status = 'active';
+          }
+          await currentProduct.save({ session });
         }
       }
 
@@ -908,7 +1042,7 @@ router.post('/:id/commit', staffOnly, asyncHandler(async (req, res) => {
           category: '',
           brand: item.name || '',
           model: '',
-          status: 'pending',
+          status: item.shelfQty > 0 ? 'active' : 'pending',
           source: 'receipt',
           imageUrls: [item.photoUrl],
           imageNames: [item.photoName],

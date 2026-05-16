@@ -164,6 +164,7 @@ module.exports = {
   assertCanEditItem,
   assertCanDeleteItem,
   assertCanConfirmItem,
+  assertItemReadyToConfirm,
   resolveStructure,
   deriveSplit,
 };
