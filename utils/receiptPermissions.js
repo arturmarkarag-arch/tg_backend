@@ -73,6 +73,30 @@ function assertCanConfirmItem(user, item) {
   }
 }
 
+/**
+ * Two-tier completeness rule.
+ *
+ *   SAVE tier (enforced at create): photo + arrived qty + expected qty.
+ *   CONFIRM tier (here): the SAVE tier PLUS price and qty-per-package.
+ *
+ * A worker can park a half-described line (just photo + counts) so the
+ * physical receiving isn't blocked, but signing it off ("Підтвердити" →
+ * the annotated photo flows to the warehouse "Надходження" strip) requires
+ * the shop-facing data to be filled. Throws receipt_item_incomplete listing
+ * exactly what's still missing so the UI can tell the worker what to add.
+ */
+function assertItemReadyToConfirm(item) {
+  const missing = [];
+  if (!item.photoUrl) missing.push('фото');
+  if (!(item.totalQty >= 1)) missing.push('кількість що приїхала');
+  if (item.expectedQty == null) missing.push('очікувана кількість');
+  if (item.price == null || !(item.price > 0)) missing.push('ціна');
+  if (!(item.qtyPerPackage >= 1)) missing.push('кількість в упаковці');
+  if (missing.length > 0) {
+    throw appError('receipt_item_incomplete', { fields: missing.join(', ') });
+  }
+}
+
 function isPosInt(n) {
   return Number.isInteger(n) && n >= 1;
 }

@@ -19,6 +19,7 @@ const {
   assertCanEditItem,
   assertCanDeleteItem,
   assertCanConfirmItem,
+  assertItemReadyToConfirm,
   resolveStructure,
   deriveSplit,
 } = require('../utils/receiptPermissions');
@@ -302,8 +303,14 @@ router.post('/:id/items', staffOnly, asyncHandler(async (req, res) => {
     originalPhotoUrl = `${process.env.R2_PUBLIC_URL.replace(/\/$/, '')}/products/${origName}`;
   }
   const defectPhotoUrls = await uploadDefectPhotos(parsed.files);
+  // SAVE-tier rule: a line can be parked with just photo + arrived qty +
+  // expected qty (no price yet). Expected qty is therefore mandatory here —
+  // price / qtyPerPackage are only required later to CONFIRM the line.
   const expectedQty = parsed.fields.expectedQty !== undefined && parsed.fields.expectedQty !== ''
     ? parseIntField(parsed.fields.expectedQty, null) : null;
+  if (!Number.isInteger(expectedQty) || expectedQty < 1) {
+    throw appError('receipt_expected_qty_required');
+  }
   const notes = String(parsed.fields.notes || '').trim();
 
   // Pull photo from existingProduct if item has no photo
@@ -519,6 +526,11 @@ router.patch('/:id/items/:itemId', staffOnly, asyncHandler(async (req, res) => {
   const nextExpectedQty = parsed.fields.expectedQty !== undefined
     ? (parsed.fields.expectedQty === '' ? null : parseIntField(parsed.fields.expectedQty, null))
     : (item.expectedQty ?? null);
+  // Expected qty is part of the SAVE tier — it may never be blanked back out
+  // once the line exists (only the owner can submit this field at all).
+  if (parsed.fields.expectedQty !== undefined && (!Number.isInteger(nextExpectedQty) || nextExpectedQty < 1)) {
+    throw appError('receipt_expected_qty_required');
+  }
   if (parsed.fields.expectedQty !== undefined && nextExpectedQty !== (item.expectedQty ?? null)) changedFields.push('expectedQty');
   if (parsed.fields.notes !== undefined && String(parsed.fields.notes).trim() !== (item.notes || '')) changedFields.push('notes');
   const hasNewDefectPhotos = (parsed.files || []).some((f) => f.field === 'defectPhoto');
@@ -733,6 +745,10 @@ router.post('/:id/items/:itemId/confirm', staffOnly, asyncHandler(async (req, re
   if (!receipt || receipt.status !== 'draft') throw appError('receipt_completed_locked');
 
   assertCanConfirmItem(req.user, item);
+  // CONFIRM tier: signing the line off (its annotated photo then flows to the
+  // warehouse "Надходження" strip) requires the full shop-facing dataset —
+  // price + qty-per-package on top of the SAVE-tier photo/quantities.
+  assertItemReadyToConfirm(item);
 
   if (item.status !== 'confirmed') {
     item.status = 'confirmed';

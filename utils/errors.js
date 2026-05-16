@@ -224,6 +224,10 @@ const ERRORS = {
   receipt_items_not_all_confirmed: { status: 409, message: ({ pending } = {}) =>
                                 `Не всі позиції підтверджені (${pending ?? '?'} без підпису). Кожен працівник має підтвердити свої позиції перед проведенням.` },
   receipt_structure_invalid: { status: 400, message: 'Невалідна розбивка кількості (палети/коробки/шт мають бути додатними цілими)' },
+  receipt_expected_qty_required: { status: 400, message: 'Вкажіть очікувану кількість (скільки мало приїхати)' },
+  receipt_item_incomplete: { status: 422, message: ({ fields } = {}) =>
+                                `Щоб підтвердити позицію, заповніть: ${fields || 'усі обовʼязкові поля'}. ` +
+                                'Прийняти товар можна й без них, але для підтвердження ціна та кількість в упаковці обовʼязкові.' },
   receipt_destination_required: { status: 400, message: 'Вкажіть призначення: «Склад» або «Магазини»' },
   receipt_shops_groups_required: { status: 400, message: 'Для призначення «Магазини» потрібно вибрати хоча б одну групу доставки' },
 
