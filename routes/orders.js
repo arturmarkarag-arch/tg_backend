@@ -244,6 +244,212 @@ router.get('/conflicts', staffOnly, async (req, res) => {
   res.json({ conflicts });
 });
 
+/**
+ * GET /history — returns order history, optionally grouped/filtered by shop or session.
+ * Admin and warehouse only.
+ */
+router.get('/history', staffOnly, asyncHandler(async (req, res) => {
+  const page = Math.max(1, parseInt(req.query.page) || 1);
+  const pageSize = Math.max(1, parseInt(req.query.pageSize) || 50);
+  const shopId = req.query.shopId;
+  const sessionId = req.query.sessionId;
+  const from = req.query.from;
+  const to = req.query.to;
+
+  const filter = {
+    status: { $ne: 'cancelled' },
+  };
+
+  if (shopId) {
+    filter.$or = [
+      { 'shopId': mongoose.Types.ObjectId.isValid(shopId) ? shopId : null },
+      { 'buyerSnapshot.shopId': shopId },
+    ];
+  }
+
+  if (sessionId) {
+    filter.orderingSessionId = sessionId;
+  }
+
+  if (from || to) {
+    const dateQuery = {};
+    if (from) {
+      const parsedFrom = new Date(from);
+      if (!Number.isNaN(parsedFrom.getTime())) {
+        dateQuery.$gte = parsedFrom;
+      }
+    }
+    if (to) {
+      const parsedTo = new Date(to);
+      if (!Number.isNaN(parsedTo.getTime())) {
+        dateQuery.$lt = parsedTo;
+      }
+    }
+    if (Object.keys(dateQuery).length) {
+      filter.createdAt = dateQuery;
+    }
+  }
+
+  const total = await Order.countDocuments(filter);
+  const orders = await Order.find(filter)
+    .populate('items.productId')
+    .populate('shopId', 'name address cityId')
+    .sort({ createdAt: -1 })
+    .skip((page - 1) * pageSize)
+    .limit(pageSize)
+    .lean();
+
+  const buyerIds = [...new Set(orders.map((o) => o.buyerTelegramId))];
+  const buyers = await User.find({ telegramId: { $in: buyerIds } }).lean();
+  const buyerMap = new Map(buyers.map((b) => [b.telegramId, b]));
+
+  // Group by session
+  const bySession = new Map();
+  for (const order of orders) {
+    const sid = order.orderingSessionId || 'unknown';
+    if (!bySession.has(sid)) {
+      bySession.set(sid, []);
+    }
+    bySession.get(sid).push(order);
+  }
+
+  const sessions = Array.from(bySession.entries()).map(([sessionId, sessionOrders]) => ({
+    sessionId,
+    orderCount: sessionOrders.length,
+    totalRevenue: sessionOrders.reduce((sum, o) => sum + o.totalPrice, 0),
+    shops: Array.from(
+      sessionOrders.reduce((acc, order) => {
+        const shopId = String(order.shopId?._id || order.buyerSnapshot?.shopId || 'unknown');
+        if (!acc.has(shopId)) {
+          acc.set(shopId, {
+            shopId,
+            shopName: order.shopId?.name || order.buyerSnapshot?.shopName || 'Unknown',
+            shopAddress: order.shopId?.address || order.buyerSnapshot?.shopAddress || '',
+            shopCity: order.shopId?.cityId?.name || order.buyerSnapshot?.shopCity || '',
+            orders: [],
+          });
+        }
+        acc.get(shopId).orders.push(order);
+        return acc;
+      }, new Map()).values()
+    ).map((shop) => ({
+      ...shop,
+      orders: shop.orders.map((order) => {
+        const buyer = buyerMap.get(order.buyerTelegramId);
+        return {
+          orderId: String(order._id),
+          orderNumber: order.orderNumber,
+          buyerTelegramId: order.buyerTelegramId,
+          buyerName: [buyer?.firstName, buyer?.lastName].filter(Boolean).join(' ') || order.buyerTelegramId,
+          status: order.status,
+          totalPrice: order.totalPrice,
+          itemCount: (order.items || []).filter((i) => !i.cancelled).length,
+          createdAt: order.createdAt,
+        };
+      }),
+    })),
+  }));
+
+  res.json({
+    sessions,
+    total,
+    page,
+    pageSize,
+    pageCount: Math.ceil(total / pageSize),
+  });
+}));
+
+/**
+ * GET /session/current — returns current session orders grouped by shop.
+ * Admin and warehouse only. Groups orders by shop and returns them with buyer/product details.
+ */
+router.get('/session/current', staffOnly, asyncHandler(async (req, res) => {
+  const { shopId: filterShopId } = req.query;
+
+  // Get all delivery groups and current session IDs
+  const allGroups = (await getAllDeliveryGroups()).map(normalizeDeliveryGroup);
+  const schedule = await getOrderingSchedule();
+
+  const currentSessionIds = new Set();
+  for (const group of allGroups) {
+    const sid = getCurrentOrderingSessionId(String(group._id), group.dayOfWeek, schedule);
+    if (sid) currentSessionIds.add(sid);
+  }
+
+  const sessionFilter = currentSessionIds.size > 0
+    ? { orderingSessionId: { $in: [...currentSessionIds] } }
+    : {};
+
+  // Get all orders from current session (excluding cancelled)
+  const orders = await Order.find({
+    status: { $ne: 'cancelled' },
+    ...sessionFilter,
+  })
+    .populate('items.productId')
+    .populate('shopId', 'name address cityId')
+    .lean();
+
+  // Filter by shop if requested
+  let filteredOrders = orders;
+  if (filterShopId) {
+    filteredOrders = orders.filter((o) => String(o.shopId?._id || o.buyerSnapshot?.shopId || '') === String(filterShopId));
+  }
+
+  // Get unique buyer IDs
+  const buyerIds = [...new Set(filteredOrders.map((o) => o.buyerTelegramId))];
+  const buyers = await User.find({ telegramId: { $in: buyerIds } }).lean();
+  const buyerMap = new Map(buyers.map((b) => [b.telegramId, b]));
+
+  // Group orders by shop
+  const byShop = new Map();
+  for (const order of filteredOrders) {
+    const shopId = String(order.shopId?._id || order.buyerSnapshot?.shopId || 'unknown');
+    if (!byShop.has(shopId)) {
+      byShop.set(shopId, {
+        shopId,
+        shopName: order.shopId?.name || order.buyerSnapshot?.shopName || 'Unknown',
+        shopAddress: order.shopId?.address || order.buyerSnapshot?.shopAddress || '',
+        shopCity: order.shopId?.cityId?.name || order.buyerSnapshot?.shopCity || '',
+        orders: [],
+      });
+    }
+    byShop.get(shopId).orders.push(order);
+  }
+
+  // Format response
+  const shops = Array.from(byShop.values()).map((shopGroup) => ({
+    ...shopGroup,
+    orders: shopGroup.orders.map((order) => {
+      const buyer = buyerMap.get(order.buyerTelegramId);
+      const items = (order.items || [])
+        .filter((item) => !item.cancelled)
+        .map((item) => ({
+          productId: String(item.productId?._id || item.productId || ''),
+          productName: item.name || item.productId?.model || 'Unknown',
+          quantity: item.quantity,
+          price: item.price,
+          packed: item.packed,
+        }));
+
+      return {
+        orderId: String(order._id),
+        orderNumber: order.orderNumber,
+        buyerTelegramId: order.buyerTelegramId,
+        buyerName: [buyer?.firstName, buyer?.lastName].filter(Boolean).join(' ') || order.buyerTelegramId,
+        status: order.status,
+        totalPrice: order.totalPrice,
+        createdAt: order.createdAt,
+        items,
+      };
+    }),
+  }));
+
+  res.json({
+    shops,
+    sessionIds: Array.from(currentSessionIds),
+  });
+}));
+
 router.get('/', async (req, res) => {
   const telegramId = req.telegramId;
   const authUser = req.telegramUser;
