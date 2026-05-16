@@ -95,17 +95,33 @@ function parseMultipart(req) {
   });
 }
 
-async function uploadToR2(fileBuffer, filename, contentType) {
+async function uploadToR2(fileBuffer, filename, contentType, folder = 'products') {
   const extension = String(filename).split('.').pop() || 'jpg';
   const safeBase = crypto.randomUUID();
   const safeFilename = `${safeBase}.${extension.replace(/[^a-zA-Z0-9]/g, '')}`;
   await s3Client.send(new PutObjectCommand({
     Bucket: process.env.R2_BUCKET_NAME,
-    Key: `products/${safeFilename}`,
+    Key: `${folder}/${safeFilename}`,
     Body: fileBuffer,
     ContentType: contentType,
   }));
   return safeFilename;
+}
+
+/** Build the public URL for an uploaded object in the given folder. */
+function r2Url(folder, filename) {
+  return `${process.env.R2_PUBLIC_URL.replace(/\/$/, '')}/${folder}/${filename}`;
+}
+
+/** Upload up to `max` defect-evidence photos to the defects/ folder. */
+async function uploadDefectPhotos(parsedFiles, max = 3) {
+  const defectFiles = (parsedFiles || []).filter((f) => f.field === 'defectPhoto').slice(0, max);
+  const urls = [];
+  for (const f of defectFiles) {
+    const fn = await uploadToR2(f.buffer, f.originalname, f.mimetype, 'defects');
+    urls.push(r2Url('defects', fn));
+  }
+  return urls;
 }
 
 /** Parses a form-field string to a safe non-negative integer. Returns fallback on NaN/negative/missing. */
@@ -285,6 +301,10 @@ router.post('/:id/items', staffOnly, asyncHandler(async (req, res) => {
     const origName = await uploadToR2(originalFile.buffer, originalFile.originalname, originalFile.mimetype);
     originalPhotoUrl = `${process.env.R2_PUBLIC_URL.replace(/\/$/, '')}/products/${origName}`;
   }
+  const defectPhotoUrls = await uploadDefectPhotos(parsed.files);
+  const expectedQty = parsed.fields.expectedQty !== undefined && parsed.fields.expectedQty !== ''
+    ? parseIntField(parsed.fields.expectedQty, null) : null;
+  const notes = String(parsed.fields.notes || '').trim();
 
   // Pull photo from existingProduct if item has no photo
   if (!photoUrl && existingProductId) {
@@ -314,6 +334,9 @@ router.post('/:id/items', staffOnly, asyncHandler(async (req, res) => {
         }
       : undefined,
     totalQty,
+    expectedQty,
+    notes,
+    defectPhotoUrls,
     transitQty: transitQty || 0,
     deliveryGroupIds: Array.isArray(deliveryGroupIds) ? deliveryGroupIds : [],
     qtyPerShop,
@@ -406,13 +429,16 @@ router.patch('/:id/items/:itemId', staffOnly, asyncHandler(async (req, res) => {
     throw appError('validation_failed', { field: 'multipart/form-data is required' });
   }
 
-  // Validate receipt status and item existence BEFORE consuming the body
+  // Validate item existence BEFORE consuming the body.
   const [receipt, item] = await Promise.all([
     Receipt.findById(req.params.id).lean(),
     ReceiptItem.findOne({ _id: req.params.itemId, receiptId: req.params.id }),
   ]);
   if (!item) throw appError('receipt_item_not_found');
-  if (!receipt || receipt.status !== 'draft') throw appError('receipt_completed_locked');
+  if (!receipt) throw appError('receipt_not_found');
+  // NOTE: editing is intentionally allowed even after the receipt is committed —
+  // price/qty are corrected post-factum and the creator may fix their own
+  // position data. Ownership rules below still apply. (Add/Delete stay locked.)
 
   const parsed = await parseMultipart(req);
 
@@ -490,7 +516,25 @@ router.patch('/:id/items/:itemId', staffOnly, asyncHandler(async (req, res) => {
   if (JSON.stringify(nextStructure) !== JSON.stringify(prevStructure)) changedFields.push('structure');
   if (parsed.fields.deliveryGroupIds !== undefined && !arraysEqual(deliveryGroupIds, item.deliveryGroupIds || [])) changedFields.push('deliveryGroupIds');
   if (parsed.fields.qtyPerShop !== undefined && qtyPerShop !== (item.qtyPerShop || 0)) changedFields.push('qtyPerShop');
-  if (parsed.files?.[0]) changedFields.push('photoUrl');
+  const nextExpectedQty = parsed.fields.expectedQty !== undefined
+    ? (parsed.fields.expectedQty === '' ? null : parseIntField(parsed.fields.expectedQty, null))
+    : (item.expectedQty ?? null);
+  if (parsed.fields.expectedQty !== undefined && nextExpectedQty !== (item.expectedQty ?? null)) changedFields.push('expectedQty');
+  if (parsed.fields.notes !== undefined && String(parsed.fields.notes).trim() !== (item.notes || '')) changedFields.push('notes');
+  const hasNewDefectPhotos = (parsed.files || []).some((f) => f.field === 'defectPhoto');
+  // keptDefectPhotoUrls = the subset of EXISTING defect photos the client wants
+  // to keep (lets the UI delete individual photos). Absent => keep all existing.
+  const keptDefectUrls = parsed.fields.keptDefectPhotoUrls !== undefined
+    ? (safeParseArray(parsed.fields.keptDefectPhotoUrls) || [])
+    : null;
+  const defectsTouched = hasNewDefectPhotos
+    || (keptDefectUrls !== null
+        && JSON.stringify(keptDefectUrls) !== JSON.stringify(item.defectPhotoUrls || []));
+  if (defectsTouched) changedFields.push('defectPhotoUrls');
+  const hasNewMainPhoto = (parsed.files || []).some(
+    (f) => f.field === 'photo' || !f.field, // legacy callers send the photo with no field name
+  );
+  if (hasNewMainPhoto) changedFields.push('photoUrl');
   if (parsed.fields.existingProductId !== undefined &&
       (existingProductId || null) !== (item.existingProductId ? String(item.existingProductId) : null)) {
     changedFields.push('existingProductId');
@@ -523,6 +567,13 @@ router.patch('/:id/items/:itemId', staffOnly, asyncHandler(async (req, res) => {
   if (parsed.fields.qtyPerPackage !== undefined) item.qtyPerPackage = Number(parsed.fields.qtyPerPackage) || 1;
   if (parsed.fields.barcode !== undefined) item.barcode = String(parsed.fields.barcode).trim();
   item.existingProductId = existingProductId || null;
+  if (parsed.fields.expectedQty !== undefined) item.expectedQty = nextExpectedQty;
+  if (parsed.fields.notes !== undefined) item.notes = String(parsed.fields.notes).trim();
+  if (defectsTouched) {
+    const kept = keptDefectUrls !== null ? keptDefectUrls : (item.defectPhotoUrls || []);
+    const uploaded = hasNewDefectPhotos ? await uploadDefectPhotos(parsed.files) : [];
+    item.defectPhotoUrls = [...kept, ...uploaded].slice(0, 3);
+  }
 
   // Re-rendered overlay metadata (comment + its position). Owner-only when it
   // changes; a non-owner price edit re-sends the SAME meta so it won't trip.
@@ -565,10 +616,10 @@ router.patch('/:id/items/:itemId', staffOnly, asyncHandler(async (req, res) => {
   try {
     await txSession.withTransaction(async () => {
       const liveReceipt = await Receipt.findOne(
-        { _id: req.params.id, status: 'draft' },
+        { _id: req.params.id },
         '_id status',
       ).session(txSession);
-      if (!liveReceipt) throw appError('receipt_completed_locked');
+      if (!liveReceipt) throw appError('receipt_not_found');
       await item.save({ session: txSession });
     });
   } finally {
@@ -772,8 +823,9 @@ router.post('/:id/commit', staffOnly, asyncHandler(async (req, res) => {
       throw appError('receipt_items_not_all_confirmed', { pending: pendingConfirm });
     }
 
-    const invalidItem = items.find((item) => !item.name || item.price === null || item.price <= 0);
-    if (invalidItem) throw appError('receipt_items_incomplete');
+    // Receiving needs only a photo + arrived quantity. Name/price are optional
+    // shop-data filled separately later — a *confirmed* item has already passed
+    // the worker's sign-off, so we don't re-validate name/price here.
 
     const pendingItem = items.find((item) => item.warehousePending);
     if (pendingItem) throw appError('receipt_item_pending', { name: pendingItem.name });
@@ -834,7 +886,7 @@ router.post('/:id/commit', staffOnly, asyncHandler(async (req, res) => {
       if (!currentProduct) {
         currentProduct = new Product({
           orderNumber: nextOrderNumber++,
-          price: item.price,
+          price: item.price ?? 0,
           quantity: item.shelfQty,
           warehouse: '',
           category: '',

@@ -56,6 +56,14 @@ const ReceiptItemSchema = new mongoose.Schema(
       },
     },
     totalQty: { type: Number, required: true, min: 1 },
+    // What the worker EXPECTED to arrive (for reconciling shortages/defects).
+    expectedQty: { type: Number, default: null },
+    // Free-text note about this delivery line: defects count, what didn't
+    // arrive, etc. (distinct from photoMeta.comment which is drawn on the photo).
+    notes: { type: String, default: '' },
+    // Optional defect evidence photos (max 3) — stored in a separate R2
+    // "defects/" folder so they don't mix with catalogue product images.
+    defectPhotoUrls: [{ type: String }],
     transitQty: { type: Number, default: 0 },
     deliveryGroupIds: [{ type: String }],
     qtyPerShop: { type: Number, default: 0 },

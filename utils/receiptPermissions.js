@@ -26,6 +26,7 @@ const OWNER_ONLY_FIELDS = new Set([
   'totalQty', 'shelfQty', 'transitQty', 'destination', 'structure',
   'deliveryGroupIds', 'qtyPerShop', 'barcode',
   'existingProductId', 'warehousePending',
+  'expectedQty', 'notes', 'defectPhotoUrls',
 ]);
 
 // Shop-facing data — any warehouse/admin user may fill these on any item.
@@ -43,11 +44,11 @@ function isOwnerOrAdmin(user, item) {
  * @param {string[]} changedFields field names this request actually mutates
  */
 function assertCanEditItem(user, item, changedFields) {
-  const isAdmin = user && user.role === 'admin';
-
-  if (item.status === 'confirmed' && !isAdmin) {
-    throw appError('receipt_item_already_confirmed');
-  }
+  // The creator (or admin) may edit their own item at ANY time — including
+  // after it is confirmed or the receipt is committed (price/qty corrections,
+  // fixing one's own position data). 'confirmed' is just a sign-off marker
+  // now, not an edit lock; the ownership boundary is what protects against a
+  // second worker silently overwriting someone else's line.
   if (isOwnerOrAdmin(user, item)) return;
 
   const restricted = (changedFields || []).filter((f) => OWNER_ONLY_FIELDS.has(f));
