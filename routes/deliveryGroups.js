@@ -247,11 +247,41 @@ router.get('/:groupId/shop-status', telegramAuth, requireTelegramRoles(['admin',
       fromShopName: wasReassigned ? (reassignEntry?.meta?.from?.shopName || null) : null,
       reassignedByName: wasReassigned ? (reassignEntry?.byName || null) : null,
       reassignedByRole: wasReassigned ? (reassignEntry?.byRole || null) : null,
+      reassignedByTelegramId: wasReassigned ? (reassignEntry?.by || null) : null,
       reassignedAt: wasReassigned ? (reassignEntry?.at || null) : null,
     });
     if (!orderedByShop[shopId]) orderedByShop[shopId] = new Set();
     for (const item of order.items || []) {
       if (item.productId && !item.cancelled) orderedByShop[shopId].add(String(item.productId));
+    }
+  }
+
+  // Resolve the CANONICAL identity of whoever moved each order here (the
+  // "першоджерело" of the conflict) from the users collection — the history
+  // byName can be a generic fallback ("Admin"), so prefer the real account.
+  const actorIds = new Set();
+  for (const list of Object.values(ordersByShop)) {
+    for (const o of list) if (o.reassignedByTelegramId) actorIds.add(String(o.reassignedByTelegramId));
+  }
+  if (actorIds.size > 0) {
+    const actors = await User.find({ telegramId: { $in: [...actorIds] } })
+      .select('telegramId firstName lastName role').lean();
+    const actorById = {};
+    for (const a of actors) {
+      actorById[String(a.telegramId)] = {
+        name: [a.firstName, a.lastName].filter(Boolean).join(' ') || String(a.telegramId),
+        role: a.role,
+      };
+    }
+    for (const list of Object.values(ordersByShop)) {
+      for (const o of list) {
+        const a = o.reassignedByTelegramId && actorById[String(o.reassignedByTelegramId)];
+        if (a) {
+          o.reassignedByName = a.name;          // canonical First Last
+          o.reassignedByRole = a.role;          // canonical role
+        }
+        // else: keep the history-recorded byName/byRole (actor account deleted)
+      }
     }
   }
 
