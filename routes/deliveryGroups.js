@@ -245,6 +245,9 @@ router.get('/:groupId/shop-status', telegramAuth, requireTelegramRoles(['admin',
       createdAt: order.createdAt,
       wasReassigned,
       fromShopName: wasReassigned ? (reassignEntry?.meta?.from?.shopName || null) : null,
+      reassignedByName: wasReassigned ? (reassignEntry?.byName || null) : null,
+      reassignedByRole: wasReassigned ? (reassignEntry?.byRole || null) : null,
+      reassignedAt: wasReassigned ? (reassignEntry?.at || null) : null,
     });
     if (!orderedByShop[shopId]) orderedByShop[shopId] = new Set();
     for (const item of order.items || []) {
