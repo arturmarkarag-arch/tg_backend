@@ -38,6 +38,14 @@ async function startServer() {
     const server = http.createServer(app);
     initSocket(server);
 
+    server.on('error', (err) => {
+      if (err.code === 'EADDRINUSE') {
+        console.error(`Failed to listen on port ${PORT}: port already in use. Stop the other process or use a different PORT.`);
+        process.exit(1);
+      }
+      throw err;
+    });
+
     server.listen(PORT, () => {
       console.log(`Server listening on port ${PORT}`);
     });

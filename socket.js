@@ -295,8 +295,8 @@ function initSocket(httpServer) {
     });
 
     // Cleanup on disconnect
-    socket.on('disconnect', () => {
-      console.log(`[Socket] Client disconnected: ${socket.id}`);
+    socket.on('disconnect', (reason) => {
+      console.log(`[Socket] Client disconnected: ${socket.id} (telegramId=${socket.telegramId}) reason=${reason}`);
       for (const [productId, data] of lockedItems) {
         if (data.socketId === socket.id) {
           lockedItems.delete(productId);

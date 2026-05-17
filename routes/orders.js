@@ -256,6 +256,7 @@ router.get('/', async (req, res) => {
   const buyerTelegramId = req.query.buyerTelegramId;
   const from = req.query.from;
   const to = req.query.to;
+  const dateField = req.query.dateField === 'updatedAt' ? 'updatedAt' : 'createdAt';
 
   const filter = {};
   if (buyerTelegramId) {
@@ -289,7 +290,7 @@ router.get('/', async (req, res) => {
       }
     }
     if (Object.keys(dateQuery).length) {
-      filter.createdAt = dateQuery;
+      filter[dateField] = dateQuery;
     }
   }
 
@@ -613,7 +614,7 @@ async function placeOrderImpl(req, res) {
       for (const newItem of validItems) {
         const sameItem = txExisting.items.find((i) => String(i.productId) === String(newItem.productId));
         if (sameItem) {
-          sameItem.quantity += newItem.quantity;
+          sameItem.quantity = newItem.quantity;
           sameItem.packed = false;
           sameItem.cancelled = false;
         } else {
