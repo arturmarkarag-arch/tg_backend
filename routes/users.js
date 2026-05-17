@@ -4,9 +4,12 @@ const User = require('../models/User');
 const Order = require('../models/Order');
 const DeliveryGroup = require('../models/DeliveryGroup');
 const Shop = require('../models/Shop');
+const City = require('../models/City');
 const PickingTask = require('../models/PickingTask');
 const { telegramAuth, requireTelegramRole } = require('../middleware/telegramAuth');
-const { isOrderingOpen, getOrderingWindowOpenAt } = require('../utils/orderingSchedule');
+const { isOrderingOpen, getOrderingWindowOpenAt, isOrderingOpeningSoon } = require('../utils/orderingSchedule');
+const { getOrderingSchedule } = require('../utils/getOrderingSchedule');
+const ClearedCart = require('../models/ClearedCart');
 const { migrateSellerShop } = require('../services/migrateSellerShop');
 const { appError, asyncHandler } = require('../utils/errors');
 const { withLock } = require('../utils/lock');
@@ -78,7 +81,7 @@ router.get('/', asyncHandler(async (req, res) => {
   const pageSize = Math.min(500, Math.max(1, parseInt(req.query.pageSize) || 20));
   const roleFilter     = req.query.role || null;
   const groupFilter    = req.query.deliveryGroupId || null;
-  const cityFilter     = req.query.cityId || null; // Filter by City._id, resolved to shopIds
+  let cityFilter       = req.query.cityId || req.query.shopCity || null; // Filter by City._id or legacy shopCity name, resolved to shopIds
   const searchQuery    = req.query.search?.trim() || null;
   const activityFilter = req.query.activityFilter || null; // 'no_cart' | 'no_order' | 'no_visit'
 
@@ -86,9 +89,15 @@ router.get('/', asyncHandler(async (req, res) => {
   if (roleFilter && roleFilter !== 'all') filter.role = roleFilter;
   if (groupFilter && groupFilter !== 'all') filter.deliveryGroupId = groupFilter;
 
-  // City filter: resolve cityId → shops in that city → filter by shopId
+  // City filter: resolve cityId or legacy city name → shops in that city → filter by shopId
   if (cityFilter && cityFilter !== 'all') {
-    const cityShops = await Shop.find({ cityId: cityFilter }, '_id').lean();
+    let cityShops = await Shop.find({ cityId: cityFilter }, '_id').lean();
+    if (!cityShops.length && !mongoose.Types.ObjectId.isValid(cityFilter)) {
+      const cityDoc = await City.findOne({ name: cityFilter }).lean();
+      if (cityDoc) {
+        cityShops = await Shop.find({ cityId: cityDoc._id }, '_id').lean();
+      }
+    }
     filter.shopId = { $in: cityShops.map((s) => s._id) };
   }
 
@@ -248,6 +257,119 @@ router.get('/:telegramId', asyncHandler(async (req, res) => {
   const user = await User.findOne({ telegramId: req.params.telegramId });
   if (!user) throw appError('user_not_found');
   res.json(user);
+}));
+
+const RESTORE_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+const { cartItemsToObject, countItems } = require('../services/clearedCart');
+
+// ─── GET /api/users/:telegramId/cleared-carts ───────────────────────────────
+// Soft-deleted carts for a seller (shown in Order history). `restorable` true
+// only within 7 days of clearing and if not already restored.
+router.get('/:telegramId/cleared-carts', asyncHandler(async (req, res) => {
+  const carts = await ClearedCart.find({ ownerTelegramId: req.params.telegramId })
+    .sort({ clearedAt: -1 })
+    .lean();
+  const now = Date.now();
+  res.json(carts.map((c) => {
+    const items = cartItemsToObject(c.orderItems);
+    return {
+      _id: c._id,
+      clearedAt: c.clearedAt,
+      clearedByName: c.clearedByName,
+      reason: c.reason,
+      shopName: c.shopName,
+      itemCount: countItems(items),
+      lastOrderPositions: c.lastOrderPositions || 0,
+      restoredAt: c.restoredAt || null,
+      restoredByName: c.restoredByName || '',
+      restorable: !c.restoredAt && (now - new Date(c.clearedAt).getTime()) < RESTORE_WINDOW_MS,
+    };
+  }));
+}));
+
+// ─── POST /api/users/:telegramId/cleared-carts/:cartId/restore ───────────────
+// Restore a soft-deleted cart. Safety gate: seller must be on a shop whose
+// ordering window is open OR opens within 4h. If the seller already has cart
+// items, body.mode ('replace'|'merge') is required.
+router.post('/:telegramId/cleared-carts/:cartId/restore', asyncHandler(async (req, res) => {
+  const admin = req.telegramUser;
+  const mode = req.body?.mode;
+
+  const session = await mongoose.connection.startSession();
+  try {
+    let payload;
+    await session.withTransaction(async () => {
+      const cc = await ClearedCart.findOne({
+        _id: req.params.cartId,
+        ownerTelegramId: req.params.telegramId,
+      }).session(session);
+      if (!cc) throw appError('cleared_cart_not_found');
+      if (cc.restoredAt) throw appError('cleared_cart_already_restored');
+      if ((Date.now() - new Date(cc.clearedAt).getTime()) >= RESTORE_WINDOW_MS) {
+        throw appError('cleared_cart_already_restored');
+      }
+
+      const seller = await User.findOne({ telegramId: req.params.telegramId }).session(session);
+      if (!seller) throw appError('user_not_found');
+      if (!seller.shopId) throw appError('restore_no_shop');
+
+      const shop = await Shop.findById(seller.shopId).session(session).lean();
+      if (!shop) throw appError('restore_no_shop');
+      const group = shop.deliveryGroupId
+        ? await DeliveryGroup.findById(shop.deliveryGroupId).session(session).lean()
+        : null;
+      if (!group) throw appError('restore_no_shop');
+
+      const schedule = await getOrderingSchedule();
+      const open = isOrderingOpen(group.dayOfWeek, schedule).isOpen;
+      const soon = isOrderingOpeningSoon(group.dayOfWeek, schedule, 240);
+      if (!open && !soon) throw appError('restore_window_closed');
+
+      const existing = cartItemsToObject(seller.cartState?.orderItems);
+      const existingCount = countItems(existing);
+      if (existingCount > 0 && !['replace', 'merge'].includes(mode)) {
+        throw appError('restore_cart_conflict', { currentCount: existingCount });
+      }
+
+      const snapItems = cartItemsToObject(cc.orderItems);
+      const snapIds = Array.isArray(cc.orderItemIds) ? cc.orderItemIds : [];
+
+      let finalItems;
+      let finalIds;
+      if (existingCount > 0 && mode === 'merge') {
+        finalItems = { ...existing };
+        for (const [k, v] of Object.entries(snapItems)) {
+          finalItems[k] = (Number(finalItems[k]) || 0) + (Number(v) || 0);
+        }
+        finalIds = [...new Set([...(seller.cartState?.orderItemIds || []), ...snapIds])];
+      } else {
+        finalItems = snapItems;
+        finalIds = snapIds;
+      }
+
+      if (!seller.cartState) seller.cartState = {};
+      seller.cartState.orderItems = finalItems;
+      seller.cartState.orderItemIds = finalIds;
+      seller.cartState.lastOrderPositions = cc.lastOrderPositions || 0;
+      seller.cartState.updatedAt = new Date();
+      seller.markModified('cartState');
+      await seller.save({ session });
+
+      cc.restoredAt = new Date();
+      cc.restoredBy = String(admin.telegramId);
+      cc.restoredByName = [admin.firstName, admin.lastName].filter(Boolean).join(' ');
+      await cc.save({ session });
+
+      payload = { ok: true, restoredItemCount: countItems(finalItems) };
+    });
+    try {
+      const io = getIO();
+      if (io) io.emit('user_order_updated', { buyerTelegramId: req.params.telegramId });
+    } catch { /* noop */ }
+    res.json(payload);
+  } finally {
+    session.endSession();
+  }
 }));
 
 router.post('/', asyncHandler(async (req, res) => {

@@ -14,7 +14,10 @@ const PickingTask = require('../models/PickingTask');
 const AppSetting = require('../models/AppSetting');
 const { buildPickingTasksFromOrders } = require('../services/taskBuilder');
 const { findAndLockNext, releaseWorkerAndStaleLocks, completePickingTask } = require('../services/pickingService');
+const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
+const { buildImageVariants } = require('../utils/imageService');
 const { getCurrentOrderingSessionId, getWarsawNow, isOrderingOpen, getOrderingWindowOpenAt } = require('../utils/orderingSchedule');
+const { getOrCreateSessionId } = require('../utils/getOrCreateSession');
 const { getOrderingSchedule, invalidateOrderingScheduleCache, ORDERING_SCHEDULE_KEY } = require('../utils/getOrderingSchedule');
 const ShopTransferRequest = require('../models/ShopTransferRequest');
 const cache = require('../utils/cache');
@@ -44,6 +47,31 @@ async function pickPickingPhaseDayOfWeek() {
     if (openAt.getTime() < now) return day;
   }
   return null;
+}
+
+// ── R2 helpers (mirrors products.js — test route has no auth so can't reuse that router) ──
+const testS3 = new S3Client({
+  region: process.env.R2_REGION || 'auto',
+  endpoint: process.env.R2_ENDPOINT,
+  credentials: {
+    accessKeyId: process.env.R2_ACCESS_KEY_ID,
+    secretAccessKey: process.env.R2_SECRET_ACCESS_KEY,
+  },
+  forcePathStyle: true,
+});
+
+function r2PublicUrl(folder, filename) {
+  const base = (process.env.R2_PUBLIC_URL || '').replace(/\/$/, '');
+  return `${base}/${folder}/${filename}`;
+}
+
+async function r2Put(key, body) {
+  await testS3.send(new PutObjectCommand({
+    Bucket: process.env.R2_BUCKET_NAME,
+    Key: key,
+    Body: body,
+    ContentType: 'image/jpeg',
+  }));
 }
 
 const router = express.Router();
@@ -137,15 +165,33 @@ router.post('/cleanup', asyncHandler(async (req, res) => {
   const testShops = await Shop.find({ name: { $regex: TEST_MARKER } }, '_id').lean();
   const testShopIds = testShops.map((s) => String(s._id));
 
-  const [users, shops, groups, tasks, orders, blocks, transfers] = await Promise.all([
+  const OrderingSession = require('../models/OrderingSession');
+
+  // Collect test product IDs BEFORE deleting so we can pull them from real blocks
+  const testProductDocs = await Product.find({ name: { $regex: TEST_MARKER } }, '_id').lean();
+  const testProductIds = testProductDocs.map((p) => p._id);
+
+  const [users, shops, groups, tasks, orders, blocks, transfers, sessions, testProducts] = await Promise.all([
     User.deleteMany({ telegramId: { $regex: TEST_MARKER } }),
     Shop.deleteMany({ _id: { $in: testShopIds } }),
     DeliveryGroup.deleteMany({ _id: { $in: testGroupIds } }),
     testGroupIds.length ? PickingTask.deleteMany({ deliveryGroupId: { $in: testGroupIds } }) : Promise.resolve({ deletedCount: 0 }),
-    testShopIds.length ? Order.deleteMany({ shopId: { $in: testShopIds } }) : Promise.resolve({ deletedCount: 0 }),
+    // Delete by buyerTelegramId pattern — catches orphaned orders even if shops were already deleted
+    Order.deleteMany({ buyerTelegramId: { $regex: TEST_MARKER } }),
     Block.deleteMany({ blockId: { $gte: TEST_BLOCK_BASE } }),
     ShopTransferRequest.deleteMany({ sellerTelegramId: { $regex: TEST_MARKER } }),
+    testGroupIds.length ? OrderingSession.deleteMany({ groupId: { $in: testGroupIds } }) : Promise.resolve({ deletedCount: 0 }),
+    // Delete test products created by image-upload test
+    testProductIds.length ? Product.deleteMany({ _id: { $in: testProductIds } }) : Promise.resolve({ deletedCount: 0 }),
   ]);
+
+  // Pull deleted test product IDs from real block productIds arrays
+  if (testProductIds.length) {
+    await Block.updateMany(
+      { blockId: { $lt: TEST_BLOCK_BASE }, productIds: { $in: testProductIds } },
+      { $pull: { productIds: { $in: testProductIds } } },
+    );
+  }
 
   try {
     await cache.invalidate(cache.KEYS.DELIVERY_GROUPS);
@@ -171,6 +217,10 @@ router.post('/cleanup', asyncHandler(async (req, res) => {
     scheduleRestored = false;
   }
 
+  // Scrub any remaining dangling productIds from real blocks (catches partial/crashed cleanups)
+  const { scrubBlockProductIds } = require('../utils/scrubBlocks');
+  const scrub = await scrubBlockProductIds({ blockIdFilter: { blockId: { $lt: TEST_BLOCK_BASE } } });
+
   res.json({
     deletedUsers: users.deletedCount || 0,
     deletedShops: shops.deletedCount || 0,
@@ -179,6 +229,9 @@ router.post('/cleanup', asyncHandler(async (req, res) => {
     deletedOrders: orders.deletedCount || 0,
     deletedBlocks: blocks.deletedCount || 0,
     deletedTransferRequests: transfers.deletedCount || 0,
+    deletedOrderingSessions: sessions.deletedCount || 0,
+    deletedTestProducts: testProducts.deletedCount || 0,
+    scrubbed: scrub,
     scheduleRestored,
   });
 }));
@@ -239,6 +292,9 @@ router.post('/run', asyncHandler(async (req, res) => {
   // may close before all orders are placed and they land in the wrong session.
   const minSafeMinutes = rawAutoMinutes > 0 ? Math.ceil(staggerSeconds / 60) + 1 : 0;
   const autoScheduleMinutes = rawAutoMinutes > 0 ? Math.max(rawAutoMinutes, minSafeMinutes) : 0;
+  // skipWorkers=true: stop after building picking tasks — no simulated workers.
+  // The operator tests the picking UI manually in the app.
+  const skipWorkers = req.body.skipWorkers === true;
 
   const jobId = makeJobId();
   const job = {
@@ -246,7 +302,7 @@ router.post('/run', asyncHandler(async (req, res) => {
     status: 'pending',
     startedAt: new Date().toISOString(),
     finishedAt: null,
-    params: { sourceGroupId, activeWorkersCount, dayOfWeek, productCount, keepData, staggerSeconds, itemsPerOrderMin, itemsPerOrderMax, autoScheduleMinutes },
+    params: { sourceGroupId, activeWorkersCount, dayOfWeek, productCount, keepData, skipWorkers, staggerSeconds, itemsPerOrderMin, itemsPerOrderMax, autoScheduleMinutes },
     progress: { step: 0, total: 6, label: 'Очікування' },
     logs: [],
     result: null,
@@ -454,15 +510,14 @@ router.post('/run', asyncHandler(async (req, res) => {
       // random subset of the sampled products. Socket events fire per-order
       // so connected dashboards update live.
       job.progress = { step: 3, total: 6, label: `Створення замовлень (${staggerSeconds}s)` };
-      // When autoScheduleMinutes > 0 the test schedule is already in DB, so we
-      // use it for orders — this makes the shop-status table show counts live.
-      // After the window closes we migrate orders to the original-schedule sessionId
-      // so the picking page works correctly after restoration.
-      // When autoScheduleMinutes = 0 we use the original schedule directly (no migration needed).
+      // Use getOrCreateSessionId (stable ObjectId keyed on groupId+openDate) instead of
+      // the deprecated getCurrentOrderingSessionId (keyed on exact timestamp).
+      // This means multiple test runs on the same day share the same session — no "old orders"
+      // when the schedule is overridden or restored between runs.
       const activeScheduleForSession = autoScheduleMinutes > 0
         ? ((await AppSetting.findOne({ key: ORDERING_SCHEDULE_KEY }).lean())?.value || originalSchedule || {})
         : (originalSchedule || {});
-      let sessionId = getCurrentOrderingSessionId(String(deliveryGroup._id), effectiveDayOfWeek, activeScheduleForSession);
+      let sessionId = await getOrCreateSessionId(String(deliveryGroup._id), effectiveDayOfWeek, activeScheduleForSession);
       appendLog(job, `sessionId: ${sessionId}`);
       job.cleanup.sessionId = sessionId;
 
@@ -569,21 +624,8 @@ router.post('/run', asyncHandler(async (req, res) => {
           appendLog(job, `Чекаємо закриття вікна замовлень: ~${waitSec}s до ${autoCloseHour}:${String(autoCloseMinute).padStart(2,'0')} Warsaw...`);
           await new Promise((r) => setTimeout(r, waitMs + 5000)); // +5s grace
           appendLog(job, 'Вікно замовлень закрито.');
-          if (!keepData && originalSchedule) {
-            appendLog(job, 'Мігруємо sessionId до оригінального розкладу...');
-            const originalSessionId = getCurrentOrderingSessionId(String(deliveryGroup._id), effectiveDayOfWeek, originalSchedule);
-            if (originalSessionId !== sessionId) {
-              const migrated = await Order.updateMany(
-                { orderingSessionId: sessionId, 'buyerSnapshot.deliveryGroupId': String(deliveryGroup._id) },
-                { $set: { orderingSessionId: originalSessionId } },
-              );
-              sessionId = originalSessionId;
-              job.cleanup.sessionId = originalSessionId;
-              appendLog(job, `sessionId мігровано → ${originalSessionId} (${migrated.modifiedCount} замовлень)`);
-            }
-          } else if (keepData) {
-            appendLog(job, 'keepData=true — залишаємо замовлення в тестовій сесії (міграція не виконується).');
-          }
+          // No sessionId migration needed: getOrCreateSessionId uses openDate (calendar date),
+          // not exact timestamp — sessionId stays stable regardless of schedule changes.
         }
       } else if (keepData) {
         job.progress = { step: 4, total: 6, label: 'Замовлення створено — очікуємо закриття вікна в додатку' };
@@ -641,6 +683,28 @@ router.post('/run', asyncHandler(async (req, res) => {
         appendLog(job, 'УВАГА: tasks=0. Перевірте чи test block містить товари з реальних блоків.');
       }
 
+      // skipWorkers: stop here — the operator uses the real app to pick manually.
+      if (skipWorkers) {
+        job.progress = { step: 5, total: 6, label: 'Готово — ручне тестування складу' };
+        appendLog(job, `✅ Picking tasks побудовано (${taskCount} шт). Відкрийте додаток → сторінку складу → натисніть "Розпочати збирання".`);
+        appendLog(job, `Група: ${deliveryGroup.name} (ID: ${String(deliveryGroup._id)})`);
+        job.result = {
+          deliveryGroupId: String(deliveryGroup._id),
+          deliveryGroupName: deliveryGroup.name,
+          blockId,
+          blockProductCount: blockProductIds.length,
+          createdShops: testShops.length,
+          createdSellers: sellers.length,
+          createdOrders: orders.length,
+          pickingTaskCount: taskCount,
+          sessionId,
+          awaitingWarehouseStart: true,
+        };
+        job.status = 'completed';
+        job.finishedAt = new Date().toISOString();
+        return;
+      }
+
       // Step 5: simulate workers picking concurrently.
       job.progress = { step: 5, total: 6, label: 'Імітація роботи складу' };
       const activeWorkers = workers.slice(0, activeWorkersCount);
@@ -657,7 +721,9 @@ router.post('/run', asyncHandler(async (req, res) => {
             appendLog(job, `Worker ${worker.telegramId} припинив роботу через перевищення таймауту`);
             break;
           }
-          const { task } = await findAndLockNext(worker.telegramId, blockId, String(deliveryGroup._id));
+          // Start from block 1, not the test block — tasks are stored with their real
+          // blockId (from getShippingBlockPositions), which comes from the real blocks.
+          const { task } = await findAndLockNext(worker.telegramId, 1, String(deliveryGroup._id));
           if (!task) break;
           try {
             await completePickingTask({
@@ -839,8 +905,10 @@ router.post('/seed-conflicts', asyncHandler(async (req, res) => {
   // session the app considers current — otherwise they default to 16:00 and
   // immediately look stale on the picking board.
   const cfSchedule = await getOrderingSchedule().catch(() => undefined);
-  const sessionId1 = getCurrentOrderingSessionId(String(group1._id), dayOfWeek, cfSchedule);
-  const sessionId2 = getCurrentOrderingSessionId(String(group2._id), dayOfWeek, cfSchedule);
+  const [sessionId1, sessionId2] = await Promise.all([
+    getOrCreateSessionId(String(group1._id), dayOfWeek, cfSchedule),
+    getOrCreateSessionId(String(group2._id), dayOfWeek, cfSchedule),
+  ]);
 
   // Each scenario gets its OWN shops so they don't share sellers/conflicts.
   // CF shops do NOT get the main group's deliveryGroupId — they are "incoming
@@ -1201,6 +1269,126 @@ router.get('/suite/list', asyncHandler(async (req, res) => {
       startedAt: j.startedAt, finishedAt: j.finishedAt, summary: j.summary,
     }));
   res.json(list);
+}));
+
+// ─── POST /api/warehouse-test/test-upload-image ───────────────────────────────
+// Full E2E image pipeline test:
+//   1. Accept raw image bytes
+//   2. buildImageVariants (sharp) → main (1200px) + thumb (240px)
+//   3. Upload both to R2 under products/ and thumbs/
+//   4. Create a Product document (status: pending, source: block_photo, tagged _test)
+//   5. Insert into a random real block (blockId < TEST_BLOCK_BASE)
+//   6. Assign orderNumber
+// Returns urls + productId + blockId so the operator can verify in the app UI.
+router.post('/test-upload-image', express.raw({ type: () => true, limit: '30mb' }), asyncHandler(async (req, res) => {
+  if (!dbReady()) return res.status(503).json({ error: 'db_not_connected' });
+  if (!Buffer.isBuffer(req.body) || req.body.length === 0) {
+    return res.status(400).json({ error: 'no_image', message: 'Передайте зображення у тілі запиту (raw binary).' });
+  }
+
+  const start = Date.now();
+
+  // Step 1: process image
+  const { filename: rawFilename, main, thumb } = await buildImageVariants(req.body);
+  // Tag filename with _test so cleanup can find orphaned R2 objects by name convention
+  const filename = rawFilename.replace('.jpg', `${TEST_MARKER}.jpg`);
+  const processingMs = Date.now() - start;
+
+  // Step 2: upload to R2
+  await Promise.all([
+    r2Put(`products/${filename}`, main),
+    r2Put(`thumbs/${filename}`, thumb),
+  ]);
+  const uploadMs = Date.now() - start - processingMs;
+
+  const imageUrl = r2PublicUrl('products', filename);
+  const thumbUrl = r2PublicUrl('thumbs', filename);
+
+  // Step 3: pick a random real block
+  const realBlocks = await Block.find({ blockId: { $lt: TEST_BLOCK_BASE } }, 'blockId').lean();
+  if (!realBlocks.length) {
+    return res.status(400).json({ error: 'no_real_blocks', message: 'Немає реальних блоків — спочатку створіть блоки в адмін-панелі.' });
+  }
+  const targetBlockMeta = realBlocks[Math.floor(Math.random() * realBlocks.length)];
+
+  // Step 4 & 5: create Product + append to block's productIds (transaction)
+  // positionIndex = 1-based index of the new product in the block (after all existing ones)
+  let productId, positionIndex, orderNumber, blockProductCount;
+  const session = await mongoose.connection.startSession();
+  try {
+    await session.withTransaction(async () => {
+      const block = await Block.findOne({ blockId: targetBlockMeta.blockId }).session(session);
+      if (!block) throw new Error('block_disappeared');
+
+      // Clean stale/missing product refs before computing position and appending.
+      if (block.productIds.length > 0) {
+        const existingProducts = await Product.find({ _id: { $in: block.productIds } }, '_id').session(session).lean();
+        const existingIds = new Set(existingProducts.map((p) => String(p._id)));
+        const filteredIds = block.productIds.filter((id) => existingIds.has(String(id)));
+        if (filteredIds.length !== block.productIds.length) {
+          block.productIds = filteredIds;
+        }
+      }
+
+      // Resolve how many valid product slots are currently in the block
+      blockProductCount = block.productIds.length;
+
+      const maxDoc = await Product.findOne({ status: { $ne: 'archived' } }, 'orderNumber')
+        .sort({ orderNumber: -1 }).session(session).lean();
+      orderNumber = (maxDoc?.orderNumber ?? 0) + 1;
+
+      const [product] = await Product.create([{
+        orderNumber,
+        price: 0,
+        quantity: 0,
+        status: 'pending',
+        source: 'block_photo',
+        name: `TestImg${TEST_MARKER}`,
+        imageUrls: [imageUrl],
+        imageNames: [filename],
+        originalImageUrl: imageUrl,
+      }], { session });
+
+      // Append to end — positionIndex is 1-based
+      block.productIds.push(product._id);
+      block.version = (block.version || 0) + 1;
+      await block.save({ session });
+
+      productId = String(product._id);
+      positionIndex = block.productIds.length; // position after push = last slot
+    });
+  } finally {
+    session.endSession();
+  }
+
+  // Notify UI
+  try {
+    const io = getIO();
+    io?.emit('block_updated', { blockId: targetBlockMeta.blockId });
+    io?.emit('catalogue_updated');
+  } catch { /* non-critical */ }
+
+  const inputBytes = req.body.length;
+  const compressionRatio = inputBytes > 0 ? (inputBytes / main.length).toFixed(2) : '—';
+
+  res.json({
+    ok: true,
+    filename,
+    imageUrl,
+    thumbUrl,
+    productId,
+    blockId: targetBlockMeta.blockId,
+    positionIndex,
+    blockProductCountBefore: blockProductCount,
+    orderNumber,
+    inputBytes,
+    mainBytes: main.length,
+    thumbBytes: thumb.length,
+    compressionRatio,
+    processingMs,
+    uploadMs,
+    message: `✅ Завантажено в R2, продукт #${orderNumber} у блоку ${targetBlockMeta.blockId} позиція ${positionIndex} (було ${blockProductCount} товарів)`,
+  });
 }));
 
 module.exports = router;

@@ -3,6 +3,7 @@ const crypto = require('crypto');
 const mongoose = require('mongoose');
 const Busboy = require('busboy');
 const { S3Client, PutObjectCommand, HeadBucketCommand } = require('@aws-sdk/client-s3');
+const { buildImageVariants } = require('../utils/imageService');
 const { requireTelegramRoles } = require('../middleware/telegramAuth');
 const Receipt = require('../models/Receipt');
 const ReceiptItem = require('../models/ReceiptItem');
@@ -43,7 +44,7 @@ async function ensureReceiptItemProduct(item, session) {
   if (item.existingProductId) {
     product = await Product.findById(item.existingProductId).session(session);
     if (product) {
-      if (item.shelfQty > 0) {
+      if (item.shelfQty > 0 && !item.stockApplied) {
         product.quantity += item.shelfQty;
       }
       if (item.price !== null) {
@@ -56,6 +57,10 @@ async function ensureReceiptItemProduct(item, session) {
         product.status = 'active';
       }
       await product.save({ session });
+      if (item.shelfQty > 0 && !item.stockApplied) {
+        item.stockApplied = true;
+        await item.save({ session });
+      }
       return product;
     }
   }
@@ -63,7 +68,7 @@ async function ensureReceiptItemProduct(item, session) {
   if (item.createdProductId) {
     product = await Product.findById(item.createdProductId).session(session);
     if (product) {
-      if (item.shelfQty > 0) {
+      if (item.shelfQty > 0 && !item.stockApplied) {
         product.quantity = item.shelfQty;
       }
       if (item.price !== null) {
@@ -76,6 +81,10 @@ async function ensureReceiptItemProduct(item, session) {
         product.status = 'active';
       }
       await product.save({ session });
+      if (item.shelfQty > 0 && !item.stockApplied) {
+        item.stockApplied = true;
+        await item.save({ session });
+      }
       return product;
     }
   }
@@ -100,6 +109,8 @@ async function ensureReceiptItemProduct(item, session) {
 
   await product.save({ session });
   item.createdProductId = product._id;
+  // Stock is applied here via the new product's initial `quantity`.
+  if (item.shelfQty > 0) item.stockApplied = true;
   await item.save({ session });
   return product;
 }
@@ -162,17 +173,27 @@ function parseMultipart(req) {
   });
 }
 
-async function uploadToR2(fileBuffer, filename, contentType, folder = 'products') {
-  const extension = String(filename).split('.').pop() || 'jpg';
-  const safeBase = crypto.randomUUID();
-  const safeFilename = `${safeBase}.${extension.replace(/[^a-zA-Z0-9]/g, '')}`;
-  await s3Client.send(new PutObjectCommand({
-    Bucket: process.env.R2_BUCKET_NAME,
-    Key: `${folder}/${safeFilename}`,
-    Body: fileBuffer,
-    ContentType: contentType,
-  }));
-  return safeFilename;
+// Single image processing path — sharp normalises orientation, produces main
+// (<folder>/<uuid>.jpg) and a 240px thumbnail (thumbs/<uuid>.jpg) in one call.
+// The `filename` and `contentType` parameters are kept for backwards-compatible
+// call sites but are now ignored (sharp always outputs JPEG with a fresh UUID).
+async function uploadToR2(fileBuffer, _filename, _contentType, folder = 'products') {
+  const { filename, main, thumb } = await buildImageVariants(fileBuffer);
+  await Promise.all([
+    s3Client.send(new PutObjectCommand({
+      Bucket: process.env.R2_BUCKET_NAME,
+      Key: `${folder}/${filename}`,
+      Body: main,
+      ContentType: 'image/jpeg',
+    })),
+    s3Client.send(new PutObjectCommand({
+      Bucket: process.env.R2_BUCKET_NAME,
+      Key: `thumbs/${filename}`,
+      Body: thumb,
+      ContentType: 'image/jpeg',
+    })),
+  ]);
+  return filename;
 }
 
 /** Build the public URL for an uploaded object in the given folder. */
@@ -886,6 +907,8 @@ router.post('/:id/items/:itemId/unconfirm', staffOnly, asyncHandler(async (req, 
         }
 
         item.status = 'draft';
+        // Stock was reversed above — allow a later re-confirm to re-apply it.
+        item.stockApplied = false;
         await item.save({ session });
 
         ReceiptItemLog.create({
@@ -999,6 +1022,12 @@ router.post('/:id/commit', staffOnly, asyncHandler(async (req, res) => {
     for (const item of items) {
       let currentProduct;
 
+      // Confirm already applied this item's stock (confirm is mandatory before
+      // commit). Re-applying here is what silently doubled every receipt.
+      // `status === 'confirmed'` also covers legacy items created before the
+      // stockApplied flag existed — they must NOT be re-applied either.
+      const stockAlreadyApplied = item.stockApplied || item.status === 'confirmed';
+
       // 1. Update or create the product
       if (
         item.existingProductId &&
@@ -1008,7 +1037,9 @@ router.post('/:id/commit', staffOnly, asyncHandler(async (req, res) => {
         usedExistingProductIds.add(String(item.existingProductId));
         currentProduct = await Product.findById(item.existingProductId).session(session);
         if (currentProduct) {
-          currentProduct.quantity += item.shelfQty;
+          if (item.shelfQty > 0 && !stockAlreadyApplied) {
+            currentProduct.quantity += item.shelfQty;
+          }
           if (item.price !== null) currentProduct.price = item.price;
           if (item.qtyPerPackage) currentProduct.quantityPerPackage = item.qtyPerPackage;
           if (item.shelfQty > 0 && currentProduct.status !== 'active') {
@@ -1016,6 +1047,7 @@ router.post('/:id/commit', staffOnly, asyncHandler(async (req, res) => {
           }
           await currentProduct.save({ session });
           item.createdProductId = currentProduct._id;
+          if (item.shelfQty > 0) item.stockApplied = true;
           await item.save({ session });
         }
       }
@@ -1026,7 +1058,7 @@ router.post('/:id/commit', staffOnly, asyncHandler(async (req, res) => {
           if (item.price !== null) currentProduct.price = item.price;
           if (item.qtyPerPackage) currentProduct.quantityPerPackage = item.qtyPerPackage;
           if (item.shelfQty > 0) {
-            currentProduct.quantity = item.shelfQty;
+            if (!stockAlreadyApplied) currentProduct.quantity = item.shelfQty;
             if (currentProduct.status !== 'active') currentProduct.status = 'active';
           }
           await currentProduct.save({ session });

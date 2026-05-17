@@ -324,4 +324,24 @@ function getOrderingWindowCloseAt(deliveryDayOfWeek, schedule = {}) {
   );
 }
 
-module.exports = { isOrderingOpen, getWindowDescription, getWarsawNow, getOrderingWindowOpenAt, getOrderingWindowCloseAt, getCurrentOrderingSessionId, getOpenDateWarsaw, DAY_SHORT_UK, DAY_FULL_UK };
+/**
+ * True if the ordering window opens today and starts within `withinMinutes`.
+ * Mirror of client/src/utils/orderingSchedule.js:isOrderingOpeningSoon.
+ * @param {number} deliveryDayOfWeek 0=Sun…6=Sat
+ * @param {{ openHour?: number, openMinute?: number }} schedule
+ * @param {number} withinMinutes default 240 (4 hours)
+ */
+function isOrderingOpeningSoon(deliveryDayOfWeek, schedule = {}, withinMinutes = 240) {
+  const openHour   = schedule.openHour   ?? 16;
+  const openMinute = schedule.openMinute ?? 0;
+  const { dayOfWeek, hour, minute } = getWarsawNow();
+
+  const dayBefore = (deliveryDayOfWeek - 1 + 7) % 7;
+  const openDay   = dayBefore === 0 ? 6 : dayBefore;
+  if (dayOfWeek !== openDay) return false;
+
+  const minsUntilOpen = (openHour * 60 + openMinute) - (hour * 60 + minute);
+  return minsUntilOpen > 0 && minsUntilOpen <= withinMinutes;
+}
+
+module.exports = { isOrderingOpen, isOrderingOpeningSoon, getWindowDescription, getWarsawNow, getOrderingWindowOpenAt, getOrderingWindowCloseAt, getCurrentOrderingSessionId, getOpenDateWarsaw, DAY_SHORT_UK, DAY_FULL_UK };

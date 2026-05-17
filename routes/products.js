@@ -502,7 +502,7 @@ router.post('/block-upload-photos', staffOnly, asyncHandler(async (req, res) => 
       if (!block) throw appError('block_not_found');
 
       // Read max orderNumber inside the transaction to prevent race conditions
-      const maxProduct = await Product.findOne({}, 'orderNumber').sort({ orderNumber: -1 }).session(session).lean();
+      const maxProduct = await Product.findOne({ status: { $ne: 'archived' } }, 'orderNumber').sort({ orderNumber: -1 }).session(session).lean();
       let nextOrderNumber = (maxProduct?.orderNumber ?? 0) + 1;
 
       for (const filename of filenames) {

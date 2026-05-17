@@ -19,8 +19,11 @@ const { getOrderingSchedule } = require('../utils/getOrderingSchedule');
 const { appError, asyncHandler } = require('../utils/errors');
 const { normalizeDeliveryGroup } = require('../utils/deliveryGroupHelpers');
 const cache = require('../utils/cache');
-const { getShop, getDeliveryGroup } = require('../utils/modelCache');
+const { getShop, getDeliveryGroup, invalidateShop } = require('../utils/modelCache');
 const { withLock } = require('../utils/lock');
+const { migrateSellerShop } = require('../services/migrateSellerShop');
+const { computeTargetShopState } = require('../utils/shopConflict');
+const { unassignSellerAndPark } = require('../services/unassignSeller');
 
 async function getAllDeliveryGroups() {
   let groups = await cache.get(cache.KEYS.DELIVERY_GROUPS);
@@ -91,17 +94,6 @@ async function ensureOrderNotInPickingPipeline(orderId, session = null) {
   const exists = session ? await query.session(session) : await query;
   if (exists) {
     throw appError('order_picking_started');
-  }
-}
-
-async function ensureOrderNotLockedByWarehouse(orderId, session = null) {
-  const query = PickingTask.exists({
-    'items.orderId': orderId,
-    status: 'locked',
-  });
-  const exists = session ? await query.session(session) : await query;
-  if (exists) {
-    throw appError('order_picking_locked');
   }
 }
 
@@ -243,6 +235,94 @@ router.get('/conflicts', staffOnly, async (req, res) => {
 
   res.json({ conflicts });
 });
+
+/**
+ * POST /conflicts/resolve — admin/warehouse resolves a shop conflict by either
+ * moving one seller (with their active order) to a clean shop, or unassigning a
+ * seller (parking their not-yet-picked order so it follows them on next assignment).
+ * Body: { shopId, buyerTelegramId, action: 'move'|'unassign', toShopId? }
+ */
+router.post('/conflicts/resolve', staffOnly, asyncHandler(async (req, res) => {
+  const actor = req.telegramUser;
+  const { shopId, buyerTelegramId, action, toShopId } = req.body || {};
+
+  if (!shopId || !buyerTelegramId || !['move', 'unassign'].includes(action)) {
+    throw appError('conflict_resolve_invalid');
+  }
+  if (action === 'move' && !toShopId) throw appError('conflict_target_required');
+
+  let invalidateFns = [];
+  let movedGroups = { prevGroupId: null, newGroupId: null };
+
+  const session = await mongoose.connection.startSession();
+  try {
+    await session.withTransaction(async () => {
+      const seller = await User.findOne({ telegramId: String(buyerTelegramId) }).session(session);
+      if (!seller) throw appError('conflict_seller_not_found');
+
+      if (action === 'unassign') {
+        await unassignSellerAndPark({
+          session,
+          seller,
+          fromShopId: String(shopId),
+          actor,
+          reason: 'conflict_resolution',
+        });
+        invalidateFns.push(() => invalidateShop(String(shopId)));
+        return;
+      }
+
+      // action === 'move'
+      const toShop = await Shop.findById(toShopId).populate('cityId', 'name').session(session);
+      if (!toShop || !toShop.isActive) throw appError('order_shop_not_found');
+
+      // Target must be completely clean — moving into an occupied shop would just
+      // relocate the conflict.
+      const targetState = await computeTargetShopState(String(toShop._id), '', session);
+      if (targetState.sellers.length > 0 || targetState.activeOrders.length > 0) {
+        throw appError('conflict_target_not_empty');
+      }
+
+      const result = await migrateSellerShop({
+        session,
+        existingUser: seller,
+        newShopFull: toShop,
+        actor,
+        reason: 'conflict_resolution_move',
+        resetCartItems: false,
+        resetCartNavigation: false,
+        clearCartReservation: true,
+        pushHistory: true,
+        updateLastSeller: true,
+      });
+      movedGroups = { prevGroupId: result.prevGroupId, newGroupId: result.newGroupId };
+      if (result.invalidate) invalidateFns.push(result.invalidate);
+    });
+  } finally {
+    session.endSession();
+  }
+
+  for (const fn of invalidateFns) {
+    try { await fn(); } catch (e) { console.warn('[conflicts resolve] invalidate failed:', e?.message); }
+  }
+
+  try {
+    const io = getIO();
+    if (io) {
+      io.emit('user_shop_changed', { telegramId: String(buyerTelegramId) });
+      io.emit('user_order_updated', { buyerTelegramId: String(buyerTelegramId) });
+      const { prevGroupId, newGroupId } = movedGroups;
+      if (prevGroupId) io.to(`picking_group_${prevGroupId}`).emit('shop_status_changed', { groupId: prevGroupId });
+      if (newGroupId && newGroupId !== prevGroupId) {
+        io.to(`picking_group_${newGroupId}`).emit('shop_status_changed', { groupId: newGroupId });
+      }
+    }
+  } catch (e) {
+    console.warn('[conflicts resolve] socket emit failed:', e?.message);
+  }
+
+  res.json({ ok: true });
+}));
 
 router.get('/', async (req, res) => {
   const telegramId = req.telegramId;
@@ -917,7 +997,11 @@ router.post('/:id/stale/restore-to-cart', telegramAuth, adminOnly, asyncHandler(
       }
 
       await ensureOrderIsStale(order, session);
-      await ensureOrderNotLockedByWarehouse(order._id, session);
+      // An order the warehouse has taken into its pipeline (pending/locked/
+      // completed) must NOT be removed by an admin — that decision belongs to
+      // the warehouse. Blocks the silent-loss hole where a queued or already
+      // packed order could be expired/restored from under the pickers.
+      await ensureOrderNotInPickingPipeline(order._id, session);
 
       const buyerTelegramId = String(order.buyerTelegramId || '');
       if (!buyerTelegramId) throw appError('validation_failed', { field: 'buyerTelegramId' });
@@ -1030,7 +1114,11 @@ router.post('/:id/stale/expire', telegramAuth, adminOnly, asyncHandler(async (re
       }
 
       await ensureOrderIsStale(order, session);
-      await ensureOrderNotLockedByWarehouse(order._id, session);
+      // An order the warehouse has taken into its pipeline (pending/locked/
+      // completed) must NOT be removed by an admin — that decision belongs to
+      // the warehouse. Blocks the silent-loss hole where a queued or already
+      // packed order could be expired/restored from under the pickers.
+      await ensureOrderNotInPickingPipeline(order._id, session);
       await detachOrderFromPendingTasks(order._id, session);
 
       order.status = 'expired';
@@ -1093,32 +1181,43 @@ router.post('/set-item-qty', telegramAuth, requireOrderingWindowOpen, asyncHandl
   const schedule = await getOrderingSchedule();
   const currentSessionId = await getOrCreateSessionId(String(group._id), group.dayOfWeek, schedule);
 
-  const order = await Order.findOne({
-    buyerTelegramId: user.telegramId,
-    orderingSessionId: currentSessionId,
-    status: { $in: ['new', 'in_progress'] },
-  });
-  if (!order) throw appError('order_not_found');
+  // Transaction + re-read inside the session: two concurrent set-item-qty calls
+  // on the same order (rapid taps, or different items in parallel) would otherwise
+  // last-write-wins on the whole items array and silently lose each other's change.
+  // Mongo serializes the writes; session.withTransaction auto-retries on WriteConflict.
+  const session = await mongoose.connection.startSession();
+  try {
+    await session.withTransaction(async () => {
+      const order = await Order.findOne({
+        buyerTelegramId: user.telegramId,
+        orderingSessionId: currentSessionId,
+        status: { $in: ['new', 'in_progress'] },
+      }).session(session);
+      if (!order) throw appError('order_not_found');
 
-  const item = order.items.find((i) => String(i.productId) === productId && !i.cancelled);
-  if (!item) throw appError('order_not_found');
+      const item = order.items.find((i) => String(i.productId) === productId && !i.cancelled);
+      if (!item) throw appError('order_not_found');
 
-  const oldQty = item.quantity;
-  item.quantity = newQty;
-  order.totalPrice = order.items
-    .filter((i) => !i.cancelled)
-    .reduce((sum, i) => sum + Number(i.price || 0) * Number(i.quantity || 0), 0);
+      const oldQty = item.quantity;
+      item.quantity = newQty;
+      order.totalPrice = order.items
+        .filter((i) => !i.cancelled)
+        .reduce((sum, i) => sum + Number(i.price || 0) * Number(i.quantity || 0), 0);
 
-  order.history.push({
-    at: new Date(),
-    by: String(user.telegramId),
-    byName: [user.firstName, user.lastName].filter(Boolean).join(' '),
-    byRole: user.role,
-    action: 'quantity_adjusted',
-    meta: { productId, oldQty, newQty },
-  });
+      order.history.push({
+        at: new Date(),
+        by: String(user.telegramId),
+        byName: [user.firstName, user.lastName].filter(Boolean).join(' '),
+        byRole: user.role,
+        action: 'quantity_adjusted',
+        meta: { productId, oldQty, newQty },
+      });
 
-  await order.save();
+      await order.save({ session });
+    });
+  } finally {
+    session.endSession();
+  }
   res.json({ ok: true, productId, newQty });
 }));
 

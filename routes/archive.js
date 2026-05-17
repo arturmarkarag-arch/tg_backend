@@ -137,53 +137,12 @@ router.post('/:id/restore', asyncHandler(async (req, res) => {
 }));
 
 /**
- * DELETE /api/archive/:id
- * Permanently delete an archived product and its R2 images.
+ * DELETE /api/archive/:id — DISABLED.
+ * Permanent deletion from the archive is intentionally not allowed to prevent
+ * irreversible silent data loss. Archived products may only be RESTORED.
  */
-router.delete('/:id', asyncHandler(async (req, res) => {
-  const product = await Product.findById(req.params.id);
-  if (!product) throw appError('product_not_found');
-  if (product.status !== 'archived') throw appError('product_only_archived_can_delete');
-
-  // Remove from any blocks and delete product atomically.
-  // Archived products should already have been removed from blocks by archiveProduct,
-  // but we guard against stale references from older code paths or manual DB edits.
-  let affectedBlockIds = [];
-  const session = await mongoose.connection.startSession();
-  try {
-    await session.withTransaction(async () => {
-      const affectedBlocks = await Block.find({ productIds: product._id }, 'blockId').session(session).lean();
-      affectedBlockIds = affectedBlocks.map((b) => b.blockId);
-      if (affectedBlockIds.length) {
-        await Block.updateMany(
-          { productIds: product._id },
-          { $pull: { productIds: product._id }, $inc: { version: 1 } },
-          { session }
-        );
-      }
-      await product.deleteOne({ session });
-    });
-  } finally {
-    await session.endSession();
-  }
-
-  // Delete R2 images after the DB transaction commits — if this fails the
-  // product is already gone from DB; orphaned R2 objects are acceptable.
-  await deleteFromR2(product.imageNames || []);
-
-  if (affectedBlockIds.length) {
-    try {
-      const io = getIO();
-      const updatedBlocks = await Block.find({ blockId: { $in: affectedBlockIds } }).lean();
-      for (const block of updatedBlocks) {
-        io.emit('block_updated', { blockId: block.blockId, block });
-      }
-    } catch (e) {
-      console.warn('[archive/delete] socket block_updated failed:', e.message);
-    }
-  }
-
-  res.json({ message: 'Product permanently deleted' });
+router.delete('/:id', asyncHandler(async (req, res) => { // eslint-disable-line no-unused-vars
+  throw appError('archive_delete_disabled');
 }));
 
 module.exports = { router };

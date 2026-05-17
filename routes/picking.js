@@ -150,16 +150,24 @@ router.post('/start-session', requireTelegramRoles(['warehouse', 'admin']), asyn
 
     const existingActiveCount = await PickingTask.countDocuments(activeFilter);
     const availableCount = await PickingTask.countDocuments(pendingFilter);
-    if (existingActiveCount > 0) {
-      const inProgressCount = await PickingTask.countDocuments({
-        status: { $in: ['locked', 'completed'] },
-        deliveryGroupId: String(deliveryGroupId),
-      });
+    const completedCount = existingActiveCount === 0
+      ? await PickingTask.countDocuments({ status: 'completed', deliveryGroupId: String(deliveryGroupId) })
+      : 0;
+
+    if (existingActiveCount > 0 || completedCount > 0) {
+      const inProgressCount = existingActiveCount > 0
+        ? await PickingTask.countDocuments({
+            status: { $in: ['locked', 'completed'] },
+            deliveryGroupId: String(deliveryGroupId),
+          })
+        : 0;
       if (confirm) {
         await DeliveryGroup.updateOne({ _id: deliveryGroupId }, { $set: { pickingConfirmedAt: new Date() } });
       }
+      // When all tasks are completed (none pending/locked), the session is done — treat as confirmed
+      // so the frontend shows 'ready' state instead of showing "Розпочати збирання" again.
       const confirmedGroup = await DeliveryGroup.findById(deliveryGroupId, 'pickingConfirmedAt').lean();
-      const sessionConfirmed = !!(confirmedGroup?.pickingConfirmedAt);
+      const sessionConfirmed = !!(confirmedGroup?.pickingConfirmedAt) || completedCount > 0;
       return res.json({ alreadyStarted: true, taskCount: availableCount, sessionActive: inProgressCount > 0, sessionConfirmed });
     }
 
@@ -470,11 +478,28 @@ router.patch('/tasks/:taskId/progress', requireTelegramRoles(['warehouse', 'admi
     if (String(task.lockedBy || '') !== String(user.telegramId || '')) return next(appError('expired_lock'));
 
     const packedSet = new Set(packedOrderIds.map(String));
-    for (const item of task.items) {
-      item.packed = packedSet.has(String(item.orderId));
-    }
-    task.lockedAt = new Date();
-    await task.save();
+    const newItems = task.items.map((it) => {
+      const plain = typeof it.toObject === 'function' ? it.toObject() : { ...it };
+      plain.packed = packedSet.has(String(it.orderId));
+      return plain;
+    });
+
+    // Atomic compare-and-swap: only writes if WE still hold the lock AND the
+    // task hasn't been modified since we read it (__v). Closes the lost-update
+    // race between two saves and the lock-stolen-mid-save (force-claim) TOCTOU.
+    // Refreshing lockedAt also acts as a heartbeat so an actively-saving worker
+    // is not force-claimed.
+    const updated = await PickingTask.findOneAndUpdate(
+      {
+        _id: task._id,
+        status: 'locked',
+        lockedBy: String(user.telegramId || ''),
+        __v: task.__v,
+      },
+      { $set: { items: newItems, lockedAt: new Date() }, $inc: { __v: 1 } },
+      { new: true },
+    );
+    if (!updated) return next(appError('expired_lock'));
 
     res.json({ ok: true });
   } catch (err) {

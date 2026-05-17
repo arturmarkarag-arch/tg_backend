@@ -163,28 +163,37 @@ async function releaseWorkerAndStaleLocks(userTelegramId, deliveryGroupId = null
  * @returns {{ completedTask, nextTask: object|null }}
  */
 async function completePickingTask({ taskId, userTelegramId, userFirstName = '', userLastName = '', userRole = 'warehouse', items = [], nextBlock }) {
-  const task = await PickingTask.findById(taskId);
-  if (!task) throw Object.assign(new Error('Task not found'), { code: 'picking_task_not_found' });
-  if (String(task.lockedBy || '') !== String(userTelegramId)) throw Object.assign(new Error('Lock expired'), { code: 'expired_lock' });
-
-  // Apply actual packed quantities
-  for (const taskItem of task.items) {
-    const input = items.find((i) => String(i.orderId) === String(taskItem.orderId));
-    if (input !== undefined) {
-      taskItem.packedQuantity = Math.max(0, Number(input.actualQty) || 0);
-    } else {
-      taskItem.packedQuantity = taskItem.quantity;
-    }
-    taskItem.packed = taskItem.packedQuantity > 0;
-  }
-
-  task.status   = 'completed';
-  task.lockedBy = null;
-  task.lockedAt = null;
+  // Cheap pre-check for a fast, clear error before opening a session.
+  const pre = await PickingTask.findById(taskId).lean();
+  if (!pre) throw Object.assign(new Error('Task not found'), { code: 'picking_task_not_found' });
+  if (String(pre.lockedBy || '') !== String(userTelegramId)) throw Object.assign(new Error('Lock expired'), { code: 'expired_lock' });
 
   const actor = { by: String(userTelegramId), byName: [userFirstName, userLastName].filter(Boolean).join(' '), byRole: userRole };
 
+  let task;
   await runTransactionWithRetry(async (session) => {
+    // Re-read + re-verify the lock INSIDE the transaction. Between the pre-check
+    // and here another worker may have force-claimed the task (lock stolen);
+    // mutating a stale in-memory doc would silently overwrite their work.
+    task = await PickingTask.findById(taskId).session(session);
+    if (!task) throw Object.assign(new Error('Task not found'), { code: 'picking_task_not_found' });
+    if (String(task.lockedBy || '') !== String(userTelegramId)) throw Object.assign(new Error('Lock expired'), { code: 'expired_lock' });
+
+    // Apply actual packed quantities
+    for (const taskItem of task.items) {
+      const input = items.find((i) => String(i.orderId) === String(taskItem.orderId));
+      if (input !== undefined) {
+        taskItem.packedQuantity = Math.max(0, Number(input.actualQty) || 0);
+      } else {
+        taskItem.packedQuantity = taskItem.quantity;
+      }
+      taskItem.packed = taskItem.packedQuantity > 0;
+    }
+
+    task.status   = 'completed';
+    task.lockedBy = null;
+    task.lockedAt = null;
+
     await task.save({ session });
     await markOrderItemsPacked(task.items, task.productId, actor, session);
   });

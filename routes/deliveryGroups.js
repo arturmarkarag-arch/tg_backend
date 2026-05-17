@@ -5,6 +5,7 @@ const DeliveryGroup = require('../models/DeliveryGroup');
 const User = require('../models/User');
 const Order = require('../models/Order');
 const Shop = require('../models/Shop');
+const PickingTask = require('../models/PickingTask');
 const { telegramAuth, requireTelegramRole, requireTelegramRoles } = require('../middleware/telegramAuth');
 const {
   isOrderingOpen,
@@ -363,6 +364,21 @@ router.post('/:id/close-ordering-session', telegramAuth, requireTelegramRole('ad
   const status = isOrderingOpen(group.dayOfWeek, schedule);
   const currentSessionId = await getOrCreateSessionId(String(group._id), group.dayOfWeek, schedule);
 
+  // HARD RULE: once the warehouse has taken an order into the picking pipeline
+  // (PickingTask pending/locked/completed) it is being physically packed. You
+  // must NOT expire it just because the ordering session is being moved/closed —
+  // that would silently lose a real, packed order. Exclude every such order.
+  const pipelineTasks = await PickingTask.find(
+    { status: { $in: ['pending', 'locked', 'completed'] } },
+    'items.orderId',
+  ).lean();
+  const protectedOrderIds = [];
+  for (const t of pipelineTasks) {
+    for (const it of t.items || []) {
+      if (it.orderId) protectedOrderIds.push(it.orderId);
+    }
+  }
+
   const staleOrderFilter = {
     'buyerSnapshot.deliveryGroupId': String(group._id),
     status: { $in: ['new', 'in_progress'] },
@@ -370,9 +386,23 @@ router.post('/:id/close-ordering-session', telegramAuth, requireTelegramRole('ad
   if (status.isOpen) {
     staleOrderFilter.orderingSessionId = { $ne: currentSessionId };
   }
+  if (protectedOrderIds.length > 0) {
+    staleOrderFilter._id = { $nin: protectedOrderIds };
+  }
 
-  const result = await Order.updateMany(staleOrderFilter, { status: 'expired' });
-  const expiredCount = result.modifiedCount ?? result.nModified ?? 0;
+  // Transaction so a double-click / concurrent close cannot double-process.
+  let expiredCount = 0;
+  const session = await mongoose.connection.startSession();
+  try {
+    await session.withTransaction(async () => {
+      const result = await Order.updateMany(
+        staleOrderFilter, { status: 'expired' }, { session },
+      );
+      expiredCount = result.modifiedCount ?? result.nModified ?? 0;
+    });
+  } finally {
+    session.endSession();
+  }
 
   res.json({
     message: expiredCount > 0

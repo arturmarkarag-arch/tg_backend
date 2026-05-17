@@ -9,6 +9,8 @@ const Order = require('../models/Order');
 const { telegramAuth, requireTelegramRole } = require('../middleware/telegramAuth');
 const cache = require('../utils/cache');
 const { invalidateShop } = require('../utils/modelCache');
+const { migrateSellerShop } = require('../services/migrateSellerShop');
+const { unassignSellerAndPark } = require('../services/unassignSeller');
 
 const router = express.Router();
 
@@ -225,23 +227,48 @@ router.patch('/:id/sellers', telegramAuth, requireTelegramRole('admin'), asyncHa
   const toAdd = newSellers.filter((id) => !currentIds.includes(id));
 
   if (toRemove.length > 0 || toAdd.length > 0) {
+    const actor = req.telegramUser;
+    const invalidateFns = [];
     const session = await mongoose.connection.startSession();
     try {
       await session.withTransaction(async () => {
-        if (toRemove.length > 0) {
-          await User.updateMany(
-            { telegramId: { $in: toRemove } },
-            { $set: { shopId: null } },
-            { session }
-          );
+        // Removals: unassign + park not-yet-picked orders so they follow the seller.
+        for (const tgId of toRemove) {
+          const seller = await User.findOne({ telegramId: tgId }).session(session);
+          if (!seller) continue;
+          await unassignSellerAndPark({
+            session,
+            seller,
+            fromShopId: shopIdStr,
+            actor,
+            reason: 'bulk_sellers_update',
+          });
         }
+
+        // Additions: full migration so the seller's active/parked order, cart
+        // reservation and history are handled atomically (not a raw shopId set).
         if (toAdd.length > 0) {
-          await User.updateMany(
-            { telegramId: { $in: toAdd }, role: 'seller' },
-            { $set: { shopId: shopIdStr } },
-            { session }
-          );
+          const shopFull = await Shop.findById(req.params.id)
+            .populate('cityId', 'name').session(session);
+          for (const tgId of toAdd) {
+            const seller = await User.findOne({ telegramId: tgId, role: 'seller' }).session(session);
+            if (!seller) continue;
+            const result = await migrateSellerShop({
+              session,
+              existingUser: seller,
+              newShopFull: shopFull,
+              actor,
+              reason: 'bulk_sellers_update',
+              resetCartItems: false,
+              resetCartNavigation: false,
+              clearCartReservation: true,
+              pushHistory: true,
+              updateLastSeller: true,
+            });
+            if (result.invalidate) invalidateFns.push(result.invalidate);
+          }
         }
+
         await Shop.findByIdAndUpdate(
           req.params.id,
           { $set: { lastSellerChangedAt: new Date() } },
@@ -250,6 +277,9 @@ router.patch('/:id/sellers', telegramAuth, requireTelegramRole('admin'), asyncHa
       });
     } finally {
       session.endSession();
+    }
+    for (const fn of invalidateFns) {
+      try { await fn(); } catch (e) { console.warn('[shops sellers] invalidate failed:', e?.message); }
     }
     await invalidateShop(req.params.id);
   }

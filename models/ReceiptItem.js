@@ -32,6 +32,12 @@ const ReceiptItemSchema = new mongoose.Schema(
     // (non-deleted) item is 'confirmed' by its owner.
     status: { type: String, enum: ['draft', 'confirmed'], default: 'draft' },
 
+    // True once this item's shelfQty has been applied to Product stock (at
+    // confirm time). The commit step MUST NOT re-apply it — confirm is
+    // mandatory before commit, so without this guard every receipt silently
+    // doubled received stock.
+    stockApplied: { type: Boolean, default: false },
+
     // UI abstraction over the existing shelfQty/transitQty split. Mutually
     // exclusive — the item goes EITHER to the warehouse incoming strip
     // ('shelf') OR straight to shops via transit ('shops'). The route layer

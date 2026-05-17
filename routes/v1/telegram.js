@@ -559,43 +559,64 @@ router.get('/register-requests', adminOnly, asyncHandler(async (req, res) => {
 }));
 
 router.post('/register-requests/:id/approve', adminOnly, asyncHandler(async (req, res) => {
-  const request = await RegistrationRequest.findById(req.params.id).lean();
-  if (!request) throw appError('registration_not_found');
-  if (request.status !== 'pending') throw appError('registration_not_pending');
+  const mongoose = require('mongoose');
+
+  const pre = await RegistrationRequest.findById(req.params.id).lean();
+  if (!pre) throw appError('registration_not_found');
+  if (pre.status !== 'pending') throw appError('registration_not_pending');
+  if (!pre.role) throw appError('registration_role_missing');
+  if (pre.role === 'seller' && !pre.deliveryGroupId) throw appError('registration_group_missing');
 
   // Admin may override shopId at approve time (e.g. seller picked wrong shop)
-  if (req.body.shopId) request.shopId = req.body.shopId;
+  const overrideShopId = req.body.shopId || null;
 
-  const existingUser = await User.findOne({ telegramId: request.telegramId }).lean();
-  if (existingUser) {
-    await RegistrationRequest.findByIdAndUpdate(req.params.id, { status: 'rejected' });
-    throw appError('registration_user_exists');
-  }
+  let userExists = false;
+  let createdUser = null;
 
-  if (!request.role) throw appError('registration_role_missing');
-  if (request.role === 'seller' && !request.deliveryGroupId) throw appError('registration_group_missing');
+  const session = await mongoose.connection.startSession();
+  try {
+    await session.withTransaction(async () => {
+      // Atomic gate: only ONE concurrent approve can flip pending→approved.
+      // Without this, two admins (or a double-click) both passed the status
+      // check and the upsert silently returned the first-created user, losing
+      // the second approval's role/shop assignment.
+      const request = await RegistrationRequest.findOneAndUpdate(
+        { _id: req.params.id, status: 'pending' },
+        { $set: { status: 'approved' } },
+        { new: true, session },
+      );
+      if (!request) throw appError('registration_not_pending');
+      if (overrideShopId) request.shopId = overrideShopId;
 
-  // Resolve shopId → actual Shop document to get fresh data and validate it still exists.
-  // shopName/shopCity are no longer stored on User — only shopId, deliveryGroupId, warehouseZone.
-  let resolvedShopId = null;
-  let resolvedDeliveryGroupId = request.role === 'seller' ? request.deliveryGroupId || '' : '';
-  let resolvedWarehouseZone = '';
+      const existing = await User.findOne({ telegramId: request.telegramId }).session(session).lean();
+      if (existing) {
+        await RegistrationRequest.updateOne(
+          { _id: request._id }, { $set: { status: 'rejected' } }, { session },
+        );
+        userExists = true;
+        return; // commit the rejected state; throw after the tx
+      }
 
-  if (request.role === 'seller' && request.shopId) {
-    const shop = await Shop.findOne({ _id: request.shopId, isActive: true }).populate('cityId', 'name').lean();
-    if (!shop) throw appError('registration_shop_inactive');
-    resolvedShopId = shop._id;
-    resolvedDeliveryGroupId = shop.deliveryGroupId || resolvedDeliveryGroupId;
-    if (resolvedDeliveryGroupId) {
-      const grp = await DeliveryGroup.findById(resolvedDeliveryGroupId).lean();
-      resolvedWarehouseZone = grp?.name || '';
-    }
-  }
+      let resolvedShopId = null;
+      let resolvedDeliveryGroupId = request.role === 'seller' ? request.deliveryGroupId || '' : '';
+      let resolvedWarehouseZone = '';
 
-  const user = await User.findOneAndUpdate(
-    { telegramId: request.telegramId },
-    {
-      $setOnInsert: {
+      if (request.role === 'seller' && request.shopId) {
+        const shop = await Shop.findOne({ _id: request.shopId, isActive: true })
+          .populate('cityId', 'name').session(session).lean();
+        if (!shop) throw appError('registration_shop_inactive');
+        resolvedShopId = shop._id;
+        resolvedDeliveryGroupId = shop.deliveryGroupId || resolvedDeliveryGroupId;
+        if (resolvedDeliveryGroupId) {
+          const grp = await DeliveryGroup.findById(resolvedDeliveryGroupId).session(session).lean();
+          resolvedWarehouseZone = grp?.name || '';
+        }
+      }
+
+      // create() (not upsert) so a concurrent create of the same telegramId
+      // throws E11000 (unique index) instead of silently returning the other
+      // request's user. Surfaces a loud, correct error.
+      const [u] = await User.create([{
         telegramId: request.telegramId,
         role: request.role,
         firstName: request.firstName,
@@ -604,18 +625,25 @@ router.post('/register-requests/:id/approve', adminOnly, asyncHandler(async (req
         shopId: resolvedShopId,
         deliveryGroupId: resolvedDeliveryGroupId,
         warehouseZone: resolvedWarehouseZone,
-      },
-    },
-    { upsert: true, new: true, setDefaultsOnInsert: true }
-  );
-  if (!user) throw appError('registration_user_exists');
-  await RegistrationRequest.findByIdAndDelete(req.params.id);
+      }], { session });
+      createdUser = u;
 
-  await sendRegistrationApprovedMessage(user.telegramId, user.role).catch((err) => {
+      await RegistrationRequest.deleteOne({ _id: request._id }, { session });
+    });
+  } catch (err) {
+    if (err && err.code === 11000) throw appError('registration_user_exists');
+    throw err;
+  } finally {
+    session.endSession();
+  }
+
+  if (userExists) throw appError('registration_user_exists');
+
+  await sendRegistrationApprovedMessage(createdUser.telegramId, createdUser.role).catch((err) => {
     console.warn('[approve] sendRegistrationApprovedMessage failed:', err?.message || err);
   });
 
-  res.json({ message: 'Заявку схвалено', telegramId: user.telegramId, role: user.role });
+  res.json({ message: 'Заявку схвалено', telegramId: createdUser.telegramId, role: createdUser.role });
 }));
 
 router.post('/register-requests/:id/reject', adminOnly, asyncHandler(async (req, res) => {

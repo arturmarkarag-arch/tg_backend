@@ -29,6 +29,7 @@ async function startServer() {
     console.log('Connected to MongoDB');
     await migrateOrdersToSessionIds();
 
+
     // Prefer key stored in DB (via admin settings), fall back to env
     const keyFromDb = await AppSetting.findOne({ key: 'openai.apiKey' }).lean();
     const OPENAI_API_KEY = keyFromDb?.value || process.env.OPENAI_API_KEY;

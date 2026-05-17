@@ -13,6 +13,7 @@ const { getOrCreateSessionId } = require('../utils/getOrCreateSession');
 const { getOrderingSchedule } = require('../utils/getOrderingSchedule');
 const { appError } = require('../utils/errors');
 const { invalidateShop } = require('../utils/modelCache');
+const { snapshotClearedCart } = require('./clearedCart');
 
 async function ensureOrderNotInPickingPipeline(orderId, session) {
   const exists = await PickingTask.exists({
@@ -166,6 +167,16 @@ async function migrateSellerShop({
     userUpdate.warehouseZone = warehouseZone;
   }
   if (resetCartItems) {
+    // Soft-delete: snapshot the cart before wiping so it can be restored for 7 days.
+    await snapshotClearedCart({
+      session,
+      owner: existingUser,
+      clearedBy: actor?.telegramId,
+      clearedByName: [actor?.firstName, actor?.lastName].filter(Boolean).join(' '),
+      reason,
+      shopId: oldShopId,
+      shopName: oldShopFull?.name || '',
+    });
     userUpdate['cartState.orderItems'] = {};
     userUpdate['cartState.orderItemIds'] = [];
     userUpdate['cartState.updatedAt'] = new Date();

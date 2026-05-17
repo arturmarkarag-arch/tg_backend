@@ -9,6 +9,22 @@ const { requireTelegramRoles } = require('../middleware/telegramAuth');
 const { appError, asyncHandler } = require('../utils/errors');
 const { refreshPickingTaskPositions } = require('../services/taskBuilder');
 
+async function repairBlockMissingProducts(blockId, session = null) {
+  const block = await Block.findOne({ blockId }).select('productIds').session(session).lean();
+  if (!block || !(block.productIds || []).length) return;
+
+  const existingProducts = await Product.find({ _id: { $in: block.productIds } }, '_id').session(session).lean();
+  const existingIds = new Set(existingProducts.map((p) => String(p._id)));
+  const filteredIds = block.productIds.filter((id) => existingIds.has(String(id)));
+  if (filteredIds.length === block.productIds.length) return;
+
+  await Block.updateOne(
+    { blockId },
+    { $set: { productIds: filteredIds }, $inc: { version: 1 } },
+    { session }
+  );
+}
+
 async function emitPositionUpdates() {
   try {
     const changed = await refreshPickingTaskPositions();
@@ -154,6 +170,8 @@ router.get('/search/products', asyncHandler(async (req, res) => {
 router.get('/:number', asyncHandler(async (req, res) => {
   const num = Number(req.params.number);
   if (!num || num < 1) throw appError('block_invalid_number');
+
+  await repairBlockMissingProducts(num);
 
   const block = await Block.findOne({ blockId: num })
     .populate({ path: 'productIds', match: { status: { $in: ['active', 'pending'] } } })
@@ -353,16 +371,58 @@ router.post('/:number/add', staffOnly, asyncHandler(async (req, res) => {
       throw appError('product_in_other_block', { existingBlockId: existing.blockId });
     }
 
-    const safeIndex = index != null
-      ? Math.min(Math.max(0, Number(index)), current.productIds.length)
-      : current.productIds.length;
+    // Build the "visible" (client-side) productIds — same subset the client renders.
+    // Dangling IDs (products deleted without being $pull-ed from the block) cause a
+    // mismatch: client's drop-zone index is based on the visible count, but the raw
+    // array is longer, so $position ends up before the visible products.
+    const rawIds = current.productIds || [];
+    let rawPosition;
+    if (rawIds.length === 0 || index == null) {
+      rawPosition = rawIds.length; // append at end
+    } else {
+      const visibleDocs = await Product.find(
+        { _id: { $in: rawIds }, status: { $in: ['active', 'pending'] } },
+        '_id',
+      ).lean();
+      const visibleIdSet = new Set(visibleDocs.map((p) => String(p._id)));
+
+      // Prune dangling IDs atomically before inserting so future reads are clean
+      const danglingIds = rawIds.filter((id) => !visibleIdSet.has(String(id)));
+      if (danglingIds.length) {
+        const versionForClean = expectedVersion != null ? Number(expectedVersion) : current.version;
+        await Block.updateOne(
+          { blockId: num, version: versionForClean },
+          { $pull: { productIds: { $in: danglingIds } }, $inc: { version: 1 } },
+        );
+        continue; // retry with fresh current after cleanup
+      }
+
+      // Map visible index → raw position (they are equal when no dangling IDs, i.e. the common case)
+      const visibleIds = rawIds.filter((id) => visibleIdSet.has(String(id)));
+      const clampedVisible = Math.min(Math.max(0, Number(index)), visibleIds.length);
+
+      if (clampedVisible === 0) {
+        rawPosition = rawIds.findIndex((id) => visibleIdSet.has(String(id)));
+        if (rawPosition === -1) rawPosition = rawIds.length;
+      } else {
+        let seen = 0;
+        rawPosition = rawIds.length; // default: append
+        for (let i = 0; i < rawIds.length; i++) {
+          if (visibleIdSet.has(String(rawIds[i]))) {
+            seen++;
+            if (seen === clampedVisible) { rawPosition = i + 1; break; }
+          }
+        }
+      }
+    }
+
     const versionToMatch = expectedVersion != null ? Number(expectedVersion) : current.version;
 
     try {
       updatedRaw = await Block.findOneAndUpdate(
         { blockId: num, version: versionToMatch },
         {
-          $push: { productIds: { $each: [productId], $position: safeIndex } },
+          $push: { productIds: { $each: [productId], $position: rawPosition } },
           $inc: { version: 1 },
         },
         { new: true },
@@ -404,6 +464,30 @@ router.post('/:number/add', staffOnly, asyncHandler(async (req, res) => {
 
   emitPositionUpdates();
   res.json(updated);
+}));
+
+// DELETE /api/blocks/:number — only allowed when block is empty
+router.delete('/:number', requireTelegramRoles(['admin', 'manager']), asyncHandler(async (req, res) => {
+  const num = parseInt(req.params.number, 10);
+  if (isNaN(num)) throw appError(400, 'Invalid block number');
+
+  const block = await Block.findOne({ blockId: num }).lean();
+  if (!block) throw appError(404, 'Block not found');
+
+  const activeCount = await Product.countDocuments({
+    _id: { $in: block.productIds || [] },
+    status: { $in: ['active', 'pending'] },
+  });
+  if (activeCount > 0) throw appError(409, 'Block is not empty');
+
+  await Block.deleteOne({ blockId: num });
+
+  try {
+    const io = getIO();
+    io.emit('block_deleted', { blockId: num });
+  } catch (_) { /* socket not ready */ }
+
+  res.json({ ok: true, blockId: num });
 }));
 
 module.exports = router;

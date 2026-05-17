@@ -18,6 +18,11 @@ const ConflictSnapshotSchema = new mongoose.Schema({
   // Requesting seller's current shop active order (will follow seller to new shop via migrateSellerShop)
   sourceShopHasActiveOrder: { type: Boolean, default: false },
   sourceShopActiveOrderId: { type: mongoose.Schema.Types.ObjectId, ref: 'Order', default: null },
+  // Full target-shop picture at submission time (display/audit only — guards recompute fresh)
+  targetShopSellerCount: { type: Number, default: 0 },
+  targetShopActiveOrderCount: { type: Number, default: 0 },
+  targetShopDistinctBuyerCount: { type: Number, default: 0 },
+  targetShopHasConflict: { type: Boolean, default: false },
 }, { _id: false });
 
 const ShopTransferRequestSchema = new mongoose.Schema({
