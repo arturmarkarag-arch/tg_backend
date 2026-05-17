@@ -14,6 +14,7 @@ const { getOrderingSchedule } = require('../utils/getOrderingSchedule');
 const { appError } = require('../utils/errors');
 const { invalidateShop } = require('../utils/modelCache');
 const { snapshotClearedCart } = require('./clearedCart');
+const { logShopTransition } = require('./shopAudit');
 
 async function ensureOrderNotInPickingPipeline(orderId, session) {
   const exists = await PickingTask.exists({
@@ -78,6 +79,11 @@ async function migrateSellerShop({
     }
   }
 
+  // Note: active orders may sometimes belong to an earlier ordering session
+  // than the current one. The oldSessionId match is useful to prefer the current
+  // session, but we still fall back to any active order on the old shop so the
+  // seller's live order is not orphaned during reassignment.
+
   let newSessionId = null;
   let warehouseZone = '';
   if (newDeliveryGroupId) {
@@ -96,13 +102,27 @@ async function migrateSellerShop({
     let activeOrder = null;
 
     if (oldShopId) {
-      const orderQuery = {
+      const legacyOrderQuery = {
         buyerTelegramId: existingUser.telegramId,
-        shopId: existingUser.shopId,
         status: { $in: ['new', 'in_progress'] },
-        ...(oldSessionId ? { orderingSessionId: oldSessionId } : {}),
+        $or: [
+          { shopId: existingUser.shopId },
+          { 'buyerSnapshot.shopId': String(existingUser.shopId) },
+        ],
       };
-      activeOrder = await Order.findOne(orderQuery).session(session);
+
+      if (oldSessionId) {
+        activeOrder = await Order.findOne({
+          ...legacyOrderQuery,
+          orderingSessionId: oldSessionId,
+        }).session(session);
+      }
+
+      if (!activeOrder) {
+        activeOrder = await Order.findOne(legacyOrderQuery)
+          .sort({ updatedAt: -1, createdAt: -1 })
+          .session(session);
+      }
     } else {
       // Seller can be temporarily unassigned. In that case pick a parked active
       // order (no shop attached) and move it into the newly assigned shop.
@@ -248,6 +268,25 @@ async function migrateSellerShop({
       { session },
     );
   }
+
+  // Durable audit: record the transition + what happened to the active order.
+  await logShopTransition(session, {
+    actorTelegramId: String(actor?.telegramId || ''),
+    actorName: [actor?.firstName, actor?.lastName].filter(Boolean).join(' '),
+    actorRole: actor?.role || '',
+    sellerTelegramId: String(existingUser.telegramId),
+    sellerName: [existingUser.firstName, existingUser.lastName].filter(Boolean).join(' '),
+    fromShopId: oldShopId,
+    fromShopName: oldShopFull?.name || '',
+    toShopId: newShopId,
+    toShopName: newShopName,
+    reason,
+    source: 'migrate',
+    orderAction: movedOrder ? 'moved' : 'none',
+    orderId: movedOrder ? String(movedOrder._id) : '',
+    orderShopBefore: movedOrder ? oldShopId : '',
+    orderShopAfter: movedOrder ? newShopId : '',
+  });
 
   // IMPORTANT: cache invalidation is intentionally NOT done here.
   // Doing it inside withTransaction would publish a stale-read window:

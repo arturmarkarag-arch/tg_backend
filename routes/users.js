@@ -11,6 +11,7 @@ const { isOrderingOpen, getOrderingWindowOpenAt, isOrderingOpeningSoon } = requi
 const { getOrderingSchedule } = require('../utils/getOrderingSchedule');
 const ClearedCart = require('../models/ClearedCart');
 const { migrateSellerShop } = require('../services/migrateSellerShop');
+const { unassignSellerAndPark } = require('../services/unassignSeller');
 const { appError, asyncHandler } = require('../utils/errors');
 const { withLock } = require('../utils/lock');
 const { invalidateShop } = require('../utils/modelCache');
@@ -407,20 +408,28 @@ router.patch('/:telegramId/shop', asyncHandler(async (req, res) => {
 
   const { shopId } = req.body;
   if (!shopId) {
-    // Unassign from shop — simple update, no migration needed
+    // Unassign from shop. CRITICAL: the seller's active (not-yet-picked) order
+    // MUST be parked (shopId=null) here — otherwise it stays stranded on the old
+    // shop and a later assignment via migrateSellerShop (which only picks up
+    // PARKED orders when the seller has no shop) can never reunite them.
+    const actor = req.telegramUser || { telegramId: 'admin', firstName: 'Admin', lastName: '', role: 'admin' };
     const user = await withLock(`user:${req.params.telegramId}:shop`, async () => {
       const session = await mongoose.connection.startSession();
       try {
         let updated;
         await session.withTransaction(async () => {
           const now = new Date();
-          const oldShopId = existing.shopId ? String(existing.shopId) : null;
+          const freshSeller = await User.findOne({ telegramId: req.params.telegramId }).session(session);
+          if (!freshSeller) throw appError('user_not_found');
+          const oldShopId = freshSeller.shopId ? String(freshSeller.shopId) : null;
 
-          updated = await User.findOneAndUpdate(
-            { telegramId: req.params.telegramId },
-            { shopId: null, deliveryGroupId: '' },
-            { new: true, session }
-          );
+          await unassignSellerAndPark({
+            session,
+            seller: freshSeller,
+            fromShopId: oldShopId,
+            actor,
+            reason: 'admin_unassign_shop',
+          });
 
           if (oldShopId) {
             await Shop.findByIdAndUpdate(
@@ -428,15 +437,17 @@ router.patch('/:telegramId/shop', asyncHandler(async (req, res) => {
               {
                 lastSellerChangedAt: now,
                 lastSeller: {
-                  telegramId: existing.telegramId,
-                  firstName: existing.firstName || '',
-                  lastName: existing.lastName || '',
+                  telegramId: freshSeller.telegramId,
+                  firstName: freshSeller.firstName || '',
+                  lastName: freshSeller.lastName || '',
                   unassignedAt: now,
                 },
               },
               { session }
             );
           }
+
+          updated = await User.findOne({ telegramId: req.params.telegramId }).session(session).lean();
         });
         return updated;
       } finally {
@@ -545,6 +556,53 @@ router.patch('/:telegramId', asyncHandler(async (req, res) => {
     if (oldShopId) await invalidateShop(oldShopId);
     await invalidateShop(newShopFull._id);
     return res.json(result.updatedUser);
+  }
+
+  // Unassign via the generic edit form (shopId cleared) for a seller/admin:
+  // MUST park the active order, otherwise it is stranded on the old shop.
+  const shopClearing = payload.shopId !== undefined && !newShopId && oldShopId
+    && ['seller', 'admin'].includes(payload.role ?? existing.role);
+  if (shopClearing) {
+    const actor = req.telegramUser || { telegramId: 'admin', firstName: 'Admin', lastName: '', role: 'admin' };
+    const nonShopPayload = { ...payload };
+    delete nonShopPayload.shopId;
+    delete nonShopPayload.deliveryGroupId;
+    const updated = await withLock(`user:${req.params.telegramId}:shop`, async () => {
+      const session = await mongoose.connection.startSession();
+      try {
+        let out;
+        await session.withTransaction(async () => {
+          if (Object.keys(nonShopPayload).length > 0) {
+            await User.findOneAndUpdate({ telegramId: req.params.telegramId }, nonShopPayload, { session });
+          }
+          const freshSeller = await User.findOne({ telegramId: req.params.telegramId }).session(session);
+          if (!freshSeller) throw appError('user_not_found');
+          await unassignSellerAndPark({
+            session, seller: freshSeller, fromShopId: oldShopId, actor,
+            reason: 'admin_general_patch_unassign',
+          });
+          out = await User.findOne({ telegramId: req.params.telegramId }).session(session).lean();
+        });
+        return out;
+      } finally {
+        session.endSession();
+      }
+    });
+    await invalidateShop(oldShopId);
+    return res.json(updated);
+  }
+
+  // Raw fallback. If a seller/admin's shopId somehow changes here it bypasses
+  // order migration — log it loudly so the leak is visible instead of silent.
+  const rawShopLeak = payload.shopId !== undefined
+    && (payload.shopId ? String(payload.shopId) : null) !== oldShopId
+    && ['seller', 'admin'].includes(payload.role ?? existing.role);
+  if (rawShopLeak) {
+    console.warn(
+      `[SHOP_AUDIT:WARN] RAW shopId change via PATCH /users/${req.params.telegramId} ` +
+      `(${oldShopId || '∅'} → ${payload.shopId || '∅'}) — order NOT migrated. ` +
+      'This path should route through migrateSellerShop/unassignSellerAndPark.',
+    );
   }
 
   const user = await User.findOneAndUpdate(

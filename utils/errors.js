@@ -163,7 +163,7 @@ const ERRORS = {
   warehouse_only_manager_close:   { status: 403, message: 'Закривати зміну можуть лише менеджери складу або адмін' },
   // ── Picking ────────────────────────────────────────────────────────────────
   picking_task_not_found:         { status: 404, message: 'Завдання не знайдено' },
-  picking_product_not_found:      { status: 404, message: 'Товар не знайдено' },
+  picking_product_not_found:      { status: 404, message: 'Товар для збирання не знайдено (можливо, архівований або видалений)' },
   picking_current_block_invalid:  { status: 400, message: 'currentBlock має бути додатнім цілим числом' },
   picking_block_invalid:          { status: 400, message: 'blockId має бути додатнім цілим числом' },
   picking_delivery_group_required:{ status: 400, message: 'Для старту сесії збирання потрібно передати deliveryGroupId' },
@@ -179,7 +179,7 @@ const ERRORS = {
   expired_lock:                   { status: 403, message: 'Завдання вже взяв інший складник або час блокування минув' },
   // ── Orders ─────────────────────────────────────────────────────────────────
   order_query_forbidden:          { status: 403, message: 'Ви можете запитувати лише власні замовлення' },
-  order_not_found:                { status: 404, message: 'Замовлення не знайдено' },
+  // NB: order_not_found is defined once in the first Orders block above.
   order_view_forbidden:           { status: 403, message: 'У вас немає доступу до цього замовлення' },
   order_modify_forbidden:         { status: 403, message: 'У вас немає прав змінювати це замовлення' },
   order_seller_no_status:         { status: 403, message: 'Продавці не можуть змінювати статус замовлення' },
@@ -189,7 +189,7 @@ const ERRORS = {
   order_items_required:           { status: 400, message: 'Потрібно передати коректний список товарів' },
   order_no_valid_items:           { status: 400, message: 'Не знайдено жодного коректного товару' },
   order_shop_required:            { status: 400, message: 'Не вказано shopId' },
-  order_shop_not_found:           { status: 400, message: 'Магазин не знайдено' },
+  order_shop_not_found:           { status: 400, message: 'Магазин для замовлення не знайдено' },
   order_transit_failed:           { status: 500, message: 'Не вдалося отримати замовлення в дорозі' },
   order_fulfill_failed:           { status: 500, message: 'Не вдалося завершити замовлення' },
   product_archive_failed:   { status: 500, message: 'Не вдалося архівувати товар' },
@@ -301,13 +301,13 @@ const ERRORS = {
 
   // ── Shops (extra) ──────────────────────────────────────────────────────────
   shop_list_failed:         { status: 500, message: 'Не вдалося отримати список магазинів' },
-  shop_cities_failed:       { status: 500, message: 'Не вдалося отримати список міст' },
+  shop_cities_failed:       { status: 500, message: 'Не вдалося отримати список міст (модуль магазинів)' },
   shop_fetch_failed:        { status: 500, message: 'Не вдалося отримати магазин' },
   shop_name_required:       { status: 400, message: 'name є обовʼязковим' },
   shop_city_required:       { status: 400, message: 'cityId є обовʼязковим' },
   shop_delivery_group_required:{ status: 400, message: 'deliveryGroupId є обовʼязковим' },
-  shop_city_not_found:      { status: 400, message: 'Місто не знайдено' },
-  shop_delivery_group_not_found:{ status: 400, message: 'Групу доставки не знайдено' },
+  shop_city_not_found:      { status: 400, message: 'Місто магазину не знайдено' },
+  shop_delivery_group_not_found:{ status: 400, message: 'Групу доставки для магазину не знайдено' },
   shop_create_failed:       { status: 500, message: 'Не вдалося створити магазин' },
   shop_update_failed:       { status: 500, message: 'Не вдалося оновити магазин' },
 
@@ -316,6 +316,47 @@ const ERRORS = {
   group_no_members:         { status: 400, message: 'Група не має учасників' },
   group_broadcast_failed:   { status: 500, message: 'Не вдалося надіслати розсилку' },
 };
+
+// ─── Dev-time integrity guard ────────────────────────────────────────────────
+// A JS object literal silently keeps only the LAST of duplicate keys, so a
+// repeated error code would vanish without any warning (and the wrong message /
+// status would be served). Scan this file's own source at load time and fail
+// fast on duplicates; advise on identical messages that make client-side
+// triage ambiguous.
+(function assertErrorDictionaryIntegrity() {
+  try {
+    const src = require('fs').readFileSync(__filename, 'utf8');
+    const start = src.indexOf('const ERRORS = {');
+    const body = src.slice(start, src.indexOf('\n};', start));
+    const re = /^ {2}([a-z0-9_]+):\s*\{/gm;
+    const seen = new Set();
+    const dups = new Set();
+    let m;
+    while ((m = re.exec(body))) {
+      if (seen.has(m[1])) dups.add(m[1]);
+      seen.add(m[1]);
+    }
+    if (dups.size) {
+      throw new Error(`[errors.js] Duplicate error codes (silently overwritten): ${[...dups].join(', ')}`);
+    }
+    // Intentional alias pairs where a shared message is by design (client
+    // switches on the `error` code, not the text).
+    const INTENTIONAL_ALIASES = new Set(['auth_not_registered|not_registered']);
+    const byMsg = new Map();
+    for (const [k, v] of Object.entries(ERRORS)) {
+      if (typeof v.message !== 'string') continue;
+      byMsg.set(v.message, [...(byMsg.get(v.message) || []), k]);
+    }
+    for (const [msg, ks] of byMsg) {
+      if (ks.length > 1 && !INTENTIONAL_ALIASES.has([...ks].sort().join('|'))) {
+        console.warn(`[errors.js] Same message for codes [${ks.join(', ')}]: "${msg}" — make them distinct for clearer client triage.`);
+      }
+    }
+  } catch (e) {
+    if (/Duplicate error codes/.test(e.message)) throw e; // fatal — real bug
+    console.warn('[errors.js] integrity guard skipped:', e.message); // scan is best-effort
+  }
+})();
 
 // ─── AppError ────────────────────────────────────────────────────────────────
 class AppError extends Error {

@@ -2,6 +2,7 @@
 const Order = require('../models/Order');
 const User = require('../models/User');
 const PickingTask = require('../models/PickingTask');
+const { logShopTransition } = require('./shopAudit');
 
 // Unassign a seller from their shop and PARK their active orders that the
 // warehouse has not started picking yet (shopId=null so the order follows the
@@ -11,6 +12,9 @@ const PickingTask = require('../models/PickingTask');
 // All writes are scoped to the passed Mongo session.
 async function unassignSellerAndPark({ session, seller, fromShopId, actor, reason }) {
   const shopIdStr = fromShopId ? String(fromShopId) : (seller.shopId ? String(seller.shopId) : '');
+
+  const parkedIds = [];
+  const leftInPipelineIds = [];
 
   if (shopIdStr) {
     const activeOrders = await Order.find({
@@ -24,8 +28,9 @@ async function unassignSellerAndPark({ session, seller, fromShopId, actor, reaso
         'items.orderId': ord._id,
         status: { $in: ['pending', 'locked', 'completed'] },
       }).session(session);
-      if (inPipeline) continue;
+      if (inPipeline) { leftInPipelineIds.push(String(ord._id)); continue; }
 
+      parkedIds.push(String(ord._id));
       ord.shopId = null;
       if (!ord.buyerSnapshot) ord.buyerSnapshot = {};
       ord.buyerSnapshot.shopId = null;
@@ -49,6 +54,28 @@ async function unassignSellerAndPark({ session, seller, fromShopId, actor, reaso
     { $set: { shopId: null, deliveryGroupId: '', warehouseZone: '' } },
     { session },
   );
+
+  await logShopTransition(session, {
+    actorTelegramId: String(actor?.telegramId || ''),
+    actorName: [actor?.firstName, actor?.lastName].filter(Boolean).join(' '),
+    actorRole: actor?.role || '',
+    sellerTelegramId: String(seller.telegramId),
+    sellerName: [seller.firstName, seller.lastName].filter(Boolean).join(' '),
+    fromShopId: shopIdStr,
+    fromShopName: '',
+    toShopId: '',
+    toShopName: '',
+    reason: reason || 'seller_unassigned',
+    source: 'unassign',
+    orderAction: parkedIds.length ? 'parked' : 'none',
+    orderId: parkedIds[0] || '',
+    orderShopBefore: shopIdStr,
+    orderShopAfter: '',
+    note: [
+      parkedIds.length ? `parked=[${parkedIds.join(',')}]` : '',
+      leftInPipelineIds.length ? `inPipelineStayed=[${leftInPipelineIds.join(',')}]` : '',
+    ].filter(Boolean).join(' '),
+  });
 }
 
 module.exports = { unassignSellerAndPark };
