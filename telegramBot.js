@@ -44,6 +44,11 @@ async function handleMyChatMemberUpdate(update) {
     const newStatus = payload.new_chat_member?.status || payload.new_chat_member_status;
     if (!chatId || !newStatus) return;
 
+    const user = await User.findOne({ telegramId: chatId }).lean();
+    if (!user) {
+      return;
+    }
+
     if (newStatus === 'kicked') {
       await handleBotBlocked(chatId);
       await logBotInteraction(chatId, 'system', 'my_chat_member', 'kicked', { payload });
@@ -51,11 +56,20 @@ async function handleMyChatMemberUpdate(update) {
     }
 
     if (['member', 'administrator', 'creator'].includes(newStatus)) {
+      const wasBlocked = Boolean(user.botBlocked);
       await User.findOneAndUpdate(
         { telegramId: chatId },
         { botBlocked: false, botLastActivityAt: new Date() }
       );
       await logBotInteraction(chatId, 'system', 'my_chat_member', newStatus, { payload });
+
+      if (wasBlocked) {
+        const name = [user.firstName, user.lastName].filter(Boolean).join(' ') || chatId;
+        const roleLabels = { seller: 'Продавець', warehouse: 'Склад', admin: 'Адмін' };
+        const roleLabel = roleLabels[user.role] || user.role || 'Невідома роль';
+        const lines = [`✅ Користувач знову розблокував бота.`, `${roleLabel}: ${name}`, `telegramId: ${chatId}`];
+        await sendAdminNotification(lines.join('\n'));
+      }
     }
   } catch (error) {
     console.error('Failed to handle my_chat_member update:', error);
@@ -211,11 +225,21 @@ async function sendPhotoWithRetry(chatId, photo, options = {}, attempts = 3) {
 
 async function handleBotBlocked(telegramId) {
   try {
-    await User.findOneAndUpdate({ telegramId: String(telegramId) }, { botBlocked: true });
-    const blockedUser = await User.findOne({ telegramId: String(telegramId) }).lean();
+    const blockedUser = await User.findOneAndUpdate(
+      { telegramId: String(telegramId) },
+      { botBlocked: true },
+      { new: true }
+    ).lean();
+
+    if (!blockedUser) {
+      console.log(`[Bot] Bot blocked event ignored for unknown telegramId=${telegramId}`);
+      return;
+    }
+
     const name = [blockedUser?.firstName, blockedUser?.lastName].filter(Boolean).join(' ') || telegramId;
     const roleLabels = { seller: 'Продавець', warehouse: 'Склад', admin: 'Адмін' };
     const roleLabel = roleLabels[blockedUser?.role] || blockedUser?.role || 'Невідома роль';
+
     // shopName/shopCity are no longer on User — look up via shopId (cached)
     let shopDisplayName = '';
     if (blockedUser?.shopId) {

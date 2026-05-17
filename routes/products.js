@@ -1,8 +1,9 @@
 const express = require('express');
 const crypto = require('crypto');
 const mongoose = require('mongoose');
-const { S3Client, PutObjectCommand, HeadBucketCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3');
+const { S3Client, PutObjectCommand, GetObjectCommand, HeadBucketCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
+const { buildImageVariants } = require('../utils/imageService');
 const { shiftUp, shiftDown } = require('../utils/shiftOrderNumbers');
 const { normalizeBarcode } = require('../utils/barcodeScanner');
 const Block = require('../models/Block');
@@ -52,20 +53,13 @@ function r2PublicUrl(folder, filename) {
   return `${base}/${folder}/${filename}`;
 }
 
-// Generate a presigned PUT URL for direct client-to-R2 upload
-async function getUploadPresignedUrl(ext = 'jpg', folder = 'products') {
-  const safeExt = ext.replace(/[^a-zA-Z0-9]/g, '').toLowerCase() || 'jpg';
-  const safeFolder = ALLOWED_UPLOAD_FOLDERS.includes(folder) ? folder : 'products';
-  const filename = `${crypto.randomUUID()}.${safeExt}`;
-  const key = `${safeFolder}/${filename}`;
-  const contentType = safeExt === 'gif' ? 'image/gif' : 'image/jpeg';
-  const command = new PutObjectCommand({
+async function r2Put(key, body, contentType = 'image/jpeg') {
+  await s3Client.send(new PutObjectCommand({
     Bucket: process.env.R2_BUCKET_NAME,
     Key: key,
+    Body: body,
     ContentType: contentType,
-  });
-  const uploadUrl = await getSignedUrl(s3Client, command, { expiresIn: 300 });
-  return { uploadUrl, filename, key, folder: safeFolder, contentType };
+  }));
 }
 
 async function deleteR2Objects(keys = []) {
@@ -102,15 +96,34 @@ router.get('/upload-url-public', asyncHandler(async (req, res) => {
   res.json({ uploadUrl, filename, key, contentType });
 }));
 
-// GET /api/v1/products/upload-url?ext=jpg&folder=products — returns a presigned PUT URL for direct R2 upload
-router.get('/upload-url', staffOnly, asyncHandler(async (req, res) => {
-  const ext = String(req.query.ext || 'jpg').replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
-  const folder = String(req.query.folder || 'products');
-  const allowed = ['jpg', 'jpeg', 'png', 'webp', 'gif'];
-  if (!allowed.includes(ext)) throw appError('product_image_unsupported');
-  const result = await getUploadPresignedUrl(ext === 'jpeg' ? 'jpg' : ext, folder);
-  res.json(result);
-}));
+// POST /api/v1/products/upload-image?folder=products — raw image bytes in body.
+// The server resizes via sharp into a main (1200px) + thumb (240px) JPEG pair,
+// stores both in R2 (<folder>/<name>.jpg and thumbs/<name>.jpg) and returns the
+// shared filename. This is the single image-processing entry point.
+router.post(
+  '/upload-image',
+  staffOnly,
+  express.raw({ type: () => true, limit: '30mb' }),
+  asyncHandler(async (req, res) => {
+    const folder = String(req.query.folder || 'products');
+    const safeFolder = ALLOWED_UPLOAD_FOLDERS.includes(folder) ? folder : 'products';
+    if (!Buffer.isBuffer(req.body) || req.body.length === 0) {
+      throw appError('product_photo_required');
+    }
+
+    const { filename, main, thumb } = await buildImageVariants(req.body);
+    await Promise.all([
+      r2Put(`${safeFolder}/${filename}`, main),
+      r2Put(`thumbs/${filename}`, thumb),
+    ]);
+
+    res.json({
+      filename,
+      url: r2PublicUrl(safeFolder, filename),
+      thumbUrl: r2PublicUrl('thumbs', filename),
+    });
+  }),
+);
 
 
 // GET /api/products/drafts — pending (unconfirmed) products
