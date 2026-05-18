@@ -3,6 +3,7 @@ const User = require('../../models/User');
 const RegistrationRequest = require('../../models/RegistrationRequest');
 const { appError, asyncHandler } = require('../../utils/errors');
 const { verifyTelegramWidget } = require('../../utils/telegramWidget');
+const { verifyGoogleIdToken, isConfigured: googleConfigured } = require('../../utils/googleAuth');
 const { signSession, verifySession } = require('../../utils/jwt');
 const { getBot } = require('../../telegramBot');
 const { buildUserProfile } = require('./telegram');
@@ -36,7 +37,30 @@ router.get('/config', asyncHandler(async (req, res) => {
       } catch { /* bot not ready — client will retry */ }
     }
   }
-  res.json({ botUsername: cachedBotUsername });
+  res.json({
+    botUsername: cachedBotUsername,
+    // Single-sourced so the client doesn't need its own build-time env.
+    googleClientId: process.env.GOOGLE_AUTH_CLIENT_ID || '',
+  });
+}));
+
+// Google Sign-In callback. Body = { credential } (the Google ID token from
+// the GIS button). We verify it locally, then log in whichever account has
+// linked this Gmail. Same JWT + profile shape as the Telegram widget path.
+router.post('/google', asyncHandler(async (req, res) => {
+  if (!googleConfigured()) throw appError('google_auth_not_configured');
+
+  const credential = req.body?.credential;
+  const result = await verifyGoogleIdToken(credential);
+  if (!result) throw appError('google_invalid_token');
+  if (!result.emailVerified) throw appError('google_email_unverified');
+
+  const user = await User.findOne({ googleEmail: result.email }).lean();
+  if (!user) throw appError('google_email_not_linked', { email: result.email });
+  if (user.botBlocked) throw appError('registration_blocked');
+
+  const token = signSession(user.telegramId);
+  res.json({ token, profile: await buildUserProfile(user) });
 }));
 
 // Telegram Login Widget callback. Body = the object the widget passes to

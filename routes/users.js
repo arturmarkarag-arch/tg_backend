@@ -13,6 +13,7 @@ const ClearedCart = require('../models/ClearedCart');
 const { migrateSellerShop } = require('../services/migrateSellerShop');
 const { unassignSellerAndPark } = require('../services/unassignSeller');
 const { appError, asyncHandler } = require('../utils/errors');
+const { normalizeEmail, isValidEmail } = require('../utils/email');
 const { withLock } = require('../utils/lock');
 const { invalidateShop } = require('../utils/modelCache');
 const { getIO } = require('../socket');
@@ -29,6 +30,23 @@ async function sanitizeUserPayload(payload, existing = null) {
   if (payload.firstName  !== undefined) data.firstName  = payload.firstName;
   if (payload.lastName   !== undefined) data.lastName   = payload.lastName;
   if (payload.phoneNumber !== undefined) data.phoneNumber = payload.phoneNumber;
+  // Linked Gmail for browser sign-in. Empty clears it; non-empty must be a
+  // valid address not already owned by another account.
+  if (payload.googleEmail !== undefined) {
+    if (payload.googleEmail === null || String(payload.googleEmail).trim() === '') {
+      data.googleEmail = '';
+    } else {
+      const email = normalizeEmail(payload.googleEmail);
+      if (!isValidEmail(email)) throw appError('profile_email_invalid');
+      const selfTid = existing?.telegramId || payload.telegramId;
+      const taken = await User.findOne({
+        googleEmail: email,
+        telegramId: { $ne: selfTid },
+      }).select('_id').lean();
+      if (taken) throw appError('profile_email_taken');
+      data.googleEmail = email;
+    }
+  }
   if (payload.botBlocked !== undefined && payload.botBlocked !== null) {
     data.botBlocked = Boolean(payload.botBlocked === 'false' ? false : payload.botBlocked);
   }

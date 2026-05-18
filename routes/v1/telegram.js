@@ -15,6 +15,7 @@ const { getIO } = require('../../socket');
 const { appError, asyncHandler } = require('../../utils/errors');
 const { withLock } = require('../../utils/lock');
 const { getShop, getDeliveryGroup } = require('../../utils/modelCache');
+const { normalizeEmail, isValidEmail } = require('../../utils/email');
 
 const router = express.Router();
 const adminOnly = requireTelegramRole('admin');
@@ -98,6 +99,7 @@ async function buildUserProfile(user) {
     firstName: user.firstName,
     lastName: user.lastName,
     phoneNumber: user.phoneNumber || '',
+    googleEmail: user.googleEmail || '',
     shopId: userShop ? String(userShop._id) : null,
     shop: userShop ? { _id: userShop._id, name: userShop.name, city: userShop.cityId?.name || '', deliveryGroupId: userShop.deliveryGroupId, cartState: normalizedCartState } : null,
     shopName: userShop?.name || '',
@@ -258,7 +260,7 @@ router.patch('/me/profile', asyncHandler(async (req, res) => {
   if (!user) throw appError('auth_required');
   if (!['seller', 'warehouse'].includes(user.role)) throw appError('forbidden');
 
-  const { firstName, lastName, phoneNumber } = req.body || {};
+  const { firstName, lastName, phoneNumber, googleEmail } = req.body || {};
   const patch = {};
   if (typeof firstName === 'string') {
     const v = firstName.trim();
@@ -271,6 +273,24 @@ router.patch('/me/profile', asyncHandler(async (req, res) => {
   if (phoneNumber !== undefined && phoneNumber !== null) {
     patch.phoneNumber = normalizePhoneNumber(phoneNumber);
   }
+  // Personal data, like phoneNumber — applied directly, no admin approval.
+  // Empty string clears the link; a non-empty value must be a valid email
+  // not already owned by another account.
+  if (typeof googleEmail === 'string') {
+    const email = normalizeEmail(googleEmail);
+    if (email === '') {
+      patch.googleEmail = '';
+    } else if (!isValidEmail(email)) {
+      throw appError('profile_email_invalid');
+    } else {
+      const taken = await User.findOne({
+        googleEmail: email,
+        telegramId: { $ne: user.telegramId },
+      }).select('_id').lean();
+      if (taken) throw appError('profile_email_taken');
+      patch.googleEmail = email;
+    }
+  }
 
   if (Object.keys(patch).length === 0) throw appError('me_profile_no_changes');
 
@@ -280,6 +300,7 @@ router.patch('/me/profile', asyncHandler(async (req, res) => {
     firstName: fresh?.firstName || '',
     lastName: fresh?.lastName || '',
     phoneNumber: fresh?.phoneNumber || '',
+    googleEmail: fresh?.googleEmail || '',
   });
 }));
 
@@ -485,7 +506,7 @@ router.post('/mini-app/reset-state', asyncHandler(async (req, res) => {
 }));
 
 router.post('/register-request', asyncHandler(async (req, res) => {
-  const { firstName, lastName, phoneNumber, shopId, role } = req.body;
+  const { firstName, lastName, phoneNumber, shopId, role, googleEmail } = req.body;
 
   const { valid, telegramId, error } = getTelegramAuth(req, process.env.TELEGRAM_BOT_TOKEN);
   if (!valid) throw appError('auth_invalid_init_data', { reason: error });
@@ -494,6 +515,15 @@ router.post('/register-request', asyncHandler(async (req, res) => {
   if (!firstName || !lastName || !role) throw appError('registration_required_fields');
   if (!['seller', 'warehouse'].includes(role)) throw appError('registration_invalid_role');
   if (role === 'seller' && !shopId) throw appError('registration_seller_shop_required');
+
+  // Optional Gmail for browser login. Validate + reject if already linked.
+  let cleanEmail = '';
+  if (googleEmail !== undefined && googleEmail !== null && String(googleEmail).trim() !== '') {
+    cleanEmail = normalizeEmail(googleEmail);
+    if (!isValidEmail(cleanEmail)) throw appError('registration_email_invalid');
+    const emailTaken = await User.findOne({ googleEmail: cleanEmail }).select('_id').lean();
+    if (emailTaken) throw appError('registration_email_taken');
+  }
 
   const existingUser = await User.findOne({ telegramId }).lean();
   if (existingUser) throw appError('registration_user_exists');
@@ -529,6 +559,7 @@ router.post('/register-request', asyncHandler(async (req, res) => {
     firstName,
     lastName,
     phoneNumber: cleanPhone,
+    googleEmail: cleanEmail,
     shopId:          role === 'seller' ? String(shop._id) : null,
     deliveryGroupId: role === 'seller' ? shop.deliveryGroupId : '',
     role,
@@ -542,6 +573,7 @@ router.post('/register-request', asyncHandler(async (req, res) => {
     `Імʼя: ${firstName}\n` +
     `Прізвище: ${lastName}\n` +
     (cleanPhone ? `Телефон: ${cleanPhone}\n` : '') +
+    (cleanEmail ? `Gmail: ${cleanEmail}\n` : '') +
     `Роль: ${roleLabel}\n` +
     (role === 'seller'
       ? `Назва магазину: ${shop.name}\nМісто: ${shop.cityId?.name || 'не вказано'}\nГрупа доставки: ${group.name} (${DAY_SHORT[group.dayOfWeek] || 'День'})\n`
@@ -602,6 +634,16 @@ router.post('/register-requests/:id/approve', adminOnly, asyncHandler(async (req
         return; // commit the rejected state; throw after the tx
       }
 
+      // The Gmail may have been linked by someone else between request and
+      // approve. Drop it rather than fail the whole approval — the user can
+      // re-link a different address from their profile afterwards.
+      let resolvedGoogleEmail = request.googleEmail || '';
+      if (resolvedGoogleEmail) {
+        const emailOwner = await User.findOne({ googleEmail: resolvedGoogleEmail })
+          .select('_id').session(session).lean();
+        if (emailOwner) resolvedGoogleEmail = '';
+      }
+
       let resolvedShopId = null;
       let resolvedDeliveryGroupId = request.role === 'seller' ? request.deliveryGroupId || '' : '';
       let resolvedWarehouseZone = '';
@@ -627,6 +669,7 @@ router.post('/register-requests/:id/approve', adminOnly, asyncHandler(async (req
         firstName: request.firstName,
         lastName: request.lastName,
         phoneNumber: request.phoneNumber || '',
+        googleEmail: resolvedGoogleEmail,
         shopId: resolvedShopId,
         deliveryGroupId: resolvedDeliveryGroupId,
         warehouseZone: resolvedWarehouseZone,

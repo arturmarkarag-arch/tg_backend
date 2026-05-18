@@ -16,6 +16,9 @@ const UserSchema = new mongoose.Schema(
     firstName: { type: String, default: '' },
     lastName: { type: String, default: '' },
     phoneNumber: { type: String, default: '' },
+    // Linked Google account for browser sign-in. Empty string = not linked.
+    // Lowercased/trimmed on save; queries must normalize the same way.
+    googleEmail: { type: String, default: '', lowercase: true, trim: true },
     shopNumber: { type: String, default: '' },
     shopId: { type: mongoose.Schema.Types.ObjectId, ref: 'Shop', default: null },
     deliveryGroupId: { type: String, default: '' },
@@ -53,6 +56,13 @@ const UserSchema = new mongoose.Schema(
     history: { type: [UserHistoryEntrySchema], default: [] },
   },
   { timestamps: true }
+);
+
+// Unique only among accounts that actually linked a Gmail. The default ''
+// (and legacy docs with no field) are excluded, so they never collide.
+UserSchema.index(
+  { googleEmail: 1 },
+  { unique: true, partialFilterExpression: { googleEmail: { $gt: '' } } },
 );
 
 module.exports = mongoose.model('User', UserSchema);

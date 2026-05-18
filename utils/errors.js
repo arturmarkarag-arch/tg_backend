@@ -114,6 +114,14 @@ const ERRORS = {
   // Backwards-compat alias used by mini-app client code that switches on `error` value.
   not_registered:           { status: 403, message: 'Користувача не зареєстровано' },
   auth_required:            { status: 401, message: 'Потрібна авторизація через Telegram' },
+
+  // ── Google browser login ───────────────────────────────────────────────────
+  google_auth_not_configured: { status: 503, message: 'Вхід через Google тимчасово недоступний (сервер не налаштовано).' },
+  google_invalid_token:     { status: 401, message: 'Не вдалося перевірити вхід Google. Спробуйте ще раз.' },
+  google_email_unverified:  { status: 403, message: 'Ваша Google-пошта не підтверджена. Підтвердьте її в акаунті Google і повторіть.' },
+  google_email_not_linked:  { status: 403, message: ({ email } = {}) =>
+                                `Пошту${email ? ` ${email}` : ''} не прив'язано до жодного акаунту. Спершу вкажіть її при реєстрації або в налаштуваннях профілю через Telegram.` },
+
   auth_role_required:       { status: 403, message: ({ allowed = [] } = {}) =>
                                 `Доступ заборонено. Дозволено лише: ${(Array.isArray(allowed) ? allowed : [allowed]).join(', ')}` },
 
@@ -246,6 +254,8 @@ const ERRORS = {
   openai_models_failed:     { status: 500, message: 'Не вдалося отримати список моделей OpenAI' },
   me_shop_required:         { status: 400, message: 'shopId є обовʼязковим' },
   me_profile_no_changes:    { status: 400, message: 'Немає змін для збереження' },
+  profile_email_invalid:    { status: 400, message: 'Невірний формат email у профілі' },
+  profile_email_taken:      { status: 409, message: 'Цю Google-пошту вже привʼязано до іншого акаунту' },
   me_state_invalid_index:   { status: 400, message: ({ field } = {}) =>
                                 `Поле «${field || 'currentIndex'}» має бути цілим невідʼємним числом` },
   init_data_required:       { status: 400, message: 'Відсутні дані Telegram (initData)' },
@@ -255,6 +265,8 @@ const ERRORS = {
   registration_required_fields: { status: 400, message: 'Будь ласка, заповніть всі обовʼязкові поля' },
   registration_invalid_role:{ status: 400, message: 'Невірно вибрана роль' },
   registration_seller_shop_required: { status: 400, message: 'Магазин є обовʼязковим для продавця' },
+  registration_email_invalid: { status: 400, message: 'Невірний формат email у заявці' },
+  registration_email_taken: { status: 409, message: 'Цю Google-пошту вже привʼязано до іншого акаунту в системі' },
   registration_shop_inactive: { status: 400, message: 'Магазин не знайдено або він неактивний' },
   registration_shop_no_group: { status: 400, message: 'Магазин не привʼязаний до групи доставки' },
   registration_group_not_found: { status: 400, message: 'Групу доставки магазину не знайдено' },
