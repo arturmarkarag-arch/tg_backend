@@ -10,6 +10,7 @@ const deliveryGroupsRouter = require('./routes/deliveryGroups');
 const { router: archiveRouter } = require('./routes/archive');
 const blocksRouter = require('./routes/blocks');
 const telegramV1Router = require('./routes/v1/telegram');
+const authV1Router = require('./routes/v1/auth');
 const adminRouter = require('./routes/admin');
 const searchProductsRouter = require('./routes/searchProducts');
 const { getBotStatus } = require('./telegramBot');
@@ -29,6 +30,7 @@ app.use('/warehouse-test', express.static(path.join(__dirname, '../Тести Е
 const { telegramAuth } = require('./middleware/telegramAuth');
 
 const publicApiPaths = [
+  /^\/api\/v1\/auth(\/.*)?$/,
   /^\/api\/search-products(\/.*)?$/,
   /^\/api\/v1\/products\/report-missing$/,
   /^\/api\/v1\/telegram\/validate$/,
@@ -89,6 +91,7 @@ app.use('/api/admin', adminRouter);
 app.use('/api/shops', shopsRouter);
 app.use('/api/shop-transfer', shopTransferRouter);
 app.use('/api/v1/telegram', telegramV1Router);
+app.use('/api/v1/auth', authV1Router);
 app.use('/api/warehouse-test', warehouseTestRouter);
 
 // Centralised error handler — converts AppError (and known Mongoose errors)

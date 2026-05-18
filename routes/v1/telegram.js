@@ -62,6 +62,61 @@ async function resolveWarehouseZone(user) {
   return group?.name || '';
 }
 
+// Builds the public profile payload for an authenticated user. Shared by the
+// Telegram mini-app path (POST /me, initData) and the browser path
+// (GET /api/v1/auth/me, JWT) so both return an identical shape.
+async function buildUserProfile(user) {
+  const userShop = user.shopId ? await getShop(user.shopId) : null;
+  const resolvedGroupId = userShop?.deliveryGroupId || user.deliveryGroupId || '';
+
+  let sessionOpenAt = null;
+  if ((user.role === 'seller' || user.role === 'admin') && resolvedGroupId) {
+    try {
+      const group = normalizeDeliveryGroup(await DeliveryGroup.findById(resolvedGroupId).lean());
+      if (group) {
+        const schedule = await getOrderingSchedule();
+        sessionOpenAt = getOrderingWindowOpenAt(group.dayOfWeek, schedule).toISOString();
+      }
+    } catch { /* non-critical */ }
+  }
+
+  let activeSellerCount = 1;
+  if (userShop) {
+    const thirtyMinsAgo = new Date(Date.now() - 30 * 60 * 1000);
+    activeSellerCount = await User.countDocuments({
+      shopId: userShop._id,
+      'miniAppState.updatedAt': { $gte: thirtyMinsAgo },
+    });
+    if (activeSellerCount < 1) activeSellerCount = 1;
+  }
+
+  const normalizedCartState = { ...normalizeCartState(user.cartState), activeSellerCount };
+
+  return {
+    telegramId: user.telegramId,
+    role: user.role,
+    firstName: user.firstName,
+    lastName: user.lastName,
+    phoneNumber: user.phoneNumber || '',
+    shopId: userShop ? String(userShop._id) : null,
+    shop: userShop ? { _id: userShop._id, name: userShop.name, city: userShop.cityId?.name || '', deliveryGroupId: userShop.deliveryGroupId, cartState: normalizedCartState } : null,
+    shopName: userShop?.name || '',
+    shopNumber: user.shopNumber,
+    shopCity: userShop?.cityId?.name || '',
+    deliveryGroupId: resolvedGroupId,
+    warehouseZone: await resolveWarehouseZone(user),
+    isWarehouseManager: user.isWarehouseManager || false,
+    isOnShift: user.isOnShift || false,
+    shiftZone: user.shiftZone || { startBlock: null, endBlock: null },
+    sessionOpenAt,
+    miniAppState: normalizeMiniAppState(user.miniAppState || {
+      lastViewedProductId: '',
+      currentIndex: 0,
+      updatedAt: null,
+    }),
+  };
+}
+
 // POST /api/v1/telegram/validate — перевірити підпис initData
 router.post('/validate', asyncHandler(async (req, res) => {
   const initData = getInitDataFromRequest(req);
@@ -99,57 +154,7 @@ router.post('/me', asyncHandler(async (req, res) => {
   }
 
   // 3. Повертаємо профіль (без чутливих полів). Shop резолвиться з кешу.
-  const userShop = user.shopId ? await getShop(user.shopId) : null;
-  const resolvedGroupId = userShop?.deliveryGroupId || user.deliveryGroupId || '';
-
-  // Обчислити sessionOpenAt для продавця та адміна з магазином (для визначення нової сесії на клієнті)
-  let sessionOpenAt = null;
-  if ((user.role === 'seller' || user.role === 'admin') && resolvedGroupId) {
-    try {
-      const group = normalizeDeliveryGroup(await DeliveryGroup.findById(resolvedGroupId).lean());
-      if (group) {
-        const schedule = await getOrderingSchedule();
-        sessionOpenAt = getOrderingWindowOpenAt(group.dayOfWeek, schedule).toISOString();
-      }
-    } catch { /* non-critical */ }
-  }
-
-  // Count sellers from the same shop active in the last 30 minutes (co-seller awareness)
-  let activeSellerCount = 1;
-  if (userShop) {
-    const thirtyMinsAgo = new Date(Date.now() - 30 * 60 * 1000);
-    activeSellerCount = await User.countDocuments({
-      shopId: userShop._id,
-      'miniAppState.updatedAt': { $gte: thirtyMinsAgo },
-    });
-    if (activeSellerCount < 1) activeSellerCount = 1;
-  }
-
-  const normalizedCartState = { ...normalizeCartState(user.cartState), activeSellerCount };
-
-  res.json({
-    telegramId: user.telegramId,
-    role: user.role,
-    firstName: user.firstName,
-    lastName: user.lastName,
-    phoneNumber: user.phoneNumber || '',
-    shopId: userShop ? String(userShop._id) : null,
-    shop: userShop ? { _id: userShop._id, name: userShop.name, city: userShop.cityId?.name || '', deliveryGroupId: userShop.deliveryGroupId, cartState: normalizedCartState } : null,
-    shopName: userShop?.name || '',
-    shopNumber: user.shopNumber,
-    shopCity: userShop?.cityId?.name || '',
-    deliveryGroupId: resolvedGroupId,
-    warehouseZone: await resolveWarehouseZone(user),
-    isWarehouseManager: user.isWarehouseManager || false,
-    isOnShift: user.isOnShift || false,
-    shiftZone: user.shiftZone || { startBlock: null, endBlock: null },
-    sessionOpenAt,
-    miniAppState: normalizeMiniAppState(user.miniAppState || {
-      lastViewedProductId: '',
-      currentIndex: 0,
-      updatedAt: null,
-    }),
-  });
+  res.json(await buildUserProfile(user));
 }));
 
 // PATCH /api/v1/telegram/me/shop — seller оновлює свій магазин.
@@ -677,3 +682,5 @@ router.delete('/register-requests/:id', adminOnly, asyncHandler(async (req, res)
 }));
 
 module.exports = router;
+// Reuse the same profile shape on the browser (JWT) auth path.
+module.exports.buildUserProfile = buildUserProfile;

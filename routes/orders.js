@@ -512,14 +512,15 @@ router.post('/', asyncHandler(async (req, res) => {
 async function placeOrderImpl(req, res) {
   const { initData, buyerTelegramId, items, shippingAddress, contactInfo, emojiType, idempotencyKey } = req.body;
 
-  const validation = getTelegramAuth(req, process.env.TELEGRAM_BOT_TOKEN);
-  if (!validation.valid) {
-    throw appError('order_invalid_initdata');
-  }
-
-  const telegramId = String(validation.telegramId || '');
+  // Identity is established by the flexible telegramAuth middleware (initData OR
+  // browser JWT). Fall back to re-validating body initData only if it isn't.
+  let telegramId = String(req.telegramId || '');
   if (!telegramId) {
-    throw appError('order_invalid_initdata');
+    const validation = getTelegramAuth(req, process.env.TELEGRAM_BOT_TOKEN);
+    if (!validation.valid || !validation.telegramId) {
+      throw appError('order_invalid_initdata');
+    }
+    telegramId = String(validation.telegramId);
   }
 
   if (buyerTelegramId && String(buyerTelegramId) !== telegramId) {

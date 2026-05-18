@@ -3,6 +3,7 @@ const mongoose = require('mongoose');
 const Block = require('./models/Block');
 const User = require('./models/User');
 const { validateTelegramInitData } = require('./utils/validateTelegramInitData');
+const { verifySession } = require('./utils/jwt');
 const { pubClient, subClient, isEnabled: redisEnabled } = require('./utils/redis');
 const { createAdapter } = require('@socket.io/redis-adapter');
 
@@ -59,25 +60,35 @@ function initSocket(httpServer) {
     console.warn('[Socket] Running without Redis adapter — single-process only');
   }
 
-  // Auth middleware — verify initData on every socket connection
+  // Auth middleware — verify initData (mini-app) OR session JWT (browser).
   io.use(async (socket, next) => {
     const initData = socket.handshake.auth?.initData;
-    if (!initData) {
-      return next(new Error('Unauthorized: initData is required'));
-    }
-    const { valid, error } = validateTelegramInitData(initData, process.env.TELEGRAM_BOT_TOKEN);
-    if (!valid) {
-      return next(new Error(`Unauthorized: ${error || 'Invalid initData'}`));
-    }
-    const params = new URLSearchParams(initData);
+    const token = socket.handshake.auth?.token;
     let telegramId = '';
-    try {
-      const user = JSON.parse(params.get('user') || '{}');
-      telegramId = String(user.id || '');
-      socket.userName = [user.first_name, user.last_name].filter(Boolean).join(' ').trim() || telegramId;
-    } catch {
-      return next(new Error('Unauthorized: Could not parse user from initData'));
+
+    if (initData) {
+      const { valid, error } = validateTelegramInitData(initData, process.env.TELEGRAM_BOT_TOKEN);
+      if (!valid) {
+        return next(new Error(`Unauthorized: ${error || 'Invalid initData'}`));
+      }
+      try {
+        const params = new URLSearchParams(initData);
+        const user = JSON.parse(params.get('user') || '{}');
+        telegramId = String(user.id || '');
+        socket.userName = [user.first_name, user.last_name].filter(Boolean).join(' ').trim() || telegramId;
+      } catch {
+        return next(new Error('Unauthorized: Could not parse user from initData'));
+      }
+    } else if (token) {
+      const session = verifySession(token);
+      if (!session) {
+        return next(new Error('Unauthorized: Invalid session token'));
+      }
+      telegramId = session.telegramId;
+    } else {
+      return next(new Error('Unauthorized: initData or token is required'));
     }
+
     if (!telegramId) {
       return next(new Error('Unauthorized: Missing telegramId'));
     }
@@ -85,8 +96,14 @@ function initSocket(httpServer) {
     if (!dbUser) {
       return next(new Error('Unauthorized: User not registered'));
     }
+    if (dbUser.botBlocked) {
+      return next(new Error('Forbidden: Account blocked'));
+    }
     if (!['admin', 'warehouse', 'seller'].includes(dbUser.role)) {
       return next(new Error('Forbidden: Insufficient role'));
+    }
+    if (!socket.userName) {
+      socket.userName = [dbUser.firstName, dbUser.lastName].filter(Boolean).join(' ').trim() || telegramId;
     }
     socket.telegramId = telegramId;
     socket.userRole = dbUser.role;

@@ -980,15 +980,10 @@ router.post('/:id/commit', staffOnly, asyncHandler(async (req, res) => {
     const pendingItem = items.find((item) => item.warehousePending);
     if (pendingItem) throw appError('receipt_item_pending', { name: pendingItem.name });
 
-    const orphanTransit = items.find(
-      (item) => item.transitQty > 0 && (!item.deliveryGroupIds || item.deliveryGroupIds.length === 0),
-    );
-    if (orphanTransit) {
-      throw appError('receipt_item_orphan_transit', {
-        name: orphanTransit.name,
-        transitQty: orphanTransit.transitQty,
-      });
-    }
+    // Items may be marked `destination='shops'` without delivery groups.
+    // Keep `transitQty` as a bookkeeping/operational marker but do not
+    // require deliveryGroupIds here — distribution to sellers is handled
+    // by a separate process/worker and **must not** be created during commit.
 
     const createdProducts = [];
 
@@ -1090,80 +1085,10 @@ router.post('/:id/commit', staffOnly, asyncHandler(async (req, res) => {
       createdProducts.push(currentProduct);
 
       // 2. Transit allocation
-      if (item.transitQty > 0 && item.deliveryGroupIds && item.deliveryGroupIds.length > 0) {
-        // New architecture: users carry shopId; legacy users carry deliveryGroupId directly.
-        const shops = await Shop.find(
-          { deliveryGroupId: { $in: item.deliveryGroupIds }, isActive: true },
-          '_id'
-        ).session(session).lean();
-        const shopIds = shops.map((s) => s._id);
-        const targetUsers = await User.find({
-          $or: [
-            { shopId: { $in: shopIds } },
-            { deliveryGroupId: { $in: item.deliveryGroupIds } },
-          ],
-          role: 'seller',
-        }).session(session).lean();
-
-        if (targetUsers.length > 0) {
-          // 4.4: Fisher-Yates shuffle for unbiased random distribution
-          const shuffledUsers = [...targetUsers];
-          for (let i = shuffledUsers.length - 1; i > 0; i--) {
-            const j = Math.floor(Math.random() * (i + 1));
-            [shuffledUsers[i], shuffledUsers[j]] = [shuffledUsers[j], shuffledUsers[i]];
-          }
-          const packSize = Math.max(1, item.qtyPerPackage || 1);
-          const baseQty = item.qtyPerShop > 0
-            ? item.qtyPerShop
-            : Math.floor(item.transitQty / targetUsers.length);
-
-          let remainingTransit = item.transitQty;
-          const allocations = shuffledUsers.map((user) => ({ user, qty: 0 }));
-
-          if (baseQty > 0) {
-            for (const alloc of allocations) {
-              if (remainingTransit >= baseQty) {
-                alloc.qty += baseQty;
-                remainingTransit -= baseQty;
-              } else {
-                break;
-              }
-            }
-          }
-
-          // Distribute remainder 1 pack at a time — guarded against empty allocations or invalid packSize
-          let i = 0;
-          while (remainingTransit > 0) {
-            if (allocations.length === 0 || packSize < 1) break;
-            const addQty = Math.min(remainingTransit, packSize);
-            allocations[i % allocations.length].qty += addQty;
-            remainingTransit -= addQty;
-            i++;
-          }
-
-          for (const alloc of allocations) {
-            if (alloc.qty <= 0) continue;
-            const idempotencyKey = `direct_${receipt._id}_${currentProduct._id}_${alloc.user.telegramId}`;
-            // Pre-check prevents E11000 inside the transaction (any duplicate error in a session aborts it)
-            if (await Order.exists({ idempotencyKey }).session(session)) continue;
-            const directOrder = new Order({
-              buyerTelegramId: alloc.user.telegramId,
-              orderType: 'direct_allocation',
-              receiptId: receipt._id,
-              status: 'confirmed',
-              items: [{
-                productId: currentProduct._id,
-                name: currentProduct.brand || currentProduct.model || item.name,
-                price: currentProduct.price,
-                quantity: alloc.qty,
-              }],
-              totalPrice: currentProduct.price * alloc.qty,
-              idempotencyKey,
-            });
-            await directOrder.save({ session });
-          }
-        }
-      }
+      // Automatic distribution to sellers (creating `direct_allocation` orders)
+      // has been intentionally disabled. `transitQty` remains a marker so
+      // the operations team can later process shipments to shops without
+      // the commit step performing allocations.
     }
 
     await session.commitTransaction();
