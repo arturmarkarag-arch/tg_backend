@@ -83,7 +83,9 @@ OrderSchema.pre('save', function normalizeItemsOnSave(next) {
   if (normalizedItems.length === this.items.length) return next();
 
   this.items = normalizedItems;
-  this.totalPrice = this.items.reduce((sum, item) => sum + (Number(item.price || 0) * Number(item.quantity || 0)), 0);
+  this.totalPrice = require('../utils/money').roundMoney(
+    this.items.reduce((sum, item) => sum + (Number(item.price || 0) * Number(item.quantity || 0)), 0),
+  );
   next();
 });
 

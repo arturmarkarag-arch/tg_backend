@@ -30,6 +30,10 @@ const UserSchema = new mongoose.Schema(
       endBlock: { type: Number, default: null },
     },
     botBlocked: { type: Boolean, default: false },
+    // Browser-session revocation. Any JWT issued (iat) strictly before this
+    // timestamp is rejected. Set by POST /v1/auth/logout so "Вийти" actually
+    // invalidates every previously issued token for this account.
+    sessionsValidFrom: { type: Date, default: null },
     botLastActivityAt: { type: Date, default: null },
     botLastSessionAt: { type: Date, default: null },
     miniAppState: {

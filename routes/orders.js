@@ -9,6 +9,7 @@ const Shop = require('../models/Shop');
 const DeliveryGroup = require('../models/DeliveryGroup');
 const PickingTask = require('../models/PickingTask');
 const Block = require('../models/Block');
+const { roundMoney } = require('../utils/money');
 const { getTelegramAuth } = require('../utils/validateTelegramInitData');
 const { telegramAuth, requireTelegramRoles } = require('../middleware/telegramAuth');
 const { getIO } = require('../socket');
@@ -37,6 +38,13 @@ async function getAllDeliveryGroups() {
 const router = express.Router();
 const staffOnly = requireTelegramRoles(['admin', 'warehouse']);
 const adminOnly = requireTelegramRoles(['admin']);
+
+// Business rule: per ordering session a buyer may order 1..6 units of any one
+// product. Because re-ordering OVERWRITES the quantity (set semantics), the
+// stored order-item quantity IS the session total for that product, so
+// clamping the per-request quantity to [1,6] enforces the session cap.
+// Overridable via env without a code change.
+const MAX_QTY_PER_PRODUCT = Number(process.env.MAX_QTY_PER_PRODUCT) || 6;
 
 async function getNextOrderNumber() {
   const counter = await Counter.findOneAndUpdate(
@@ -603,7 +611,7 @@ async function placeOrderImpl(req, res) {
       continue;
     }
 
-    const quantity = Math.min(1000, Math.max(1, parseInt(item.quantity, 10) || 1));
+    const quantity = Math.min(MAX_QTY_PER_PRODUCT, Math.max(1, parseInt(item.quantity, 10) || 1));
     if (quantity <= 0) continue;
 
     const price = Number(product.price || 0);
@@ -619,6 +627,7 @@ async function placeOrderImpl(req, res) {
 
     totalPrice += price * quantity;
   }
+  totalPrice = roundMoney(totalPrice);
 
   if (validItems.length === 0) {
     throw appError('order_no_valid_items');
@@ -683,9 +692,18 @@ async function placeOrderImpl(req, res) {
     byRole: buyer.role,
   };
 
-  // Wrap the read-modify-write in a MongoDB transaction so that concurrent requests cannot
-  // interleave their reads and saves, which would cause later saves to overwrite merged items.
+  // Serialise create-or-merge for this buyer/shop/session across ALL workers.
+  // Without this, two concurrent POSTs with DIFFERENT idempotency keys each
+  // find no active order and each insert one → duplicate active orders for the
+  // same seller/session (picking then splits the quantities). The MongoDB
+  // transaction alone does NOT prevent this — two distinct inserts never
+  // write-conflict — but the Redis-backed lock makes the read-modify-write
+  // exclusive. (idempotencyKey collisions are still handled below as a backstop.)
   let order;
+  const placementLockKey = currentSessionId
+    ? `order:place:${buyer.telegramId}:${buyer.shopId || 'none'}:${currentSessionId}`
+    : `order:place:${buyer.telegramId}:${buyer.shopId || 'none'}:nogroup`;
+  const placement = await withLock(placementLockKey, async () => {
   const mongoSession = await mongoose.connection.startSession();
   mongoSession.startTransaction();
   try {
@@ -709,7 +727,7 @@ async function placeOrderImpl(req, res) {
       txExisting.buyerSnapshot = buyerSnapshot;
       if (currentSessionId) txExisting.orderingSessionId = currentSessionId;
 
-      txExisting.totalPrice = txExisting.items.reduce((sum, item) => sum + (Number(item.price || 0) * Number(item.quantity || 0)), 0);
+      txExisting.totalPrice = roundMoney(txExisting.items.reduce((sum, item) => sum + (Number(item.price || 0) * Number(item.quantity || 0)), 0));
       if (txExisting.status === 'new' || txExisting.status === 'in_progress') {
         txExisting.status = 'in_progress';
       }
@@ -770,18 +788,24 @@ async function placeOrderImpl(req, res) {
     }
 
     await mongoSession.commitTransaction();
+    return { sentResponse: false };
   } catch (err) {
     await mongoSession.abortTransaction();
     // Idempotency key collision: another request already created this order
     if (err.code === 11000 && sanitizedKey) {
       mongoSession.endSession();
       const existing = await Order.findOne({ idempotencyKey: sanitizedKey }).lean();
-      if (existing) return res.status(200).json(existing);
+      if (existing) { res.status(200).json(existing); return { sentResponse: true }; }
     }
     throw err;
   } finally {
     mongoSession.endSession();
   }
+  }, { ttlMs: 30_000, waitMs: 20_000 });
+
+  // The idempotency-collision branch already sent a 200 inside the lock —
+  // stop here so we don't fall through to the socket-emit / response code.
+  if (placement && placement.sentResponse) return;
 
   // Save order position count and clear the user's cart (order is placed — cart is done)
   // NOTE: cart-clear is now performed INSIDE the transaction above (atomic with
@@ -1171,7 +1195,9 @@ router.post('/set-item-qty', telegramAuth, requireOrderingWindowOpen, asyncHandl
   const newQty = parseInt(req.body?.quantity, 10);
 
   if (!productId) throw appError('validation_failed', { field: 'productId' });
-  if (!Number.isFinite(newQty) || newQty < 1) throw appError('validation_failed', { field: 'quantity' });
+  if (!Number.isFinite(newQty) || newQty < 1 || newQty > MAX_QTY_PER_PRODUCT) {
+    throw appError('validation_failed', { field: 'quantity' });
+  }
 
   if (!user.shopId) throw appError('no_shop');
   const shop = await getShop(user.shopId);
@@ -1201,9 +1227,9 @@ router.post('/set-item-qty', telegramAuth, requireOrderingWindowOpen, asyncHandl
 
       const oldQty = item.quantity;
       item.quantity = newQty;
-      order.totalPrice = order.items
+      order.totalPrice = roundMoney(order.items
         .filter((i) => !i.cancelled)
-        .reduce((sum, i) => sum + Number(i.price || 0) * Number(i.quantity || 0), 0);
+        .reduce((sum, i) => sum + Number(i.price || 0) * Number(i.quantity || 0), 0));
 
       order.history.push({
         at: new Date(),
@@ -1220,6 +1246,63 @@ router.post('/set-item-qty', telegramAuth, requireOrderingWindowOpen, asyncHandl
     session.endSession();
   }
   res.json({ ok: true, productId, newQty });
+}));
+
+// POST /remove-item — seller removes (cancels) one product from their active
+// session order. Mirrors set-item-qty's lookup/transaction. Buyer-only, and
+// only while the ordering window is open. Idempotent: removing an already-
+// removed / absent item just returns ok.
+router.post('/remove-item', telegramAuth, requireOrderingWindowOpen, asyncHandler(async (req, res) => {
+  const user = req.telegramUser;
+  const productId = String(req.body?.productId || '').trim();
+  if (!productId) throw appError('validation_failed', { field: 'productId' });
+
+  if (!user.shopId) throw appError('no_shop');
+  const shop = await getShop(user.shopId);
+  if (!shop?.deliveryGroupId) throw appError('no_delivery_group');
+  const group = normalizeDeliveryGroup(await getDeliveryGroup(shop.deliveryGroupId));
+  if (!group) throw appError('delivery_group_not_found');
+
+  const schedule = await getOrderingSchedule();
+  const currentSessionId = await getOrCreateSessionId(String(group._id), group.dayOfWeek, schedule);
+
+  const session = await mongoose.connection.startSession();
+  try {
+    await session.withTransaction(async () => {
+      const order = await Order.findOne({
+        buyerTelegramId: user.telegramId,
+        orderingSessionId: currentSessionId,
+        status: { $in: ['new', 'in_progress'] },
+      }).session(session);
+      if (!order) throw appError('order_not_found');
+
+      const item = order.items.find((i) => String(i.productId) === productId && !i.cancelled);
+      if (!item) {
+        // Already gone — idempotent success, nothing to write.
+        return;
+      }
+
+      const removedQty = item.quantity;
+      item.cancelled = true;
+      order.totalPrice = roundMoney(order.items
+        .filter((i) => !i.cancelled)
+        .reduce((sum, i) => sum + Number(i.price || 0) * Number(i.quantity || 0), 0));
+
+      order.history.push({
+        at: new Date(),
+        by: String(user.telegramId),
+        byName: [user.firstName, user.lastName].filter(Boolean).join(' '),
+        byRole: user.role,
+        action: 'item_removed',
+        meta: { productId, qty: removedQty },
+      });
+
+      await order.save({ session });
+    });
+  } finally {
+    session.endSession();
+  }
+  res.json({ ok: true, productId, removed: true });
 }));
 
 module.exports = router;

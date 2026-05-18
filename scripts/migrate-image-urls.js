@@ -22,7 +22,7 @@ function replaceUrl(url) {
 
 async function run() {
   await mongoose.connect(MONGODB_URI);
-  console.log('Connected to MongoDB:', MONGODB_URI);
+  console.log('Connected to MongoDB:', require('../utils/maskMongoUri').maskMongoUri(MONGODB_URI));
 
   const db = mongoose.connection.db;
 

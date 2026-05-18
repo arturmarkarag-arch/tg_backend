@@ -22,7 +22,7 @@ const DAY_UK = ['Нд', 'Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб'];
 
 async function run() {
   await mongoose.connect(MONGODB_URI);
-  console.log('✅ Підключено до MongoDB:', MONGODB_URI);
+  console.log('✅ Підключено до MongoDB:', require('../utils/maskMongoUri').maskMongoUri(MONGODB_URI));
 
   const db = mongoose.connection.db;
   const usersCol = db.collection('users');

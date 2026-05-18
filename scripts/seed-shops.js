@@ -35,7 +35,7 @@ async function run() {
 
   const records = JSON.parse(fs.readFileSync(inputFile, 'utf-8'));
   console.log(`📂 Завантажено ${records.length} записів з ${inputFile}`);
-  console.log(`🔌 Підключаємось до: ${MONGODB_URI}`);
+  console.log('🔌 Підключаємось до:', require('../utils/maskMongoUri').maskMongoUri(MONGODB_URI));
 
   await mongoose.connect(MONGODB_URI);
   console.log('✅ Підключено\n');

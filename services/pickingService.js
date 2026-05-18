@@ -183,7 +183,12 @@ async function completePickingTask({ taskId, userTelegramId, userFirstName = '',
     for (const taskItem of task.items) {
       const input = items.find((i) => String(i.orderId) === String(taskItem.orderId));
       if (input !== undefined) {
-        taskItem.packedQuantity = Math.max(0, Number(input.actualQty) || 0);
+        // Clamp to [0, ordered]: a picker can pack fewer (partial / out of
+        // stock) but never MORE than was ordered. Without the upper cap a bad
+        // actualQty (typo / fat-finger) propagates into order fulfilment and
+        // downstream receipt/reporting as an impossible packed count.
+        const ordered = Number(taskItem.quantity) || 0;
+        taskItem.packedQuantity = Math.min(ordered, Math.max(0, Number(input.actualQty) || 0));
       } else {
         taskItem.packedQuantity = taskItem.quantity;
       }
@@ -240,22 +245,31 @@ async function outOfStockPickingTask({ taskId, userTelegramId, userFirstName = '
   await task.populate('productId');
 
   const packedSet = new Set(packedOrderIds.map(String));
-  for (const item of task.items) {
-    const wasPacked = packedSet.has(String(item.orderId));
-    item.packedQuantity = wasPacked ? item.quantity : 0;
-    item.packed = wasPacked;
-  }
-
-  task.status   = 'completed';
-  task.lockedBy = null;
-  task.lockedAt = null;
-
   const actor = { by: String(userTelegramId), byName: [userFirstName, userLastName].filter(Boolean).join(' '), byRole: userRole };
 
-  // Phase 1: atomic task + order update
+  // Phase 1: atomic task + order update.
+  // Re-read + re-verify the task INSIDE the transaction (mirrors the hardening
+  // already in completePickingTask). Between the initial findById above and
+  // here a concurrent progress-PATCH or force-claim may have mutated the task;
+  // saving the stale in-memory doc would silently overwrite their work.
   await runTransactionWithRetry(async (session) => {
-    await task.save({ session });
-    await markOrderItemsPacked(task.items, task.productId, actor, session);
+    const fresh = await PickingTask.findById(task._id).session(session);
+    if (!fresh) throw Object.assign(new Error('Task not found'), { code: 'picking_task_not_found' });
+    if (fresh.status === 'completed') return; // finalized by a retry / other path
+    if (String(fresh.lockedBy || '') !== String(userTelegramId)) {
+      throw Object.assign(new Error('Lock expired'), { code: 'expired_lock' });
+    }
+    for (const item of fresh.items) {
+      const wasPacked = packedSet.has(String(item.orderId));
+      item.packedQuantity = wasPacked ? item.quantity : 0;
+      item.packed = wasPacked;
+    }
+    fresh.status   = 'completed';
+    fresh.lockedBy = null;
+    fresh.lockedAt = null;
+    await fresh.save({ session });
+    await markOrderItemsPacked(fresh.items, fresh.productId, actor, session);
+    task = fresh; // keep downstream block/product lookups consistent
   });
 
   // Phase 2: archive product (idempotent on retry via completed-status guard above)

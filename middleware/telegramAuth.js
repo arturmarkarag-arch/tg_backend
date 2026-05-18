@@ -1,6 +1,6 @@
 const User = require('../models/User');
 const { getTelegramAuth, getInitDataFromRequest } = require('../utils/validateTelegramInitData');
-const { verifySession } = require('../utils/jwt');
+const { verifySession, isSessionNotRevoked } = require('../utils/jwt');
 const { appError } = require('../utils/errors');
 
 // Accepts either Telegram Mini App initData (x-telegram-initdata header) OR a
@@ -13,6 +13,7 @@ async function telegramAuth(req, res, next) {
   let telegramId = '';
   let initData = null;
   let parsedData = null;
+  let jwtIat = null; // set only on the browser/JWT path
 
   if (hasInitData) {
     // Mini-app path — unchanged. A present-but-invalid initData still fails
@@ -36,6 +37,7 @@ async function telegramAuth(req, res, next) {
       return next(appError('auth_required'));
     }
     telegramId = session.telegramId;
+    jwtIat = session.iat;
   }
 
   const user = await User.findOne({ telegramId }).lean();
@@ -45,6 +47,10 @@ async function telegramAuth(req, res, next) {
   // Blocked users must not retain access via either transport.
   if (user.botBlocked) {
     return next(appError('registration_blocked'));
+  }
+  // Browser token issued before the user logged out → reject (real logout).
+  if (jwtIat !== null && !isSessionNotRevoked(jwtIat, user)) {
+    return next(appError('auth_required'));
   }
 
   req.telegramInitData = initData;

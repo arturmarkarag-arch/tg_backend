@@ -19,13 +19,22 @@ const receiptsRouter = require('./routes/receipts');
 const pickingRouter = require('./routes/picking');
 const shopsRouter = require('./routes/shops');
 const shopTransferRouter = require('./routes/shopTransfer');
-const warehouseTestRouter = require('./routes/warehouseTest');
+
+// The warehouse test harness (destructive: cleanup/seed/reset of real
+// collections) must NEVER be reachable in production. It is loaded and mounted
+// only outside production. Even then it is NOT a public path — it requires the
+// normal telegramAuth (admin) middleware as defense-in-depth.
+const ENABLE_TEST_API = process.env.NODE_ENV !== 'production';
+
+const { expressCorsOptions } = require('./utils/corsOptions');
 
 const app = express();
-app.use(cors());
+app.use(cors(expressCorsOptions));
 app.use(express.json());
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
-app.use('/warehouse-test', express.static(path.join(__dirname, '../Тести Е2Е/test-warehouse')));
+if (ENABLE_TEST_API) {
+  app.use('/warehouse-test', express.static(path.join(__dirname, '../Тести Е2Е/test-warehouse')));
+}
 
 const { telegramAuth } = require('./middleware/telegramAuth');
 
@@ -42,8 +51,14 @@ const publicApiPaths = [
   /^\/api\/health$/,
   /^\/api\/bot-status$/,
   /^\/api\/openai-status$/,
-  /^\/api\/warehouse-test(\/.*)?$/,
 ];
+
+// The test harness UI calls warehouse-test without auth. This is acceptable
+// ONLY because the entire route is unmounted in production (ENABLE_TEST_API).
+// In production this entry never exists, so it cannot widen the attack surface.
+if (ENABLE_TEST_API) {
+  publicApiPaths.push(/^\/api\/warehouse-test(\/.*)?$/);
+}
 
 function requireAuthForApi(req, res, next) {
   if (!req.path.startsWith('/api')) return next();
@@ -92,7 +107,10 @@ app.use('/api/shops', shopsRouter);
 app.use('/api/shop-transfer', shopTransferRouter);
 app.use('/api/v1/telegram', telegramV1Router);
 app.use('/api/v1/auth', authV1Router);
-app.use('/api/warehouse-test', warehouseTestRouter);
+if (ENABLE_TEST_API) {
+  // eslint-disable-next-line global-require
+  app.use('/api/warehouse-test', require('./routes/warehouseTest'));
+}
 
 // Centralised error handler — converts AppError (and known Mongoose errors)
 // into a consistent JSON envelope { error: <code>, message: <ukrainian text>, ... }.

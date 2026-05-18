@@ -4,6 +4,7 @@ const Block = require('../models/Block');
 const PickingTask = require('../models/PickingTask');
 const Order = require('../models/Order');
 const User = require('../models/User');
+const { withLock } = require('../utils/lock');
 
 /**
  * Returns a Map of productId → { blockId, index } for each productId
@@ -42,10 +43,33 @@ async function getShippingBlockPositions(productIds) {
  * Guard: re-entrant calls are silently dropped (only one run at a time).
  */
 async function buildPickingTasksFromOrders(targetDeliveryGroupId = null, options = {}) {
-  const orderingSessionId = options?.orderingSessionId ? String(options.orderingSessionId) : null;
-  if (buildPickingTasksFromOrders._running) return;
-  buildPickingTasksFromOrders._running = true;
+  const lockKey = targetDeliveryGroupId !== null
+    ? `taskbuilder:${String(targetDeliveryGroupId)}`
+    : 'taskbuilder:__all__';
   try {
+    return await withLock(
+      lockKey,
+      () => buildPickingTasksImpl(targetDeliveryGroupId, options),
+      { ttlMs: 120_000, waitMs: 60_000 },
+    );
+  } catch (err) {
+    // Preserve the original "silently skip a redundant concurrent build"
+    // behaviour — the in-flight build recomputes from current orders anyway.
+    if (err && err.code === 'lock_busy') {
+      console.warn('[taskBuilder] build skipped — another build already running for', lockKey);
+      return;
+    }
+    throw err;
+  }
+}
+
+// Cross-worker serialised by the Redis lock above. The previous in-process
+// `_running` boolean did NOT exclude concurrent builds on OTHER workers — two
+// builds racing on the same group could leave some order/product pairs without
+// a PickingTask (item never picked). Different groups still build in parallel.
+async function buildPickingTasksImpl(targetDeliveryGroupId = null, options = {}) {
+  const orderingSessionId = options?.orderingSessionId ? String(options.orderingSessionId) : null;
+  {
     // 1. Find already assigned order/product pairs so we don't create duplicates.
     const activeTaskFilter = { status: { $in: ['pending', 'locked'] } };
     if (targetDeliveryGroupId !== null) activeTaskFilter.deliveryGroupId = String(targetDeliveryGroupId);
@@ -188,8 +212,6 @@ async function buildPickingTasksFromOrders(targetDeliveryGroupId = null, options
         console.error('[taskBuilder] PickingTask insert error:', err);
       }
     }
-  } finally {
-    buildPickingTasksFromOrders._running = false;
   }
 }
 

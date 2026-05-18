@@ -4,7 +4,7 @@ const RegistrationRequest = require('../../models/RegistrationRequest');
 const { appError, asyncHandler } = require('../../utils/errors');
 const { verifyTelegramWidget } = require('../../utils/telegramWidget');
 const { verifyGoogleIdToken, isConfigured: googleConfigured } = require('../../utils/googleAuth');
-const { signSession, verifySession } = require('../../utils/jwt');
+const { signSession, verifySession, isSessionNotRevoked } = require('../../utils/jwt');
 const { getBot } = require('../../telegramBot');
 const { buildUserProfile } = require('./telegram');
 
@@ -90,13 +90,26 @@ router.get('/me', asyncHandler(async (req, res) => {
   const user = await User.findOne({ telegramId: session.telegramId }).lean();
   if (!user) await throwRegistrationState(session.telegramId);
   if (user.botBlocked) throw appError('registration_blocked');
+  if (!isSessionNotRevoked(session.iat, user)) throw appError('auth_required');
 
   res.json(await buildUserProfile(user));
 }));
 
-// Bearer tokens are stateless — the client just drops it. Kept for symmetry.
-router.post('/logout', (req, res) => {
+// Real logout: bump the user's sessionsValidFrom so EVERY token issued before
+// now (this device and any other) is rejected on the next request. Idempotent
+// and best-effort — an expired/invalid token still yields { ok: true } so the
+// client can always clear local state.
+router.post('/logout', asyncHandler(async (req, res) => {
+  const auth = req.headers?.authorization || '';
+  const token = auth.startsWith('Bearer ') ? auth.slice(7) : '';
+  const session = verifySession(token);
+  if (session?.telegramId) {
+    await User.updateOne(
+      { telegramId: session.telegramId },
+      { $set: { sessionsValidFrom: new Date() } },
+    );
+  }
   res.json({ ok: true });
-});
+}));
 
 module.exports = router;

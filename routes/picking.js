@@ -14,6 +14,22 @@ const { normalizeDeliveryGroup } = require('../utils/deliveryGroupHelpers');
 const { getOrderingSchedule } = require('../utils/getOrderingSchedule');
 const { appError } = require('../utils/errors');
 const { withLock } = require('../utils/lock');
+const cache = require('../utils/cache');
+const { invalidateDeliveryGroup } = require('../utils/modelCache');
+
+// Every write to a DeliveryGroup (here: pickingConfirmedAt) must bust BOTH the
+// per-id model cache (dg:<id>, read by orders.js/getDeliveryGroup) AND the
+// full-list cache (KEYS.DELIVERY_GROUPS, read by dashboards). Without this the
+// picking dashboard / ordering window serve a stale confirmed-state for up to
+// 10 min across workers. Best-effort: a cache miss must never break picking.
+async function bustGroupCaches(id) {
+  try {
+    await cache.invalidate(cache.KEYS.DELIVERY_GROUPS);
+    await invalidateDeliveryGroup(id);
+  } catch (e) {
+    console.warn('[picking] delivery-group cache bust failed:', e.message);
+  }
+}
 
 const {
   findAndLockNext,
@@ -113,6 +129,7 @@ router.post('/start-session', requireTelegramRoles(['warehouse', 'admin']), asyn
         const windowCloseAt = getOrderingWindowCloseAt(group.dayOfWeek, schedule).toISOString();
         // Reset confirmed flag so next picking session starts fresh
         await DeliveryGroup.updateOne({ _id: deliveryGroupId }, { $set: { pickingConfirmedAt: null } });
+        await bustGroupCaches(deliveryGroupId);
         return res.json({ windowOpen: true, message, windowCloseAt });
       }
       // Picking is only allowed on the actual delivery day.
@@ -163,6 +180,7 @@ router.post('/start-session', requireTelegramRoles(['warehouse', 'admin']), asyn
         : 0;
       if (confirm) {
         await DeliveryGroup.updateOne({ _id: deliveryGroupId }, { $set: { pickingConfirmedAt: new Date() } });
+        await bustGroupCaches(deliveryGroupId);
       }
       // When all tasks are completed (none pending/locked), the session is done — treat as confirmed
       // so the frontend shows 'ready' state instead of showing "Розпочати збирання" again.
@@ -209,6 +227,7 @@ router.post('/start-session', requireTelegramRoles(['warehouse', 'admin']), asyn
         return res.json({ noOrders: true, staleWarnings });
       }
       await DeliveryGroup.updateOne({ _id: deliveryGroupId }, { $set: { pickingConfirmedAt: new Date() } });
+      await bustGroupCaches(deliveryGroupId);
       return res.json({ started: true, taskCount, staleWarnings });
     }
 
@@ -222,6 +241,7 @@ router.post('/start-session', requireTelegramRoles(['warehouse', 'admin']), asyn
     }
 
     await DeliveryGroup.updateOne({ _id: deliveryGroupId }, { $set: { pickingConfirmedAt: new Date() } });
+    await bustGroupCaches(deliveryGroupId);
     res.json({ started: true, taskCount });
   } catch (err) {
     if (err && err.name === 'AppError') return next(err);

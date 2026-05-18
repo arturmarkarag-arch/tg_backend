@@ -696,6 +696,7 @@ router.patch('/:id', staffOnly, asyncHandler(async (req, res) => {
     product.status = status;
     product.archivedAt = null;
   }
+  const previousPrice = Number(product.price || 0);
   if (price !== undefined) product.price = Number(price);
   if (quantity !== undefined) product.quantity = Number(quantity);
   if (fields.notes !== undefined) product.notes = String(fields.notes);
@@ -753,6 +754,56 @@ router.patch('/:id', staffOnly, asyncHandler(async (req, res) => {
     }
   } else {
     await product.save();
+  }
+
+  // Re-price ACTIVE orders (new/in_progress) that contain this product so the
+  // whole order stays in ONE price epoch. Without this, an existing order keeps
+  // the old per-item price while a newly merged line gets the new price → the
+  // invoice/total mixes price epochs and diverges from the catalogue.
+  // confirmed/fulfilled orders are finalized and intentionally NOT touched.
+  // Two atomic pipeline updates → no read-modify-write race with set-item-qty.
+  if (price !== undefined && Number(price) !== previousPrice) {
+    const newPrice = Number(price);
+    const activeFilter = {
+      status: { $in: ['new', 'in_progress'] },
+      'items.productId': product._id,
+    };
+    await Order.updateMany(
+      activeFilter,
+      { $set: { 'items.$[elem].price': newPrice } },
+      { arrayFilters: [{ 'elem.productId': product._id, 'elem.cancelled': { $ne: true } }] },
+    );
+    await Order.updateMany(activeFilter, [
+      {
+        $set: {
+          totalPrice: {
+            $round: [
+              {
+                $sum: {
+                  $map: {
+                    input: {
+                      $filter: {
+                        input: '$items',
+                        as: 'i',
+                        cond: { $ne: ['$$i.cancelled', true] },
+                      },
+                    },
+                    as: 'i',
+                    in: {
+                      $multiply: [
+                        { $ifNull: ['$$i.price', 0] },
+                        { $ifNull: ['$$i.quantity', 0] },
+                      ],
+                    },
+                  },
+                },
+              },
+              2,
+            ],
+          },
+        },
+      },
+    ]);
   }
 
   // Delete replaced R2 images after successful DB save — orphaned objects are

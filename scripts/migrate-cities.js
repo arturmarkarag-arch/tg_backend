@@ -19,7 +19,7 @@ async function main() {
   await mongoose.connect(process.env.MONGODB_URI);
   const db = mongoose.connection.db;
   console.log(WRITE ? '✍️  WRITE mode' : '🔍 DRY-RUN mode (use --run to write)');
-  console.log('DB:', process.env.MONGODB_URI.split('@')[1].split('/')[0]);
+  console.log('DB:', require('../utils/maskMongoUri').maskMongoUri(process.env.MONGODB_URI));
 
   // 1. Collect distinct city names from shops
   const rawCities = await db.collection('shops').distinct('city');

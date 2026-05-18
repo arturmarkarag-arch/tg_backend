@@ -6,6 +6,7 @@ const City = require('../models/City');
 const DeliveryGroup = require('../models/DeliveryGroup');
 const User = require('../models/User');
 const Order = require('../models/Order');
+const PickingTask = require('../models/PickingTask');
 const { telegramAuth, requireTelegramRole } = require('../middleware/telegramAuth');
 const cache = require('../utils/cache');
 const { invalidateShop } = require('../utils/modelCache');
@@ -151,6 +152,38 @@ router.patch('/:id', telegramAuth, requireTelegramRole('admin'), asyncHandler(as
 
   await shop.save();
   await invalidateShop(shop._id);
+
+  // Propagate identity changes onto already-placed ACTIVE orders and their
+  // pending/locked picking tasks. buyerSnapshot is a point-in-time copy taken
+  // at order time; without this the warehouse would pick/label and deliver to
+  // the OLD shop name/address for every order placed before this edit.
+  const nameChanged = name !== undefined;
+  const addressChanged = address !== undefined;
+  const cityChanged = cityId !== undefined;
+  if (nameChanged || addressChanged || cityChanged) {
+    const cityDoc2 = await City.findById(shop.cityId).lean();
+    const snap = {
+      'buyerSnapshot.shopName': shop.name,
+      'buyerSnapshot.shopCity': cityDoc2?.name || '',
+      'buyerSnapshot.shopAddress': shop.address || '',
+    };
+    const activeOrders = await Order.find(
+      { shopId: shop._id, status: { $in: ['new', 'in_progress'] } },
+      '_id',
+    ).lean();
+    if (activeOrders.length) {
+      const ids = activeOrders.map((o) => o._id);
+      await Order.updateMany({ _id: { $in: ids } }, { $set: snap });
+      if (nameChanged) {
+        await PickingTask.updateMany(
+          { status: { $in: ['pending', 'locked'] }, 'items.orderId': { $in: ids } },
+          { $set: { 'items.$[elem].shopName': shop.name } },
+          { arrayFilters: [{ 'elem.orderId': { $in: ids } }] },
+        );
+      }
+    }
+  }
+
   res.json(shop);
 }));
 

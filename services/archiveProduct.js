@@ -86,7 +86,7 @@ async function archiveProduct(product, { notifyBuyers = false, bot = null } = {}
       if (!matchingItems.length) continue;
 
       for (const item of matchingItems) {
-        order.totalPrice = Math.max(0, order.totalPrice - item.price * item.quantity);
+        order.totalPrice = Math.max(0, require('../utils/money').roundMoney(order.totalPrice - item.price * item.quantity));
         item.cancelled = true;
         cancelledCount += 1;
       }

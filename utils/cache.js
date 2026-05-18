@@ -24,9 +24,23 @@ const local = new Map(); // key → { value, expiresAt }
 
 // Subscribe to invalidation events — every worker drops L1 when ANY worker invalidates.
 if (isEnabled() && subClient) {
-  subClient.subscribe(CHANNEL).catch((err) => {
-    console.warn('[Cache] failed to subscribe:', err.message);
+  const ensureSubscribed = () => {
+    subClient.subscribe(CHANNEL).catch((err) => {
+      console.warn('[Cache] failed to subscribe:', err.message);
+    });
+  };
+
+  ensureSubscribed();
+
+  // On every (re)connection: re-subscribe AND drop the entire L1. While the
+  // subscriber was disconnected this worker missed invalidation messages, so
+  // any L1 entry may now be stale — the only safe move is to discard it and
+  // re-read from L2/DB. Idempotent for the very first connect (L1 is empty).
+  subClient.on('ready', () => {
+    ensureSubscribed();
+    local.clear();
   });
+
   subClient.on('message', (channel, message) => {
     if (channel !== CHANNEL) return;
     if (message === '*') {

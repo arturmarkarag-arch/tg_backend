@@ -44,7 +44,11 @@ const LOCK_TIMEOUT_MS = 60_000;
 
 function initSocket(httpServer) {
   io = new Server(httpServer, {
-    cors: { origin: '*', methods: ['GET', 'POST'] },
+    cors: {
+      origin: require('./utils/corsOptions').corsOrigin,
+      methods: ['GET', 'POST'],
+      credentials: true,
+    },
   });
 
   // Cross-worker Socket.IO via Redis pub/sub. Without this, an emit on worker A
@@ -107,6 +111,7 @@ function initSocket(httpServer) {
     }
     socket.telegramId = telegramId;
     socket.userRole = dbUser.role;
+    socket.shopId = dbUser.shopId ? String(dbUser.shopId) : '';
     next();
   });
 
@@ -114,8 +119,13 @@ function initSocket(httpServer) {
     socket.receiptIds = new Set();
     console.log(`[Socket] Client connected: ${socket.id} (telegramId=${socket.telegramId})`);
 
-    // Join a block room to receive updates for that block
+    const isWarehouseStaff = () => ['admin', 'warehouse'].includes(socket.userRole);
+
+    // Join a block room to receive updates for that block.
+    // Block/picking/receipt rooms are warehouse-domain — sellers have no
+    // business there, so deny the join (prevents presence/info exposure).
     socket.on('join_block', (blockNumber) => {
+      if (!isWarehouseStaff()) return;
       socket.join(`block_${blockNumber}`);
     });
 
@@ -125,6 +135,7 @@ function initSocket(httpServer) {
 
     // Join a picking-group room to receive real-time shop status updates
     socket.on('join_picking_group', (groupId) => {
+      if (!isWarehouseStaff()) return;
       if (groupId) socket.join(`picking_group_${groupId}`);
     });
 
@@ -132,9 +143,12 @@ function initSocket(httpServer) {
       if (groupId) socket.leave(`picking_group_${groupId}`);
     });
 
-    // Join a shop room for co-seller presence awareness
+    // Join a shop room for co-seller presence awareness.
+    // A seller may only ever observe presence in their OWN shop; admins and
+    // warehouse staff may observe any shop.
     socket.on('join_shop', (shopId) => {
       if (!shopId) return;
+      if (socket.userRole === 'seller' && String(shopId) !== socket.shopId) return;
       const room = `shop_${shopId}`;
       socket.join(room);
       socket.shopIds = socket.shopIds || new Set();
@@ -159,6 +173,7 @@ function initSocket(httpServer) {
     });
 
     socket.on('join_receipt', (receiptId) => {
+      if (!isWarehouseStaff()) return;
       const room = `receipt_${receiptId}`;
       socket.join(room);
       socket.receiptIds.add(receiptId);

@@ -137,7 +137,7 @@ const s3Client = new S3Client({
 (async () => {
   try {
     await s3Client.send(new HeadBucketCommand({ Bucket: process.env.R2_BUCKET_NAME }));
-    console.log('Cloudflare R2 bucket OK:', process.env.R2_BUCKET_NAME);
+    console.log('Cloudflare R2 bucket OK');
   } catch (err) {
     console.error('R2 bucket check failed:', err.message);
   }
@@ -956,8 +956,9 @@ router.post('/:id/commit', staffOnly, asyncHandler(async (req, res) => {
       { new: true, session },
     );
     if (!receipt) {
-      await session.abortTransaction();
-      session.endSession();
+      // Do NOT abort/end here — the outer catch owns rollback. Aborting twice
+      // on an already-ended session throws a secondary error that masks this
+      // one. Just throw; the catch aborts the still-open transaction cleanly.
       throw appError('receipt_already_completed');
     }
 
@@ -1017,11 +1018,16 @@ router.post('/:id/commit', staffOnly, asyncHandler(async (req, res) => {
     for (const item of items) {
       let currentProduct;
 
-      // Confirm already applied this item's stock (confirm is mandatory before
-      // commit). Re-applying here is what silently doubled every receipt.
-      // `status === 'confirmed'` also covers legacy items created before the
-      // stockApplied flag existed — they must NOT be re-applied either.
-      const stockAlreadyApplied = item.stockApplied || item.status === 'confirmed';
+      // `item.stockApplied` is the SINGLE source of truth. It is set
+      // idempotently by ensureReceiptItemProduct() at confirm time whenever
+      // stock is actually added (shelfQty > 0). The old extra
+      // `|| item.status === 'confirmed'` clause was wrong in BOTH directions:
+      //   • item confirmed while shelfQty===0 (destination=shops, no stock
+      //     applied, stockApplied=false) then edited to shelfQty>0 → the
+      //     'confirmed' clause made commit skip it → SILENT STOCK LOSS;
+      //   • it was also redundant for double-apply (stockApplied already
+      //     covers that). Drive strictly off the flag.
+      const stockAlreadyApplied = !!item.stockApplied;
 
       // 1. Update or create the product
       if (
