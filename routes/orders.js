@@ -337,9 +337,13 @@ router.get('/', async (req, res) => {
   const authUser = req.telegramUser;
 
   const page = Math.max(1, parseInt(req.query.page) || 1);
-  const pageSize = req.query.pageSize !== undefined
+  const requestedPageSize = req.query.pageSize !== undefined
     ? Math.max(0, Number(req.query.pageSize))
     : 20;
+  const MAX_PAGE_SIZE = 200;
+  const pageSize = requestedPageSize === 0
+    ? MAX_PAGE_SIZE
+    : Math.min(MAX_PAGE_SIZE, requestedPageSize);
   const status = req.query.status; // optional: 'new', 'confirmed', 'fulfilled', 'cancelled'
   const buyerTelegramId = req.query.buyerTelegramId;
   const from = req.query.from;
@@ -361,6 +365,12 @@ router.get('/', async (req, res) => {
   } else if (!status) {
     // By default exclude cancelled
     filter.status = { $ne: 'cancelled' };
+  }
+
+  if (req.query.orderType === 'direct_allocation') {
+    filter.orderType = 'direct_allocation';
+  } else if (req.query.orderType === 'manual') {
+    filter.orderType = { $ne: 'direct_allocation' };
   }
 
   if (from || to) {
@@ -426,6 +436,8 @@ router.get('/', async (req, res) => {
 
 router.get('/transit/active', staffOnly, async (req, res) => {
   try {
+    const maxLimit = 200;
+    const limit = Math.min(maxLimit, Math.max(1, Number(req.query.limit) || maxLimit));
     const orders = await Order.find({
       orderType: 'direct_allocation',
       status: { $nin: ['fulfilled', 'cancelled'] },
@@ -433,6 +445,7 @@ router.get('/transit/active', staffOnly, async (req, res) => {
       .populate('items.productId')
       .populate('receiptId', 'receiptNumber')
       .sort({ createdAt: -1 })
+      .limit(limit)
       .lean();
 
     const buyerIds = [...new Set(orders.map((o) => o.buyerTelegramId))];
