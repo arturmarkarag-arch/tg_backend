@@ -14,6 +14,7 @@ const Block = require('../models/Block');
 const ReceiptItemLog = require('../models/ReceiptItemLog');
 const DeliveryGroup = require('../models/DeliveryGroup');
 const Shop = require('../models/Shop');
+const Counter = require('../models/Counter');
 const { getIO } = require('../socket');
 const { appError, asyncHandler } = require('../utils/errors');
 const {
@@ -318,8 +319,17 @@ router.delete('/:id', staffOnly, asyncHandler(async (req, res) => {
   res.json({ message: 'Receipt deleted' });
 }));
 
+async function getNextReceiptNumber() {
+  const counter = await Counter.findOneAndUpdate(
+    { name: 'receiptNumber' },
+    { $inc: { seq: 1 } },
+    { upsert: true, new: true },
+  );
+  return `REC-${String(counter.seq).padStart(4, '0')}`;
+}
+
 router.post('/', staffOnly, asyncHandler(async (req, res) => {
-  const receiptNumber = `REC-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
+  const receiptNumber = await getNextReceiptNumber();
   const receipt = new Receipt({
     receiptNumber,
     status: 'draft',
@@ -390,14 +400,8 @@ router.post('/:id/items', staffOnly, asyncHandler(async (req, res) => {
     originalPhotoUrl = `${process.env.R2_PUBLIC_URL.replace(/\/$/, '')}/products/${origName}`;
   }
   const defectPhotoUrls = await uploadDefectPhotos(parsed.files);
-  // SAVE-tier rule: a line can be parked with just photo + arrived qty +
-  // expected qty (no price yet). Expected qty is therefore mandatory here —
-  // price / qtyPerPackage are only required later to CONFIRM the line.
-  const expectedQty = parsed.fields.expectedQty !== undefined && parsed.fields.expectedQty !== ''
-    ? parseIntField(parsed.fields.expectedQty, null) : null;
-  if (!Number.isInteger(expectedQty) || expectedQty < 1) {
-    throw appError('receipt_expected_qty_required');
-  }
+  // SAVE-tier rule: a line can be parked with just photo + arrived qty (no
+  // price yet). Price / qtyPerPackage are only required later to CONFIRM.
   const notes = String(parsed.fields.notes || '').trim();
 
   // Pull photo from existingProduct if item has no photo
@@ -428,7 +432,6 @@ router.post('/:id/items', staffOnly, asyncHandler(async (req, res) => {
         }
       : undefined,
     totalQty,
-    expectedQty,
     notes,
     defectPhotoUrls,
     transitQty: transitQty || 0,
@@ -437,7 +440,8 @@ router.post('/:id/items', staffOnly, asyncHandler(async (req, res) => {
     shelfQty,
     name: String(parsed.fields.name || '').trim(),
     price: parsed.fields.price !== undefined && parsed.fields.price !== '' ? Number(parsed.fields.price) : null,
-    qtyPerPackage: parsed.fields.qtyPerPackage ? Number(parsed.fields.qtyPerPackage) : 1,
+    qtyPerPackage: parsed.fields.qtyPerPackage !== undefined && parsed.fields.qtyPerPackage !== ''
+      ? Number(parsed.fields.qtyPerPackage) : null,
     barcode: String(parsed.fields.barcode || '').trim(),
     existingProductId: existingProductId || null,
     warehousePending: isWarehousePending,
@@ -603,22 +607,14 @@ router.patch('/:id/items/:itemId', staffOnly, asyncHandler(async (req, res) => {
     const np = parsed.fields.price !== '' ? Number(parsed.fields.price) : null;
     if (np !== item.price) changedFields.push('price');
   }
-  if (parsed.fields.qtyPerPackage !== undefined && (Number(parsed.fields.qtyPerPackage) || 1) !== item.qtyPerPackage) changedFields.push('qtyPerPackage');
+  if (parsed.fields.qtyPerPackage !== undefined
+      && (parsed.fields.qtyPerPackage !== '' ? Number(parsed.fields.qtyPerPackage) : null) !== item.qtyPerPackage) changedFields.push('qtyPerPackage');
   if (parsed.fields.barcode !== undefined && String(parsed.fields.barcode).trim() !== (item.barcode || '')) changedFields.push('barcode');
   if (nextDestination !== (item.destination || 'shelf')) changedFields.push('destination');
   if (totalQty !== item.totalQty) changedFields.push('totalQty');
   if (JSON.stringify(nextStructure) !== JSON.stringify(prevStructure)) changedFields.push('structure');
   if (parsed.fields.deliveryGroupIds !== undefined && !arraysEqual(deliveryGroupIds, item.deliveryGroupIds || [])) changedFields.push('deliveryGroupIds');
   if (parsed.fields.qtyPerShop !== undefined && qtyPerShop !== (item.qtyPerShop || 0)) changedFields.push('qtyPerShop');
-  const nextExpectedQty = parsed.fields.expectedQty !== undefined
-    ? (parsed.fields.expectedQty === '' ? null : parseIntField(parsed.fields.expectedQty, null))
-    : (item.expectedQty ?? null);
-  // Expected qty is part of the SAVE tier — it may never be blanked back out
-  // once the line exists (only the owner can submit this field at all).
-  if (parsed.fields.expectedQty !== undefined && (!Number.isInteger(nextExpectedQty) || nextExpectedQty < 1)) {
-    throw appError('receipt_expected_qty_required');
-  }
-  if (parsed.fields.expectedQty !== undefined && nextExpectedQty !== (item.expectedQty ?? null)) changedFields.push('expectedQty');
   if (parsed.fields.notes !== undefined && String(parsed.fields.notes).trim() !== (item.notes || '')) changedFields.push('notes');
   const hasNewDefectPhotos = (parsed.files || []).some((f) => f.field === 'defectPhoto');
   // keptDefectPhotoUrls = the subset of EXISTING defect photos the client wants
@@ -663,10 +659,9 @@ router.patch('/:id/items/:itemId', staffOnly, asyncHandler(async (req, res) => {
   item.qtyPerShop = qtyPerShop;
   if (parsed.fields.name !== undefined) item.name = String(parsed.fields.name).trim();
   if (parsed.fields.price !== undefined) item.price = parsed.fields.price !== '' ? Number(parsed.fields.price) : null;
-  if (parsed.fields.qtyPerPackage !== undefined) item.qtyPerPackage = Number(parsed.fields.qtyPerPackage) || 1;
+  if (parsed.fields.qtyPerPackage !== undefined) item.qtyPerPackage = parsed.fields.qtyPerPackage !== '' ? Number(parsed.fields.qtyPerPackage) : null;
   if (parsed.fields.barcode !== undefined) item.barcode = String(parsed.fields.barcode).trim();
   item.existingProductId = existingProductId || null;
-  if (parsed.fields.expectedQty !== undefined) item.expectedQty = nextExpectedQty;
   if (parsed.fields.notes !== undefined) item.notes = String(parsed.fields.notes).trim();
   if (defectsTouched) {
     const kept = keptDefectUrls !== null ? keptDefectUrls : (item.defectPhotoUrls || []);

@@ -26,7 +26,7 @@ const OWNER_ONLY_FIELDS = new Set([
   'totalQty', 'shelfQty', 'transitQty', 'destination', 'structure',
   'deliveryGroupIds', 'qtyPerShop', 'barcode',
   'existingProductId', 'warehousePending',
-  'expectedQty', 'notes', 'defectPhotoUrls',
+  'notes', 'defectPhotoUrls',
 ]);
 
 // Shop-facing data — any warehouse/admin user may fill these on any item.
@@ -89,7 +89,6 @@ function assertItemReadyToConfirm(item) {
   const missing = [];
   if (!item.photoUrl) missing.push('фото');
   if (!(item.totalQty >= 1)) missing.push('кількість що приїхала');
-  if (item.expectedQty == null) missing.push('очікувана кількість');
   if (item.price == null || !(item.price > 0)) missing.push('ціна');
   if (!(item.qtyPerPackage >= 1)) missing.push('кількість в упаковці');
   if (missing.length > 0) {
