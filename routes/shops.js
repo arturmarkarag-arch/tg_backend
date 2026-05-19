@@ -36,17 +36,45 @@ router.get('/', asyncHandler(async (req, res) => {
 
     const shops = await Shop.find(filter).populate('cityId', 'name country').sort({ name: 1 }).lean();
 
-    // Seller names per shop
+    // Sellers per shop — full data so the Shops tab can render cart/activity
+    // status, phone, and "previously assigned" history without a separate
+    // /users round-trip.
     const shopIds = shops.map((s) => s._id);
     const sellers = await User.find({ role: { $in: ['seller', 'admin'] }, shopId: { $in: shopIds } })
-      .select('shopId firstName lastName telegramId role')
+      .select('shopId firstName lastName telegramId role phoneNumber cartState miniAppState history')
       .lean();
-    const sellersByShop = {};
+
+    // Compute cartItemCount + lastOrderAt the same way GET /users does, so the
+    // client treats both responses identically.
+    const getCartCount = (u) => {
+      const items = u.cartState?.orderItems;
+      if (!items) return 0;
+      const obj = items instanceof Map ? Object.fromEntries(items) : items;
+      return Object.values(obj).reduce((s, q) => s + (Number(q) || 0), 0);
+    };
+    const sellerTids = sellers.map((s) => s.telegramId).filter(Boolean);
+    const lastOrders = sellerTids.length
+      ? await Order.aggregate([
+        { $match: { buyerTelegramId: { $in: sellerTids } } },
+        { $sort: { createdAt: -1 } },
+        { $group: { _id: '$buyerTelegramId', lastOrderAt: { $first: '$createdAt' } } },
+      ])
+      : [];
+    const lastOrderMap = new Map(lastOrders.map((o) => [o._id, o.lastOrderAt]));
+
+    const sellersByShop = {};   // shopId → full seller objects (UI cards)
+    const sellerNamesByShop = {}; // shopId → display-name strings (legacy)
     for (const s of sellers) {
       const sid = String(s.shopId);
       if (!sellersByShop[sid]) sellersByShop[sid] = [];
+      if (!sellerNamesByShop[sid]) sellerNamesByShop[sid] = [];
+      sellersByShop[sid].push({
+        ...s,
+        cartItemCount: getCartCount(s),
+        lastOrderAt: lastOrderMap.get(s.telegramId) || null,
+      });
       const label = [s.firstName, s.lastName].filter(Boolean).join(' ') || String(s.telegramId);
-      sellersByShop[sid].push(s.role === 'admin' ? `${label} (адмін)` : label);
+      sellerNamesByShop[sid].push(s.role === 'admin' ? `${label} (адмін)` : label);
     }
 
     // Active order flags — only when filtered by deliveryGroupId (for reassign modal)
@@ -63,13 +91,15 @@ router.get('/', asyncHandler(async (req, res) => {
 
     const result = shops.map((s) => {
       const sid = String(s._id);
-      const shopSellerNames = sellersByShop[sid] || [];
+      const shopSellers = sellersByShop[sid] || [];
+      const shopSellerNames = sellerNamesByShop[sid] || [];
       return {
         ...s,
         cityId: s.cityId?._id ? String(s.cityId._id) : (s.cityId || null),
         city: s.cityId?.name || '',
-        sellerCount: shopSellerNames.length,
+        sellerCount: shopSellers.length,
         sellerNames: shopSellerNames,
+        sellers: shopSellers,
         hasActiveOrder: activeOrderShopIds.has(sid),
       };
     });
