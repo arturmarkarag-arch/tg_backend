@@ -534,9 +534,9 @@ router.patch('/:id/items/:itemId', staffOnly, asyncHandler(async (req, res) => {
   ]);
   if (!item) throw appError('receipt_item_not_found');
   if (!receipt) throw appError('receipt_not_found');
-  // NOTE: editing is intentionally allowed even after the receipt is committed —
-  // price/qty are corrected post-factum and the creator may fix their own
-  // position data. Ownership rules below still apply. (Add/Delete stay locked.)
+  // NOTE: previously we blocked all edits when a receipt was completed.
+  // Instead, allow a narrow set of post-commit edits (price, qtyPerPackage,
+  // and photo overlay comment). Other changes remain forbidden.
 
   const parsed = await parseMultipart(req);
 
@@ -633,6 +633,39 @@ router.patch('/:id/items/:itemId', staffOnly, asyncHandler(async (req, res) => {
   if (parsed.fields.existingProductId !== undefined &&
       (existingProductId || null) !== (item.existingProductId ? String(item.existingProductId) : null)) {
     changedFields.push('existingProductId');
+  }
+
+  // Detect changes to the photo overlay metadata (comment + position).
+  // If the client sent `photoMeta`, normalize and compare to the stored
+  // value and mark it as changed when different.
+  if (parsed.fields.photoMeta !== undefined) {
+    const rawPhotoMeta = safeParseObject(parsed.fields.photoMeta);
+    if (rawPhotoMeta === undefined) throw appError('validation_failed', { field: 'photoMeta' });
+    if (rawPhotoMeta && typeof rawPhotoMeta === 'object') {
+      const prevMeta = item.photoMeta || { comment: '', commentPos: { x: 0.5, y: 0.5 } };
+      const newMeta = {
+        comment: String(rawPhotoMeta.comment || ''),
+        commentPos: {
+          x: Number(rawPhotoMeta?.commentPos?.x) || 0.5,
+          y: Number(rawPhotoMeta?.commentPos?.y) || 0.5,
+        },
+      };
+      if (newMeta.comment !== (prevMeta.comment || '')
+          || newMeta.commentPos.x !== (prevMeta.commentPos?.x || 0.5)
+          || newMeta.commentPos.y !== (prevMeta.commentPos?.y || 0.5)) {
+        changedFields.push('photoMeta');
+      }
+    }
+  }
+
+  // When a receipt is already completed we allow only a small whitelist of
+  // post-commit edits. Any other changed field is rejected.
+  if (receipt.status === 'completed') {
+    const allowedAfterCompleted = new Set(['price', 'qtyPerPackage', 'photoMeta']);
+    const disallowed = changedFields.filter((f) => !allowedAfterCompleted.has(f));
+    if (disallowed.length > 0) {
+      throw appError('receipt_completed_locked');
+    }
   }
 
   assertCanEditItem(req.user, item, changedFields);
@@ -1121,6 +1154,10 @@ router.post('/:id/commit', staffOnly, asyncHandler(async (req, res) => {
 // Link a warehousePending item to an existing product, or mark it as a brand-new product.
 router.patch('/:id/items/:itemId/link', staffOnly, asyncHandler(async (req, res) => {
   const { existingProductId, markAsNew, keepNewPhoto } = req.body || {};
+  const receipt = await Receipt.findById(req.params.id).lean();
+  if (!receipt) throw appError('receipt_not_found');
+  if (receipt.status === 'completed') throw appError('receipt_completed_locked');
+
   const item = await ReceiptItem.findOne({ _id: req.params.itemId, receiptId: req.params.id });
   if (!item) throw appError('receipt_item_not_found');
 
