@@ -73,7 +73,7 @@ async function deleteR2Objects(keys = []) {
 }
 
 function getProductTitle(product) {
-  return product.brand || product.model || product.category || `#${product.orderNumber}`;
+  return product.name || product.brand || product.model || product.category || `#${product.orderNumber}`;
 }
 
 const router = express.Router();
@@ -207,8 +207,12 @@ router.get('/', async (req, res) => {
     const items = products.map((product) => ({
       id: product._id,
       title: getProductTitle(product),
+      name: product.name || '',
       price: product.price,
       quantity: product.quantity,
+      quantityPerPackage: product.quantityPerPackage || 0,
+      barcode: product.barcode || '',
+      source: product.source || '',
       image_url: product.imageUrls?.[0] || product.localImageUrl || '',
       thumbnail_url: product.imageUrls?.[0] || product.localImageUrl || '',
       status: product.status,
@@ -669,7 +673,7 @@ router.patch('/:id', staffOnly, asyncHandler(async (req, res) => {
 
   const { orderNumber, name, category, brand, model, warehouse, status, price, quantity } = fields;
   const parsedOrderNumber = orderNumber !== undefined ? Number(orderNumber) : product.orderNumber;
-  const incomingBrand = brand || name;
+  const incomingBrand = brand || product.brand;
 
   if (orderNumber !== undefined && (Number.isNaN(parsedOrderNumber) || parsedOrderNumber <= 0)) {
     throw appError('product_order_invalid');
@@ -688,6 +692,7 @@ router.patch('/:id', staffOnly, asyncHandler(async (req, res) => {
   const previousOrderNumber = product.orderNumber;
 
   product.orderNumber = parsedOrderNumber;
+  if (name !== undefined) product.name = name;
   if (category !== undefined) product.category = category;
   if (incomingBrand !== undefined) product.brand = incomingBrand;
   if (model !== undefined) product.model = model;

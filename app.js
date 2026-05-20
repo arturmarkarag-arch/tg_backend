@@ -91,6 +91,7 @@ app.get('/api/openai-status', async (req, res) => {
   }
 });
 
+app.use('/api/products', productsRouter);
 app.use('/api/v1/products', productsRouter);
 app.use('/api/users', usersRouter);
 app.use('/api/activity', activityRouter);
