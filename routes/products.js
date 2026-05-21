@@ -477,6 +477,21 @@ router.get('/:id/who-ordered', staffOnly, asyncHandler(async (req, res) => {
   res.json({ shops: [...byShop.values()] });
 }));
 
+// Proxy an image through the server so the browser canvas can draw it without
+// CORS/taint issues regardless of whether the source is local or R2.
+router.get('/proxy-image', asyncHandler(async (req, res) => {
+  const { url } = req.query;
+  if (!url || !url.startsWith('http')) {
+    return res.status(400).json({ error: 'invalid_url' });
+  }
+  const axios = require('axios');
+  const upstream = await axios.get(url, { responseType: 'arraybuffer', timeout: 15000 });
+  res.set('Content-Type', upstream.headers['content-type'] || 'image/jpeg');
+  res.set('Cache-Control', 'private, max-age=300');
+  res.set('Access-Control-Allow-Origin', '*');
+  res.send(Buffer.from(upstream.data));
+}));
+
 router.get('/:id', asyncHandler(async (req, res) => {
   const product = await Product.findById(req.params.id);
   if (!product) throw appError('product_not_found');
@@ -726,9 +741,12 @@ router.patch('/:id', staffOnly, asyncHandler(async (req, res) => {
       const safe = String(fn).replace(/[^a-zA-Z0-9._-]/g, '');
       if (safe) { imageUrls.push(r2PublicUrl('products', safe)); imageNames.push(safe); }
     }
-    // Preserve originalImageUrl — it always points to the clean, un-annotated photo.
-    // On first edit the current imageUrls[0] becomes the original; on subsequent edits keep it.
-    if (!product.originalImageUrl && product.imageUrls?.[0]) {
+    // Prefer an explicit originalFilename from the client (raw camera capture).
+    // Fall back to promoting the current imageUrls[0] on the first edit.
+    if (fields.originalFilename) {
+      const safeOrig = String(fields.originalFilename).replace(/[^a-zA-Z0-9._-]/g, '');
+      if (safeOrig) product.originalImageUrl = r2PublicUrl('originals', safeOrig);
+    } else if (!product.originalImageUrl && product.imageUrls?.[0]) {
       product.originalImageUrl = product.imageUrls[0];
     }
     product.imageUrls = imageUrls;

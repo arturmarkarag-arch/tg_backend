@@ -31,7 +31,10 @@ const { expressCorsOptions } = require('./utils/corsOptions');
 const app = express();
 app.use(cors(expressCorsOptions));
 app.use(express.json());
-app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+app.use('/uploads', (req, res, next) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  next();
+}, express.static(path.join(__dirname, 'uploads')));
 if (ENABLE_TEST_API) {
   app.use('/warehouse-test', express.static(path.join(__dirname, '../Тести Е2Е/test-warehouse')));
 }
