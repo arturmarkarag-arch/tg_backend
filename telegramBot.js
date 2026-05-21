@@ -2,6 +2,7 @@
 const User = require('./models/User');
 const BotInteractionLog = require('./models/BotInteractionLog');
 const RegistrationRequest = require('./models/RegistrationRequest');
+const SearchProduct = require('./models/SearchProduct');
 const DeliveryGroup = require('./models/DeliveryGroup');
 const Shop = require('./models/Shop');
 
@@ -319,6 +320,44 @@ async function initBot(token) {
 
       if (isGroupChat && !(await isAuthorizedGroup(chatId))) {
         return;
+      }
+
+      if (isGroupChat && msg.reply_to_message && rawText && !rawText.startsWith('/')) {
+        const replyToId = String(msg.reply_to_message.message_id);
+        const request = await SearchProduct.findOne({
+          requestTelegramMessageId: replyToId,
+          groupChatId: chatId,
+        }).lean();
+
+        if (request) {
+          const match = rawText.match(/([0-9]+(?:[.,][0-9]+)?)/);
+          if (!match) {
+            await bot.sendMessage(chatId, 'Не вдалося розпізнати ціну. Введіть число, наприклад 10 або 10.50.', {
+              reply_to_message_id: msg.message_id,
+            });
+            return;
+          }
+
+          const price = Number(match[1].replace(',', '.'));
+          if (Number.isNaN(price)) {
+            await bot.sendMessage(chatId, 'Не вдалося обробити ціну. Введіть валідне число, наприклад 10 або 10.50.', {
+              reply_to_message_id: msg.message_id,
+            });
+            return;
+          }
+
+          const adminName = [msg.from?.first_name, msg.from?.last_name].filter(Boolean).join(' ') || '';
+          await SearchProduct.findByIdAndUpdate(request._id, {
+            price,
+            adminTelegramId: String(msg.from?.id || ''),
+            adminName,
+          });
+
+          await bot.sendMessage(chatId, `Ціну ${match[1]} збережено.`, {
+            reply_to_message_id: msg.message_id,
+          });
+          return;
+        }
       }
 
       if (text === '/start') {

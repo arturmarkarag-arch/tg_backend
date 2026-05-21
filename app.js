@@ -18,7 +18,9 @@ const { verifyOpenAIConnection } = require('./openaiClient');
 const receiptsRouter = require('./routes/receipts');
 const pickingRouter = require('./routes/picking');
 const shopsRouter = require('./routes/shops');
-const shopTransferRouter = require('./routes/shopTransfer');
+const shopTransferRouter  = require('./routes/shopTransfer');
+const shopProductsRouter  = require('./routes/shopProducts');
+const visionSearchRouter  = require('./routes/visionSearch');
 
 // The warehouse test harness (destructive: cleanup/seed/reset of real
 // collections) must NEVER be reachable in production. It is loaded and mounted
@@ -51,6 +53,7 @@ const publicApiPaths = [
   /^\/api\/delivery-groups\/summary$/,
   /^\/api\/shops\/cities$/,
   /^\/api\/shops$/,
+  /^\/api\/shop-products\/barcode\/.+$/,
   /^\/api\/health$/,
   /^\/api\/bot-status$/,
   /^\/api\/openai-status$/,
@@ -109,6 +112,8 @@ app.use('/api/picking', pickingRouter);
 app.use('/api/admin', adminRouter);
 app.use('/api/shops', shopsRouter);
 app.use('/api/shop-transfer', shopTransferRouter);
+app.use('/api/shop-products',  shopProductsRouter);
+app.use('/api/vision-search', visionSearchRouter);
 app.use('/api/v1/telegram', telegramV1Router);
 app.use('/api/v1/auth', authV1Router);
 if (ENABLE_TEST_API) {

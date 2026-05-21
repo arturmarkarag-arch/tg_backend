@@ -9,6 +9,7 @@ const { normalizeBarcode } = require('../utils/barcodeScanner');
 const Block = require('../models/Block');
 const { getIO } = require('../socket');
 const Product = require('../models/Product');
+const ShopProduct = require('../models/ShopProduct');
 const Order = require('../models/Order');
 const User = require('../models/User');
 const Shop = require('../models/Shop');
@@ -76,7 +77,53 @@ function getProductTitle(product) {
   return product.name || product.brand || product.model || product.category || `#${product.orderNumber}`;
 }
 
+// Upsert a ShopProduct when a warehouse Product goes active.
+// Uses $setOnInsert so manually-edited shop catalog data is never overwritten.
+async function upsertShopProductFromProduct(product) {
+  const barcode = String(product.barcode || '').trim();
+  const filter = barcode ? { barcode } : { linkedProductId: product._id };
+  const insertData = {
+    name:               product.name || product.brand || product.model || product.category || '',
+    price:              product.price || 0,
+    quantityPerPackage: product.quantityPerPackage || 0,
+    notes:              product.notes || '',
+    originalImageUrl:   product.originalImageUrl || product.imageUrls?.[0] || '',
+    imageUrl:           product.imageUrls?.[0] || '',
+    labelPositions:     product.labelPositions || {},
+    source:             'receive',
+    linkedProductId:    product._id,
+    barcode,
+  };
+  await ShopProduct.findOneAndUpdate(
+    filter,
+    { $set: { linkedProductId: product._id }, $setOnInsert: insertData },
+    { upsert: true, new: false },
+  );
+}
+
 const router = express.Router();
+
+// GET /api/v1/products/upload-url?folder=products&ext=jpg — staff presigned PUT URL for direct browser→R2 upload
+router.get('/upload-url', staffOnly, asyncHandler(async (req, res) => {
+  const folder = String(req.query.folder || 'products');
+  const safeFolder = ALLOWED_UPLOAD_FOLDERS.includes(folder) ? folder : 'products';
+  const ext = String(req.query.ext || 'jpg').replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
+  const safeExt = ['jpg', 'jpeg', 'png', 'webp'].includes(ext) ? (ext === 'jpeg' ? 'jpg' : ext) : 'jpg';
+  const filename = `${crypto.randomUUID()}.${safeExt}`;
+  const key = `${safeFolder}/${filename}`;
+  const command = new PutObjectCommand({
+    Bucket: process.env.R2_BUCKET_NAME,
+    Key: key,
+    ContentType: 'image/jpeg',
+  });
+  const uploadUrl = await getSignedUrl(s3Client, command, { expiresIn: 300 });
+  res.json({
+    uploadUrl,
+    filename,
+    url: r2PublicUrl(safeFolder, filename),
+    thumbUrl: r2PublicUrl('thumbs', filename),
+  });
+}));
 
 // GET /api/v1/products/upload-url-public?ext=jpg — public presigned PUT URL for missing-product reports (no auth required)
 router.get('/upload-url-public', asyncHandler(async (req, res) => {
@@ -95,6 +142,23 @@ router.get('/upload-url-public', asyncHandler(async (req, res) => {
   const uploadUrl = await getSignedUrl(s3Client, command, { expiresIn: 300 });
   res.json({ uploadUrl, filename, key, contentType });
 }));
+
+router.post(
+  '/upload-missing-image',
+  express.raw({ type: () => true, limit: '30mb' }),
+  asyncHandler(async (req, res) => {
+    const ext = String(req.query.ext || 'jpg').replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
+    const allowed = ['jpg', 'jpeg', 'png', 'webp'];
+    const safeExt = allowed.includes(ext) ? (ext === 'jpeg' ? 'jpg' : ext) : 'jpg';
+    if (!Buffer.isBuffer(req.body) || req.body.length === 0) {
+      throw appError('product_photo_required');
+    }
+    const filename = `${crypto.randomUUID()}.${safeExt}`;
+    const contentType = req.headers['content-type'] || 'image/jpeg';
+    await r2Put(`missing-products/${filename}`, req.body, contentType);
+    res.json({ filename });
+  }),
+);
 
 // POST /api/v1/products/upload-image?folder=products — raw image bytes in body.
 // The server resizes via sharp into a main (1200px) + thumb (240px) JPEG pair,
@@ -347,11 +411,21 @@ router.post('/report-missing', asyncHandler(async (req, res) => {
   const sendResults = await Promise.all(allowedGroupIds.map(async (chatId) => {
     const groupId = String(chatId);
     const existing = await SearchProduct.findOne({ barcode: normalizedBarcode, groupChatId: groupId, status: 'active' });
+    const photoPublicUrl = r2PublicUrl('missing-products', filename);
+
     if (existing && existing.requestTelegramPhotoFileId) {
       try {
-        await bot.sendPhoto(chatId, existing.requestTelegramPhotoFileId, {
+        const sent = await bot.sendPhoto(chatId, existing.requestTelegramPhotoFileId, {
           caption: existing.requestCaption || caption,
         });
+        await SearchProduct.findOneAndUpdate(
+          { barcode: normalizedBarcode, groupChatId: groupId, status: 'active' },
+          {
+            requestTelegramMessageId: String(sent.message_id),
+            // Backfill imageUrl for existing records that were saved without it
+            ...(existing.imageUrl ? {} : { imageUrl: photoPublicUrl }),
+          }
+        );
         return { chatId, sent: true, reused: true };
       } catch (err) {
         console.error('Failed to resend existing missing product photo to group', chatId, err.message || err);
@@ -372,6 +446,7 @@ router.post('/report-missing', asyncHandler(async (req, res) => {
           requestTelegramPhotoFileId: sentPhotoFileId,
           requestTelegramMessageId: String(sent.message_id),
           requestCaption: caption,
+          imageUrl: photoPublicUrl,
           status: 'active',
         },
         { upsert: true, new: true, setDefaultsOnInsert: true }
@@ -591,6 +666,7 @@ router.post('/receive', staffOnly, asyncHandler(async (req, res) => {
   const explicitPending = body.status === 'pending';
   const imageUrl = r2PublicUrl('products', filename);
   const origImageUrl = originalFilename ? r2PublicUrl('originals', originalFilename) : imageUrl;
+  const barcode = String(body.barcode || '').trim();
 
   // Read max orderNumber AND insert the new product inside the same transaction
   // so two concurrent /receive requests cannot read the same max and produce
@@ -609,6 +685,7 @@ router.post('/receive', staffOnly, asyncHandler(async (req, res) => {
         price,
         quantity,
         quantityPerPackage,
+        barcode,
         status: explicitPending ? 'pending' : isConfirmed ? 'active' : 'pending',
         source: 'receive',
         notes: body.notes ? String(body.notes) : '',
@@ -621,6 +698,12 @@ router.post('/receive', staffOnly, asyncHandler(async (req, res) => {
   } finally {
     session.endSession();
   }
+
+  if (product.status === 'active') {
+    upsertShopProductFromProduct(product).catch((err) =>
+      console.error('[products/receive] ShopProduct upsert failed:', err.message));
+  }
+
   try {
     const io = getIO();
     if (io) io.emit('incoming_updated');
@@ -705,6 +788,7 @@ router.patch('/:id', staffOnly, asyncHandler(async (req, res) => {
   // would leave the catalog with duplicate orderNumbers.
   const orderChanged = orderNumber !== undefined && parsedOrderNumber !== product.orderNumber;
   const previousOrderNumber = product.orderNumber;
+  const previousStatus = product.status;
 
   product.orderNumber = parsedOrderNumber;
   if (name !== undefined) product.name = name;
@@ -755,28 +839,46 @@ router.patch('/:id', staffOnly, asyncHandler(async (req, res) => {
     product.telegramMessageIds = [];
   }
 
-  if (orderChanged) {
+  const barcodeChanged = fields.barcode !== undefined;
+  const needsSession = orderChanged || barcodeChanged;
+
+  if (needsSession) {
     const session = await mongoose.connection.startSession();
     try {
       await session.withTransaction(async () => {
-        if (parsedOrderNumber < previousOrderNumber) {
-          await shiftUp(
-            { _id: { $ne: product._id }, orderNumber: { $gte: parsedOrderNumber, $lt: previousOrderNumber } },
-            session,
-          );
-        } else {
-          await shiftDown(
-            { _id: { $ne: product._id }, orderNumber: { $gt: previousOrderNumber, $lte: parsedOrderNumber } },
-            session,
-          );
+        if (orderChanged) {
+          if (parsedOrderNumber < previousOrderNumber) {
+            await shiftUp(
+              { _id: { $ne: product._id }, orderNumber: { $gte: parsedOrderNumber, $lt: previousOrderNumber } },
+              session,
+            );
+          } else {
+            await shiftDown(
+              { _id: { $ne: product._id }, orderNumber: { $gt: previousOrderNumber, $lte: parsedOrderNumber } },
+              session,
+            );
+          }
         }
         await product.save({ session });
+        if (barcodeChanged) {
+          await ShopProduct.findOneAndUpdate(
+            { linkedProductId: product._id },
+            { $set: { barcode: product.barcode } },
+            { session },
+          );
+        }
       });
     } finally {
       session.endSession();
     }
   } else {
     await product.save();
+  }
+
+  // When a product transitions to active, mirror it into the shop catalog.
+  if (status === 'active' && previousStatus !== 'active') {
+    upsertShopProductFromProduct(product).catch((err) =>
+      console.error('[products/patch] ShopProduct upsert failed:', err.message));
   }
 
   // Re-price ACTIVE orders (new/in_progress) that contain this product so the

@@ -243,5 +243,44 @@ router.delete('/telegram-groups/:groupId', telegramAuth, requireTelegramRole('ad
   }
 });
 
+// ── OpenAI Costs & Usage (Admin Key required) ─────────────────────────────────
+
+async function fetchOpenAIAdmin(path) {
+  const key = process.env.ADMIN_OPENAPI;
+  if (!key) throw new Error('ADMIN_OPENAPI не встановлено в .env');
+  const res = await fetch(`https://api.openai.com/v1${path}`, {
+    headers: { Authorization: `Bearer ${key}` },
+  });
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(json.error?.message || `OpenAI Admin API ${res.status}`);
+  return json;
+}
+
+router.get('/openai/costs', telegramAuth, requireTelegramRole('admin'), asyncHandler(async (req, res) => {
+  if (!process.env.ADMIN_OPENAPI) {
+    return res.status(503).json({ error: 'admin_key_missing', message: 'ADMIN_OPENAPI не встановлено в .env' });
+  }
+  const days      = Math.min(30, Math.max(1, parseInt(req.query.days, 10) || 7));
+  const endTime   = Math.floor(Date.now() / 1000);
+  const startTime = endTime - days * 86400;
+  const data = await fetchOpenAIAdmin(
+    `/organization/costs?start_time=${startTime}&end_time=${endTime}&limit=${days}&bucket_width=1d&group_by=line_item`,
+  );
+  res.json(data);
+}));
+
+router.get('/openai/usage', telegramAuth, requireTelegramRole('admin'), asyncHandler(async (req, res) => {
+  if (!process.env.ADMIN_OPENAPI) {
+    return res.status(503).json({ error: 'admin_key_missing', message: 'ADMIN_OPENAPI не встановлено в .env' });
+  }
+  const days      = Math.min(30, Math.max(1, parseInt(req.query.days, 10) || 7));
+  const endTime   = Math.floor(Date.now() / 1000);
+  const startTime = endTime - days * 86400;
+  const data = await fetchOpenAIAdmin(
+    `/organization/usage/completions?start_time=${startTime}&end_time=${endTime}&limit=${days}&bucket_width=1d&group_by=model`,
+  );
+  res.json(data);
+}));
+
 router.getAllowedGroupIds = getAllowedGroupIds;
 module.exports = router;
