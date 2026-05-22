@@ -1,14 +1,21 @@
 'use strict';
 
+const crypto      = require('crypto');
 const router      = require('express').Router();
-const multer      = require('multer');
 const { requireTelegramRoles } = require('../middleware/telegramAuth');
 const { asyncHandler }         = require('../utils/errors');
 const ShopProduct    = require('../models/ShopProduct');
 const VisionTestLog  = require('../models/VisionTestLog');
 const AppSetting     = require('../models/AppSetting');
-const { getOpenAIStatus, describeProductImage, explainProductImage, embedText } = require('../openaiClient');
+const { getOpenAIStatus, describeProductImageUrl, explainProductImageUrl, embedText } = require('../openaiClient');
 const { embedShopProduct } = require('../utils/shopProductEmbedding');
+const { presignPutUrl, deleteObject, publicUrl } = require('../utils/r2');
+
+// One-shot query photos live here; deleted right after OpenAI reads them.
+const VISION_TMP_FOLDER = 'vision-tmp';
+function isVisionTmpKey(key) {
+  return typeof key === 'string' && key.startsWith(`${VISION_TMP_FOLDER}/`) && !key.includes('..');
+}
 
 // Atlas Vector Search index name — must exist on the shopproducts collection
 // (no fallback; the query errors clearly if it's missing).
@@ -27,11 +34,13 @@ const staffOnly = requireTelegramRoles(['admin', 'warehouse']);
 const adminOnly = requireTelegramRoles(['admin']);
 const anyRole   = requireTelegramRoles(['admin', 'warehouse', 'seller']);
 
-const upload = multer({
-  storage: multer.memoryStorage(),
-  limits:  { fileSize: 10 * 1024 * 1024 },
-  fileFilter: (_req, file, cb) => cb(null, file.mimetype.startsWith('image/')),
-});
+// ─── GET /upload-url — presigned PUT for a one-shot query photo ───────────────
+// Browser uploads the photo straight to R2; the bytes never touch our server.
+router.get('/upload-url', anyRole, asyncHandler(async (req, res) => {
+  const key = `${VISION_TMP_FOLDER}/${crypto.randomUUID()}.jpg`;
+  const uploadUrl = await presignPutUrl(key, 'image/jpeg');
+  res.json({ uploadUrl, key });
+}));
 
 // ─── Vector helpers ─────────────────────────────────────────────────────────
 function toResultItem(p, score) {
@@ -93,10 +102,12 @@ router.post('/embed-all', adminOnly, asyncHandler(async (req, res) => {
 }));
 
 // ─── POST /query-vector — embedding similarity search ─────────────────────────
-// Describes the query photo, embeds the description, and ranks the catalog via
-// Atlas $vectorSearch (requires the index — no fallback). See searchByVector.
-router.post('/query-vector', staffOnly, upload.single('photo'), asyncHandler(async (req, res) => {
-  if (!req.file) return res.status(400).json({ error: 'photo_required' });
+// Body: { key, threshold? }. The query photo was uploaded straight to R2 (vision-tmp/);
+// OpenAI reads it by URL (no bytes through us), then we delete it. Describes the
+// photo, embeds it, and ranks the catalog via Atlas $vectorSearch (no fallback).
+router.post('/query-vector', staffOnly, asyncHandler(async (req, res) => {
+  const key = req.body?.key;
+  if (!isVisionTmpKey(key)) return res.status(400).json({ error: 'photo_required', message: 'Не вказано фото' });
 
   const status = getOpenAIStatus();
   if (!status.connected) {
@@ -110,51 +121,57 @@ router.post('/query-vector', staffOnly, upload.single('photo'), asyncHandler(asy
     ? Math.min(1, Math.max(0, clientThreshold))
     : await getVisionThreshold();
 
-  let descriptor = '', embedding = null, usage = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
+  const imageUrl = publicUrl(key);
   try {
-    const d = await describeProductImage(req.file.buffer, req.file.mimetype);
-    descriptor = d.descriptor;
-    usage.inputTokens  += Number(d.usage?.inputTokens  || 0);
-    usage.outputTokens += Number(d.usage?.outputTokens || 0);
-    const e = await embedText(descriptor);
-    embedding = e.embedding;
-    usage.inputTokens += Number(e.usage?.inputTokens || 0);
-    usage.totalTokens  = usage.inputTokens + usage.outputTokens;
-  } catch (err) {
-    console.error('[visionSearch] query-vector OpenAI error:', err.message);
-    return res.status(502).json({ error: 'openai_api_error', message: err.message });
-  }
+    let descriptor = '', embedding = null, usage = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
+    try {
+      const d = await describeProductImageUrl(imageUrl);
+      descriptor = d.descriptor;
+      usage.inputTokens  += Number(d.usage?.inputTokens  || 0);
+      usage.outputTokens += Number(d.usage?.outputTokens || 0);
+      const e = await embedText(descriptor);
+      embedding = e.embedding;
+      usage.inputTokens += Number(e.usage?.inputTokens || 0);
+      usage.totalTokens  = usage.inputTokens + usage.outputTokens;
+    } catch (err) {
+      console.error('[visionSearch] query-vector OpenAI error:', err.message);
+      return res.status(502).json({ error: 'openai_api_error', message: err.message });
+    }
 
-  if (!embedding) {
-    return res.json({ threshold, reasoning: descriptor, results: [], usage });
-  }
+    if (!embedding) {
+      return res.json({ threshold, reasoning: descriptor, results: [], usage });
+    }
 
-  let resultItems;
-  try {
-    resultItems = await searchByVector(embedding, 5);
-  } catch (err) {
-    console.error('[visionSearch] vector search error:', err.message);
-    return res.status(502).json({
-      error:   'vector_search_failed',
-      message: `Векторний пошук недоступний — перевір Atlas-індекс "${VECTOR_INDEX}". (${err.message})`,
+    let resultItems;
+    try {
+      resultItems = await searchByVector(embedding, 5);
+    } catch (err) {
+      console.error('[visionSearch] vector search error:', err.message);
+      return res.status(502).json({
+        error:   'vector_search_failed',
+        message: `Векторний пошук недоступний — перевір Atlas-індекс "${VECTOR_INDEX}". (${err.message})`,
+      });
+    }
+
+    const log = await VisionTestLog.create({
+      results:   resultItems.map((r) => ({ assetId: r.assetId, score: r.score, shopProduct: r.shopProduct._id })),
+      reasoning: descriptor,
+      threshold,
+      createdBy: req.telegramUser?.username || req.telegramUser?.id || '',
     });
+
+    res.json({ logId: log._id, threshold, reasoning: descriptor, results: resultItems, usage });
+  } finally {
+    deleteObject(key); // one-shot photo — remove from R2 regardless of outcome
   }
-
-  const log = await VisionTestLog.create({
-    results:   resultItems.map((r) => ({ assetId: r.assetId, score: r.score, shopProduct: r.shopProduct._id })),
-    reasoning: descriptor,
-    threshold,
-    createdBy: req.telegramUser?.username || req.telegramUser?.id || '',
-  });
-
-  res.json({ logId: log._id, threshold, reasoning: descriptor, results: resultItems, usage });
 }));
 
 // ─── POST /describe — plain-language product explainer (all roles) ────────────
 // For staff/sellers who scan a product they don't recognise. No search, no
 // embedding — just a friendly Ukrainian description of the photo.
-router.post('/describe', anyRole, upload.single('photo'), asyncHandler(async (req, res) => {
-  if (!req.file) return res.status(400).json({ error: 'photo_required' });
+router.post('/describe', anyRole, asyncHandler(async (req, res) => {
+  const key = req.body?.key;
+  if (!isVisionTmpKey(key)) return res.status(400).json({ error: 'photo_required', message: 'Не вказано фото' });
 
   const status = getOpenAIStatus();
   if (!status.connected) {
@@ -162,11 +179,13 @@ router.post('/describe', anyRole, upload.single('photo'), asyncHandler(async (re
   }
 
   try {
-    const { text, usage } = await explainProductImage(req.file.buffer, req.file.mimetype);
+    const { text, usage } = await explainProductImageUrl(publicUrl(key));
     res.json({ description: text, usage });
   } catch (err) {
     console.error('[visionSearch] describe error:', err.message);
     return res.status(502).json({ error: 'openai_api_error', message: err.message });
+  } finally {
+    deleteObject(key); // one-shot photo
   }
 }));
 

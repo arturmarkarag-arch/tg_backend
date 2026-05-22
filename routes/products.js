@@ -3,13 +3,13 @@ const crypto = require('crypto');
 const mongoose = require('mongoose');
 const { S3Client, PutObjectCommand, GetObjectCommand, HeadBucketCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
-const { buildImageVariants } = require('../utils/imageService');
 const { shiftUp, shiftDown } = require('../utils/shiftOrderNumbers');
 const { normalizeBarcode } = require('../utils/barcodeScanner');
 const Block = require('../models/Block');
 const { getIO } = require('../socket');
 const Product = require('../models/Product');
 const ShopProduct = require('../models/ShopProduct');
+const { upsertShopProductFromProduct } = require('../utils/upsertShopProduct');
 const Order = require('../models/Order');
 const User = require('../models/User');
 const Shop = require('../models/Shop');
@@ -77,30 +77,6 @@ function getProductTitle(product) {
   return product.name || product.brand || product.model || product.category || `#${product.orderNumber}`;
 }
 
-// Upsert a ShopProduct when a warehouse Product goes active.
-// Uses $setOnInsert so manually-edited shop catalog data is never overwritten.
-async function upsertShopProductFromProduct(product) {
-  const barcode = String(product.barcode || '').trim();
-  const filter = barcode ? { barcode } : { linkedProductId: product._id };
-  const insertData = {
-    name:               product.name || product.brand || product.model || product.category || '',
-    price:              product.price || 0,
-    quantityPerPackage: product.quantityPerPackage || 0,
-    notes:              product.notes || '',
-    originalImageUrl:   product.originalImageUrl || product.imageUrls?.[0] || '',
-    imageUrl:           product.imageUrls?.[0] || '',
-    labelPositions:     product.labelPositions || {},
-    source:             'receive',
-    linkedProductId:    product._id,
-    barcode,
-  };
-  await ShopProduct.findOneAndUpdate(
-    filter,
-    { $set: { linkedProductId: product._id }, $setOnInsert: insertData },
-    { upsert: true, new: false },
-  );
-}
-
 const router = express.Router();
 
 // GET /api/v1/products/upload-url?folder=products&ext=jpg — staff presigned PUT URL for direct browser→R2 upload
@@ -123,6 +99,23 @@ router.get('/upload-url', staffOnly, asyncHandler(async (req, res) => {
     url: r2PublicUrl(safeFolder, filename),
     thumbUrl: r2PublicUrl('thumbs', filename),
   });
+}));
+
+// GET /api/v1/products/upload-url-pair — presigned PUTs for products/<file> AND
+// thumbs/<file> sharing one filename. Lets the client resize + make the thumbnail
+// itself and upload both straight to R2 (no image bytes through the server).
+router.get('/upload-url-pair', staffOnly, asyncHandler(async (req, res) => {
+  const filename = `${crypto.randomUUID()}.jpg`;
+  const sign = (key) => getSignedUrl(
+    s3Client,
+    new PutObjectCommand({ Bucket: process.env.R2_BUCKET_NAME, Key: key, ContentType: 'image/jpeg' }),
+    { expiresIn: 300 },
+  );
+  const [mainUrl, thumbUrl] = await Promise.all([
+    sign(`products/${filename}`),
+    sign(`thumbs/${filename}`),
+  ]);
+  res.json({ filename, mainUrl, thumbUrl });
 }));
 
 // GET /api/v1/products/upload-url-public?ext=jpg — public presigned PUT URL for missing-product reports (no auth required)
@@ -159,36 +152,6 @@ router.post(
     res.json({ filename });
   }),
 );
-
-// POST /api/v1/products/upload-image?folder=products — raw image bytes in body.
-// The server resizes via sharp into a main (1200px) + thumb (240px) JPEG pair,
-// stores both in R2 (<folder>/<name>.jpg and thumbs/<name>.jpg) and returns the
-// shared filename. This is the single image-processing entry point.
-router.post(
-  '/upload-image',
-  staffOnly,
-  express.raw({ type: () => true, limit: '30mb' }),
-  asyncHandler(async (req, res) => {
-    const folder = String(req.query.folder || 'products');
-    const safeFolder = ALLOWED_UPLOAD_FOLDERS.includes(folder) ? folder : 'products';
-    if (!Buffer.isBuffer(req.body) || req.body.length === 0) {
-      throw appError('product_photo_required');
-    }
-
-    const { filename, main, thumb } = await buildImageVariants(req.body);
-    await Promise.all([
-      r2Put(`${safeFolder}/${filename}`, main),
-      r2Put(`thumbs/${filename}`, thumb),
-    ]);
-
-    res.json({
-      filename,
-      url: r2PublicUrl(safeFolder, filename),
-      thumbUrl: r2PublicUrl('thumbs', filename),
-    });
-  }),
-);
-
 
 // GET /api/products/drafts — pending (unconfirmed) products
 router.get('/drafts', staffOnly, asyncHandler(async (req, res) => {

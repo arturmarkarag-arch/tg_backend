@@ -346,14 +346,35 @@ async function describeProductImage(imageBuffer, mimeType, { model = null } = {}
   return { descriptor: extractOutputText(response), usage: buildUsageInfo(response) };
 }
 
+// Same as describeProductImage but takes a public image URL. OpenAI fetches the
+// image itself, so the bytes never pass through our server — used to embed the
+// catalog (images already live in R2) without burning Render egress bandwidth.
+async function describeProductImageUrl(imageUrl, { model = null } = {}) {
+  if (!openai || !imageUrl) return { descriptor: '', usage: {} };
+  const selectedModel = model || (await getSelectedOpenAIModel());
+  const response = await openai.responses.create({
+    model: selectedModel,
+    input: [{
+      role: 'user',
+      content: [
+        { type: 'input_text', text: PRODUCT_DESCRIBE_PROMPT },
+        { type: 'input_image', image_url: imageUrl, detail: 'high' },
+      ],
+    }],
+  });
+  return { descriptor: extractOutputText(response), usage: buildUsageInfo(response) };
+}
+
 // Friendly product explainer for shop staff who don't know the item. Returns a
 // plain-language Ukrainian description — distinct from describeProductImage,
 // whose terse output is tuned for embeddings.
 const PRODUCT_EXPLAIN_PROMPT =
-  'Ти пояснюєш товар працівнику магазину, який його не знає. Відповідай УКРАЇНСЬКОЮ, простими словами. ' +
-  'Опиши: що це за товар і для чого він, бренд/виробник (якщо видно), основні характеристики, ' +
-  'обʼєм/розмір/вагу, як використовувати. Якщо на етикетці є важливий текст — згадай його. ' +
-  'Будь стислим і зрозумілим. Не вигадуй того, чого не видно на фото.';
+  'Ти пояснюєш товар працівнику магазину, який не знає цей продукт і не розуміє написів на упаковці. ' +
+  'Відповідай УКРАЇНСЬКОЮ мовою, просто і ДУЖЕ СТИСЛО. ' +
+  'Опиши: що це за товар, для чого він, бренд/виробника (якщо видно), основні характеристики, обʼєм/вагу/розмір, як використовувати (коротко), важливий текст з етикетки (якщо є). ' +
+  'Не вигадуй інформацію, якої не видно на фото. ' +
+  'Не додавай зайвих пояснень, припущень чи рекламних фраз. ' +
+  'Якщо текст або товар погано видно — так і напиши.';
 
 async function explainProductImage(imageBuffer, mimeType, { model = null } = {}) {
   if (!openai) return { text: '', usage: {} };
@@ -369,6 +390,24 @@ async function explainProductImage(imageBuffer, mimeType, { model = null } = {})
           image_url: `data:${mimeType || 'image/jpeg'};base64,${Buffer.from(imageBuffer).toString('base64')}`,
           detail: 'high',
         },
+      ],
+    }],
+  });
+  return { text: extractOutputText(response), usage: buildUsageInfo(response) };
+}
+
+// URL variant of explainProductImage — OpenAI fetches the image itself (no bytes
+// through our server). Used by the vision /describe R2 cycle.
+async function explainProductImageUrl(imageUrl, { model = null } = {}) {
+  if (!openai || !imageUrl) return { text: '', usage: {} };
+  const selectedModel = model || (await getSelectedOpenAIModel());
+  const response = await openai.responses.create({
+    model: selectedModel,
+    input: [{
+      role: 'user',
+      content: [
+        { type: 'input_text', text: PRODUCT_EXPLAIN_PROMPT },
+        { type: 'input_image', image_url: imageUrl, detail: 'high' },
       ],
     }],
   });
@@ -398,6 +437,8 @@ module.exports = {
   analyzeBarcodeImage,
   analyzeProductImage,
   describeProductImage,
+  describeProductImageUrl,
   explainProductImage,
+  explainProductImageUrl,
   embedText,
 };

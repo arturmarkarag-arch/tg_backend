@@ -1,25 +1,22 @@
 'use strict';
 
-const { describeProductImage, embedText, getOpenAIStatus } = require('../openaiClient');
-
-async function fetchImageBuffer(url) {
-  // Hard timeout so a slow/dead image URL can't stall the caller.
-  const r = await fetch(url, { signal: AbortSignal.timeout(20000) });
-  if (!r.ok) throw new Error(`image fetch ${r.status}`);
-  return { buffer: Buffer.from(await r.arrayBuffer()), mimeType: r.headers.get('content-type') || 'image/jpeg' };
-}
+const { describeProductImageUrl, embedText, getOpenAIStatus } = require('../openaiClient');
 
 // Generates a descriptor + embedding for one ShopProduct doc and saves them.
 // Returns true on success, false when skipped (OpenAI off, no photo, empty
 // embedding). Prefers the clean original image over the annotated one.
+//
+// The image URL is handed straight to OpenAI (it fetches the bytes itself), so
+// the catalog image never travels through our server — important when indexing
+// thousands of products (Render egress stays near zero).
 async function embedShopProduct(doc) {
   if (!doc) return false;
   if (!getOpenAIStatus().connected) return false;
   const url = doc.originalImageUrl || doc.imageUrl;
   if (!url) return false;
 
-  const { buffer, mimeType } = await fetchImageBuffer(url);
-  const { descriptor } = await describeProductImage(buffer, mimeType);
+  const { descriptor } = await describeProductImageUrl(url);
+  if (!descriptor) return false;
   const { embedding, model } = await embedText(descriptor);
   if (!embedding) return false;
 
@@ -40,4 +37,4 @@ function embedShopProductAsync(doc, ctx = '') {
     .catch((err) => console.error(`[embed] ${ctx} ${doc?._id}:`, err.message));
 }
 
-module.exports = { embedShopProduct, embedShopProductAsync, fetchImageBuffer };
+module.exports = { embedShopProduct, embedShopProductAsync };

@@ -16,6 +16,7 @@ const DeliveryGroup = require('../models/DeliveryGroup');
 const Shop = require('../models/Shop');
 const Counter = require('../models/Counter');
 const { getIO } = require('../socket');
+const { upsertShopProductFromProduct } = require('../utils/upsertShopProduct');
 const { appError, asyncHandler } = require('../utils/errors');
 const {
   assertCanEditItem,
@@ -98,6 +99,7 @@ async function ensureReceiptItemProduct(item, session) {
     quantity: item.shelfQty,
     warehouse: '',
     category: '',
+    name: item.name || '',
     brand: item.name || '',
     model: '',
     status: item.shelfQty > 0 ? 'active' : 'pending',
@@ -200,6 +202,13 @@ async function uploadToR2(fileBuffer, _filename, _contentType, folder = 'product
 /** Build the public URL for an uploaded object in the given folder. */
 function r2Url(folder, filename) {
   return `${process.env.R2_PUBLIC_URL.replace(/\/$/, '')}/${folder}/${filename}`;
+}
+
+// Sanitize a client-supplied R2 filename (the photo/original are uploaded direct
+// to R2 by the browser; only the filename comes back). Rejects path traversal.
+function safeUploadName(v) {
+  const s = String(v || '').trim();
+  return /^[a-zA-Z0-9._-]+\.(jpg|jpeg|png|webp)$/i.test(s) ? s : '';
 }
 
 /** Upload up to `max` defect-evidence photos to the defects/ folder. */
@@ -358,8 +367,10 @@ router.post('/:id/items', staffOnly, asyncHandler(async (req, res) => {
   if (!req.is('multipart/form-data')) throw appError('receipt_multipart_required');
 
   const parsed = await parseMultipart(req);
-  const file = parsed.files.find((f) => f.field === 'photo') || parsed.files?.[0];
-  const originalFile = parsed.files.find((f) => f.field === 'originalPhoto') || null;
+  // Main photo + clean original are uploaded straight to R2 by the browser; only
+  // their filenames arrive here. (Defect photos still come as multipart files.)
+  const photoFilename    = safeUploadName(parsed.fields.photoFilename);
+  const originalFilename = safeUploadName(parsed.fields.originalFilename);
   const photoMeta = safeParseObject(parsed.fields.photoMeta) || null;
   const existingProductId = parsed.fields.existingProductId ? String(parsed.fields.existingProductId).trim() : null;
   const isWarehousePending = parsed.fields.warehousePending === 'true';
@@ -371,7 +382,7 @@ router.post('/:id/items', staffOnly, asyncHandler(async (req, res) => {
   }
   const qtyPerShop = parseIntField(parsed.fields.qtyPerShop);
 
-  if (!file && !existingProductId) throw appError('receipt_photo_required');
+  if (!photoFilename && !existingProductId) throw appError('receipt_photo_required');
 
   // Destination is the UI-level choice; it derives the shelf/transit split.
   const destination = String(parsed.fields.destination || 'shelf');
@@ -390,14 +401,12 @@ router.post('/:id/items', staffOnly, asyncHandler(async (req, res) => {
   let photoUrl;
   let photoName;
   let originalPhotoUrl = '';
-  if (file) {
-    const filename = await uploadToR2(file.buffer, file.originalname, file.mimetype);
-    photoUrl = `${process.env.R2_PUBLIC_URL.replace(/\/$/, '')}/products/${filename}`;
-    photoName = file.originalname || filename;
+  if (photoFilename) {
+    photoUrl  = r2Url('products', photoFilename);
+    photoName = photoFilename;
   }
-  if (originalFile) {
-    const origName = await uploadToR2(originalFile.buffer, originalFile.originalname, originalFile.mimetype);
-    originalPhotoUrl = `${process.env.R2_PUBLIC_URL.replace(/\/$/, '')}/products/${origName}`;
+  if (originalFilename) {
+    originalPhotoUrl = r2Url('products', originalFilename);
   }
   const defectPhotoUrls = await uploadDefectPhotos(parsed.files);
   // SAVE-tier rule: a line can be parked with just photo + arrived qty (no
@@ -715,17 +724,15 @@ router.patch('/:id/items/:itemId', staffOnly, asyncHandler(async (req, res) => {
     };
   }
 
-  const originalFile = parsed.files.find((f) => f.field === 'originalPhoto') || null;
-  if (originalFile) {
-    const origName = await uploadToR2(originalFile.buffer, originalFile.originalname, originalFile.mimetype);
-    item.originalPhotoUrl = `${process.env.R2_PUBLIC_URL.replace(/\/$/, '')}/products/${origName}`;
+  const originalFilename = safeUploadName(parsed.fields.originalFilename);
+  if (originalFilename) {
+    item.originalPhotoUrl = r2Url('products', originalFilename);
   }
 
-  const file = parsed.files.find((f) => f.field === 'photo') || parsed.files?.[0];
-  if (file) {
-    const filename = await uploadToR2(file.buffer, file.originalname, file.mimetype);
-    item.photoUrl = `${process.env.R2_PUBLIC_URL.replace(/\/$/, '')}/products/${filename}`;
-    item.photoName = file.originalname || filename;
+  const photoFilename = safeUploadName(parsed.fields.photoFilename);
+  if (photoFilename) {
+    item.photoUrl = r2Url('products', photoFilename);
+    item.photoName = photoFilename;
   } else if (!item.photoUrl && existingProductId) {
     const existingProduct = await Product.findById(existingProductId).lean();
     if (existingProduct) {
@@ -855,6 +862,7 @@ router.post('/:id/items/:itemId/confirm', staffOnly, asyncHandler(async (req, re
   const session = await mongoose.connection.startSession();
   try {
     let confirmedItem = null;
+    let confirmedProduct = null;
     await session.withTransaction(async () => {
       const receipt = await Receipt.findById(req.params.id).session(session);
       const item = await ReceiptItem.findOne({ _id: req.params.itemId, receiptId: req.params.id }).session(session);
@@ -870,6 +878,7 @@ router.post('/:id/items/:itemId/confirm', staffOnly, asyncHandler(async (req, re
       }
 
       const product = await ensureReceiptItemProduct(item, session);
+      confirmedProduct = product;
       confirmedItem = item.toObject();
       confirmedItem.currentLocation = {
         blockId: null,
@@ -887,6 +896,12 @@ router.post('/:id/items/:itemId/confirm', staffOnly, asyncHandler(async (req, re
         changes: [{ field: 'status', label: 'Статус', from: 'draft', to: 'confirmed' }],
       }).catch((e) => console.error('[ReceiptItemLog] confirm error:', e));
     });
+    // Push the confirmed product into "Товари Магазинів" (after the txn commits,
+    // background — never blocks confirm). Idempotent upsert by barcode/link.
+    if (confirmedProduct) {
+      upsertShopProductFromProduct(confirmedProduct).catch((err) =>
+        console.error('[receipts/confirm] ShopProduct upsert failed:', err.message));
+    }
     const io = getIO();
     if (io) {
       io.to(`receipt_${req.params.id}`).emit('receipt_item_confirmed', confirmedItem);
@@ -1101,6 +1116,7 @@ router.post('/:id/commit', staffOnly, asyncHandler(async (req, res) => {
           quantity: item.shelfQty,
           warehouse: '',
           category: '',
+          name: item.name || '',
           brand: item.name || '',
           model: '',
           status: item.shelfQty > 0 ? 'active' : 'pending',
