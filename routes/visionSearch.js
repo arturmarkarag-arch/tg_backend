@@ -2,15 +2,29 @@
 
 const router      = require('express').Router();
 const multer      = require('multer');
-const mongoose    = require('mongoose');
 const { requireTelegramRoles } = require('../middleware/telegramAuth');
 const { asyncHandler }         = require('../utils/errors');
 const ShopProduct    = require('../models/ShopProduct');
 const VisionTestLog  = require('../models/VisionTestLog');
-const { identifyProductFromPhoto, getOpenAIStatus, describeProductImage, embedText } = require('../openaiClient');
+const AppSetting     = require('../models/AppSetting');
+const { getOpenAIStatus, describeProductImage, explainProductImage, embedText } = require('../openaiClient');
+
+// Atlas Vector Search index name — must exist on the shopproducts collection
+// (no fallback; the query errors clearly if it's missing).
+const VECTOR_INDEX = 'shopproduct_vector';
+
+// Confidence threshold is admin-configurable (vision.threshold setting).
+const VISION_THRESHOLD_KEY = 'vision.threshold';
+const DEFAULT_THRESHOLD = 0.6;
+async function getVisionThreshold() {
+  const s = await AppSetting.findOne({ key: VISION_THRESHOLD_KEY }).lean();
+  const v = Number(s?.value);
+  return Number.isFinite(v) ? Math.min(1, Math.max(0, v)) : DEFAULT_THRESHOLD;
+}
 
 const staffOnly = requireTelegramRoles(['admin', 'warehouse']);
 const adminOnly = requireTelegramRoles(['admin']);
+const anyRole   = requireTelegramRoles(['admin', 'warehouse', 'seller']);
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -19,14 +33,6 @@ const upload = multer({
 });
 
 // ─── Vector helpers ─────────────────────────────────────────────────────────
-function cosineSimilarity(a, b) {
-  if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return 0;
-  let dot = 0, na = 0, nb = 0;
-  for (let i = 0; i < a.length; i++) { dot += a[i] * b[i]; na += a[i] * a[i]; nb += b[i] * b[i]; }
-  if (!na || !nb) return 0;
-  return dot / (Math.sqrt(na) * Math.sqrt(nb));
-}
-
 async function fetchImageBuffer(url) {
   // Hard timeout so a slow/dead image URL can't stall the whole embed request.
   const r = await fetch(url, { signal: AbortSignal.timeout(20000) });
@@ -34,62 +40,32 @@ async function fetchImageBuffer(url) {
   return { buffer: Buffer.from(await r.arrayBuffer()), mimeType: r.headers.get('content-type') || 'image/jpeg' };
 }
 
-// ─── POST /query ──────────────────────────────────────────────────────────────
-router.post('/query', staffOnly, upload.single('photo'), asyncHandler(async (req, res) => {
-  if (!req.file) return res.status(400).json({ error: 'photo_required' });
+function toResultItem(p, score) {
+  return {
+    assetId:     String(p._id),
+    score:       Math.max(0, Math.min(1, score)),
+    shopProduct: { _id: p._id, name: p.name, barcode: p.barcode, price: p.price, imageUrl: p.imageUrl },
+  };
+}
 
-  const status = getOpenAIStatus();
-  if (!status.connected) {
-    return res.status(503).json({
-      error:   'openai_not_configured',
-      message: status.error || 'OpenAI не підключено — перевірте OPENAI_API_KEY в налаштуваннях',
-    });
-  }
-
-  const threshold = Math.min(1, Math.max(0, parseFloat(req.body.threshold) || 0));
-  const detail = ['low', 'high', 'auto'].includes(req.body.detail) ? req.body.detail : 'low';
-
-  const allProducts = await ShopProduct
-    .find({}, { _id: 1, name: 1, barcode: 1, price: 1, imageUrl: 1 })
-    .lean();
-
-  let aiResult;
-  try {
-    aiResult = await identifyProductFromPhoto(req.file.buffer, req.file.mimetype, allProducts, { detail });
-  } catch (err) {
-    console.error('[visionSearch] OpenAI error:', err.message);
-    return res.status(502).json({ error: 'openai_api_error', message: err.message });
-  }
-
-  const productMap = Object.fromEntries(allProducts.map((p) => [p._id.toString(), p]));
-
-  const resultItems = (aiResult.candidates || [])
-    .filter((c) => c.productId && mongoose.isValidObjectId(String(c.productId)))
-    .map((c) => ({
-      assetId:     String(c.productId),
-      score:       Math.min(1, Math.max(0, Number(c.confidence) || 0)),
-      shopProduct: productMap[String(c.productId)] || null,
-    }));
-
-  const log = await VisionTestLog.create({
-    results: resultItems.map((r) => ({
-      assetId:     r.assetId,
-      score:       r.score,
-      shopProduct: r.shopProduct?._id || null,
-    })),
-    reasoning: aiResult.reasoning || '',
-    threshold,
-    createdBy: req.telegramUser?.username || req.telegramUser?.id || '',
-  });
-
-  res.json({
-    logId:     log._id,
-    threshold,
-    reasoning: aiResult.reasoning || '',
-    results:   resultItems,
-    usage:     aiResult.usage || {},
-  });
-}));
+// Ranks the catalog against a query embedding via Atlas $vectorSearch. Requires
+// the `shopproduct_vector` index to exist (no fallback). Atlas cosine score is
+// (1+cos)/2, converted back to raw cosine so the % matches the test-page meter.
+async function searchByVector(embedding, k = 5) {
+  const docs = await ShopProduct.aggregate([
+    {
+      $vectorSearch: {
+        index:         VECTOR_INDEX,
+        path:          'embedding',
+        queryVector:   embedding,
+        numCandidates: Math.max(100, k * 20),
+        limit:         k,
+      },
+    },
+    { $project: { name: 1, barcode: 1, price: 1, imageUrl: 1, score: { $meta: 'vectorSearchScore' } } },
+  ]);
+  return docs.map((p) => toResultItem(p, 2 * (p.score || 0) - 1));
+}
 
 // ─── POST /embed-all — backfill descriptors + embeddings for the catalog ──────
 // Admin-only. Processes a batch of products that have a photo but no embedding
@@ -131,10 +107,9 @@ router.post('/embed-all', adminOnly, asyncHandler(async (req, res) => {
   res.json({ processed, failed, remaining, embedded });
 }));
 
-// ─── POST /query-vector — cosine similarity search over embeddings ────────────
-// Describes the query photo, embeds the description, and ranks the catalog by
-// cosine similarity in-process. No Atlas index required; swap to $vectorSearch
-// when the catalog outgrows in-memory scoring.
+// ─── POST /query-vector — embedding similarity search ─────────────────────────
+// Describes the query photo, embeds the description, and ranks the catalog via
+// Atlas $vectorSearch (with an in-process cosine fallback). See searchByVector.
 router.post('/query-vector', staffOnly, upload.single('photo'), asyncHandler(async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'photo_required' });
 
@@ -143,7 +118,12 @@ router.post('/query-vector', staffOnly, upload.single('photo'), asyncHandler(asy
     return res.status(503).json({ error: 'openai_not_configured', message: status.error || 'OpenAI не підключено' });
   }
 
-  const threshold = Math.min(1, Math.max(0, parseFloat(req.body.threshold) || 0));
+  // Client may override (test page slider); otherwise use the admin setting.
+  const clientThreshold = req.body.threshold != null && req.body.threshold !== ''
+    ? parseFloat(req.body.threshold) : NaN;
+  const threshold = Number.isFinite(clientThreshold)
+    ? Math.min(1, Math.max(0, clientThreshold))
+    : await getVisionThreshold();
 
   let descriptor = '', embedding = null, usage = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
   try {
@@ -164,18 +144,16 @@ router.post('/query-vector', staffOnly, upload.single('photo'), asyncHandler(asy
     return res.json({ threshold, reasoning: descriptor, results: [], usage });
   }
 
-  const catalog = await ShopProduct
-    .find({ embedding: { $exists: true } }, { name: 1, barcode: 1, price: 1, imageUrl: 1, embedding: 1 })
-    .lean();
-
-  const resultItems = catalog
-    .map((p) => ({
-      assetId:     String(p._id),
-      score:       Math.max(0, Math.min(1, cosineSimilarity(embedding, p.embedding))),
-      shopProduct: { _id: p._id, name: p.name, barcode: p.barcode, price: p.price, imageUrl: p.imageUrl },
-    }))
-    .sort((a, b) => b.score - a.score)
-    .slice(0, 5);
+  let resultItems;
+  try {
+    resultItems = await searchByVector(embedding, 5);
+  } catch (err) {
+    console.error('[visionSearch] vector search error:', err.message);
+    return res.status(502).json({
+      error:   'vector_search_failed',
+      message: `Векторний пошук недоступний — перевір Atlas-індекс "${VECTOR_INDEX}". (${err.message})`,
+    });
+  }
 
   const log = await VisionTestLog.create({
     results:   resultItems.map((r) => ({ assetId: r.assetId, score: r.score, shopProduct: r.shopProduct._id })),
@@ -185,6 +163,26 @@ router.post('/query-vector', staffOnly, upload.single('photo'), asyncHandler(asy
   });
 
   res.json({ logId: log._id, threshold, reasoning: descriptor, results: resultItems, usage });
+}));
+
+// ─── POST /describe — plain-language product explainer (all roles) ────────────
+// For staff/sellers who scan a product they don't recognise. No search, no
+// embedding — just a friendly Ukrainian description of the photo.
+router.post('/describe', anyRole, upload.single('photo'), asyncHandler(async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'photo_required' });
+
+  const status = getOpenAIStatus();
+  if (!status.connected) {
+    return res.status(503).json({ error: 'openai_not_configured', message: status.error || 'OpenAI не підключено' });
+  }
+
+  try {
+    const { text, usage } = await explainProductImage(req.file.buffer, req.file.mimetype);
+    res.json({ description: text, usage });
+  } catch (err) {
+    console.error('[visionSearch] describe error:', err.message);
+    return res.status(502).json({ error: 'openai_api_error', message: err.message });
+  }
 }));
 
 // ─── GET /logs ────────────────────────────────────────────────────────────────

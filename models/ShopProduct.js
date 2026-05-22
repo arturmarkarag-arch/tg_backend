@@ -27,6 +27,9 @@ const ShopProductSchema = new mongoose.Schema(
       enum: ['receive', 'seller', 'manual'],
       default: 'manual',
     },
+    // Telegram id of whoever created this record. Drives future edit-permission
+    // rules (e.g. a seller may edit only their own entries).
+    createdBy: { type: String, default: '' },
     // Optional back-reference to the warehouse Product it originated from
     linkedProductId: {
       type: mongoose.Schema.Types.ObjectId,
@@ -37,9 +40,14 @@ const ShopProductSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-// barcode is unique when non-empty — sparse so that multiple records
-// without a barcode can coexist
-ShopProductSchema.index({ barcode: 1 }, { unique: true, sparse: true });
+// barcode is unique only among NON-EMPTY values. `sparse` is not enough here:
+// barcode defaults to '' (a present value), so sparse would still index every
+// empty-barcode doc and collide. A partial index on barcode > '' enforces
+// uniqueness for real barcodes while letting unlimited empty-barcode docs coexist.
+ShopProductSchema.index(
+  { barcode: 1 },
+  { unique: true, partialFilterExpression: { barcode: { $gt: '' } } },
+);
 ShopProductSchema.index({ linkedProductId: 1 });
 ShopProductSchema.index({ createdAt: -1 });
 

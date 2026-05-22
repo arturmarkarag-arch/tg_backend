@@ -51,6 +51,24 @@ router.post('/openai/settings', telegramAuth, requireTelegramRole('admin'), asyn
   res.json({ model: selectedModel });
 }));
 
+// ── Vision (photo search) settings ────────────────────────────────────────────
+const VISION_THRESHOLD_KEY = 'vision.threshold';
+const VISION_THRESHOLD_DEFAULT = 0.6;
+
+router.get('/vision-settings', telegramAuth, requireTelegramRole('admin'), asyncHandler(async (req, res) => {
+  const threshold = await getAppSetting(VISION_THRESHOLD_KEY, VISION_THRESHOLD_DEFAULT);
+  res.json({ threshold: Number(threshold) });
+}));
+
+router.post('/vision-settings', telegramAuth, requireTelegramRole('admin'), asyncHandler(async (req, res) => {
+  const t = parseFloat(req.body?.threshold);
+  if (!Number.isFinite(t) || t < 0 || t > 1) {
+    return res.status(400).json({ error: 'invalid_threshold', message: 'Поріг має бути від 0 до 1' });
+  }
+  const threshold = await setAppSetting(VISION_THRESHOLD_KEY, t);
+  res.json({ threshold: Number(threshold) });
+}));
+
 router.get('/ordering-schedule', telegramAuth, requireTelegramRole('admin'), asyncHandler(async (req, res) => {
   const saved = await getAppSetting(ORDERING_SCHEDULE_KEY, ORDERING_SCHEDULE_DEFAULTS);
   res.json({ ...ORDERING_SCHEDULE_DEFAULTS, ...saved });

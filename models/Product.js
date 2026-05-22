@@ -29,6 +29,10 @@ const ProductSchema = new mongoose.Schema(
     archivedAt: { type: Date, default: null },
     originalOrderNumber: { type: Number, default: null },
     restoredFromArchive: { type: Boolean, default: false },
+    // Non-authoritative "recommended update" coming FROM a ShopProduct edit.
+    // Never auto-applied — staff review and decide. Shape:
+    // { price, name, quantityPerPackage, notes, imageUrl, by, at }.
+    pendingShopUpdate: { type: mongoose.Schema.Types.Mixed, default: null },
   },
   { timestamps: true }
 );

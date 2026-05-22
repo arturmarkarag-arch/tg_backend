@@ -1,6 +1,5 @@
 const express = require('express');
 const crypto  = require('crypto');
-const mongoose = require('mongoose');
 const { S3Client, PutObjectCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3');
 const { requireTelegramRoles } = require('../middleware/telegramAuth');
 const { appError, asyncHandler } = require('../utils/errors');
@@ -107,22 +106,31 @@ router.post('/', staffOnly, asyncHandler(async (req, res) => {
     if (safe) originalImageUrl = r2PublicUrl('originals', safe);
   }
 
-  const item = await ShopProduct.create({
-    barcode:            String(barcode || '').trim(),
-    name:               String(name    || '').trim(),
-    price:              Number(price)  || 0,
-    quantityPerPackage: Number(quantityPerPackage) || 0,
-    notes:              String(notes  || '').trim(),
-    source:             ['receive', 'seller', 'manual'].includes(source) ? source : 'manual',
-    imageUrl,
-    originalImageUrl,
-  });
-  res.status(201).json(item);
+  try {
+    const item = await ShopProduct.create({
+      barcode:            String(barcode || '').trim(),
+      name:               String(name    || '').trim(),
+      price:              Number(price)  || 0,
+      quantityPerPackage: Number(quantityPerPackage) || 0,
+      notes:              String(notes  || '').trim(),
+      source:             ['receive', 'seller', 'manual'].includes(source) ? source : 'manual',
+      createdBy:          String(req.telegramId || req.user?.telegramId || ''),
+      imageUrl,
+      originalImageUrl,
+    });
+    res.status(201).json(item);
+  } catch (err) {
+    if (err.code === 11000) {
+      return res.status(409).json({ error: 'barcode_exists', message: 'Товар з таким штрихкодом вже існує' });
+    }
+    throw err;
+  }
 }));
 
 // ── PATCH /:id — update ───────────────────────────────────────────────────────
-// Uses a transaction when the record is linked to a warehouse Product so that
-// shared fields (name, price) stay consistent across both collections atomically.
+// Shop Products is fully decoupled from the warehouse: edits here NEVER mutate
+// the linked warehouse Product. (Any "recommendation" channel back to the
+// warehouse will be a separate, explicit, non-authoritative mechanism.)
 router.patch('/:id', staffOnly, asyncHandler(async (req, res) => {
   const item = await ShopProduct.findById(req.params.id);
   if (!item) throw appError('product_not_found');
@@ -155,26 +163,13 @@ router.patch('/:id', staffOnly, asyncHandler(async (req, res) => {
     item.originalImageUrl = item.imageUrl;
   }
 
-  // ── Transactional propagation to linked warehouse Product ─────────────────
-  // Only name and price are considered "shared" between the two systems.
-  const propagate = item.linkedProductId &&
-    (fields.name !== undefined || fields.price !== undefined);
-
-  if (propagate) {
-    const session = await mongoose.connection.startSession();
-    try {
-      await session.withTransaction(async () => {
-        await item.save({ session });
-        const updates = {};
-        if (fields.name  !== undefined) updates.name  = item.name;
-        if (fields.price !== undefined) updates.price = item.price;
-        await Product.findByIdAndUpdate(item.linkedProductId, { $set: updates }, { session });
-      });
-    } finally {
-      session.endSession();
-    }
-  } else {
+  try {
     await item.save();
+  } catch (err) {
+    if (err.code === 11000) {
+      return res.status(409).json({ error: 'barcode_exists', message: 'Товар з таким штрихкодом вже існує' });
+    }
+    throw err;
   }
 
   res.json(item.toObject());

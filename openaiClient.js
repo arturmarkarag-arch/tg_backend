@@ -305,60 +305,6 @@ async function analyzeProductImage(imageBuffer, { model = null } = {}) {
   };
 }
 
-// ─── Visual product catalog search ───────────────────────────────────────────
-//
-// Given a photo and the ShopProduct catalog, asks OpenAI to identify the best
-// matching product(s). Returns up to 3 candidates ranked by confidence.
-//
-// products: Array<{ _id, name, barcode? }> — lean Mongoose documents
-// Returns: { candidates: [{ productId, confidence }], reasoning, usage }
-
-async function identifyProductFromPhoto(imageBuffer, mimeType, products, { model = null, detail = 'low' } = {}) {
-  if (!openai) return { candidates: [], reasoning: '', usage: {} };
-
-  const selectedModel = model || (await getSelectedOpenAIModel());
-
-  // Compact catalog — keep one line per product to minimize token usage.
-  // Format: "ID|назва|штрихкод" (barcode omitted when absent)
-  const catalogText = products
-    .map((p) => `${p._id}|${p.name}${p.barcode ? `|${p.barcode}` : ''}`)
-    .join('\n');
-
-  const prompt =
-    `Ти — асистент для ідентифікації товарів. Знайди товар з каталогу що відповідає фотографії.\n\n` +
-    `КАТАЛОГ (${products.length} товарів, формат "id|назва|штрихкод"):\n${catalogText}\n\n` +
-    `Поверни ТІЛЬКИ JSON без markdown:\n` +
-    `{"candidates":[{"productId":"<id>","confidence":<0.0-1.0>}],"reasoning":"<коротке пояснення>"}\n\n` +
-    `Правила:\n` +
-    `- До 3 найкращих збігів за спаданням confidence\n` +
-    `- Використовуй точний id (перше поле до |)\n` +
-    `- confidence: 0.0 = немає збігу, 1.0 = ідеальний збіг\n` +
-    `- Порожній масив якщо нічого не підходить`;
-
-  const response = await openai.responses.create({
-    model: selectedModel,
-    input: [{
-      role: 'user',
-      content: [
-        { type: 'input_text', text: prompt },
-        {
-          type: 'input_image',
-          image_url: `data:${mimeType || 'image/jpeg'};base64,${Buffer.from(imageBuffer).toString('base64')}`,
-          detail,
-        },
-      ],
-    }],
-  });
-
-  const rawText = extractOutputText(response);
-  const parsed  = parseJsonObject(rawText);
-  return {
-    candidates: Array.isArray(parsed.candidates) ? parsed.candidates : [],
-    reasoning:  String(parsed.reasoning || '').trim(),
-    usage:      buildUsageInfo(response),
-  };
-}
-
 // ─── Text completion (generic) ────────────────────────────────────────────────
 
 async function createChatCompletion(prompt, { model = null } = {}) {
@@ -400,6 +346,35 @@ async function describeProductImage(imageBuffer, mimeType, { model = null } = {}
   return { descriptor: extractOutputText(response), usage: buildUsageInfo(response) };
 }
 
+// Friendly product explainer for shop staff who don't know the item. Returns a
+// plain-language Ukrainian description — distinct from describeProductImage,
+// whose terse output is tuned for embeddings.
+const PRODUCT_EXPLAIN_PROMPT =
+  'Ти пояснюєш товар працівнику магазину, який його не знає. Відповідай УКРАЇНСЬКОЮ, простими словами. ' +
+  'Опиши: що це за товар і для чого він, бренд/виробник (якщо видно), основні характеристики, ' +
+  'обʼєм/розмір/вагу, як використовувати. Якщо на етикетці є важливий текст — згадай його. ' +
+  'Будь стислим і зрозумілим. Не вигадуй того, чого не видно на фото.';
+
+async function explainProductImage(imageBuffer, mimeType, { model = null } = {}) {
+  if (!openai) return { text: '', usage: {} };
+  const selectedModel = model || (await getSelectedOpenAIModel());
+  const response = await openai.responses.create({
+    model: selectedModel,
+    input: [{
+      role: 'user',
+      content: [
+        { type: 'input_text', text: PRODUCT_EXPLAIN_PROMPT },
+        {
+          type: 'input_image',
+          image_url: `data:${mimeType || 'image/jpeg'};base64,${Buffer.from(imageBuffer).toString('base64')}`,
+          detail: 'high',
+        },
+      ],
+    }],
+  });
+  return { text: extractOutputText(response), usage: buildUsageInfo(response) };
+}
+
 async function embedText(text) {
   if (!openai) throw new Error(openaiStatus.error || 'OPENAI_API_KEY not configured');
   const clean = String(text || '').trim();
@@ -422,7 +397,7 @@ module.exports = {
   createChatCompletion,
   analyzeBarcodeImage,
   analyzeProductImage,
-  identifyProductFromPhoto,
   describeProductImage,
+  explainProductImage,
   embedText,
 };
