@@ -8,6 +8,7 @@ const ShopProduct    = require('../models/ShopProduct');
 const VisionTestLog  = require('../models/VisionTestLog');
 const AppSetting     = require('../models/AppSetting');
 const { getOpenAIStatus, describeProductImage, explainProductImage, embedText } = require('../openaiClient');
+const { embedShopProduct } = require('../utils/shopProductEmbedding');
 
 // Atlas Vector Search index name — must exist on the shopproducts collection
 // (no fallback; the query errors clearly if it's missing).
@@ -33,13 +34,6 @@ const upload = multer({
 });
 
 // ─── Vector helpers ─────────────────────────────────────────────────────────
-async function fetchImageBuffer(url) {
-  // Hard timeout so a slow/dead image URL can't stall the whole embed request.
-  const r = await fetch(url, { signal: AbortSignal.timeout(20000) });
-  if (!r.ok) throw new Error(`image fetch ${r.status}`);
-  return { buffer: Buffer.from(await r.arrayBuffer()), mimeType: r.headers.get('content-type') || 'image/jpeg' };
-}
-
 function toResultItem(p, score) {
   return {
     assetId:     String(p._id),
@@ -87,16 +81,7 @@ router.post('/embed-all', adminOnly, asyncHandler(async (req, res) => {
   let processed = 0, failed = 0;
   for (const doc of docs) {
     try {
-      const { buffer, mimeType } = await fetchImageBuffer(doc.originalImageUrl || doc.imageUrl);
-      const { descriptor } = await describeProductImage(buffer, mimeType);
-      const { embedding, model } = await embedText(descriptor);
-      if (!embedding) { failed++; continue; }
-      doc.descriptor     = descriptor;
-      doc.embedding      = embedding;
-      doc.embeddingModel = model;
-      doc.embeddedAt     = new Date();
-      await doc.save();
-      processed++;
+      if (await embedShopProduct(doc)) processed++; else failed++;
     } catch (err) {
       console.error('[visionSearch] embed-all failed for', String(doc._id), err.message);
       failed++;
@@ -109,7 +94,7 @@ router.post('/embed-all', adminOnly, asyncHandler(async (req, res) => {
 
 // ─── POST /query-vector — embedding similarity search ─────────────────────────
 // Describes the query photo, embeds the description, and ranks the catalog via
-// Atlas $vectorSearch (with an in-process cosine fallback). See searchByVector.
+// Atlas $vectorSearch (requires the index — no fallback). See searchByVector.
 router.post('/query-vector', staffOnly, upload.single('photo'), asyncHandler(async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'photo_required' });
 

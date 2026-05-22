@@ -5,6 +5,7 @@ const { requireTelegramRoles } = require('../middleware/telegramAuth');
 const { appError, asyncHandler } = require('../utils/errors');
 const ShopProduct = require('../models/ShopProduct');
 const Product     = require('../models/Product');
+const { embedShopProductAsync } = require('../utils/shopProductEmbedding');
 
 const staffOnly  = requireTelegramRoles(['admin', 'warehouse']);
 const adminOnly  = requireTelegramRoles(['admin']);
@@ -119,6 +120,8 @@ router.post('/', staffOnly, asyncHandler(async (req, res) => {
       originalImageUrl,
     });
     res.status(201).json(item);
+    // Auto-index for vector search (background; needs a photo).
+    if (item.imageUrl || item.originalImageUrl) embedShopProductAsync(item, 'create');
   } catch (err) {
     if (err.code === 11000) {
       return res.status(409).json({ error: 'barcode_exists', message: 'Товар з таким штрихкодом вже існує' });
@@ -163,6 +166,8 @@ router.patch('/:id', staffOnly, asyncHandler(async (req, res) => {
     item.originalImageUrl = item.imageUrl;
   }
 
+  const photoChanged = Boolean(fields.filename || fields.originalFilename);
+
   try {
     await item.save();
   } catch (err) {
@@ -173,6 +178,8 @@ router.patch('/:id', staffOnly, asyncHandler(async (req, res) => {
   }
 
   res.json(item.toObject());
+  // New photo → the old embedding is stale; re-index in the background.
+  if (photoChanged && (item.imageUrl || item.originalImageUrl)) embedShopProductAsync(item, 'patch');
 }));
 
 // ── DELETE /:id ───────────────────────────────────────────────────────────────
