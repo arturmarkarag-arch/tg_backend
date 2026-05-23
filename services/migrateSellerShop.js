@@ -79,10 +79,9 @@ async function migrateSellerShop({
     }
   }
 
-  // Note: active orders may sometimes belong to an earlier ordering session
-  // than the current one. The oldSessionId match is useful to prefer the current
-  // session, but we still fall back to any active order on the old shop so the
-  // seller's live order is not orphaned during reassignment.
+  // The migration moves ONLY the order from the old shop's CURRENT ordering
+  // session (oldSessionId). Orders from EARLIER sessions are intentionally left
+  // in place — see the lookup below.
 
   let newSessionId = null;
   let warehouseZone = '';
@@ -111,17 +110,17 @@ async function migrateSellerShop({
         ],
       };
 
+      // Move ONLY the seller's order from the CURRENT ordering session of the old
+      // shop. A stale order from an EARLIER session is deliberately NOT moved:
+      // silently yanking it into the new shop's session (the removed fallback)
+      // dropped it into a picking run it never belonged to and re-sessioned it
+      // behind the operator's back. Stale orders surface separately via picking
+      // start-session's `staleWarnings` for explicit manual handling.
       if (oldSessionId) {
         activeOrder = await Order.findOne({
           ...legacyOrderQuery,
           orderingSessionId: oldSessionId,
         }).session(session);
-      }
-
-      if (!activeOrder) {
-        activeOrder = await Order.findOne(legacyOrderQuery)
-          .sort({ updatedAt: -1, createdAt: -1 })
-          .session(session);
       }
     } else {
       // Seller can be temporarily unassigned. In that case pick a parked active

@@ -552,10 +552,12 @@ router.post('/block-upload-photos', staffOnly, asyncHandler(async (req, res) => 
 
   const session = await mongoose.connection.startSession();
   let results = [];
+  let createdProducts = [];
   let savedBlock;
   try {
     await session.withTransaction(async () => {
       results = []; // reset on retry
+      createdProducts = []; // reset on retry
       const block = await Block.findOne({ blockId }).session(session);
       if (!block) throw appError('block_not_found');
 
@@ -579,6 +581,7 @@ router.post('/block-upload-photos', staffOnly, asyncHandler(async (req, res) => 
         block.productIds.push(product._id);
         nextOrderNumber += 1;
         results.push({ productId: String(product._id), imageUrl, index: results.length });
+        createdProducts.push(product);
       }
 
       block.version += 1;
@@ -587,6 +590,16 @@ router.post('/block-upload-photos', staffOnly, asyncHandler(async (req, res) => 
     });
   } finally {
     session.endSession();
+  }
+
+  // Mirror every uploaded product into the shop catalogue ("Товари Магазинів"),
+  // exactly as receipt items mirror on confirm — every product that reaches the
+  // warehouse must surface in the shop catalogue. Fire-and-forget AFTER commit
+  // (the mirror is a projection, never blocks this request); $setOnInsert means a
+  // later label edit's pushSharedFieldsToMirror fills in price/name/photo.
+  for (const product of createdProducts) {
+    upsertShopProductFromProduct(product).catch((err) =>
+      console.error('[products/block-upload] ShopProduct upsert failed:', err.message));
   }
 
   try {
@@ -914,7 +927,13 @@ router.patch('/:id', staffOnly, asyncHandler(async (req, res) => {
   // acceptable if deletion fails; DB is the source of truth.
   if (oldImageNames.length > 0) {
     const newNameSet = new Set(product.imageNames || []);
-    const toDelete = oldImageNames.filter((n) => !newNameSet.has(n));
+    // Never delete the file still referenced as the clean original. block_photo
+    // products (Склад-Полки direct upload) store the original + annotated photo
+    // under the SAME products/ filename, so without this guard the FIRST label
+    // edit would purge the clean original. The edit canvas would then fall back
+    // to the already-annotated photo and bake new labels on top of the old ones.
+    const originalName = (product.originalImageUrl || '').split('/').pop();
+    const toDelete = oldImageNames.filter((n) => !newNameSet.has(n) && n !== originalName);
     if (toDelete.length) {
       deleteR2Objects(toDelete.map((n) => `products/${n}`)).catch(() => {});
     }

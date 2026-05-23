@@ -202,6 +202,49 @@ router.post('/start-session', requireTelegramRoles(['warehouse', 'admin']), asyn
         const schedule2 = await getOrderingSchedule();
         currentSessionId = await getOrCreateSessionId(String(deliveryGroupId), group2.dayOfWeek, schedule2);
       }
+
+      // BLOCK start while there are UNRESOLVED conflicts: a shop in THIS group's
+      // CURRENT session holding active orders from 2+ distinct buyers (two sellers'
+      // orders collided on one shop). Picking must not begin until staff resolve
+      // them (move/unassign a seller) via the conflict panel. Same definition as
+      // GET /v1/orders/conflicts, scoped to this group+session. The client already
+      // renders this response (usePickingSession → 'unresolved_conflicts').
+      const sessionActiveOrders = await Order.find(
+        {
+          'buyerSnapshot.deliveryGroupId': String(deliveryGroupId),
+          status: { $in: ['new', 'in_progress'] },
+          orderingSessionId: currentSessionId,
+        },
+        '_id shopId buyerSnapshot buyerTelegramId orderNumber',
+      ).lean();
+
+      const ordersByShop = new Map();
+      for (const o of sessionActiveOrders) {
+        const sid = String(o.shopId || o.buyerSnapshot?.shopId || '');
+        if (!sid) continue;
+        if (!ordersByShop.has(sid)) ordersByShop.set(sid, []);
+        ordersByShop.get(sid).push(o);
+      }
+      const conflictShopIds = [...ordersByShop.entries()]
+        .filter(([, orders]) => new Set(orders.map((o) => String(o.buyerTelegramId))).size > 1)
+        .map(([sid]) => sid);
+
+      if (conflictShopIds.length > 0) {
+        const conflicts = [];
+        for (const sid of conflictShopIds) {
+          for (const o of ordersByShop.get(sid)) {
+            conflicts.push({
+              orderId: String(o._id),
+              orderNumber: o.orderNumber,
+              shopName: o.buyerSnapshot?.shopName || '—',
+              shopCity: o.buyerSnapshot?.shopCity || '',
+            });
+          }
+        }
+        // Do NOT build tasks or mark confirmed — staff must resolve first.
+        return res.json({ unresolved: true, conflicts });
+      }
+
       const staleOrders = await Order.find(
         {
           'buyerSnapshot.deliveryGroupId': String(deliveryGroupId),
@@ -231,18 +274,11 @@ router.post('/start-session', requireTelegramRoles(['warehouse', 'admin']), asyn
       return res.json({ started: true, taskCount, staleWarnings });
     }
 
-    // Fallback: if group lookup failed, keep previous behavior without session scoping.
-    await buildPickingTasksFromOrders(deliveryGroupId);
-
-    const taskCount = await PickingTask.countDocuments(pendingFilter);
-
-    if (taskCount === 0) {
-      return res.json({ noOrders: true });
-    }
-
-    await DeliveryGroup.updateOne({ _id: deliveryGroupId }, { $set: { pickingConfirmedAt: new Date() } });
-    await bustGroupCaches(deliveryGroupId);
-    res.json({ started: true, taskCount });
+    // Reaching here means deliveryGroupId did not resolve to a real DeliveryGroup.
+    // In the clean architecture every picking session is scoped to a real group +
+    // ordering session, so this is an error — we never silently build tasks from
+    // ALL active orders without session scoping (the removed legacy fallback).
+    throw appError('group_not_found');
   } catch (err) {
     if (err && err.name === 'AppError') return next(err);
     console.error('[picking/start-session]', err);

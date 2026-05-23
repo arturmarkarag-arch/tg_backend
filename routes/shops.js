@@ -15,9 +15,27 @@ const { unassignSellerAndPark } = require('../services/unassignSeller');
 
 const router = express.Router();
 
+// Public / non-staff projection of a shop — ONLY the fields registration and a
+// shop-picker need. Carries NO seller personal data (name/phone/telegramId/cart/
+// history). Used by the public /registry endpoint and the non-staff branch of GET /.
+function toMinimalShop(s) {
+  return {
+    _id: s._id,
+    name: s.name,
+    address: s.address || '',
+    cityId: s.cityId?._id ? String(s.cityId._id) : (s.cityId || null),
+    city: s.cityId?.name || '',
+    deliveryGroupId: s.deliveryGroupId ? String(s.deliveryGroupId) : '',
+    isActive: s.isActive,
+  };
+}
+
 // ─── GET /api/shops ──────────────────────────────────────────────────────────
-// Список магазинів. За замовчуванням тільки активні.
-// Query: ?cityId=xxx  ?city=Warszawa (legacy)  ?deliveryGroupId=xxx  ?includeInactive=true
+// Список магазинів. За замовчуванням тільки активні. Requires auth (mounted
+// behind the global telegramAuth gate). Seller PII is returned ONLY to staff
+// (admin/warehouse); every other authenticated role gets the minimal projection.
+// Public registration uses GET /api/shops/registry instead.
+// Query: ?cityId=xxx  ?deliveryGroupId=xxx  ?includeInactive=true
 router.get('/', asyncHandler(async (req, res) => {
   const filter = {};
 
@@ -26,15 +44,18 @@ router.get('/', asyncHandler(async (req, res) => {
     }
     if (req.query.cityId) {
       filter.cityId = req.query.cityId;
-    } else if (req.query.city) {
-      const cityDoc = await City.findOne({ name: req.query.city.trim() }).lean();
-      if (cityDoc) filter.cityId = cityDoc._id;
     }
     if (req.query.deliveryGroupId) {
       filter.deliveryGroupId = req.query.deliveryGroupId;
     }
 
     const shops = await Shop.find(filter).populate('cityId', 'name country').sort({ name: 1 }).lean();
+
+    // Seller PII is STAFF-ONLY. Sellers (and any other non-staff authenticated
+    // role) get a minimal shop list with no personal data.
+    if (!['admin', 'warehouse'].includes(req.telegramUser?.role)) {
+      return res.json(shops.map(toMinimalShop));
+    }
 
     // Sellers per shop — full data so the Shops tab can render cart/activity
     // status, phone, and "previously assigned" history without a separate
@@ -118,18 +139,36 @@ router.get('/cities', asyncHandler(async (req, res) => {
   res.json(cities);
 }));
 
+// ─── GET /api/shops/registry ──────────────────────────────────────────────────
+// PUBLIC minimal shop list for the registration screen. A not-yet-registered
+// Telegram user cannot pass telegramAuth (no User record), so registration must
+// stay public — but it gets NO seller data, only id/name/address/city/group.
+// Active shops only, optionally filtered by ?cityId=.
+router.get('/registry', asyncHandler(async (req, res) => {
+  const filter = { isActive: true };
+  if (req.query.cityId) filter.cityId = req.query.cityId;
+  const shops = await Shop.find(filter).populate('cityId', 'name').sort({ name: 1 }).lean();
+  res.json(shops.map(toMinimalShop));
+}));
+
 // ─── GET /api/shops/:id ───────────────────────────────────────────────────────
 router.get('/:id', asyncHandler(async (req, res) => {
   const shop = await Shop.findById(req.params.id).populate('cityId', 'name country').lean();
   if (!shop) throw appError('shop_not_found');
 
-  // Продавці цього магазину
+  const cityId = shop.cityId?._id ? String(shop.cityId._id) : (shop.cityId || null);
+  const base = { ...shop, cityId, city: shop.cityId?.name || '' }; // city computed from populate, not stored field
+
+  // The seller list (names + telegramIds) is STAFF-ONLY — a seller must not be
+  // able to enumerate other sellers via shop ids.
+  if (!['admin', 'warehouse'].includes(req.telegramUser?.role)) {
+    return res.json(base);
+  }
+
   const sellers = await User.find({ shopId: shop._id, role: { $in: ['seller', 'admin'] } })
     .select('telegramId firstName lastName role')
     .lean();
-
-  const cityId = shop.cityId?._id ? String(shop.cityId._id) : (shop.cityId || null);
-  res.json({ ...shop, cityId, city: shop.cityId?.name || '', sellers }); // city computed from populate, not stored field
+  res.json({ ...base, sellers });
 }));
 
 // ─── POST /api/shops ──────────────────────────────────────────────────────────

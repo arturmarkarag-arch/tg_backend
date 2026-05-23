@@ -4,7 +4,6 @@ const User = require('../models/User');
 const Order = require('../models/Order');
 const DeliveryGroup = require('../models/DeliveryGroup');
 const Shop = require('../models/Shop');
-const City = require('../models/City');
 const PickingTask = require('../models/PickingTask');
 const { telegramAuth, requireTelegramRole } = require('../middleware/telegramAuth');
 const { isOrderingOpen, getOrderingWindowOpenAt, isOrderingOpeningSoon } = require('../utils/orderingSchedule');
@@ -100,7 +99,7 @@ router.get('/', asyncHandler(async (req, res) => {
   const pageSize = Math.min(500, Math.max(1, parseInt(req.query.pageSize) || 20));
   const roleFilter     = req.query.role || null;
   const groupFilter    = req.query.deliveryGroupId || null;
-  let cityFilter       = req.query.cityId || req.query.shopCity || null; // Filter by City._id or legacy shopCity name, resolved to shopIds
+  const cityFilter     = req.query.cityId || null; // City._id, resolved to shopIds
   const searchQuery    = req.query.search?.trim() || null;
   const activityFilter = req.query.activityFilter || null; // 'no_cart' | 'no_order' | 'no_visit'
 
@@ -108,15 +107,9 @@ router.get('/', asyncHandler(async (req, res) => {
   if (roleFilter && roleFilter !== 'all') filter.role = roleFilter;
   if (groupFilter && groupFilter !== 'all') filter.deliveryGroupId = groupFilter;
 
-  // City filter: resolve cityId or legacy city name → shops in that city → filter by shopId
+  // City filter: cityId → shops in that city → filter by shopId
   if (cityFilter && cityFilter !== 'all') {
-    let cityShops = await Shop.find({ cityId: cityFilter }, '_id').lean();
-    if (!cityShops.length && !mongoose.Types.ObjectId.isValid(cityFilter)) {
-      const cityDoc = await City.findOne({ name: cityFilter }).lean();
-      if (cityDoc) {
-        cityShops = await Shop.find({ cityId: cityDoc._id }, '_id').lean();
-      }
-    }
+    const cityShops = await Shop.find({ cityId: cityFilter }, '_id').lean();
     filter.shopId = { $in: cityShops.map((s) => s._id) };
   }
 

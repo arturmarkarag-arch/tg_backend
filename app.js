@@ -53,7 +53,9 @@ const publicApiPaths = [
   /^\/api\/v1\/telegram\/me$/,
   /^\/api\/delivery-groups\/summary$/,
   /^\/api\/shops\/cities$/,
-  /^\/api\/shops$/,
+  // Minimal, seller-PII-free shop list for the registration screen. The full
+  // GET /api/shops (with seller data) now requires auth and is staff-only.
+  /^\/api\/shops\/registry$/,
   /^\/api\/shop-products\/barcode\/.+$/,
   /^\/api\/health$/,
   /^\/api\/bot-status$/,

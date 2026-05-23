@@ -249,22 +249,6 @@ function getOrderingWindowOpenAt(deliveryDayOfWeek, schedule = {}) {
 }
 
 /**
- * Returns a stable string ID for the current ordering session of a delivery group.
- * Format: `<groupId>:<windowOpenAt ISO string>`
- *
- * @deprecated Use getOrCreateSessionId from utils/getOrCreateSession instead.
- *             This sync version is kept for test utilities (warehouseTest.js).
- * @param {string} groupId
- * @param {number} deliveryDayOfWeek  0=Sun … 6=Sat
- * @param {{ openHour?: number, openMinute?: number }} [schedule]
- * @returns {string}
- */
-function getCurrentOrderingSessionId(groupId, deliveryDayOfWeek, schedule = {}) {
-  const windowOpenAt = getOrderingWindowOpenAt(deliveryDayOfWeek, schedule);
-  return `${groupId}:${windowOpenAt.toISOString()}`;
-}
-
-/**
  * Returns the Warsaw calendar date string ("YYYY-MM-DD") for the day the ordering window
  * opens for the given delivery group. Stable even if admin changes the open time.
  *
@@ -344,4 +328,4 @@ function isOrderingOpeningSoon(deliveryDayOfWeek, schedule = {}, withinMinutes =
   return minsUntilOpen > 0 && minsUntilOpen <= withinMinutes;
 }
 
-module.exports = { isOrderingOpen, isOrderingOpeningSoon, getWindowDescription, getWarsawNow, getOrderingWindowOpenAt, getOrderingWindowCloseAt, getCurrentOrderingSessionId, getOpenDateWarsaw, DAY_SHORT_UK, DAY_FULL_UK };
+module.exports = { isOrderingOpen, isOrderingOpeningSoon, getWindowDescription, getWarsawNow, getOrderingWindowOpenAt, getOrderingWindowCloseAt, getOpenDateWarsaw, DAY_SHORT_UK, DAY_FULL_UK };

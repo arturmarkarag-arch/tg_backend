@@ -598,6 +598,24 @@ async function placeOrderImpl(req, res) {
     if (!isOpen) {
       return res.status(423).json({ error: 'ordering_closed', message });
     }
+
+    // Guard: a cart restored from a stale order is pinned to its original delivery
+    // group via cartState.reservedForGroupId. Until that reservation is cleared
+    // (seller migration with clearCartReservation, or the order placed back into
+    // its own group), the items must NOT be submittable to a DIFFERENT group —
+    // otherwise the restored order silently lands in the wrong picking session.
+    // This invariant was previously enforced only on the client; a direct POST
+    // bypassed it. Now enforced server-side.
+    const reservedGroupId = buyer.cartState?.reservedForGroupId
+      ? String(buyer.cartState.reservedForGroupId)
+      : null;
+    if (reservedGroupId && reservedGroupId !== String(group._id)) {
+      return res.status(409).json({
+        error: 'cart_reserved_for_other_group',
+        message: 'Кошик зарезервовано для іншої групи доставки. Очистіть кошик або зверніться до адміністратора.',
+        reservedForGroupId: reservedGroupId,
+      });
+    }
   }
 
   const productIds = items
@@ -718,8 +736,13 @@ async function placeOrderImpl(req, res) {
     : `order:place:${buyer.telegramId}:${buyer.shopId || 'none'}:nogroup`;
   const placement = await withLock(placementLockKey, async () => {
   const mongoSession = await mongoose.connection.startSession();
-  mongoSession.startTransaction();
   try {
+    // withTransaction auto-retries on transient WriteConflicts (e.g. a concurrent
+    // set-item-qty / remove-item / snapshot writing the same order document) and
+    // on UnknownTransactionCommitResult — matching every other order handler.
+    // A non-transient error (e.g. 11000 duplicate key) is NOT retried; it aborts
+    // and rethrows to the catch below.
+    await mongoSession.withTransaction(async () => {
     const txExisting = await Order.findOne(existingOrderQuery).session(mongoSession);
 
     if (txExisting) {
@@ -800,13 +823,13 @@ async function placeOrderImpl(req, res) {
       );
     }
 
-    await mongoSession.commitTransaction();
+    });
     return { sentResponse: false };
   } catch (err) {
-    await mongoSession.abortTransaction();
-    // Idempotency key collision: another request already created this order
+    // withTransaction has already aborted the transaction. On a non-transient
+    // error it rethrows here. Idempotency key collision = another request already
+    // created this order under the same key → return the existing one.
     if (err.code === 11000 && sanitizedKey) {
-      mongoSession.endSession();
       const existing = await Order.findOne({ idempotencyKey: sanitizedKey }).lean();
       if (existing) { res.status(200).json(existing); return { sentResponse: true }; }
     }

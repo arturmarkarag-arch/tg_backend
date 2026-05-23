@@ -18,6 +18,7 @@ const Shop = require('../models/Shop');
 const Counter = require('../models/Counter');
 const { getIO } = require('../socket');
 const { upsertShopProductFromProduct, upsertShopOwnedFromReceiptItem } = require('../utils/upsertShopProduct');
+const { embedShopProductAsync } = require('../utils/shopProductEmbedding');
 const { appError, asyncHandler } = require('../utils/errors');
 const {
   assertCanEditItem,
@@ -928,7 +929,11 @@ router.post('/:id/items/:itemId/confirm', staffOnly, asyncHandler(async (req, re
   try {
     let confirmedItem = null;
     let confirmedProduct = null;
+    // ShopProducts that need (re)embedding — scheduled AFTER commit so we never
+    // embed a doc that could still roll back. Reset on every transaction attempt.
+    let embedTargets = [];
     await session.withTransaction(async () => {
+      embedTargets = [];
       const receipt = await Receipt.findById(req.params.id).session(session);
       const item = await ReceiptItem.findOne({ _id: req.params.itemId, receiptId: req.params.id }).session(session);
       if (!item) throw appError('receipt_item_not_found');
@@ -944,6 +949,30 @@ router.post('/:id/items/:itemId/confirm', staffOnly, asyncHandler(async (req, re
 
       const product = await ensureReceiptItemProduct(item, session);
       confirmedProduct = product;
+
+      // Shop-catalog routing by destination — now INSIDE the stock transaction so
+      // a warehouse Product can NEVER commit without its ShopProduct mirror, and a
+      // shop-owned entry's back-link (createdShopProductId) is persisted atomically.
+      // Previously these ran fire-and-forget after the txn: a crash/error there left
+      // a confirmed Product with no mirror that nothing retried (re-confirm is
+      // blocked once confirmed). Embeddings are deferred to after commit.
+      if (product) {
+        // shelf item → ShopProduct MIRROR of the warehouse product (linkedProductId set).
+        const mirror = await upsertShopProductFromProduct(product, { session });
+        if (mirror && !mirror.embedding && (mirror.imageUrl || mirror.originalImageUrl)) {
+          embedTargets.push([mirror, 'upsert-from-product']);
+        }
+      } else if ((item.destination || 'shelf') === 'shops' && !item.existingProductId) {
+        // brand-new shops item → shop-OWNED ShopProduct (no warehouse product).
+        // (shops + existingProductId is a pure transit marker → nothing to create.)
+        const sp = await upsertShopOwnedFromReceiptItem(item.toObject(), { session });
+        if (sp && String(sp._id) !== String(item.createdShopProductId || '')) {
+          item.createdShopProductId = sp._id;
+          await item.save({ session });
+        }
+        if (sp && (sp.imageUrl || sp.originalImageUrl)) embedTargets.push([sp, 'shop-owned-upsert']);
+      }
+
       confirmedItem = item.toObject();
       confirmedItem.currentLocation = {
         blockId: null,
@@ -961,23 +990,8 @@ router.post('/:id/items/:itemId/confirm', staffOnly, asyncHandler(async (req, re
         changes: [{ field: 'status', label: 'Статус', from: 'draft', to: 'confirmed' }],
       }).catch((e) => console.error('[ReceiptItemLog] confirm error:', e));
     });
-    // Shop-catalog routing by destination (after the stock txn, background —
-    // never blocks confirm). Idempotent.
-    if (confirmedProduct) {
-      // shelf item → ShopProduct MIRROR of the warehouse product (linkedProductId set).
-      upsertShopProductFromProduct(confirmedProduct).catch((err) =>
-        console.error('[receipts/confirm] ShopProduct mirror upsert failed:', err.message));
-    } else if (confirmedItem && (confirmedItem.destination || 'shelf') === 'shops' && !confirmedItem.existingProductId) {
-      // brand-new shops item → shop-OWNED ShopProduct (no warehouse product).
-      // (shops + existingProductId is a pure transit marker → nothing to create.)
-      upsertShopOwnedFromReceiptItem(confirmedItem)
-        .then((sp) => {
-          if (sp && String(sp._id) !== String(confirmedItem.createdShopProductId || '')) {
-            return ReceiptItem.updateOne({ _id: confirmedItem._id }, { $set: { createdShopProductId: sp._id } });
-          }
-        })
-        .catch((err) => console.error('[receipts/confirm] shop-owned upsert failed:', err.message));
-    }
+    // The shop mirror / shop-owned doc is now durable — schedule background embedding.
+    for (const [doc, reason] of embedTargets) embedShopProductAsync(doc, reason);
     const io = getIO();
     if (io) {
       io.to(`receipt_${req.params.id}`).emit('receipt_item_confirmed', confirmedItem);
