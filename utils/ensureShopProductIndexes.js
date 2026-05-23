@@ -15,10 +15,9 @@ async function ensureShopProductIndexes() {
     const coll = ShopProduct.collection;
     const indexes = await coll.indexes();
     const barcodeIdx = indexes.find((i) => i.name === 'barcode_1');
-    console.log('[migrate] ShopProduct barcode_1 index before:', barcodeIdx ? JSON.stringify(barcodeIdx) : 'none');
 
     if (barcodeIdx && !barcodeIdx.partialFilterExpression) {
-      console.log('[migrate] dropping stale (non-partial) barcode_1 index');
+      console.log('[migrate] dropping stale (non-partial) ShopProduct.barcode_1 index');
       await coll.dropIndex('barcode_1');
     }
 
@@ -26,7 +25,6 @@ async function ensureShopProductIndexes() {
       { barcode: 1 },
       { unique: true, partialFilterExpression: { barcode: { $gt: '' } }, name: 'barcode_1' },
     );
-    console.log('[migrate] ShopProduct barcode_1 partial unique index ensured ✓');
   } catch (err) {
     console.error('[migrate] ensureShopProductIndexes failed:', err.message);
   }

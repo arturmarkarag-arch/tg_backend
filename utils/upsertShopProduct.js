@@ -25,21 +25,18 @@ async function upsertShopProductFromProduct(product) {
     // NOTE: linkedProductId lives ONLY in $set below. Having it in both $set and
     // $setOnInsert triggers MongoDB conflict code 40 and the whole upsert fails.
   };
-  console.log('[shop-upsert] start', { productId: String(product._id), barcode: barcode || '(empty)', name: insertData.name, filter });
   try {
-    const before = await ShopProduct.findOne(filter).select('_id').lean();
     const doc = await ShopProduct.findOneAndUpdate(
       filter,
       { $set: { linkedProductId: product._id }, $setOnInsert: insertData },
       { upsert: true, new: true },
     );
-    console.log('[shop-upsert] OK', { shopProductId: String(doc?._id), created: !before, hasPhoto: Boolean(doc?.imageUrl || doc?.originalImageUrl) });
     if (doc && !doc.embedding && (doc.imageUrl || doc.originalImageUrl)) {
       embedShopProductAsync(doc, 'upsert-from-product');
     }
     return doc;
   } catch (err) {
-    console.error('[shop-upsert] FAILED', { code: err.code, message: err.message, filter });
+    console.error('[shop-upsert] failed:', err.code, err.message);
     return null;
   }
 }

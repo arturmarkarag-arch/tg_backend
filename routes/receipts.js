@@ -911,8 +911,6 @@ router.post('/:id/items/:itemId/confirm', staffOnly, asyncHandler(async (req, re
     });
     // Push the confirmed product into "Товари Магазинів" (after the txn commits,
     // background — never blocks confirm). Idempotent upsert by barcode/link.
-    console.log('[receipts/confirm] item confirmed; confirmedProduct =',
-      confirmedProduct ? String(confirmedProduct._id) : 'null');
     if (confirmedProduct) {
       upsertShopProductFromProduct(confirmedProduct).catch((err) =>
         console.error('[receipts/confirm] ShopProduct upsert failed:', err.message));
