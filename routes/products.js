@@ -243,6 +243,7 @@ router.get('/', async (req, res) => {
       image_url: product.imageUrls?.[0] || product.localImageUrl || '',
       thumbnail_url: product.imageUrls?.[0] || product.localImageUrl || '',
       status: product.status,
+      orderNumber: product.orderNumber ?? 0,
       createdAt: product.createdAt,
     }));
 
@@ -831,11 +832,19 @@ router.patch('/:id', staffOnly, asyncHandler(async (req, res) => {
           );
         }
       });
+    } catch (err) {
+      if (err.code === 11000 && err.keyPattern?.barcode) throw appError('product_barcode_duplicate');
+      throw err;
     } finally {
       session.endSession();
     }
   } else {
-    await product.save();
+    try {
+      await product.save();
+    } catch (err) {
+      if (err.code === 11000 && err.keyPattern?.barcode) throw appError('product_barcode_duplicate');
+      throw err;
+    }
   }
 
   // Keep the linked ShopProduct mirror in sync with the warehouse owner.

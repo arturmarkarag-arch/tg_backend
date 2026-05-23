@@ -35,7 +35,7 @@ function normalizeMiniAppState(miniAppState) {
 }
 
 function normalizeCartState(cartState) {
-  const defaults = { orderItems: {}, orderItemIds: [], lastOrderPositions: 0, lastViewedProductId: '', currentIndex: 0, currentPage: 0, updatedAt: null, lastModifiedByTelegramId: null, lastModifiedByName: null, activeSellerCount: 1, reservedForGroupId: null };
+  const defaults = { orderItems: {}, orderItemIds: [], lastOrderPositions: 0, lastViewedProductId: '', lastViewedOrderNumber: 0, currentIndex: 0, currentPage: 0, updatedAt: null, lastModifiedByTelegramId: null, lastModifiedByName: null, activeSellerCount: 1, reservedForGroupId: null };
   if (!cartState || typeof cartState !== 'object') return defaults;
   const result = { ...defaults, ...cartState };
   if (result.orderItems instanceof Map) {
@@ -307,7 +307,7 @@ router.patch('/me/profile', asyncHandler(async (req, res) => {
 // POST /api/v1/telegram/mini-app/state — зберегти навігаційний стан (User) і кошик (Shop)
 // Захищено telegramAuth middleware — telegramId береться ТІЛЬКИ з req.telegramId
 router.post('/mini-app/state', asyncHandler(async (req, res) => {
-  const { currentIndex, currentPage, productId, orderItems, orderItemIds, viewMode } = req.body;
+  const { currentIndex, currentPage, productId, orderNumber, orderItems, orderItemIds, viewMode } = req.body;
   const telegramId = req.telegramId;
 
   if (!Number.isInteger(currentIndex) || currentIndex < 0) {
@@ -385,6 +385,7 @@ router.post('/mini-app/state', asyncHandler(async (req, res) => {
           'cartState.orderItems': sanitizedOrderItems,
           'cartState.orderItemIds': sanitizedOrderItemIds,
           'cartState.lastViewedProductId': String(productId || ''),
+          'cartState.lastViewedOrderNumber': Number.isFinite(Number(orderNumber)) ? Number(orderNumber) : 0,
           'cartState.currentIndex': currentIndex,
           'cartState.currentPage': currentPage,
           'cartState.updatedAt': new Date(),
@@ -470,6 +471,7 @@ router.post('/mini-app/reset-state', asyncHandler(async (req, res) => {
           'cartState.orderItemIds': [],
           'cartState.lastOrderPositions': 0,
           'cartState.lastViewedProductId': '',
+          'cartState.lastViewedOrderNumber': 0,
           'cartState.currentIndex': 0,
           'cartState.currentPage': 0,
           'cartState.updatedAt': new Date(),

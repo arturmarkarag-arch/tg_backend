@@ -44,4 +44,12 @@ ProductSchema.index(
   { unique: true, partialFilterExpression: { status: { $ne: 'archived' } } }
 );
 
+// Унікальний частковий індекс: barcode унікальний тільки серед не-порожніх значень.
+// Дозволяє необмежену кількість документів без штрих-коду, але забороняє два
+// активних/архівованих товари з однаковим штрих-кодом.
+ProductSchema.index(
+  { barcode: 1 },
+  { unique: true, partialFilterExpression: { barcode: { $gt: '' } } }
+);
+
 module.exports = mongoose.model('Product', ProductSchema);

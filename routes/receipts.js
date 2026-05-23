@@ -2,7 +2,7 @@ const express = require('express');
 const crypto = require('crypto');
 const mongoose = require('mongoose');
 const Busboy = require('busboy');
-const { S3Client, PutObjectCommand, HeadBucketCommand } = require('@aws-sdk/client-s3');
+const { S3Client, PutObjectCommand, HeadBucketCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3');
 const { buildImageVariants } = require('../utils/imageService');
 const { requireTelegramRoles } = require('../middleware/telegramAuth');
 const Receipt = require('../models/Receipt');
@@ -126,7 +126,12 @@ async function ensureReceiptItemProduct(item, session) {
     quantityPerPackage: item.qtyPerPackage || 0,
   });
 
-  await product.save({ session });
+  try {
+    await product.save({ session });
+  } catch (err) {
+    if (err.code === 11000 && err.keyPattern?.barcode) throw appError('product_barcode_duplicate');
+    throw err;
+  }
   item.createdProductId = product._id;
   // Stock is applied here via the new product's initial `quantity`.
   if (item.shelfQty > 0) item.stockApplied = true;
@@ -242,6 +247,36 @@ async function uploadDefectPhotos(parsedFiles, max = 3) {
 function parseIntField(val, fallback = 0) {
   const n = Math.trunc(Number(val));
   return Number.isFinite(n) && n >= 0 ? n : fallback;
+}
+
+/**
+ * Parses a form-field string to a finite number (price, qtyPerPackage).
+ * Returns null if the field is absent or empty; throws validation_failed if
+ * the value is present but not a finite number (NaN, Infinity, text).
+ */
+function parseNumberField(val, fieldName) {
+  if (val === undefined || val === null || val === '') return null;
+  const n = Number(val);
+  if (!Number.isFinite(n)) throw appError('validation_failed', { field: fieldName });
+  return n;
+}
+
+/**
+ * Best-effort R2 cleanup for defect photos that were uploaded before a
+ * transaction that subsequently failed. Deletes both the defects/ object
+ * and its thumbs/ companion (created by buildImageVariants).  Never throws.
+ */
+async function cleanupDefectPhotos(urls) {
+  if (!urls || urls.length === 0) return;
+  const base = (process.env.R2_PUBLIC_URL || '').replace(/\/$/, '') + '/';
+  const keys = urls.flatMap((url) => {
+    const key = url.startsWith(base) ? url.slice(base.length) : null;
+    if (!key) return [];
+    return [key, key.replace(/^defects\//, 'thumbs/')];
+  });
+  await Promise.allSettled(
+    keys.map((k) => s3Client.send(new DeleteObjectCommand({ Bucket: process.env.R2_BUCKET_NAME, Key: k }))),
+  ).catch(() => {});
 }
 
 /** Parses a JSON array field. Returns [] when absent, string[] on success, null on bad JSON. */
@@ -466,9 +501,8 @@ router.post('/:id/items', staffOnly, asyncHandler(async (req, res) => {
     qtyPerShop,
     shelfQty,
     name: String(parsed.fields.name || '').trim(),
-    price: parsed.fields.price !== undefined && parsed.fields.price !== '' ? Number(parsed.fields.price) : null,
-    qtyPerPackage: parsed.fields.qtyPerPackage !== undefined && parsed.fields.qtyPerPackage !== ''
-      ? Number(parsed.fields.qtyPerPackage) : null,
+    price: parseNumberField(parsed.fields.price, 'price'),
+    qtyPerPackage: parseNumberField(parsed.fields.qtyPerPackage, 'qtyPerPackage'),
     barcode: String(parsed.fields.barcode || '').trim(),
     existingProductId: existingProductId || null,
     warehousePending: isWarehousePending,
@@ -488,6 +522,10 @@ router.post('/:id/items', staffOnly, asyncHandler(async (req, res) => {
       if (!liveReceipt) throw appError('receipt_already_completed');
       await receiptItem.save({ session: addItemSession });
     });
+  } catch (txErr) {
+    // Transaction failed after defect photos were already uploaded — clean them up.
+    cleanupDefectPhotos(defectPhotoUrls).catch(() => {});
+    throw txErr;
   } finally {
     addItemSession.endSession();
   }
@@ -715,15 +753,16 @@ router.patch('/:id/items/:itemId', staffOnly, asyncHandler(async (req, res) => {
   item.deliveryGroupIds = deliveryGroupIds;
   item.qtyPerShop = qtyPerShop;
   if (parsed.fields.name !== undefined) item.name = String(parsed.fields.name).trim();
-  if (parsed.fields.price !== undefined) item.price = parsed.fields.price !== '' ? Number(parsed.fields.price) : null;
-  if (parsed.fields.qtyPerPackage !== undefined) item.qtyPerPackage = parsed.fields.qtyPerPackage !== '' ? Number(parsed.fields.qtyPerPackage) : null;
+  if (parsed.fields.price !== undefined) item.price = parseNumberField(parsed.fields.price, 'price');
+  if (parsed.fields.qtyPerPackage !== undefined) item.qtyPerPackage = parseNumberField(parsed.fields.qtyPerPackage, 'qtyPerPackage');
   if (parsed.fields.barcode !== undefined) item.barcode = String(parsed.fields.barcode).trim();
   item.existingProductId = existingProductId || null;
   if (parsed.fields.notes !== undefined) item.notes = String(parsed.fields.notes).trim();
+  let uploadedDefectUrls = [];
   if (defectsTouched) {
     const kept = keptDefectUrls !== null ? keptDefectUrls : (item.defectPhotoUrls || []);
-    const uploaded = hasNewDefectPhotos ? await uploadDefectPhotos(parsed.files) : [];
-    item.defectPhotoUrls = [...kept, ...uploaded].slice(0, 3);
+    uploadedDefectUrls = hasNewDefectPhotos ? await uploadDefectPhotos(parsed.files) : [];
+    item.defectPhotoUrls = [...kept, ...uploadedDefectUrls].slice(0, 3);
   }
 
   // Re-rendered overlay metadata (comment + its position). Owner-only when it
@@ -773,6 +812,10 @@ router.patch('/:id/items/:itemId', staffOnly, asyncHandler(async (req, res) => {
       if (!liveReceipt) throw appError('receipt_not_found');
       await item.save({ session: txSession });
     });
+  } catch (txErr) {
+    // Transaction failed after defect photos were already uploaded — clean them up.
+    cleanupDefectPhotos(uploadedDefectUrls).catch(() => {});
+    throw txErr;
   } finally {
     txSession.endSession();
   }
@@ -846,6 +889,11 @@ router.delete('/:id/items/:itemId', staffOnly, asyncHandler(async (req, res) => 
 
       await item.deleteOne({ session });
       deletedItem = item;
+
+      // If confirm had created a shop-owned ShopProduct, remove it too.
+      if (deletedItem.createdShopProductId) {
+        await ShopProduct.deleteOne({ _id: deletedItem.createdShopProductId }).session(session);
+      }
     });
 
     // Аудит-лог видалення позиції — обов'язковий слід для розслідувань

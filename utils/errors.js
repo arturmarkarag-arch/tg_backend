@@ -138,6 +138,7 @@ const ERRORS = {
   product_drafts_failed:    { status: 500, message: 'Не вдалося отримати чернетки' },
   product_list_failed:      { status: 500, message: 'Не вдалося отримати список товарів' },
   product_barcode_required: { status: 400, message: 'Параметр barcode обовʼязковий' },
+  product_barcode_duplicate: { status: 409, message: 'Товар з таким штрих-кодом вже існує' },
   product_filename_required:{ status: 400, message: 'Параметр filename обовʼязковий' },
   product_reorder_invalid:  { status: 400, message: 'Order має бути масивом id товарів' },
   product_broadcast_invalid:{ status: 400, message: 'productIds має бути непорожнім масивом' },
