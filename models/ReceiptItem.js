@@ -60,6 +60,10 @@ const ReceiptItemSchema = new mongoose.Schema(
         x: { type: Number, default: 0.5 },
         y: { type: Number, default: 0.5 },
       },
+      // Positions of the price / qty labels on the photo (normalized 0..1) so
+      // the same overlay layout can be reproduced on the warehouse + shop docs.
+      pricePos: { type: mongoose.Schema.Types.Mixed, default: null },
+      qtyPos:   { type: mongoose.Schema.Types.Mixed, default: null },
     },
     totalQty: { type: Number, required: true, min: 1 },
     // What the worker EXPECTED to arrive (for reconciling shortages/defects).

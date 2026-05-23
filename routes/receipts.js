@@ -8,6 +8,7 @@ const { requireTelegramRoles } = require('../middleware/telegramAuth');
 const Receipt = require('../models/Receipt');
 const ReceiptItem = require('../models/ReceiptItem');
 const Product = require('../models/Product');
+const ShopProduct = require('../models/ShopProduct');
 const User = require('../models/User');
 const Order = require('../models/Order');
 const Block = require('../models/Block');
@@ -93,6 +94,12 @@ async function ensureReceiptItemProduct(item, session) {
 
   const maxProduct = await Product.findOne({}, 'orderNumber').sort({ orderNumber: -1 }).session(session).lean();
   const nextOrderNumber = (maxProduct?.orderNumber ?? 0) + 1;
+  const pm = item.photoMeta || {};
+  const labelPositions = {};
+  if (pm.commentPos) { labelPositions.commentX = pm.commentPos.x; labelPositions.commentY = pm.commentPos.y; }
+  if (pm.pricePos)   { labelPositions.priceX   = pm.pricePos.x;   labelPositions.priceY   = pm.pricePos.y; }
+  if (pm.qtyPos)     { labelPositions.qtyX     = pm.qtyPos.x;     labelPositions.qtyY     = pm.qtyPos.y; }
+
   product = new Product({
     orderNumber: nextOrderNumber,
     price: item.price ?? 0,
@@ -106,6 +113,8 @@ async function ensureReceiptItemProduct(item, session) {
     source: 'receipt',
     imageUrls: [item.photoUrl],
     imageNames: [item.photoName],
+    originalImageUrl: item.originalPhotoUrl || '',
+    labelPositions,
     barcode: item.barcode || '',
     quantityPerPackage: item.qtyPerPackage || 0,
   });
@@ -438,6 +447,8 @@ router.post('/:id/items', staffOnly, asyncHandler(async (req, res) => {
             x: Number(photoMeta?.commentPos?.x) || 0.5,
             y: Number(photoMeta?.commentPos?.y) || 0.5,
           },
+          pricePos: photoMeta.pricePos || null,
+          qtyPos:   photoMeta.qtyPos || null,
         }
       : undefined,
     totalQty,
@@ -721,6 +732,8 @@ router.patch('/:id/items/:itemId', staffOnly, asyncHandler(async (req, res) => {
         x: Number(photoMeta?.commentPos?.x) || 0.5,
         y: Number(photoMeta?.commentPos?.y) || 0.5,
       },
+      pricePos: photoMeta.pricePos || null,
+      qtyPos:   photoMeta.qtyPos || null,
     };
   }
 
@@ -898,6 +911,8 @@ router.post('/:id/items/:itemId/confirm', staffOnly, asyncHandler(async (req, re
     });
     // Push the confirmed product into "Товари Магазинів" (after the txn commits,
     // background — never blocks confirm). Idempotent upsert by barcode/link.
+    console.log('[receipts/confirm] item confirmed; confirmedProduct =',
+      confirmedProduct ? String(confirmedProduct._id) : 'null');
     if (confirmedProduct) {
       upsertShopProductFromProduct(confirmedProduct).catch((err) =>
         console.error('[receipts/confirm] ShopProduct upsert failed:', err.message));
@@ -943,6 +958,9 @@ router.post('/:id/items/:itemId/unconfirm', staffOnly, asyncHandler(async (req, 
           if (product && product.source === 'receipt') {
             const inBlock = await Block.exists({ productIds: product._id }).session(session);
             if (!inBlock) {
+              // Also remove the auto-created shop catalog entry so a later
+              // re-confirm doesn't leave an orphan + create a duplicate.
+              await ShopProduct.deleteOne({ linkedProductId: product._id }).session(session);
               await product.deleteOne({ session });
               item.createdProductId = null;
             }

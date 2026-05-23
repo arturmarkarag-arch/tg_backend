@@ -15,6 +15,7 @@ const { initOpenAI } = require('./openaiClient');
 const { initSocket } = require('./socket');
 const AppSetting = require('./models/AppSetting');
 const { migrateOrdersToSessionIds } = require('./utils/getOrCreateSession');
+const { ensureShopProductIndexes } = require('./utils/ensureShopProductIndexes');
 
 let httpServer = null;
 let shuttingDown = false;
@@ -67,6 +68,7 @@ async function startServer() {
     await mongoose.connect(MONGODB_URI, { useNewUrlParser: true, useUnifiedTopology: true });
     console.log('Connected to MongoDB');
     await migrateOrdersToSessionIds();
+    await ensureShopProductIndexes();
 
 
     // Prefer key stored in DB (via admin settings), fall back to env
