@@ -68,7 +68,7 @@ async function handleMyChatMemberUpdate(update) {
         const name = [user.firstName, user.lastName].filter(Boolean).join(' ') || chatId;
         const roleLabels = { seller: 'Продавець', warehouse: 'Склад', admin: 'Адмін' };
         const roleLabel = roleLabels[user.role] || user.role || 'Невідома роль';
-        const lines = [`✅ Користувач знову розблокував бота.`, `${roleLabel}: ${name}`, `telegramId: ${chatId}`];
+        const lines = [`✅ Користувач розблокував бота.`, `${roleLabel}: ${name}`, `telegramId: ${chatId}`];
         await sendAdminNotification(lines.join('\n'));
       }
     }
@@ -249,7 +249,7 @@ async function handleBotBlocked(telegramId) {
       if (blockedShop) shopDisplayName = [blockedShop.name, blockedShop.cityId?.name].filter(Boolean).join(', ');
     }
     const shopParts = shopDisplayName ? [shopDisplayName] : [];
-    const lines = [`⛔ БОТ ЗАБЛОКОВАНО!`, `${roleLabel}: ${name}`];
+    const lines = [`Користувач заблокував бота!`, `${roleLabel}: ${name}`];
     if (shopParts.length) lines.push(`Магазин: ${shopParts.join(', ')}`);
     lines.push(`заблокував бота.`);
     const admins = await User.find({ role: 'admin' }, 'telegramId').lean();

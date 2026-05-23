@@ -59,7 +59,13 @@ router.get('/', staffOnly, asyncHandler(async (req, res) => {
   res.json({ items, total, openCount });
 }));
 
-// ─── POST /:id/approve — set the product price (staff) ────────────────────────
+// ─── POST /:id/approve — record the resolution (staff) ────────────────────────
+// The price itself is NO LONGER written here. The warehouse Product is the single
+// owner of its price+photo, so the new price is set through the warehouse editor
+// (PATCH /v1/products/:id), which re-bakes the price label onto the photo and
+// pushes the shared fields to the linked ShopProduct mirror. By the time the
+// client calls approve, the product is already updated; this endpoint only marks
+// the request resolved and snapshots the price that was set.
 router.post('/:id/approve', staffOnly, asyncHandler(async (req, res) => {
   const pr = await PriceRequest.findById(req.params.id);
   if (!pr) return res.status(404).json({ error: 'not_found' });
@@ -70,7 +76,6 @@ router.post('/:id/approve', staffOnly, asyncHandler(async (req, res) => {
     return res.status(400).json({ error: 'invalid_price', message: 'Невірна ціна' });
   }
 
-  await Product.findByIdAndUpdate(pr.product, { $set: { price } });
   pr.status        = 'approved';
   pr.resolvedPrice = price;
   pr.decidedBy     = String(req.telegramId || '');

@@ -17,7 +17,7 @@ const DeliveryGroup = require('../models/DeliveryGroup');
 const Shop = require('../models/Shop');
 const Counter = require('../models/Counter');
 const { getIO } = require('../socket');
-const { upsertShopProductFromProduct } = require('../utils/upsertShopProduct');
+const { upsertShopProductFromProduct, upsertShopOwnedFromReceiptItem } = require('../utils/upsertShopProduct');
 const { appError, asyncHandler } = require('../utils/errors');
 const {
   assertCanEditItem,
@@ -43,6 +43,13 @@ const FIELD_LABELS = {
 };
 
 async function ensureReceiptItemProduct(item, session) {
+  // `destination: 'shops'` goods never hit the warehouse, so they create NO
+  // warehouse Product and apply NO shelf stock. Their shop-catalog routing
+  // (shop-owned ShopProduct for new items, or transit marker for items linked
+  // to an existing warehouse product) is handled by the confirm/commit caller,
+  // outside the stock transaction. Returning null here keeps stock untouched.
+  if ((item.destination || 'shelf') === 'shops') return null;
+
   let product = null;
   if (item.existingProductId) {
     product = await Product.findById(item.existingProductId).session(session);
@@ -554,9 +561,10 @@ router.patch('/:id/items/:itemId', staffOnly, asyncHandler(async (req, res) => {
   ]);
   if (!item) throw appError('receipt_item_not_found');
   if (!receipt) throw appError('receipt_not_found');
-  // NOTE: previously we blocked all edits when a receipt was completed.
-  // Instead, allow a narrow set of post-commit edits (price, qtyPerPackage,
-  // and photo overlay comment). Other changes remain forbidden.
+  // A COMMITTED receipt is a frozen acceptance record — fully read-only.
+  // Post-commit edits to price/qty/photo are gone: those now happen at the
+  // product's OWNER (warehouse Product or shop ShopProduct), never on the
+  // invoice. The freeze is enforced below, once we know what actually changed.
 
   const parsed = await parseMultipart(req);
 
@@ -678,14 +686,10 @@ router.patch('/:id/items/:itemId', staffOnly, asyncHandler(async (req, res) => {
     }
   }
 
-  // When a receipt is already completed we allow only a small whitelist of
-  // post-commit edits. Any other changed field is rejected.
-  if (receipt.status === 'completed') {
-    const allowedAfterCompleted = new Set(['price', 'qtyPerPackage', 'photoMeta']);
-    const disallowed = changedFields.filter((f) => !allowedAfterCompleted.has(f));
-    if (disallowed.length > 0) {
-      throw appError('receipt_completed_locked');
-    }
+  // Freeze: a committed receipt accepts NO field changes. Edit the product at
+  // its owner (warehouse / shop), not on the invoice.
+  if (receipt.status === 'completed' && changedFields.length > 0) {
+    throw appError('receipt_completed_locked');
   }
 
   assertCanEditItem(req.user, item, changedFields);
@@ -909,11 +913,22 @@ router.post('/:id/items/:itemId/confirm', staffOnly, asyncHandler(async (req, re
         changes: [{ field: 'status', label: 'Статус', from: 'draft', to: 'confirmed' }],
       }).catch((e) => console.error('[ReceiptItemLog] confirm error:', e));
     });
-    // Push the confirmed product into "Товари Магазинів" (after the txn commits,
-    // background — never blocks confirm). Idempotent upsert by barcode/link.
+    // Shop-catalog routing by destination (after the stock txn, background —
+    // never blocks confirm). Idempotent.
     if (confirmedProduct) {
+      // shelf item → ShopProduct MIRROR of the warehouse product (linkedProductId set).
       upsertShopProductFromProduct(confirmedProduct).catch((err) =>
-        console.error('[receipts/confirm] ShopProduct upsert failed:', err.message));
+        console.error('[receipts/confirm] ShopProduct mirror upsert failed:', err.message));
+    } else if (confirmedItem && (confirmedItem.destination || 'shelf') === 'shops' && !confirmedItem.existingProductId) {
+      // brand-new shops item → shop-OWNED ShopProduct (no warehouse product).
+      // (shops + existingProductId is a pure transit marker → nothing to create.)
+      upsertShopOwnedFromReceiptItem(confirmedItem)
+        .then((sp) => {
+          if (sp && String(sp._id) !== String(confirmedItem.createdShopProductId || '')) {
+            return ReceiptItem.updateOne({ _id: confirmedItem._id }, { $set: { createdShopProductId: sp._id } });
+          }
+        })
+        .catch((err) => console.error('[receipts/confirm] shop-owned upsert failed:', err.message));
     }
     const io = getIO();
     if (io) {
@@ -942,7 +957,15 @@ router.post('/:id/items/:itemId/unconfirm', staffOnly, asyncHandler(async (req, 
       assertCanConfirmItem(req.user, item);
 
       if (item.status === 'confirmed') {
-        if (item.existingProductId) {
+        if ((item.destination || 'shelf') === 'shops') {
+          // shops item: created no warehouse product / stock. Remove the shop-owned
+          // catalog entry it created (if any) so a re-confirm — to any destination —
+          // starts clean. Never deletes a warehouse mirror (linkedProductId: null guard).
+          if (item.createdShopProductId) {
+            await ShopProduct.deleteOne({ _id: item.createdShopProductId, linkedProductId: null }).session(session);
+            item.createdShopProductId = null;
+          }
+        } else if (item.existingProductId) {
           const product = await Product.findById(item.existingProductId).session(session);
           if (product) {
             product.quantity = Math.max(0, product.quantity - item.shelfQty);
@@ -1049,8 +1072,11 @@ router.post('/:id/commit', staffOnly, asyncHandler(async (req, res) => {
 
     // 4.1: Pre-determine how many NEW products will be created (no existingProductId or not found),
     // then do ONE bulk shiftUp instead of one per new product.
+    // shops items create NO warehouse product, so they are EXCLUDED from this
+    // count — including them would over-shift every orderNumber (silent bug).
+    const shelfItems = items.filter((i) => (i.destination || 'shelf') !== 'shops');
     const existingIdSet = new Set(
-      items
+      shelfItems
         .map((i) => i.existingProductId || i.createdProductId)
         .filter(Boolean)
         .map(String)
@@ -1061,7 +1087,7 @@ router.post('/:id/commit', staffOnly, asyncHandler(async (req, res) => {
         _id: { $in: [...existingIdSet] },
       }).session(session);
     }
-    const newProductCount = items.length - resolvedExistingCount;
+    const newProductCount = shelfItems.length - resolvedExistingCount;
     if (newProductCount > 0) {
       await Product.updateMany(
         { orderNumber: { $gte: 1 } },
@@ -1075,6 +1101,10 @@ router.post('/:id/commit', staffOnly, asyncHandler(async (req, res) => {
     const usedExistingProductIds = new Set();
 
     for (const item of items) {
+      // shops items never create/update a warehouse product — their shop-catalog
+      // routing (shop-owned entry or transit marker) was handled at confirm time.
+      if ((item.destination || 'shelf') === 'shops') continue;
+
       let currentProduct;
 
       // `item.stockApplied` is the SINGLE source of truth. It is set

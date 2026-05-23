@@ -138,6 +138,12 @@ router.patch('/:id', staffOnly, asyncHandler(async (req, res) => {
   const item = await ShopProduct.findById(req.params.id);
   if (!item) throw appError('product_not_found');
 
+  // A ShopProduct with a linkedProductId is a READ-ONLY MIRROR of a warehouse
+  // Product. Its shared fields (name/price/qty/photo/notes) are owned by the
+  // warehouse and pushed in via pushSharedFieldsToMirror — editing them here
+  // would desync. Only shop-OWNED products (linkedProductId: null) are editable.
+  if (item.linkedProductId) throw appError('shopproduct_edit_on_warehouse');
+
   const fields = req.body;
 
   // ── Scalar fields ──────────────────────────────────────────────────────────
@@ -184,8 +190,19 @@ router.patch('/:id', staffOnly, asyncHandler(async (req, res) => {
 
 // ── DELETE /:id ───────────────────────────────────────────────────────────────
 router.delete('/:id', staffOnly, asyncHandler(async (req, res) => {
-  const item = await ShopProduct.findByIdAndDelete(req.params.id).lean();
+  const item = await ShopProduct.findById(req.params.id).lean();
   if (!item) throw appError('product_not_found');
+
+  // A LIVE mirror (linked to a non-archived warehouse Product) is warehouse-owned
+  // and must not be deleted from here. But an ORPHANED mirror — whose warehouse
+  // owner was archived/deleted — may be cleaned up (archiving the owner never
+  // cascades to the mirror, so orphans can accumulate otherwise).
+  if (item.linkedProductId) {
+    const owner = await Product.findById(item.linkedProductId).select('status').lean();
+    if (owner && owner.status !== 'archived') throw appError('shopproduct_edit_on_warehouse');
+  }
+
+  await ShopProduct.deleteOne({ _id: item._id });
   res.json({ ok: true });
 }));
 

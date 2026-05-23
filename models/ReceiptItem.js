@@ -84,6 +84,11 @@ const ReceiptItemSchema = new mongoose.Schema(
     barcode: { type: String, default: '' },
     existingProductId: { type: mongoose.Schema.Types.ObjectId, ref: 'Product', default: null },
     createdProductId: { type: mongoose.Schema.Types.ObjectId, ref: 'Product', default: null },
+    // For `destination: 'shops'` brand-new items: the shop-OWNED ShopProduct this
+    // item created (linkedProductId: null). Tracked for idempotency (re-confirm /
+    // commit don't duplicate) and cleanup on unconfirm. Null for shelf items —
+    // those create a warehouse Product + a mirror keyed by linkedProductId instead.
+    createdShopProductId: { type: mongoose.Schema.Types.ObjectId, ref: 'ShopProduct', default: null },
     warehousePending: { type: Boolean, default: false },
   },
   { timestamps: true }

@@ -9,7 +9,7 @@ const Block = require('../models/Block');
 const { getIO } = require('../socket');
 const Product = require('../models/Product');
 const ShopProduct = require('../models/ShopProduct');
-const { upsertShopProductFromProduct } = require('../utils/upsertShopProduct');
+const { upsertShopProductFromProduct, pushSharedFieldsToMirror } = require('../utils/upsertShopProduct');
 const Order = require('../models/Order');
 const User = require('../models/User');
 const Shop = require('../models/Shop');
@@ -838,10 +838,17 @@ router.patch('/:id', staffOnly, asyncHandler(async (req, res) => {
     await product.save();
   }
 
-  // When a product transitions to active, mirror it into the shop catalog.
+  // Keep the linked ShopProduct mirror in sync with the warehouse owner.
+  // First activation CREATES the mirror ($setOnInsert with the just-updated
+  // values); any later edit PUSHES the shared fields onto the existing mirror.
+  // Both are fire-and-forget — the mirror is a projection, not part of this
+  // request's contract. Shop-OWNED products (linkedProductId: null) are untouched.
   if (status === 'active' && previousStatus !== 'active') {
     upsertShopProductFromProduct(product).catch((err) =>
       console.error('[products/patch] ShopProduct upsert failed:', err.message));
+  } else {
+    pushSharedFieldsToMirror(product, { photoChanged: patchFilenames.length > 0 }).catch((err) =>
+      console.error('[products/patch] ShopProduct mirror push failed:', err.message));
   }
 
   // Re-price ACTIVE orders (new/in_progress) that contain this product so the

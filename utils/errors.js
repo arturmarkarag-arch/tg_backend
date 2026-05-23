@@ -151,6 +151,7 @@ const ERRORS = {
   product_archive_via_delete:{ status: 400, message: 'Використовуйте DELETE для архівації товару' },
   product_block_id_invalid: { status: 400, message: 'Невірний ідентифікатор блока' },
   product_filenames_required:{ status: 400, message: 'Не вказано файли зображень' },
+  shopproduct_edit_on_warehouse:{ status: 403, message: 'Цей товар належить складу й редагується на сторінці Складу. Тут він лише відображається.' },
   product_upload_failed_generic: { status: 500, message: 'Не вдалося завантажити' },
   telegram_groups_not_configured: { status: 500, message: 'Не налаштовано Telegram-групи для розсилок' },
   telegram_bot_not_initialized:   { status: 500, message: 'Telegram-бот не ініціалізований' },
