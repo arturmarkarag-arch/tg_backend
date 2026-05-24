@@ -21,6 +21,10 @@ const ShopProductSchema = new mongoose.Schema(
     embedding:      { type: [Number], default: undefined },
     embeddingModel: { type: String, default: '' },
     embeddedAt:     { type: Date, default: null },
+    // Human-friendly Ukrainian product description for the card UI. Generated
+    // on demand (staff presses "Згенерувати") from explainProductImage, NOT the
+    // terse embedding `descriptor`. Shop-local: never synced to/from warehouse.
+    aiDescription:  { type: String, default: '' },
     // Where this record came from
     source: {
       type: String,

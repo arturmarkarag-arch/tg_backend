@@ -320,10 +320,13 @@ const EMBEDDING_MODEL = process.env.OPENAI_EMBEDDING_MODEL || 'text-embedding-3-
 
 // Turns a product photo into a compact, factual text descriptor. The descriptor
 // (not the raw image) is what gets embedded — both for the catalog and for the
-// query photo — so the wording must be consistent between the two.
+// query photo — so the wording must be consistent between the two. Label text is
+// kept verbatim in its original language: brand/product names are the strongest
+// matching signal, and translating them photo-to-photo introduces variance.
 const PRODUCT_DESCRIBE_PROMPT =
   'Опиши товар на фото для каталожного співставлення. Дай стислий фактичний опис ОДНИМ абзацом: ' +
   'бренд, тип товару, варіант/смак, обʼєм/розмір/вагу, колір, тип упаковки та видимий текст на етикетці. ' +
+  'Текст з етикетки — бренд, назву, написи — наводь ДОСЛІВНО мовою оригіналу, не перекладай і не транслітеруй. ' +
   'Тільки факти, без вступних слів і без здогадок про те, чого не видно.';
 
 async function describeProductImage(imageBuffer, mimeType, { model = null } = {}) {

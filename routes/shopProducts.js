@@ -6,6 +6,7 @@ const { appError, asyncHandler } = require('../utils/errors');
 const ShopProduct = require('../models/ShopProduct');
 const Product     = require('../models/Product');
 const { embedShopProductAsync } = require('../utils/shopProductEmbedding');
+const { explainProductImageUrl, getOpenAIStatus } = require('../openaiClient');
 
 const staffOnly  = requireTelegramRoles(['admin', 'warehouse']);
 const adminOnly  = requireTelegramRoles(['admin']);
@@ -186,6 +187,34 @@ router.patch('/:id', staffOnly, asyncHandler(async (req, res) => {
   res.json(item.toObject());
   // New photo → the old embedding is stale; re-index in the background.
   if (photoChanged && (item.imageUrl || item.originalImageUrl)) embedShopProductAsync(item, 'patch');
+}));
+
+// ── POST /:id/describe — generate + cache the human-friendly card description ──
+// On-demand (staff presses the button). Uses the clean original photo and the
+// plain-language Ukrainian explainer — distinct from the terse embedding
+// `descriptor`. Result is cached in aiDescription; pressing again regenerates.
+router.post('/:id/describe', staffOnly, asyncHandler(async (req, res) => {
+  const item = await ShopProduct.findById(req.params.id);
+  if (!item) throw appError('product_not_found');
+
+  const url = item.originalImageUrl || item.imageUrl;
+  if (!url) return res.status(400).json({ error: 'photo_required', message: 'У товару немає фото' });
+
+  const status = getOpenAIStatus();
+  if (!status.connected) {
+    return res.status(503).json({ error: 'openai_not_configured', message: status.error || 'OpenAI не підключено' });
+  }
+
+  try {
+    const { text } = await explainProductImageUrl(url);
+    if (!text) return res.status(502).json({ error: 'empty_description', message: 'Не вдалося згенерувати опис' });
+    item.aiDescription = text;
+    await item.save();
+    res.json({ _id: item._id, aiDescription: item.aiDescription });
+  } catch (err) {
+    console.error('[shopProducts] describe error:', err.message);
+    return res.status(502).json({ error: 'openai_api_error', message: err.message });
+  }
 }));
 
 // ── DELETE /:id ───────────────────────────────────────────────────────────────
