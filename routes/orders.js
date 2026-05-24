@@ -1045,74 +1045,112 @@ router.patch('/:id/snapshot', staffOnly, async (req, res) => {
 });
 
 // POST /:id/stale/restore-to-cart — admin-only action.
-// Restores stale order items to seller cart and expires the order in one transaction.
+// Creates (or updates) an active order for the buyer in the current ordering session
+// from the items in the stale order, then expires the stale order.
+// No longer writes to cartState.orderItems — items go directly into an Order document.
 router.post('/:id/stale/restore-to-cart', telegramAuth, adminOnly, asyncHandler(async (req, res) => {
-  const session = await mongoose.connection.startSession();
+  const mongoSession = await mongoose.connection.startSession();
   let result = null;
   try {
-    await session.withTransaction(async () => {
-      const order = await Order.findById(req.params.id).session(session);
-      if (!order) throw appError('order_not_found');
-      if (!['new', 'in_progress'].includes(order.status)) {
-        throw appError('order_not_active', { status: order.status });
+    await mongoSession.withTransaction(async () => {
+      const staleOrder = await Order.findById(req.params.id).session(mongoSession);
+      if (!staleOrder) throw appError('order_not_found');
+      if (!['new', 'in_progress'].includes(staleOrder.status)) {
+        throw appError('order_not_active', { status: staleOrder.status });
       }
 
-      await ensureOrderIsStale(order, session);
-      // An order the warehouse has taken into its pipeline (pending/locked/
-      // completed) must NOT be removed by an admin — that decision belongs to
-      // the warehouse. Blocks the silent-loss hole where a queued or already
-      // packed order could be expired/restored from under the pickers.
-      await ensureOrderNotInPickingPipeline(order._id, session);
+      await ensureOrderIsStale(staleOrder, mongoSession);
+      await ensureOrderNotInPickingPipeline(staleOrder._id, mongoSession);
 
-      const buyerTelegramId = String(order.buyerTelegramId || '');
+      const buyerTelegramId = String(staleOrder.buyerTelegramId || '');
       if (!buyerTelegramId) throw appError('validation_failed', { field: 'buyerTelegramId' });
 
-      const buyer = await User.findOne({ telegramId: buyerTelegramId }).session(session);
+      const buyer = await User.findOne({ telegramId: buyerTelegramId }).session(mongoSession);
       if (!buyer) throw appError('user_not_found');
 
-      const cartItems = buyer.cartState?.orderItems instanceof Map
-        ? Object.fromEntries(buyer.cartState.orderItems)
-        : { ...(buyer.cartState?.orderItems || {}) };
-      const orderItemIds = new Set(Array.isArray(buyer.cartState?.orderItemIds) ? buyer.cartState.orderItemIds.map(String) : []);
+      const activeItems = (staleOrder.items || []).filter((i) => !i.cancelled && Number(i.quantity) > 0);
+      if (activeItems.length === 0) throw appError('validation_failed', { field: 'items' });
 
-      let restoredPositions = 0;
-      for (const item of order.items || []) {
-        if (item.cancelled) continue;
-        const pid = String(item.productId || '');
-        const qty = Number(item.quantity || 0);
-        if (!pid || qty <= 0) continue;
-        restoredPositions += 1;
-        cartItems[pid] = Number(cartItems[pid] || 0) + qty;
-        orderItemIds.add(pid);
+      // Resolve current ordering session for the buyer's delivery group.
+      const deliveryGroupId = staleOrder.buyerSnapshot?.deliveryGroupId
+        ? String(staleOrder.buyerSnapshot.deliveryGroupId)
+        : (buyer.deliveryGroupId ? String(buyer.deliveryGroupId) : null);
+      if (!deliveryGroupId) throw appError('no_delivery_group');
+      const group = normalizeDeliveryGroup(await getDeliveryGroup(deliveryGroupId));
+      if (!group) throw appError('delivery_group_not_found');
+      const schedule = await getOrderingSchedule();
+      const currentSessionId = await getOrCreateSessionId(String(group._id), group.dayOfWeek, schedule);
+
+      const actor = actorFromReq(req);
+
+      // Find or create the buyer's active order in the current session.
+      let newOrder = await Order.findOne({
+        buyerTelegramId,
+        orderingSessionId: currentSessionId,
+        status: { $in: ['new', 'in_progress'] },
+      }).session(mongoSession);
+
+      if (!newOrder) {
+        newOrder = new Order({
+          orderNumber: await getNextOrderNumber(),
+          buyerTelegramId,
+          buyerSnapshot: staleOrder.buyerSnapshot,
+          orderingSessionId: currentSessionId,
+          status: 'new',
+          items: activeItems.map((i) => ({
+            productId: i.productId,
+            name: i.name,
+            price: i.price,
+            quantity: i.quantity,
+            packed: false,
+            cancelled: false,
+          })),
+          totalPrice: roundMoney(activeItems.reduce((s, i) => s + Number(i.price || 0) * Number(i.quantity || 0), 0)),
+          history: [{ ...actor, action: 'created', meta: { restoredFromOrderId: String(staleOrder._id) } }],
+        });
+      } else {
+        // Merge items into existing order — add missing, sum quantities for existing.
+        for (const srcItem of activeItems) {
+          const pid = String(srcItem.productId);
+          const existing = newOrder.items.find((i) => String(i.productId) === pid && !i.cancelled);
+          if (existing) {
+            existing.quantity += Number(srcItem.quantity);
+          } else {
+            const cancelled = newOrder.items.find((i) => String(i.productId) === pid && i.cancelled);
+            if (cancelled) {
+              cancelled.cancelled = false;
+              cancelled.quantity = Number(srcItem.quantity);
+              cancelled.price = srcItem.price;
+            } else {
+              newOrder.items.push({ productId: srcItem.productId, name: srcItem.name, price: srcItem.price, quantity: srcItem.quantity, packed: false, cancelled: false });
+            }
+          }
+        }
+        newOrder.totalPrice = roundMoney(newOrder.items
+          .filter((i) => !i.cancelled)
+          .reduce((s, i) => s + Number(i.price || 0) * Number(i.quantity || 0), 0));
+        newOrder.history.push({ ...actor, action: 'items_restored', meta: { restoredFromOrderId: String(staleOrder._id) } });
       }
+      await newOrder.save({ session: mongoSession });
 
+      const restoredPositions = newOrder.items.filter((i) => !i.cancelled).length;
+
+      // Update cartState to reflect position count (orderItems remains empty — no cart).
       await User.updateOne(
         { _id: buyer._id },
-        {
-          $set: {
-            'cartState.orderItems': cartItems,
-            'cartState.orderItemIds': Array.from(orderItemIds),
-            'cartState.updatedAt': new Date(),
-            'cartState.lastOrderPositions': restoredPositions,
-            'cartState.reservedForGroupId': order.buyerSnapshot?.deliveryGroupId ? String(order.buyerSnapshot.deliveryGroupId) : null,
-          },
-        },
-        { session },
+        { $set: { 'cartState.lastOrderPositions': restoredPositions, 'cartState.orderItems': {}, 'cartState.orderItemIds': [], 'cartState.updatedAt': new Date() } },
+        { session: mongoSession },
       );
 
-      await detachOrderFromPendingTasks(order._id, session);
+      await detachOrderFromPendingTasks(staleOrder._id, mongoSession);
 
-      order.status = 'expired';
-      order.history.push({
-        ...actorFromReq(req),
+      staleOrder.status = 'expired';
+      staleOrder.history.push({
+        ...actor,
         action: 'stale_order_restored_to_cart',
-        meta: {
-          restoredPositions,
-          deliveryGroupId: order.buyerSnapshot?.deliveryGroupId || '',
-          fromSessionId: order.orderingSessionId || '',
-        },
+        meta: { restoredPositions, deliveryGroupId, fromSessionId: staleOrder.orderingSessionId || '', newOrderId: String(newOrder._id) },
       });
-      await order.save({ session });
+      await staleOrder.save({ session: mongoSession });
 
       await User.updateOne(
         { _id: buyer._id },
@@ -1120,30 +1158,25 @@ router.post('/:id/stale/restore-to-cart', telegramAuth, adminOnly, asyncHandler(
           $push: {
             history: {
               at: new Date(),
-              ...actorFromReq(req),
+              ...actor,
               action: 'stale_order_restored_to_cart',
               meta: {
-                orderId: String(order._id),
-                orderNumber: order.orderNumber || null,
+                orderId: String(staleOrder._id),
+                orderNumber: staleOrder.orderNumber || null,
                 restoredPositions,
-                shopName: order.buyerSnapshot?.shopName || '',
-                shopCity: order.buyerSnapshot?.shopCity || '',
+                shopName: staleOrder.buyerSnapshot?.shopName || '',
+                shopCity: staleOrder.buyerSnapshot?.shopCity || '',
               },
             },
           },
         },
-        { session },
+        { session: mongoSession },
       );
 
-      result = {
-        orderId: String(order._id),
-        buyerTelegramId,
-        deliveryGroupId: order.buyerSnapshot?.deliveryGroupId ? String(order.buyerSnapshot.deliveryGroupId) : '',
-        restoredPositions,
-      };
+      result = { orderId: String(staleOrder._id), buyerTelegramId, deliveryGroupId, restoredPositions };
     });
   } finally {
-    session.endSession();
+    mongoSession.endSession();
   }
 
   try {
@@ -1158,7 +1191,7 @@ router.post('/:id/stale/restore-to-cart', telegramAuth, adminOnly, asyncHandler(
     console.warn('[orders.stale.restore] socket emit failed:', emitErr?.message || emitErr);
   }
 
-  res.json({ message: 'Замовлення повернуто в кошик продавця', ...result });
+  res.json({ message: 'Замовлення відновлено в поточній сесії', ...result });
 }));
 
 // POST /:id/stale/expire — admin-only action.
@@ -1222,6 +1255,143 @@ router.post('/:id/stale/expire', telegramAuth, adminOnly, asyncHandler(async (re
 router.patch('/:id', requireOrderingWindowOpen, async (req, res) => {
   throw appError('order_status_change_disabled');
 });
+
+// POST /upsert-item — seller adds, updates, or removes a product in their active session order.
+// quantity=0 removes the item. Creates the order if none exists for this session.
+// Single endpoint replaces the add-to-cart → place-order two-step flow.
+router.post('/upsert-item', telegramAuth, requireOrderingWindowOpen, asyncHandler(async (req, res) => {
+  const user = req.telegramUser;
+  const productId = String(req.body?.productId || '').trim();
+  const newQty = parseInt(req.body?.quantity, 10);
+
+  if (!productId) throw appError('validation_failed', { field: 'productId' });
+  if (!Number.isFinite(newQty) || newQty < 0 || newQty > MAX_QTY_PER_PRODUCT) {
+    throw appError('validation_failed', { field: 'quantity' });
+  }
+
+  if (!user.shopId) throw appError('no_shop');
+  const shop = await getShop(user.shopId);
+  if (!shop?.deliveryGroupId) throw appError('no_delivery_group');
+  const group = normalizeDeliveryGroup(await getDeliveryGroup(shop.deliveryGroupId));
+  if (!group) throw appError('delivery_group_not_found');
+
+  const schedule = await getOrderingSchedule();
+  const currentSessionId = await getOrCreateSessionId(String(group._id), group.dayOfWeek, schedule);
+
+  const mongoSession = await mongoose.connection.startSession();
+  let result;
+  try {
+    await mongoSession.withTransaction(async () => {
+      const actor = {
+        at: new Date(),
+        by: String(user.telegramId),
+        byName: [user.firstName, user.lastName].filter(Boolean).join(' '),
+        byRole: user.role,
+      };
+
+      let order = await Order.findOne({
+        buyerTelegramId: user.telegramId,
+        orderingSessionId: currentSessionId,
+        status: { $in: ['new', 'in_progress'] },
+      }).session(mongoSession);
+
+      if (!order) {
+        if (newQty === 0) { result = { ok: true, productId, newQty: 0, action: 'noop' }; return; }
+
+        const product = await Product.findById(productId).session(mongoSession).lean();
+        if (!product || !isProductAvailable(product)) throw appError('product_not_found');
+        const inBlock = await Block.findOne({ productIds: product._id }).session(mongoSession).lean();
+        if (!inBlock) throw appError('product_not_in_block');
+
+        const price = Number(product.price || 0);
+        const buyerSnapshot = {
+          shopId: String(user.shopId),
+          shopName: shop.name || '',
+          shopCity: shop.cityId?.name || '',
+          shopAddress: shop.address || '',
+          deliveryGroupId: String(group._id),
+        };
+        order = new Order({
+          orderNumber: await getNextOrderNumber(),
+          buyerTelegramId: user.telegramId,
+          buyerSnapshot,
+          orderingSessionId: currentSessionId,
+          status: 'new',
+          items: [{ productId: product._id, name: buildProductLabel(product), price, quantity: newQty, packed: false, cancelled: false }],
+          totalPrice: roundMoney(price * newQty),
+          history: [{ ...actor, action: 'created' }],
+        });
+        await order.save({ session: mongoSession });
+        await User.updateOne(
+          { telegramId: user.telegramId },
+          { $set: { 'cartState.lastOrderPositions': 1, 'cartState.orderItems': {}, 'cartState.orderItemIds': [], 'cartState.updatedAt': new Date() } },
+          { session: mongoSession },
+        );
+        result = { ok: true, productId, newQty, action: 'created', orderId: String(order._id) };
+        return;
+      }
+
+      // Order exists — find item (including cancelled for re-add)
+      const item = order.items.find((i) => String(i.productId) === productId);
+      const activeItem = item && !item.cancelled ? item : null;
+
+      if (newQty === 0) {
+        if (!activeItem) { result = { ok: true, productId, newQty: 0, action: 'noop' }; return; }
+        activeItem.cancelled = true;
+        order.history.push({ ...actor, action: 'item_removed', meta: { productId, qty: activeItem.quantity } });
+      } else if (!activeItem) {
+        // Add new item (or re-add cancelled)
+        const product = await Product.findById(productId).session(mongoSession).lean();
+        if (!product || !isProductAvailable(product)) throw appError('product_not_found');
+        const inBlock = await Block.findOne({ productIds: product._id }).session(mongoSession).lean();
+        if (!inBlock) throw appError('product_not_in_block');
+
+        const price = Number(product.price || 0);
+        if (item) {
+          // Re-activate cancelled item
+          item.cancelled = false;
+          item.quantity = newQty;
+          item.price = price;
+          item.packed = false;
+        } else {
+          order.items.push({ productId: product._id, name: buildProductLabel(product), price, quantity: newQty, packed: false, cancelled: false });
+        }
+        order.history.push({ ...actor, action: 'item_added', meta: { productId, newQty } });
+      } else {
+        const oldQty = activeItem.quantity;
+        activeItem.quantity = newQty;
+        order.history.push({ ...actor, action: 'quantity_adjusted', meta: { productId, oldQty, newQty } });
+      }
+
+      order.totalPrice = roundMoney(order.items
+        .filter((i) => !i.cancelled)
+        .reduce((sum, i) => sum + Number(i.price || 0) * Number(i.quantity || 0), 0));
+
+      await order.save({ session: mongoSession });
+
+      const activePositions = order.items.filter((i) => !i.cancelled).length;
+      await User.updateOne(
+        { telegramId: user.telegramId },
+        { $set: { 'cartState.lastOrderPositions': activePositions, 'cartState.orderItems': {}, 'cartState.orderItemIds': [], 'cartState.updatedAt': new Date() } },
+        { session: mongoSession },
+      );
+
+      result = { ok: true, productId, newQty, action: newQty === 0 ? 'removed' : (activeItem ? 'updated' : 'added'), orderId: String(order._id) };
+    });
+  } finally {
+    mongoSession.endSession();
+  }
+
+  try {
+    const io = getIO();
+    if (io) {
+      io.emit('user_order_updated', { buyerTelegramId: user.telegramId });
+      io.to(`picking_group_${String(group._id)}`).emit('shop_status_changed', { groupId: String(group._id) });
+    }
+  } catch { /* non-critical */ }
+
+  res.json(result);
+}));
 
 // POST /set-item-qty — seller sets the exact quantity for a product in their active session order.
 // Handles both increase and decrease. Only the buyer themselves can call this.
