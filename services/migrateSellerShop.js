@@ -13,7 +13,6 @@ const { getOrCreateSessionId } = require('../utils/getOrCreateSession');
 const { getOrderingSchedule } = require('../utils/getOrderingSchedule');
 const { appError } = require('../utils/errors');
 const { invalidateShop } = require('../utils/modelCache');
-const { snapshotClearedCart } = require('./clearedCart');
 const { logShopTransition } = require('./shopAudit');
 
 async function ensureOrderNotInPickingPipeline(orderId, session) {
@@ -33,7 +32,6 @@ async function ensureOrderNotInPickingPipeline(orderId, session) {
  * @param {Object}  params.newShopFull                          New shop doc (populated cityId)
  * @param {Object}  params.actor                                { telegramId, firstName, lastName, role }
  * @param {string}  params.reason                               history meta.reason
- * @param {boolean} [params.resetCartItems=false]               clear cartState.orderItems/orderItemIds
  * @param {boolean} [params.resetCartNavigation=false]          reset cartState navigation (lastViewedProductId, indices)
  * @param {boolean} [params.clearCartReservation=true]          clear cartState.reservedForGroupId
  * @param {boolean} [params.pushHistory=true]                   push history entry to user
@@ -45,7 +43,6 @@ async function migrateSellerShop({
   newShopFull,
   actor,
   reason,
-  resetCartItems = false,
   resetCartNavigation = false,
   clearCartReservation = true,
   pushHistory = true,
@@ -184,21 +181,6 @@ async function migrateSellerShop({
   // Only sellers carry a warehouseZone-derived-from-shop; preserve other roles' values
   if (existingUser.role === 'seller') {
     userUpdate.warehouseZone = warehouseZone;
-  }
-  if (resetCartItems) {
-    // Soft-delete: snapshot the cart before wiping so it can be restored for 7 days.
-    await snapshotClearedCart({
-      session,
-      owner: existingUser,
-      clearedBy: actor?.telegramId,
-      clearedByName: [actor?.firstName, actor?.lastName].filter(Boolean).join(' '),
-      reason,
-      shopId: oldShopId,
-      shopName: oldShopFull?.name || '',
-    });
-    userUpdate['cartState.orderItems'] = {};
-    userUpdate['cartState.orderItemIds'] = [];
-    userUpdate['cartState.updatedAt'] = new Date();
   }
   if (resetCartNavigation) {
     userUpdate['cartState.lastViewedProductId'] = '';

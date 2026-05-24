@@ -113,7 +113,13 @@ async function ensureOrderNotInPickingPipeline(orderId, session = null) {
 async function requireOrderingWindowOpen(req, res, next) {
   try {
     const user = req.telegramUser;
-    if (!user || user.role !== 'seller') return next();
+    // Warehouse users cannot place orders at all — they manage picking, not ordering.
+    if (!user || user.role === 'warehouse') return next();
+    // Non-sellers (admins) with no shop assigned cannot order — return clear error.
+    if (user.role !== 'seller' && !user.shopId) {
+      return res.status(403).json({ error: 'no_shop', message: 'Вас не призначено до жодного магазину.' });
+    }
+    if (user.role !== 'seller') return next(); // admin with shop — skip window check
 
     if (!user.shopId) {
       return res.status(403).json({

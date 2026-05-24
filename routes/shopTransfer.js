@@ -11,8 +11,7 @@ const Order = require('../models/Order');
 const PickingTask = require('../models/PickingTask');
 const { migrateSellerShop } = require('../services/migrateSellerShop');
 const { invalidateShop } = require('../utils/modelCache');
-const { countCartItems, computeTargetShopState } = require('../utils/shopConflict');
-const { snapshotClearedCart } = require('../services/clearedCart');
+const { computeTargetShopState } = require('../utils/shopConflict');
 const { getIO } = require('../socket');
 
 const router = express.Router();
@@ -28,32 +27,23 @@ function normalizePhone(raw) {
 
 // ─── helpers ──────────────────────────────────────────────────────────────────
 
-async function buildConflictSnapshot(toShopId, fromShopId, sellerCartState) {
+async function buildConflictSnapshot(toShopId, fromShopId) {
   const { sellers, activeOrders, distinctBuyerCount, hasConflict } =
     await computeTargetShopState(toShopId);
 
-  // Primary (first) seller kept for backward-compatible display fields
   const targetSeller = sellers[0] || null;
 
-  // Active orders for source shop (will follow seller via migrateSellerShop)
   const sourceActiveOrder = await Order.findOne(
     { shopId: fromShopId, status: { $in: ['new', 'in_progress'] } }, '_id'
   ).lean();
 
-  let targetSellerCartHasItems = false;
-  let targetSellerCartItemCount = 0;
   let targetSellerHasActiveOrder = false;
   let targetSellerActiveOrderId = null;
 
   if (targetSeller) {
-    const targetCartItems = countCartItems(targetSeller.cartState);
-    targetSellerCartHasItems = targetCartItems > 0;
-    targetSellerCartItemCount = targetCartItems;
     targetSellerHasActiveOrder = activeOrders.length > 0;
     targetSellerActiveOrderId = activeOrders[0]?._id || null;
   }
-
-  const cartItems = countCartItems(sellerCartState);
 
   return {
     targetShopHasSeller: !!targetSeller,
@@ -61,15 +51,10 @@ async function buildConflictSnapshot(toShopId, fromShopId, sellerCartState) {
       ? [targetSeller.firstName, targetSeller.lastName].filter(Boolean).join(' ')
       : '',
     targetShopSellerTelegramId: targetSeller?.telegramId || '',
-    targetSellerCartHasItems,
-    targetSellerCartItemCount,
     targetSellerHasActiveOrder,
     targetSellerActiveOrderId,
     sourceShopHasActiveOrder: !!sourceActiveOrder,
     sourceShopActiveOrderId: sourceActiveOrder?._id || null,
-    cartHasItems: cartItems > 0,
-    cartItemCount: cartItems,
-    // New: full picture of the target shop at submission time (display/audit only)
     targetShopSellerCount: sellers.length,
     targetShopActiveOrderCount: activeOrders.length,
     targetShopDistinctBuyerCount: distinctBuyerCount,
@@ -102,8 +87,7 @@ router.post('/', telegramAuth, requireTelegramRole('seller'), asyncHandler(async
   }).lean();
   if (existing) throw appError('transfer_already_pending');
 
-  const sellerFull = await User.findOne({ telegramId: seller.telegramId }, 'cartState').lean();
-  const conflictSnapshot = await buildConflictSnapshot(toShopId, seller.shopId, sellerFull?.cartState);
+  const conflictSnapshot = await buildConflictSnapshot(toShopId, seller.shopId);
 
   const request = await ShopTransferRequest.create({
     sellerTelegramId: seller.telegramId,
@@ -164,7 +148,7 @@ router.get('/', telegramAuth, requireTelegramRole('admin'), asyncHandler(async (
 // ─── POST /api/shop-transfer/:id/approve  (admin approves) ───────────────────
 router.post('/:id/approve', telegramAuth, requireTelegramRole('admin'), asyncHandler(async (req, res) => {
   const admin = req.telegramUser;
-  const { cartDecision, displacedSellerDecision, overrideToShopId } = req.body;
+  const { overrideToShopId } = req.body;
 
   // Pre-load the request before starting session (read-only, no race risk here)
   const requestDoc = await ShopTransferRequest.findById(req.params.id).lean();
@@ -176,28 +160,6 @@ router.post('/:id/approve', telegramAuth, requireTelegramRole('admin'), asyncHan
   if (overrideToShopId) {
     const overrideShop = await Shop.findById(overrideToShopId, 'isActive').lean();
     if (!overrideShop || !overrideShop.isActive) throw appError('transfer_target_not_found');
-  }
-
-  // requestDoc.conflictSnapshot is kept ONLY for display/audit ("what was true when
-  // the seller asked"). NEVER drive safety guards off it — between submit and approve
-  // either seller can add or clear cart items. Recompute requirements from fresh reads.
-  const requestingSellerFresh = await User.findOne(
-    { telegramId: requestDoc.sellerTelegramId }, 'cartState',
-  ).lean();
-  if (countCartItems(requestingSellerFresh?.cartState) > 0 && !['clear', 'keep'].includes(cartDecision)) {
-    throw appError('transfer_cart_decision_required');
-  }
-
-  // Fresh displaced-seller check against the EFFECTIVE target shop. This also covers
-  // the admin-override path, which previously bypassed this guard entirely and could
-  // silently wipe the displaced seller's cart.
-  const targetSellerFresh = requestDoc.isProfileOnly ? null : await User.findOne(
-    { shopId: String(effectiveToShopId), role: 'seller', telegramId: { $ne: requestDoc.sellerTelegramId } },
-    'cartState',
-  ).lean();
-  if (targetSellerFresh && countCartItems(targetSellerFresh.cartState) > 0
-      && !['clear_cart', 'keep_cart'].includes(displacedSellerDecision)) {
-    return res.status(400).json({ error: 'displaced_seller_decision_required', message: 'Потрібно прийняти рішення щодо кошика поточного продавця цільового магазину.' });
   }
 
   // ДІРКА 3+4 (варіант B): refuse to push a seller into a shop that is ALREADY in a
@@ -277,30 +239,7 @@ router.post('/:id/approve', telegramAuth, requireTelegramRole('admin'), asyncHan
       }).session(session);
 
       if (targetCurrentSeller) {
-        // Fresh in-tx check (targetCurrentSeller is a full session doc with cartState).
-        // Closes the submit→approve staleness window completely.
-        const targetCartHasItems = countCartItems(targetCurrentSeller.cartState) > 0;
-        if (targetCartHasItems && !['clear_cart', 'keep_cart'].includes(displacedSellerDecision)) {
-          throw appError('transfer_target_occupied');
-        }
-
         const displacedPatch = { shopId: null, deliveryGroupId: '', warehouseZone: '' };
-
-        if (displacedSellerDecision === 'clear_cart') {
-          // Soft-delete: snapshot before wiping so admin can restore within 7 days.
-          await snapshotClearedCart({
-            session,
-            owner: targetCurrentSeller,
-            clearedBy: admin.telegramId,
-            clearedByName: [admin.firstName, admin.lastName].filter(Boolean).join(' '),
-            reason: `shop_transfer_displaced:${String(request._id)}`,
-            shopId: String(effectiveToShopId),
-            shopName: toShop.name || '',
-          });
-          displacedPatch['cartState.orderItems'] = {};
-          displacedPatch['cartState.orderItemIds'] = [];
-          displacedPatch['cartState.updatedAt'] = new Date();
-        }
 
         await User.updateOne(
           { telegramId: targetCurrentSeller.telegramId },
@@ -407,7 +346,6 @@ router.post('/:id/approve', telegramAuth, requireTelegramRole('admin'), asyncHan
           newShopFull: toShop,
           actor: admin,
           reason: `admin_transfer_approved:${String(request._id)}`,
-          resetCartItems: cartDecision === 'clear',
           resetCartNavigation: true,
           clearCartReservation: true,
           pushHistory: true,
@@ -420,8 +358,6 @@ router.post('/:id/approve', telegramAuth, requireTelegramRole('admin'), asyncHan
       request.resolvedAt = new Date();
       request.resolvedBy = admin.telegramId;
       request.resolvedByName = [admin.firstName, admin.lastName].filter(Boolean).join(' ');
-      request.cartDecision = cartDecision || null;
-      request.displacedSellerDecision = displacedSellerDecision || null;
       request.displacedSellerTelegramId = targetCurrentSeller?.telegramId || '';
       await request.save({ session });
 
