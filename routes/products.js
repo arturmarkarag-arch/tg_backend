@@ -119,6 +119,28 @@ router.get('/upload-url-pair', staffOnly, asyncHandler(async (req, res) => {
   res.json({ filename, mainUrl, thumbUrl });
 }));
 
+// GET /api/v1/products/upload-url-triple — presigned PUTs for ALL THREE variants
+// sharing one filename: originals/<f> (CLEAN, no labels — the embedding/describe
+// source), products/<f> (annotated, shown in UI/Telegram), thumbs/<f> (thumbnail
+// of the CLEAN original). resolveThumbUrl maps either products/ or originals/ →
+// thumbs/, so the shared filename keeps every variant in sync. This is the single
+// upload primitive every product-photo flow should use so the clean original is
+// guaranteed to exist (we never embed/describe a price/quantity-labelled photo).
+router.get('/upload-url-triple', staffOnly, asyncHandler(async (req, res) => {
+  const filename = `${crypto.randomUUID()}.jpg`;
+  const sign = (key) => getSignedUrl(
+    s3Client,
+    new PutObjectCommand({ Bucket: process.env.R2_BUCKET_NAME, Key: key, ContentType: 'image/jpeg' }),
+    { expiresIn: 300 },
+  );
+  const [originalUrl, productUrl, thumbUrl] = await Promise.all([
+    sign(`originals/${filename}`),
+    sign(`products/${filename}`),
+    sign(`thumbs/${filename}`),
+  ]);
+  res.json({ filename, originalUrl, productUrl, thumbUrl });
+}));
+
 // GET /api/v1/products/upload-url-public?ext=jpg — public presigned PUT URL for missing-product reports (no auth required)
 router.get('/upload-url-public', asyncHandler(async (req, res) => {
   const ext = String(req.query.ext || 'jpg').replace(/[^a-zA-Z0-9]/g, '').toLowerCase();

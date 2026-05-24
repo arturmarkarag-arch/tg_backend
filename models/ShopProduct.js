@@ -21,6 +21,18 @@ const ShopProductSchema = new mongoose.Schema(
     embedding:      { type: [Number], default: undefined },
     embeddingModel: { type: String, default: '' },
     embeddedAt:     { type: Date, default: null },
+    // ── Gemini Embedding 2 (multimodal, photo→vector) ─────────────────────────
+    // Parallel to the OpenAI `embedding` above so the live OpenAI search keeps
+    // working while the Gemini index is validated. geminiVector is the native
+    // image embedding (no intermediate descriptor). geminiFromLabeled flags the
+    // few legacy docs embedded from a labelled photo (no clean original existed);
+    // they should be re-embedded once re-photographed. Has its own Atlas index
+    // (shopproduct_gemini_vector, path geminiVector).
+    geminiVector:        { type: [Number], default: undefined },
+    geminiEmbeddingModel:{ type: String, default: '' },
+    geminiEmbeddingDim:  { type: Number, default: 0 },
+    geminiEmbeddedAt:    { type: Date, default: null },
+    geminiFromLabeled:   { type: Boolean, default: false },
     // Human-friendly Ukrainian product description for the card UI. Generated
     // on demand (staff presses "Згенерувати") from explainProductImage, NOT the
     // terse embedding `descriptor`. Shop-local: never synced to/from warehouse.

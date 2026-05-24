@@ -12,6 +12,7 @@ const mongoose = require('mongoose');
 const app = require('./app');
 const { initBot } = require('./telegramBot');
 const { initOpenAI } = require('./openaiClient');
+const { initGemini } = require('./geminiClient');
 const { initSocket } = require('./socket');
 const AppSetting = require('./models/AppSetting');
 const { migrateOrdersToSessionIds } = require('./utils/getOrCreateSession');
@@ -75,6 +76,12 @@ async function startServer() {
     const keyFromDb = await AppSetting.findOne({ key: 'openai.apiKey' }).lean();
     const OPENAI_API_KEY = keyFromDb?.value || process.env.OPENAI_API_KEY;
     initOpenAI(OPENAI_API_KEY);
+
+    // Gemini (embeddings / vector search). Prefer a DB-stored key, fall back to env.
+    const geminiKeyFromDb = await AppSetting.findOne({ key: 'gemini.apiKey' }).lean();
+    const GEMINI_API_KEY = geminiKeyFromDb?.value || process.env.GEMINI_API_KEY;
+    initGemini(GEMINI_API_KEY);
+
     initBot(TELEGRAM_BOT_TOKEN);
 
     const server = http.createServer(app);

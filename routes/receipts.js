@@ -460,7 +460,9 @@ router.post('/:id/items', staffOnly, asyncHandler(async (req, res) => {
     photoName = photoFilename;
   }
   if (originalFilename) {
-    originalPhotoUrl = r2Url('products', originalFilename);
+    // CLEAN original lives in originals/ — it's the embedding/describe source and
+    // must never be the price/quantity-labelled photo (which is in products/).
+    originalPhotoUrl = r2Url('originals', originalFilename);
   }
   const defectPhotoUrls = await uploadDefectPhotos(parsed.files);
   // SAVE-tier rule: a line can be parked with just photo + arrived qty (no
@@ -785,7 +787,8 @@ router.patch('/:id/items/:itemId', staffOnly, asyncHandler(async (req, res) => {
 
   const originalFilename = safeUploadName(parsed.fields.originalFilename);
   if (originalFilename) {
-    item.originalPhotoUrl = r2Url('products', originalFilename);
+    // CLEAN original → originals/ (see create path); never the labelled photo.
+    item.originalPhotoUrl = r2Url('originals', originalFilename);
   }
 
   const photoFilename = safeUploadName(parsed.fields.photoFilename);

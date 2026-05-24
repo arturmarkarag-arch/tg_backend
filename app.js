@@ -15,6 +15,7 @@ const adminRouter = require('./routes/admin');
 const searchProductsRouter = require('./routes/searchProducts');
 const { getBotStatus } = require('./telegramBot');
 const { verifyOpenAIConnection } = require('./openaiClient');
+const { verifyGeminiConnection } = require('./geminiClient');
 const receiptsRouter = require('./routes/receipts');
 const pickingRouter = require('./routes/picking');
 const shopsRouter = require('./routes/shops');
@@ -60,6 +61,7 @@ const publicApiPaths = [
   /^\/api\/health$/,
   /^\/api\/bot-status$/,
   /^\/api\/openai-status$/,
+  /^\/api\/gemini-status$/,
 ];
 
 // The test harness UI calls warehouse-test without auth. This is acceptable
@@ -96,6 +98,19 @@ app.get('/api/openai-status', async (req, res) => {
       status: 'error',
       error: 'openai_connection_failed',
       message: t('openai_connection_failed', { reason: error?.message }),
+    });
+  }
+});
+
+app.get('/api/gemini-status', async (req, res) => {
+  try {
+    const result = await verifyGeminiConnection();
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({
+      status: 'error',
+      error: 'gemini_connection_failed',
+      message: error?.message || 'Gemini connection failed',
     });
   }
 });
