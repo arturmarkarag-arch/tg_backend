@@ -65,6 +65,7 @@ router.get('/', staffOnly, asyncHandler(async (req, res) => {
           { barcode:       new RegExp(t, 'i') },
           { notes:         new RegExp(t, 'i') },
           { aiDescription: new RegExp(t, 'i') },
+          { descriptor:    new RegExp(t, 'i') },
         ],
       }));
     }
