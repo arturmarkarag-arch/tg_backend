@@ -61,9 +61,10 @@ router.get('/', staffOnly, asyncHandler(async (req, res) => {
     if (terms.length) {
       query.$and = terms.map((t) => ({
         $or: [
-          { name:    new RegExp(t, 'i') },
-          { barcode: new RegExp(t, 'i') },
-          { notes:   new RegExp(t, 'i') },
+          { name:          new RegExp(t, 'i') },
+          { barcode:       new RegExp(t, 'i') },
+          { notes:         new RegExp(t, 'i') },
+          { aiDescription: new RegExp(t, 'i') },
         ],
       }));
     }
