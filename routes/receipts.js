@@ -19,6 +19,7 @@ const Counter = require('../models/Counter');
 const { getIO } = require('../socket');
 const { upsertShopProductFromProduct, upsertShopOwnedFromReceiptItem } = require('../utils/upsertShopProduct');
 const { embedShopProductAsync } = require('../utils/shopProductEmbedding');
+const { explainProductImageUrl, getOpenAIStatus } = require('../openaiClient');
 const { appError, asyncHandler } = require('../utils/errors');
 const {
   assertCanEditItem,
@@ -125,6 +126,7 @@ async function ensureReceiptItemProduct(item, session) {
     labelPositions,
     barcode: item.barcode || '',
     quantityPerPackage: item.qtyPerPackage || 0,
+    aiDescription: item.aiDescription || '',
   });
 
   try {
@@ -1233,6 +1235,7 @@ router.post('/:id/commit', staffOnly, asyncHandler(async (req, res) => {
           imageNames: [item.photoName],
           barcode: item.barcode || '',
           quantityPerPackage: item.qtyPerPackage || 0,
+          aiDescription: item.aiDescription || '',
         });
 
         await currentProduct.save({ session });
@@ -1341,6 +1344,36 @@ router.patch('/:id/items/:itemId/link', staffOnly, asyncHandler(async (req, res)
   if (io) io.to(`receipt_${req.params.id}`).emit('receipt_item_updated', enriched);
 
   res.json(enriched);
+}));
+
+// ── POST /:id/items/:itemId/describe — generate + cache the item description ──
+// On-demand during receiving. Plain-language Ukrainian explainer from the item
+// photo, cached on the ReceiptItem; copied into the warehouse Product /
+// ShopProduct when this item is confirmed. Pressing again regenerates.
+router.post('/:id/items/:itemId/describe', staffOnly, asyncHandler(async (req, res) => {
+  const item = await ReceiptItem.findOne({ _id: req.params.itemId, receiptId: req.params.id });
+  if (!item) throw appError('receipt_item_not_found');
+
+  const url = item.originalPhotoUrl || item.photoUrl || '';
+  if (!url) return res.status(400).json({ error: 'photo_required', message: 'У позиції немає фото' });
+
+  const status = getOpenAIStatus();
+  if (!status.connected) {
+    return res.status(503).json({ error: 'openai_not_configured', message: status.error || 'OpenAI не підключено' });
+  }
+
+  try {
+    const { text } = await explainProductImageUrl(url);
+    if (!text) return res.status(502).json({ error: 'empty_description', message: 'Не вдалося згенерувати опис' });
+    item.aiDescription = text;
+    await item.save();
+    const io = getIO();
+    if (io) io.to(`receipt_${req.params.id}`).emit('receipt_item_updated', item.toObject());
+    res.json({ _id: item._id, aiDescription: item.aiDescription });
+  } catch (err) {
+    console.error('[receipts] describe error:', err.message);
+    return res.status(502).json({ error: 'openai_api_error', message: err.message });
+  }
 }));
 
 // ── HISTORY / AUDIT LOG ────────────────────────────────────────────────────

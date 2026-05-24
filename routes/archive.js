@@ -119,7 +119,10 @@ router.post('/:id/restore', asyncHandler(async (req, res) => {
         restoreOrder = (maxOrder?.orderNumber || 0) + 1;
       }
 
-      product.status = 'active';
+      // Restore to 'pending' (not 'active') so the warehouse worker can place
+      // the item via the incoming queue. It transitions to 'active' when confirmed
+      // there, which also triggers the ShopProduct mirror sync.
+      product.status = 'pending';
       product.archivedAt = null;
       product.originalOrderNumber = null;
       product.restoredFromArchive = true;

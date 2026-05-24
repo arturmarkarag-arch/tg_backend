@@ -102,6 +102,9 @@ async function buildUserProfile(user) {
     googleEmail: user.googleEmail || '',
     shopId: userShop ? String(userShop._id) : null,
     shop: userShop ? { _id: userShop._id, name: userShop.name, city: userShop.cityId?.name || '', deliveryGroupId: userShop.deliveryGroupId, cartState: normalizedCartState } : null,
+    // catalogState is always present regardless of role — lets admin/warehouse
+    // restore their last catalog position across sessions and devices.
+    catalogState: normalizeCartState(user.cartState),
     shopName: userShop?.name || '',
     shopNumber: user.shopNumber,
     shopCity: userShop?.cityId?.name || '',

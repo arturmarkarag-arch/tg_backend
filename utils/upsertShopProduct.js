@@ -25,6 +25,7 @@ async function upsertShopProductFromProduct(product, { session = null } = {}) {
     originalImageUrl:   product.originalImageUrl || product.imageUrls?.[0] || '',
     imageUrl:           product.imageUrls?.[0] || '',
     labelPositions:     product.labelPositions || {},
+    aiDescription:      product.aiDescription || '',
     source:             'receive',
     barcode,
     // NOTE: linkedProductId lives ONLY in $set below. Having it in both $set and
@@ -134,6 +135,9 @@ async function upsertShopOwnedFromReceiptItem(item, { session = null } = {}) {
     receiptItemId:      item._id,
     // linkedProductId intentionally NOT set → shop-owned (null).
   };
+  // Only propagate a non-empty description: `data` is applied with $set on every
+  // re-confirm, so an empty value would wipe a description regenerated on the shop side.
+  if (item.aiDescription) data.aiDescription = item.aiDescription;
   const ses = (q) => (session ? q.session(session) : q);
 
   const exec = async () => {

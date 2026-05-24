@@ -17,6 +17,7 @@ const DeliveryGroup = require('../models/DeliveryGroup');
 const SearchProduct = require('../models/SearchProduct');
 const { requireTelegramRoles } = require('../middleware/telegramAuth');
 const { appError, asyncHandler } = require('../utils/errors');
+const { explainProductImageUrl, getOpenAIStatus } = require('../openaiClient');
 const { getOrCreateSessionId } = require('../utils/getOrCreateSession');
 const { getOrderingSchedule } = require('../utils/getOrderingSchedule');
 const { normalizeDeliveryGroup } = require('../utils/deliveryGroupHelpers');
@@ -156,7 +157,7 @@ router.post(
 // GET /api/products/drafts — pending (unconfirmed) products
 router.get('/drafts', staffOnly, asyncHandler(async (req, res) => {
   const products = await Product.find({ status: 'pending', source: 'receive' })
-    .sort('-createdAt')
+    .sort('-updatedAt') // restored products have old createdAt; updatedAt reflects actual recency
     .lean();
   res.json(products);
 }));
@@ -186,6 +187,7 @@ router.get('/', async (req, res) => {
             { category: new RegExp(term, 'i') },
             { warehouse: new RegExp(term, 'i') },
             { barcode: new RegExp(term, 'i') },
+            { aiDescription: new RegExp(term, 'i') },
           ],
         }));
       }
@@ -957,6 +959,34 @@ router.delete('/:id', staffOnly, asyncHandler(async (req, res) => {
   await archiveProduct(product, { notifyBuyers: false });
 
   res.json({ message: 'Product archived' });
+}));
+
+// ── POST /:id/describe — generate + cache the human-friendly card description ──
+// On-demand (staff presses the button). Plain-language Ukrainian explainer from
+// the product photo, cached in aiDescription. Warehouse-local: never pushed to
+// the ShopProduct mirror. Pressing again regenerates.
+router.post('/:id/describe', staffOnly, asyncHandler(async (req, res) => {
+  const product = await Product.findById(req.params.id);
+  if (!product) throw appError('product_not_found');
+
+  const url = product.originalImageUrl || product.imageUrls?.[0] || '';
+  if (!url) return res.status(400).json({ error: 'photo_required', message: 'У товару немає фото' });
+
+  const status = getOpenAIStatus();
+  if (!status.connected) {
+    return res.status(503).json({ error: 'openai_not_configured', message: status.error || 'OpenAI не підключено' });
+  }
+
+  try {
+    const { text } = await explainProductImageUrl(url);
+    if (!text) return res.status(502).json({ error: 'empty_description', message: 'Не вдалося згенерувати опис' });
+    product.aiDescription = text;
+    await product.save();
+    res.json({ _id: product._id, aiDescription: product.aiDescription });
+  } catch (err) {
+    console.error('[products] describe error:', err.message);
+    return res.status(502).json({ error: 'openai_api_error', message: err.message });
+  }
 }));
 
 module.exports = router;

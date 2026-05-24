@@ -29,6 +29,11 @@ const ProductSchema = new mongoose.Schema(
     archivedAt: { type: Date, default: null },
     originalOrderNumber: { type: Number, default: null },
     restoredFromArchive: { type: Boolean, default: false },
+    // Human-friendly Ukrainian description for the card UI. Generated on demand
+    // (staff presses "Згенерувати") from the product photo via explainProductImage.
+    // NOT pushed to the ShopProduct mirror — pushSharedFieldsToMirror leaves local
+    // fields alone, so warehouse and shop descriptions stay independent.
+    aiDescription: { type: String, default: '' },
     // Non-authoritative "recommended update" coming FROM a ShopProduct edit.
     // Never auto-applied — staff review and decide. Shape:
     // { price, name, quantityPerPackage, notes, imageUrl, by, at }.

@@ -79,6 +79,11 @@ const ReceiptItemSchema = new mongoose.Schema(
     qtyPerShop: { type: Number, default: 0 },
     shelfQty: { type: Number, required: true },
     name: { type: String, default: '' },
+    // Human-friendly Ukrainian description generated on demand during receiving
+    // (staff presses "Згенерувати" from the item photo). Copied into the warehouse
+    // Product / ShopProduct created when this item is confirmed, so it's described
+    // once and available everywhere downstream.
+    aiDescription: { type: String, default: '' },
     price: { type: Number, default: null },
     qtyPerPackage: { type: Number, default: 1 },
     barcode: { type: String, default: '' },
