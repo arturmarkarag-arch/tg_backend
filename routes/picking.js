@@ -687,6 +687,82 @@ router.get('/locked-tasks', requireTelegramRoles(['warehouse', 'admin']), async 
 });
 
 // ---------------------------------------------------------------------------
+// GET /api/picking/shift-board?deliveryGroupId=...
+// Live "shift board": who is working, how many tasks each person completed,
+// session start time, last activity time.
+// ---------------------------------------------------------------------------
+router.get('/shift-board', requireTelegramRoles(['warehouse', 'admin']), async (req, res, next) => {
+  try {
+    const { deliveryGroupId } = req.query;
+    if (!deliveryGroupId) return res.json({ workers: [], totalCompleted: 0, totalPending: 0, sessionStart: null, lastActivity: null, groupName: '' });
+
+    const dgId = String(deliveryGroupId);
+
+    // Group name + session start time
+    const group = await DeliveryGroup.findById(dgId, 'name pickingConfirmedAt').lean();
+    const groupName = group?.name || '';
+    const sessionStart = group?.pickingConfirmedAt || null;
+
+    // Active workers (currently have a locked task)
+    const lockedTasks = await PickingTask.find(
+      { deliveryGroupId: dgId, status: 'locked', lockedBy: { $ne: null } },
+      'lockedBy lockedAt',
+    ).lean();
+    const activeWorkerIds = new Set(lockedTasks.map((t) => String(t.lockedBy)));
+
+    // Task counts per worker from completed tasks (updatedAt = completion time)
+    const completedTasks = await PickingTask.find(
+      { deliveryGroupId: dgId, status: 'completed' },
+      'updatedAt',
+    ).lean();
+    const totalCompleted = completedTasks.length;
+    const totalPending = await PickingTask.countDocuments({ deliveryGroupId: dgId, status: 'pending' });
+    const lastActivity = completedTasks.length
+      ? completedTasks.reduce((max, t) => (t.updatedAt > max ? t.updatedAt : max), completedTasks[0].updatedAt)
+      : null;
+
+    // Per-worker stats: aggregate from Order.history (who packed via picking)
+    // Scoped to orders in this delivery group fulfilled today.
+    const workerStats = await Order.aggregate([
+      { $match: { 'buyerSnapshot.deliveryGroupId': dgId, status: { $in: ['fulfilled', 'in_progress', 'new'] } } },
+      { $unwind: '$history' },
+      { $match: { 'history.action': 'status_changed', 'history.meta.via': 'picking', 'history.by': { $exists: true, $ne: '' } } },
+      { $group: { _id: '$history.by', name: { $first: '$history.byName' }, tasksCompleted: { $sum: 1 } } },
+    ]);
+
+    // Merge with User collection for name fallback
+    const workerIds = workerStats.map((w) => w._id);
+    const activeIdsWithNoStats = [...activeWorkerIds].filter((id) => !workerIds.includes(id));
+    const allWorkerIds = [...new Set([...workerIds, ...activeIdsWithNoStats])];
+
+    const users = allWorkerIds.length
+      ? await User.find({ telegramId: { $in: allWorkerIds } }, 'telegramId firstName lastName').lean()
+      : [];
+    const userNameMap = new Map(users.map((u) => [
+      String(u.telegramId),
+      [u.firstName, u.lastName].filter(Boolean).join(' ') || String(u.telegramId),
+    ]));
+
+    const statsMap = new Map(workerStats.map((w) => [w._id, w]));
+
+    const workers = allWorkerIds.map((id) => {
+      const stat = statsMap.get(id);
+      return {
+        telegramId: id,
+        name: stat?.name || userNameMap.get(id) || id,
+        tasksCompleted: stat?.tasksCompleted || 0,
+        isActive: activeWorkerIds.has(id),
+      };
+    }).sort((a, b) => b.tasksCompleted - a.tasksCompleted || (b.isActive ? 1 : 0) - (a.isActive ? 1 : 0));
+
+    res.json({ groupName, sessionStart, lastActivity, workers, totalCompleted, totalPending });
+  } catch (err) {
+    console.error('[picking/shift-board]', err);
+    next(appError('picking_next_failed'));
+  }
+});
+
+// ---------------------------------------------------------------------------
 // POST /api/picking/tasks/:taskId/force-claim
 // Force-release a stale lock and claim the task for the current worker.
 // Only allowed if the task has been locked for more than FORCE_CLAIM_AFTER_MS.
