@@ -241,6 +241,23 @@ router.post('/query-vector', staffOnly, asyncHandler(async (req, res) => {
   }
 }));
 
+// Attaches each warehouse product's shelf location ({ blockId, position, total })
+// so search results can show WHERE the item is. Products not on any shelf get null.
+async function attachWarehouseLocations(items) {
+  if (!Array.isArray(items) || items.length === 0) return items;
+  const objIds = items.map((i) => i._id);
+  const blocks = await Block.find({ productIds: { $in: objIds } }, 'blockId productIds').lean();
+  const locByProduct = new Map();
+  for (const b of blocks) {
+    const pids = (b.productIds || []).map(String);
+    pids.forEach((pid, idx) => {
+      if (!locByProduct.has(pid)) locByProduct.set(pid, { blockId: b.blockId, position: idx + 1, total: pids.length });
+    });
+  }
+  for (const it of items) it.location = locByProduct.get(String(it._id)) || null;
+  return items;
+}
+
 // ─── POST /query-text — semantic TEXT → IMAGE search (Gemini) ─────────────────
 // The multimodal payoff: a typed word ("рукавички", "піца") is embedded with
 // gemini-embedding-2 and matched against the catalog's IMAGE vectors in the same
@@ -257,6 +274,11 @@ router.post('/query-text', staffOnly, asyncHandler(async (req, res) => {
 
   const limit = Math.min(50, Math.max(1, parseInt(req.body?.limit, 10) || 20));
 
+  // Which catalog to search: shopproducts (Товари Магазинів, default) | products (Товари Складу).
+  const collection = String(req.body?.collection || 'shopproducts').toLowerCase() === 'products' ? 'products' : 'shopproducts';
+  const Model    = collection === 'products' ? Product : ShopProduct;
+  const idxName  = collection === 'products' ? VECTOR_INDEX_WAREHOUSE : VECTOR_INDEX_GEMINI;
+
   let embedding = null;
   try {
     const e = await geminiEmbedText(text);
@@ -269,10 +291,10 @@ router.post('/query-text', staffOnly, asyncHandler(async (req, res) => {
 
   let items;
   try {
-    items = await ShopProduct.aggregate([
+    items = await Model.aggregate([
       {
         $vectorSearch: {
-          index:         VECTOR_INDEX_GEMINI,
+          index:         idxName,
           path:          'geminiVector',
           queryVector:   embedding,
           numCandidates: Math.max(100, limit * 20),
@@ -286,41 +308,19 @@ router.post('/query-text', staffOnly, asyncHandler(async (req, res) => {
     console.error('[visionSearch] query-text vector search error:', err.message);
     return res.status(502).json({
       error:   'vector_search_failed',
-      message: `Векторний пошук недоступний — перевір Atlas-індекс "${VECTOR_INDEX_GEMINI}". (${err.message})`,
+      message: `Векторний пошук недоступний — перевір Atlas-індекс "${idxName}". (${err.message})`,
     });
   }
 
+  if (collection === 'products') await attachWarehouseLocations(items);
   res.json({ items, total: items.length });
 }));
 
-// Finds which Block holds a warehouse product and its position/neighbours.
-// Returns null when the product isn't placed on any shelf yet.
-async function locateInBlock(productId) {
-  const block = await Block.findOne({ productIds: productId }).lean();
-  if (!block) return null;
-  const ids = (block.productIds || []).map(String);
-  const idx = ids.indexOf(String(productId));
-  if (idx === -1) return null;
-  const neighbourIds = [ids[idx - 1], ids[idx + 1]].filter(Boolean);
-  const neighbours = neighbourIds.length
-    ? await Product.find({ _id: { $in: neighbourIds } }, 'name barcode imageUrls originalImageUrl').lean()
-    : [];
-  const byId = new Map(neighbours.map((n) => [String(n._id), n]));
-  return {
-    blockId:  block.blockId,
-    position: idx + 1,           // 1-based, як бачить людина
-    total:    ids.length,
-    prev: idx > 0 ? (byId.get(ids[idx - 1]) || null) : null,
-    next: idx < ids.length - 1 ? (byId.get(ids[idx + 1]) || null) : null,
-  };
-}
-
-// ─── POST /locate — "Прийомка": is this arriving item already on the warehouse? ──
-// Body: { key, threshold? }. Photo → Gemini vector → $vectorSearch over WAREHOUSE
-// products (product_gemini_vector). If the best match clears the threshold, also
-// returns WHERE it's shelved (block, position, neighbours). If nothing matches,
-// found:false — we deliberately do NOT search anywhere else.
-router.post('/locate', staffOnly, asyncHandler(async (req, res) => {
+// ─── POST /query-vector-warehouse — photo search over WAREHOUSE products ──────
+// Body: { key, limit? }. Photo → Gemini vector → $vectorSearch over the warehouse
+// index (product_gemini_vector). Returns full Product docs ranked by similarity
+// (rendered straight into the Товари Складу list). Gemini-only.
+router.post('/query-vector-warehouse', staffOnly, asyncHandler(async (req, res) => {
   const key = req.body?.key;
   if (!isVisionTmpKey(key)) return res.status(400).json({ error: 'photo_required', message: 'Не вказано фото' });
 
@@ -328,12 +328,7 @@ router.post('/locate', staffOnly, asyncHandler(async (req, res) => {
     return res.status(503).json({ error: 'gemini_not_configured', message: getGeminiStatus().error || 'Gemini не підключено' });
   }
 
-  const clientThreshold = req.body.threshold != null && req.body.threshold !== ''
-    ? parseFloat(req.body.threshold) : NaN;
-  const threshold = Number.isFinite(clientThreshold)
-    ? Math.min(1, Math.max(0, clientThreshold))
-    : await getVisionThreshold();
-
+  const limit = Math.min(50, Math.max(1, parseInt(req.body?.limit, 10) || 20));
   const imageUrl = publicUrl(key);
   try {
     let embedding = null;
@@ -341,44 +336,35 @@ router.post('/locate', staffOnly, asyncHandler(async (req, res) => {
       const g = await geminiEmbedImageUrl(imageUrl);
       embedding = g.embedding;
     } catch (err) {
-      console.error('[visionSearch] locate Gemini error:', err.message);
+      console.error('[visionSearch] warehouse photo Gemini error:', err.message);
       return res.status(502).json({ error: 'gemini_api_error', message: err.message });
     }
-    if (!embedding) return res.json({ found: false, threshold, best: null, location: null, matches: [] });
+    if (!embedding) return res.json({ items: [], total: 0 });
 
-    let docs;
+    let items;
     try {
-      docs = await Product.aggregate([
+      items = await Product.aggregate([
         {
           $vectorSearch: {
             index:         VECTOR_INDEX_WAREHOUSE,
             path:          'geminiVector',
             queryVector:   embedding,
-            numCandidates: 100,
-            limit:         5,
+            numCandidates: Math.max(100, limit * 20),
+            limit,
           },
         },
         { $addFields: { _score: { $meta: 'vectorSearchScore' } } },
-        { $project: { name: 1, barcode: 1, imageUrls: 1, originalImageUrl: 1, status: 1, _score: 1 } },
+        { $project: { geminiVector: 0 } },
       ]);
     } catch (err) {
-      console.error('[visionSearch] locate vector search error:', err.message);
+      console.error('[visionSearch] warehouse photo vector search error:', err.message);
       return res.status(502).json({
         error:   'vector_search_failed',
         message: `Векторний пошук по складу недоступний — перевір Atlas-індекс "${VECTOR_INDEX_WAREHOUSE}". (${err.message})`,
       });
     }
-
-    const matches = docs.map((d) => ({
-      ...d,
-      score: Math.max(0, Math.min(1, 2 * (d._score || 0) - 1)),
-    }));
-    const best  = matches[0] || null;
-    const found = Boolean(best && best.score >= threshold);
-
-    const location = found ? await locateInBlock(best._id) : null;
-
-    res.json({ found, threshold, best: found ? best : null, location, matches });
+    await attachWarehouseLocations(items);
+    res.json({ items, total: items.length });
   } finally {
     deleteObject(key); // one-shot photo
   }
