@@ -20,6 +20,8 @@ const { getIO } = require('../socket');
 const { upsertShopProductFromProduct, upsertShopOwnedFromReceiptItem } = require('../utils/upsertShopProduct');
 const { embedShopProductAsync } = require('../utils/shopProductEmbedding');
 const { explainProductImageUrl, getOpenAIStatus } = require('../openaiClient');
+const { getGeminiStatus } = require('../geminiClient');
+const { describeImageUrl } = require('../utils/productDescribe');
 const { appError, asyncHandler } = require('../utils/errors');
 const {
   assertCanEditItem,
@@ -1360,13 +1362,12 @@ router.post('/:id/items/:itemId/describe', staffOnly, asyncHandler(async (req, r
   const url = item.originalPhotoUrl || item.photoUrl || '';
   if (!url) return res.status(400).json({ error: 'photo_required', message: 'У позиції немає фото' });
 
-  const status = getOpenAIStatus();
-  if (!status.connected) {
-    return res.status(503).json({ error: 'openai_not_configured', message: status.error || 'OpenAI не підключено' });
+  if (!getGeminiStatus().connected && !getOpenAIStatus().connected) {
+    return res.status(503).json({ error: 'describe_not_configured', message: 'Опис недоступний: не підключено ні Gemini, ні OpenAI' });
   }
 
   try {
-    const { text } = await explainProductImageUrl(url);
+    const { text } = await describeImageUrl(url);
     if (!text) return res.status(502).json({ error: 'empty_description', message: 'Не вдалося згенерувати опис' });
     item.aiDescription = text;
     await item.save();
@@ -1375,7 +1376,7 @@ router.post('/:id/items/:itemId/describe', staffOnly, asyncHandler(async (req, r
     res.json({ _id: item._id, aiDescription: item.aiDescription });
   } catch (err) {
     console.error('[receipts] describe error:', err.message);
-    return res.status(502).json({ error: 'openai_api_error', message: err.message });
+    return res.status(502).json({ error: 'describe_api_error', message: err.message });
   }
 }));
 

@@ -5,11 +5,14 @@ const router      = require('express').Router();
 const { requireTelegramRoles } = require('../middleware/telegramAuth');
 const { asyncHandler }         = require('../utils/errors');
 const ShopProduct    = require('../models/ShopProduct');
+const Product        = require('../models/Product');
+const Block          = require('../models/Block');
 const VisionTestLog  = require('../models/VisionTestLog');
 const AppSetting     = require('../models/AppSetting');
 const { getOpenAIStatus, describeProductImageUrl, explainProductImageUrl, embedText } = require('../openaiClient');
-const { getGeminiStatus, embedImageUrl: geminiEmbedImageUrl } = require('../geminiClient');
+const { getGeminiStatus, embedImageUrl: geminiEmbedImageUrl, embedText: geminiEmbedText } = require('../geminiClient');
 const { embedShopProduct } = require('../utils/shopProductEmbedding');
+const { describeImageUrl } = require('../utils/productDescribe');
 const { presignPutUrl, deleteObject, publicUrl } = require('../utils/r2');
 
 // One-shot query photos live here; deleted right after OpenAI reads them.
@@ -21,8 +24,9 @@ function isVisionTmpKey(key) {
 // Atlas Vector Search index names — must exist on the shopproducts collection
 // (no fallback; the query errors clearly if it's missing). The OpenAI index is
 // on `embedding` (1536); the Gemini index is on `geminiVector` (3072).
-const VECTOR_INDEX        = 'shopproduct_vector';
-const VECTOR_INDEX_GEMINI = 'shopproduct_gemini_vector';
+const VECTOR_INDEX           = 'shopproduct_vector';
+const VECTOR_INDEX_GEMINI    = 'shopproduct_gemini_vector';
+const VECTOR_INDEX_WAREHOUSE = 'product_gemini_vector'; // Товари Складу (Прийомка locate)
 
 // Which embedding provider answers a search. Resolves a per-request override
 // (test page) first, then the admin setting, then the safe default (openai).
@@ -237,6 +241,149 @@ router.post('/query-vector', staffOnly, asyncHandler(async (req, res) => {
   }
 }));
 
+// ─── POST /query-text — semantic TEXT → IMAGE search (Gemini) ─────────────────
+// The multimodal payoff: a typed word ("рукавички", "піца") is embedded with
+// gemini-embedding-2 and matched against the catalog's IMAGE vectors in the same
+// space — so it finds the product photo even with no name/description text. Gemini
+// only; returns FULL ShopProduct docs ordered by similarity (so the catalog list
+// can render + edit them like a normal page).
+router.post('/query-text', staffOnly, asyncHandler(async (req, res) => {
+  const text = String(req.body?.text || '').trim();
+  if (!text) return res.status(400).json({ error: 'text_required', message: 'Порожній запит' });
+
+  if (!getGeminiStatus().connected) {
+    return res.status(503).json({ error: 'gemini_not_configured', message: getGeminiStatus().error || 'Gemini не підключено' });
+  }
+
+  const limit = Math.min(50, Math.max(1, parseInt(req.body?.limit, 10) || 20));
+
+  let embedding = null;
+  try {
+    const e = await geminiEmbedText(text);
+    embedding = e.embedding;
+  } catch (err) {
+    console.error('[visionSearch] query-text Gemini error:', err.message);
+    return res.status(502).json({ error: 'gemini_api_error', message: err.message });
+  }
+  if (!embedding) return res.json({ items: [], total: 0 });
+
+  let items;
+  try {
+    items = await ShopProduct.aggregate([
+      {
+        $vectorSearch: {
+          index:         VECTOR_INDEX_GEMINI,
+          path:          'geminiVector',
+          queryVector:   embedding,
+          numCandidates: Math.max(100, limit * 20),
+          limit,
+        },
+      },
+      { $addFields: { _score: { $meta: 'vectorSearchScore' } } },
+      { $project: { geminiVector: 0, embedding: 0 } }, // drop heavy vectors from the payload
+    ]);
+  } catch (err) {
+    console.error('[visionSearch] query-text vector search error:', err.message);
+    return res.status(502).json({
+      error:   'vector_search_failed',
+      message: `Векторний пошук недоступний — перевір Atlas-індекс "${VECTOR_INDEX_GEMINI}". (${err.message})`,
+    });
+  }
+
+  res.json({ items, total: items.length });
+}));
+
+// Finds which Block holds a warehouse product and its position/neighbours.
+// Returns null when the product isn't placed on any shelf yet.
+async function locateInBlock(productId) {
+  const block = await Block.findOne({ productIds: productId }).lean();
+  if (!block) return null;
+  const ids = (block.productIds || []).map(String);
+  const idx = ids.indexOf(String(productId));
+  if (idx === -1) return null;
+  const neighbourIds = [ids[idx - 1], ids[idx + 1]].filter(Boolean);
+  const neighbours = neighbourIds.length
+    ? await Product.find({ _id: { $in: neighbourIds } }, 'name barcode imageUrls originalImageUrl').lean()
+    : [];
+  const byId = new Map(neighbours.map((n) => [String(n._id), n]));
+  return {
+    blockId:  block.blockId,
+    position: idx + 1,           // 1-based, як бачить людина
+    total:    ids.length,
+    prev: idx > 0 ? (byId.get(ids[idx - 1]) || null) : null,
+    next: idx < ids.length - 1 ? (byId.get(ids[idx + 1]) || null) : null,
+  };
+}
+
+// ─── POST /locate — "Прийомка": is this arriving item already on the warehouse? ──
+// Body: { key, threshold? }. Photo → Gemini vector → $vectorSearch over WAREHOUSE
+// products (product_gemini_vector). If the best match clears the threshold, also
+// returns WHERE it's shelved (block, position, neighbours). If nothing matches,
+// found:false — we deliberately do NOT search anywhere else.
+router.post('/locate', staffOnly, asyncHandler(async (req, res) => {
+  const key = req.body?.key;
+  if (!isVisionTmpKey(key)) return res.status(400).json({ error: 'photo_required', message: 'Не вказано фото' });
+
+  if (!getGeminiStatus().connected) {
+    return res.status(503).json({ error: 'gemini_not_configured', message: getGeminiStatus().error || 'Gemini не підключено' });
+  }
+
+  const clientThreshold = req.body.threshold != null && req.body.threshold !== ''
+    ? parseFloat(req.body.threshold) : NaN;
+  const threshold = Number.isFinite(clientThreshold)
+    ? Math.min(1, Math.max(0, clientThreshold))
+    : await getVisionThreshold();
+
+  const imageUrl = publicUrl(key);
+  try {
+    let embedding = null;
+    try {
+      const g = await geminiEmbedImageUrl(imageUrl);
+      embedding = g.embedding;
+    } catch (err) {
+      console.error('[visionSearch] locate Gemini error:', err.message);
+      return res.status(502).json({ error: 'gemini_api_error', message: err.message });
+    }
+    if (!embedding) return res.json({ found: false, threshold, best: null, location: null, matches: [] });
+
+    let docs;
+    try {
+      docs = await Product.aggregate([
+        {
+          $vectorSearch: {
+            index:         VECTOR_INDEX_WAREHOUSE,
+            path:          'geminiVector',
+            queryVector:   embedding,
+            numCandidates: 100,
+            limit:         5,
+          },
+        },
+        { $addFields: { _score: { $meta: 'vectorSearchScore' } } },
+        { $project: { name: 1, barcode: 1, imageUrls: 1, originalImageUrl: 1, status: 1, _score: 1 } },
+      ]);
+    } catch (err) {
+      console.error('[visionSearch] locate vector search error:', err.message);
+      return res.status(502).json({
+        error:   'vector_search_failed',
+        message: `Векторний пошук по складу недоступний — перевір Atlas-індекс "${VECTOR_INDEX_WAREHOUSE}". (${err.message})`,
+      });
+    }
+
+    const matches = docs.map((d) => ({
+      ...d,
+      score: Math.max(0, Math.min(1, 2 * (d._score || 0) - 1)),
+    }));
+    const best  = matches[0] || null;
+    const found = Boolean(best && best.score >= threshold);
+
+    const location = found ? await locateInBlock(best._id) : null;
+
+    res.json({ found, threshold, best: found ? best : null, location, matches });
+  } finally {
+    deleteObject(key); // one-shot photo
+  }
+}));
+
 // ─── POST /describe — plain-language product explainer (all roles) ────────────
 // For staff/sellers who scan a product they don't recognise. No search, no
 // embedding — just a friendly Ukrainian description of the photo.
@@ -244,13 +391,12 @@ router.post('/describe', anyRole, asyncHandler(async (req, res) => {
   const key = req.body?.key;
   if (!isVisionTmpKey(key)) return res.status(400).json({ error: 'photo_required', message: 'Не вказано фото' });
 
-  const status = getOpenAIStatus();
-  if (!status.connected) {
-    return res.status(503).json({ error: 'openai_not_configured', message: status.error || 'OpenAI не підключено' });
+  if (!getGeminiStatus().connected && !getOpenAIStatus().connected) {
+    return res.status(503).json({ error: 'describe_not_configured', message: 'Опис недоступний: не підключено ні Gemini, ні OpenAI' });
   }
 
   try {
-    const { text, usage } = await explainProductImageUrl(publicUrl(key));
+    const { text, usage } = await describeImageUrl(publicUrl(key));
     res.json({ description: text, usage });
   } catch (err) {
     console.error('[visionSearch] describe error:', err.message);

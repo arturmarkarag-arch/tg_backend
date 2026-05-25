@@ -12,6 +12,8 @@
 //   node scripts/reindexGemini.js --create-index  # also (try to) create the Atlas vector index
 //   node scripts/reindexGemini.js --limit=50      # cap how many docs to process (smoke test)
 //   node scripts/reindexGemini.js --delay=1100    # ms between Gemini calls (default 1100 = ~54/min)
+//   node scripts/reindexGemini.js --collection=products --create-index   # warehouse (Товари Складу)
+//   node scripts/reindexGemini.js --collection=shopproducts              # shop catalog (default)
 //
 // Resumable: re-running without --force picks up where it left off (skips docs
 // that already have a geminiVector).
@@ -19,8 +21,10 @@
 require('dotenv').config();
 const mongoose = require('mongoose');
 const ShopProduct = require('../models/ShopProduct');
+const Product     = require('../models/Product');
 const { initGemini, getGeminiStatus, GEMINI_EMBEDDING_MODEL, GEMINI_EMBEDDING_DIMENSIONS } = require('../geminiClient');
 const { embedGemini } = require('../utils/shopProductEmbedding');
+const { embedProductGemini } = require('../utils/productEmbedding');
 
 const args = process.argv.slice(2);
 const hasFlag = (f) => args.includes(f);
@@ -34,7 +38,29 @@ const CREATE_INDEX = hasFlag('--create-index');
 const LIMIT        = parseInt(flagVal('--limit', '0'), 10) || 0;
 const DELAY_MS     = parseInt(flagVal('--delay', '1100'), 10);
 
-const INDEX_NAME = 'shopproduct_gemini_vector';
+// --collection=shopproducts (Товари Магазинів, default) | products (Товари Складу)
+const COLLECTION = String(flagVal('--collection', 'shopproducts')).toLowerCase();
+const TARGETS = {
+  shopproducts: {
+    Model: ShopProduct,
+    index: 'shopproduct_gemini_vector',
+    embed: embedGemini,
+    photoFilter: { $or: [{ imageUrl: { $ne: '' } }, { originalImageUrl: { $ne: '' } }] },
+  },
+  products: {
+    Model: Product,
+    index: 'product_gemini_vector',
+    embed: embedProductGemini,
+    photoFilter: { status: { $ne: 'archived' }, $or: [{ originalImageUrl: { $ne: '' } }, { 'imageUrls.0': { $exists: true } }] },
+  },
+};
+const TARGET = TARGETS[COLLECTION];
+if (!TARGET) {
+  console.error(`Unknown --collection="${COLLECTION}" (use: shopproducts | products)`);
+  process.exit(1);
+}
+
+const INDEX_NAME = TARGET.index;
 const INDEX_DEFINITION = {
   name: INDEX_NAME,
   type: 'vectorSearch',
@@ -49,12 +75,12 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function tryCreateIndex() {
   try {
-    const existing = await ShopProduct.collection.listSearchIndexes().toArray().catch(() => []);
+    const existing = await TARGET.Model.collection.listSearchIndexes().toArray().catch(() => []);
     if (Array.isArray(existing) && existing.some((i) => i.name === INDEX_NAME)) {
       console.log(`[index] "${INDEX_NAME}" already exists — skipping create.`);
       return;
     }
-    await ShopProduct.collection.createSearchIndex(INDEX_DEFINITION);
+    await TARGET.Model.collection.createSearchIndex(INDEX_DEFINITION);
     console.log(`[index] created "${INDEX_NAME}" (${GEMINI_EMBEDDING_DIMENSIONS} dims, cosine). Atlas needs ~1 min to build it.`);
   } catch (err) {
     console.warn(`[index] auto-create failed: ${err.message}`);
@@ -73,25 +99,25 @@ async function main() {
   }
 
   await mongoose.connect(MONGODB_URI, { useNewUrlParser: true, useUnifiedTopology: true });
-  console.log(`[db] connected. Model=${GEMINI_EMBEDDING_MODEL}, dims=${GEMINI_EMBEDDING_DIMENSIONS}, delay=${DELAY_MS}ms, force=${FORCE}`);
+  console.log(`[db] connected. Collection=${COLLECTION}, index=${INDEX_NAME}, model=${GEMINI_EMBEDDING_MODEL}, dims=${GEMINI_EMBEDDING_DIMENSIONS}, delay=${DELAY_MS}ms, force=${FORCE}`);
 
   if (CREATE_INDEX) await tryCreateIndex();
 
-  // Has a photo of some kind.
-  const filter = { $or: [{ imageUrl: { $ne: '' } }, { originalImageUrl: { $ne: '' } }] };
+  // Has a photo of some kind (filter differs per collection).
+  const filter = { ...TARGET.photoFilter };
   if (!FORCE) filter.geminiVector = { $exists: false };
 
-  const total = await ShopProduct.countDocuments(filter);
-  console.log(`[reindex] ${total} product(s) to process${LIMIT ? ` (capped at ${LIMIT})` : ''}.`);
+  const total = await TARGET.Model.countDocuments(filter);
+  console.log(`[reindex] ${total} doc(s) to process${LIMIT ? ` (capped at ${LIMIT})` : ''}.`);
 
   let processed = 0, embedded = 0, failed = 0, fromLabeled = 0;
-  const cursor = ShopProduct.find(filter).cursor();
+  const cursor = TARGET.Model.find(filter).cursor();
 
   for (let doc = await cursor.next(); doc != null; doc = await cursor.next()) {
     if (LIMIT && processed >= LIMIT) break;
     processed++;
     try {
-      const ok = await embedGemini(doc);
+      const ok = await TARGET.embed(doc);
       if (ok) {
         await doc.save();
         embedded++;

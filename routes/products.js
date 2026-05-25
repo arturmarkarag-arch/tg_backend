@@ -18,6 +18,9 @@ const SearchProduct = require('../models/SearchProduct');
 const { requireTelegramRoles } = require('../middleware/telegramAuth');
 const { appError, asyncHandler } = require('../utils/errors');
 const { explainProductImageUrl, getOpenAIStatus } = require('../openaiClient');
+const { getGeminiStatus } = require('../geminiClient');
+const { describeImageUrl } = require('../utils/productDescribe');
+const { embedProductAsync } = require('../utils/productEmbedding');
 const { getOrCreateSessionId } = require('../utils/getOrCreateSession');
 const { getOrderingSchedule } = require('../utils/getOrderingSchedule');
 const { normalizeDeliveryGroup } = require('../utils/deliveryGroupHelpers');
@@ -624,6 +627,8 @@ router.post('/block-upload-photos', staffOnly, asyncHandler(async (req, res) => 
   for (const product of createdProducts) {
     upsertShopProductFromProduct(product).catch((err) =>
       console.error('[products/block-upload] ShopProduct upsert failed:', err.message));
+    // Index the shelf photo for the Прийомка warehouse-locate search.
+    embedProductAsync(product, 'block-upload');
   }
 
   try {
@@ -704,6 +709,9 @@ router.post('/receive', staffOnly, asyncHandler(async (req, res) => {
     upsertShopProductFromProduct(product).catch((err) =>
       console.error('[products/receive] ShopProduct upsert failed:', err.message));
   }
+
+  // Index the warehouse photo for the Прийомка "is it already on the warehouse?" search.
+  if (product.originalImageUrl || product.imageUrls?.[0]) embedProductAsync(product, 'receive');
 
   try {
     const io = getIO();
@@ -970,6 +978,11 @@ router.patch('/:id', staffOnly, asyncHandler(async (req, res) => {
     console.warn('[products/patch] socket incoming_updated failed:', e.message);
   }
 
+  // Photo changed → its warehouse vector is stale; re-index in the background.
+  if (patchFilenames.length > 0 && (product.originalImageUrl || product.imageUrls?.[0])) {
+    embedProductAsync(product, 'patch');
+  }
+
   res.json(product);
 }));
 
@@ -994,20 +1007,19 @@ router.post('/:id/describe', staffOnly, asyncHandler(async (req, res) => {
   const url = product.originalImageUrl || product.imageUrls?.[0] || '';
   if (!url) return res.status(400).json({ error: 'photo_required', message: 'У товару немає фото' });
 
-  const status = getOpenAIStatus();
-  if (!status.connected) {
-    return res.status(503).json({ error: 'openai_not_configured', message: status.error || 'OpenAI не підключено' });
+  if (!getGeminiStatus().connected && !getOpenAIStatus().connected) {
+    return res.status(503).json({ error: 'describe_not_configured', message: 'Опис недоступний: не підключено ні Gemini, ні OpenAI' });
   }
 
   try {
-    const { text } = await explainProductImageUrl(url);
+    const { text } = await describeImageUrl(url);
     if (!text) return res.status(502).json({ error: 'empty_description', message: 'Не вдалося згенерувати опис' });
     product.aiDescription = text;
     await product.save();
     res.json({ _id: product._id, aiDescription: product.aiDescription });
   } catch (err) {
     console.error('[products] describe error:', err.message);
-    return res.status(502).json({ error: 'openai_api_error', message: err.message });
+    return res.status(502).json({ error: 'describe_api_error', message: err.message });
   }
 }));
 

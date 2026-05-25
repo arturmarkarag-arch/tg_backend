@@ -34,6 +34,15 @@ const ProductSchema = new mongoose.Schema(
     // NOT pushed to the ShopProduct mirror — pushSharedFieldsToMirror leaves local
     // fields alone, so warehouse and shop descriptions stay independent.
     aiDescription: { type: String, default: '' },
+    // ── Gemini Embedding 2 (multimodal photo→vector) for warehouse search ──────
+    // Lets "Прийомка" locate an arriving item already on the warehouse by photo.
+    // Embedded from the CLEAN original; geminiFromLabeled flags fallbacks. Has its
+    // own Atlas index (product_gemini_vector, path geminiVector).
+    geminiVector:         { type: [Number], default: undefined },
+    geminiEmbeddingModel: { type: String, default: '' },
+    geminiEmbeddingDim:   { type: Number, default: 0 },
+    geminiEmbeddedAt:     { type: Date, default: null },
+    geminiFromLabeled:    { type: Boolean, default: false },
     // Non-authoritative "recommended update" coming FROM a ShopProduct edit.
     // Never auto-applied — staff review and decide. Shape:
     // { price, name, quantityPerPackage, notes, imageUrl, by, at }.

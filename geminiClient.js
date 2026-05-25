@@ -25,6 +25,10 @@ const GEMINI_EMBEDDING_MODEL =
   process.env.GEMINI_EMBEDDING_MODEL || 'gemini-embedding-2';
 const GEMINI_EMBEDDING_DIMENSIONS =
   Number(process.env.GEMINI_EMBEDDING_DIMENSIONS) || 3072;
+// Generative model for plain-language image→text (the "Що це за товар?" / describe
+// features). Distinct from the embedding model — embeddings can't generate text.
+const GEMINI_TEXT_MODEL =
+  process.env.GEMINI_TEXT_MODEL || 'gemini-2.5-flash';
 
 let apiKey = null;
 let geminiStatus = { connected: false, error: 'GEMINI_API_KEY not configured' };
@@ -105,6 +109,33 @@ async function embedText(text) {
   return { embedding, model: GEMINI_EMBEDDING_MODEL, dimensions: embedding.length };
 }
 
+// ─── Generative: describe a product photo in plain language ──────────────────
+// Uses the generative model (generateContent), NOT the embedding model. Fetches
+// the image bytes (Gemini has no fetch-by-URL) and returns the generated text.
+async function generateTextFromImageUrl(imageUrl, prompt) {
+  if (!apiKey) throw new Error(geminiStatus.error || 'GEMINI_API_KEY not configured');
+  if (!imageUrl) return { text: '' };
+  const imgRes = await axios.get(imageUrl, { responseType: 'arraybuffer', timeout: 30000 });
+  const buffer = Buffer.from(imgRes.data);
+  const mimeType = imgRes.headers?.['content-type'] || guessMimeFromUrl(imageUrl);
+  const url = `${GEMINI_BASE_URL}/models/${GEMINI_TEXT_MODEL}:generateContent`;
+  const body = {
+    contents: [{
+      parts: [
+        { text: String(prompt || '') },
+        { inline_data: { mime_type: mimeType || 'image/jpeg', data: buffer.toString('base64') } },
+      ],
+    }],
+  };
+  const res = await axios.post(url, body, {
+    headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey },
+    timeout: 45000,
+  });
+  const parts = res.data?.candidates?.[0]?.content?.parts || [];
+  const text = parts.map((p) => p?.text || '').join('').trim();
+  return { text };
+}
+
 function guessMimeFromUrl(url) {
   const u = String(url).toLowerCase();
   if (u.endsWith('.png')) return 'image/png';
@@ -127,10 +158,12 @@ async function verifyGeminiConnection() {
 module.exports = {
   GEMINI_EMBEDDING_MODEL,
   GEMINI_EMBEDDING_DIMENSIONS,
+  GEMINI_TEXT_MODEL,
   initGemini,
   getGeminiStatus,
   verifyGeminiConnection,
   embedImageBuffer,
   embedImageUrl,
   embedText,
+  generateTextFromImageUrl,
 };
