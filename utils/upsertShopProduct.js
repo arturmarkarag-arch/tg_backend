@@ -63,8 +63,16 @@ async function upsertShopProductFromProduct(product, { session = null } = {}) {
 // copied across.
 //
 // `name` is only overwritten when non-empty: a blank computed name is almost
-// never an intentional clear and would silently wipe a good mirror name.
-async function pushSharedFieldsToMirror(product, { photoChanged = false } = {}) {
+// never an intentional clear and would silently wipe a good mirror name. Same
+// guard for `aiDescription` — a linked mirror is the SAME physical product, so
+// its human description is owned by the warehouse and pushed across here; we
+// only overwrite when the warehouse actually has one (never wipe with a blank).
+//
+// Pass `{ session }` to run inside a caller's transaction (receipt confirm/commit).
+// In that mode errors PROPAGATE so the mirror can never desync from a committing
+// Product, and the embedding is NOT scheduled here — the caller schedules it
+// AFTER commit, using the returned doc.
+async function pushSharedFieldsToMirror(product, { photoChanged = false, session = null } = {}) {
   if (!product?._id) return null;
   const imageUrl = product.imageUrls?.[0] || '';
   const computedName = product.name || product.brand || product.model || product.category || '';
@@ -79,13 +87,22 @@ async function pushSharedFieldsToMirror(product, { photoChanged = false } = {}) 
     barcode:            String(product.barcode || '').trim(),
   };
   if (computedName) $set.name = computedName;
+  if (product.aiDescription) $set.aiDescription = product.aiDescription;
 
-  try {
-    const doc = await ShopProduct.findOneAndUpdate(
+  const run = () => {
+    const q = ShopProduct.findOneAndUpdate(
       { linkedProductId: product._id },
       { $set },
       { new: true },
     );
+    return session ? q.session(session) : q;
+  };
+
+  // Transactional caller: let errors abort the receipt; defer embedding to caller.
+  if (session) return run();
+
+  try {
+    const doc = await run();
     // New photo → the mirror's embedding is stale; re-index in the background.
     if (doc && photoChanged && (doc.imageUrl || doc.originalImageUrl)) {
       embedShopProductAsync(doc, 'mirror-push');

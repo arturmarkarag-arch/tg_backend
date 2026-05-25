@@ -17,7 +17,7 @@ const DeliveryGroup = require('../models/DeliveryGroup');
 const Shop = require('../models/Shop');
 const Counter = require('../models/Counter');
 const { getIO } = require('../socket');
-const { upsertShopProductFromProduct, upsertShopOwnedFromReceiptItem } = require('../utils/upsertShopProduct');
+const { upsertShopProductFromProduct, upsertShopOwnedFromReceiptItem, pushSharedFieldsToMirror } = require('../utils/upsertShopProduct');
 const { embedShopProductAsync } = require('../utils/shopProductEmbedding');
 const { explainProductImageUrl, getOpenAIStatus } = require('../openaiClient');
 const { getGeminiStatus } = require('../geminiClient');
@@ -965,7 +965,12 @@ router.post('/:id/items/:itemId/confirm', staffOnly, asyncHandler(async (req, re
       // blocked once confirmed). Embeddings are deferred to after commit.
       if (product) {
         // shelf item → ShopProduct MIRROR of the warehouse product (linkedProductId set).
-        const mirror = await upsertShopProductFromProduct(product, { session });
+        // upsert only $setOnInsert, so it can CREATE a mirror but never refresh an
+        // existing one. A re-receipt into a product that already has a mirror would
+        // therefore leave the mirror's price/qtyPerPackage/photo/description stale —
+        // so immediately push the warehouse's current shared values across.
+        await upsertShopProductFromProduct(product, { session });
+        const mirror = await pushSharedFieldsToMirror(product, { session });
         if (mirror && !mirror.embedding && (mirror.imageUrl || mirror.originalImageUrl)) {
           embedTargets.push([mirror, 'upsert-from-product']);
         }

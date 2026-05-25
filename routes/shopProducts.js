@@ -201,6 +201,11 @@ router.post('/:id/describe', staffOnly, asyncHandler(async (req, res) => {
   const item = await ShopProduct.findById(req.params.id);
   if (!item) throw appError('product_not_found');
 
+  // A linked mirror's description is owned by the warehouse (pushed in via
+  // pushSharedFieldsToMirror — same physical product, same description). Regenerate
+  // it from the warehouse card; doing it here would diverge until the next push.
+  if (item.linkedProductId) throw appError('shopproduct_edit_on_warehouse');
+
   const url = item.originalImageUrl || item.imageUrl;
   if (!url) return res.status(400).json({ error: 'photo_required', message: 'У товару немає фото' });
 

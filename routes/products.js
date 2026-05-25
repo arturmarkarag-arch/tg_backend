@@ -269,6 +269,14 @@ router.get('/', async (req, res) => {
       source: product.source || '',
       image_url: product.imageUrls?.[0] || product.localImageUrl || '',
       thumbnail_url: product.imageUrls?.[0] || product.localImageUrl || '',
+      // Raw image fields + label positions: the warehouse editor (InlinePhotoCanvas)
+      // needs the CLEAN originalImageUrl and the saved labelPositions to reopen with
+      // markers in place and avoid baking labels on top of an already-annotated photo.
+      // The seller mini-app ignores these extra fields (it reads image_url/thumbnail_url).
+      imageUrls: product.imageUrls || [],
+      originalImageUrl: product.originalImageUrl || '',
+      localImageUrl: product.localImageUrl || '',
+      labelPositions: product.labelPositions || {},
       status: product.status,
       orderNumber: product.orderNumber ?? 0,
       createdAt: product.createdAt,
@@ -998,8 +1006,9 @@ router.delete('/:id', staffOnly, asyncHandler(async (req, res) => {
 
 // ── POST /:id/describe — generate + cache the human-friendly card description ──
 // On-demand (staff presses the button). Plain-language Ukrainian explainer from
-// the product photo, cached in aiDescription. Warehouse-local: never pushed to
-// the ShopProduct mirror. Pressing again regenerates.
+// the product photo, cached in aiDescription, then pushed to the linked
+// ShopProduct mirror — a mirror is the SAME physical product, so it must show the
+// same description. Pressing again regenerates.
 router.post('/:id/describe', staffOnly, asyncHandler(async (req, res) => {
   const product = await Product.findById(req.params.id);
   if (!product) throw appError('product_not_found');
@@ -1017,6 +1026,9 @@ router.post('/:id/describe', staffOnly, asyncHandler(async (req, res) => {
     product.aiDescription = text;
     await product.save();
     res.json({ _id: product._id, aiDescription: product.aiDescription });
+    // Keep the linked mirror's description in sync (fire-and-forget — same as PATCH).
+    pushSharedFieldsToMirror(product, {}).catch((err) =>
+      console.error('[products/describe] ShopProduct mirror push failed:', err.message));
   } catch (err) {
     console.error('[products] describe error:', err.message);
     return res.status(502).json({ error: 'describe_api_error', message: err.message });

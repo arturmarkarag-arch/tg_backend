@@ -35,7 +35,9 @@ const ShopProductSchema = new mongoose.Schema(
     geminiFromLabeled:   { type: Boolean, default: false },
     // Human-friendly Ukrainian product description for the card UI. Generated
     // on demand (staff presses "Згенерувати") from explainProductImage, NOT the
-    // terse embedding `descriptor`. Shop-local: never synced to/from warehouse.
+    // terse embedding `descriptor`. For a shop-OWNED product (linkedProductId:
+    // null) it's editable here; for a warehouse MIRROR it's owned by the warehouse
+    // and pushed in via pushSharedFieldsToMirror — same product, same description.
     aiDescription:  { type: String, default: '' },
     // Where this record came from
     source: {
