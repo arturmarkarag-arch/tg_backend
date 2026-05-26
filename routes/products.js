@@ -280,6 +280,7 @@ router.get('/', async (req, res) => {
       status: product.status,
       orderNumber: product.orderNumber ?? 0,
       createdAt: product.createdAt,
+      shelvedAt: product.shelvedAt || null,
     }));
 
     return res.json({
@@ -335,6 +336,28 @@ router.get('/check', asyncHandler(async (req, res) => {
 router.get('/pending', asyncHandler(async (req, res) => {
   const products = await Product.find({ status: 'pending' }).sort({ orderNumber: 1 });
   res.json(products);
+}));
+
+// Count of products shelved within the last `days` (default 7) that are visible
+// in the seller catalogue (placed in a block). Drives the "Товари" nav badge.
+router.get('/new-count', asyncHandler(async (req, res) => {
+  const days = Math.min(90, Math.max(1, Number(req.query.days) || 7));
+  const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+  const [result] = await Product.aggregate([
+    { $match: { status: { $ne: 'archived' }, shelvedAt: { $gte: cutoff } } },
+    {
+      $lookup: {
+        from: 'blocks',
+        localField: '_id',
+        foreignField: 'productIds',
+        as: '_block',
+        pipeline: [{ $project: { _id: 1 } }],
+      },
+    },
+    { $match: { '_block.0': { $exists: true } } },
+    { $count: 'count' },
+  ]);
+  res.json({ count: result?.count ?? 0 });
 }));
 
 router.patch('/reorder', staffOnly, asyncHandler(async (req, res) => {

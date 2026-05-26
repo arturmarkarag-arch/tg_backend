@@ -27,6 +27,11 @@ const ProductSchema = new mongoose.Schema(
     originalImageUrl: { type: String, default: '' },
     labelPositions: { type: mongoose.Schema.Types.Mixed, default: {} },
     archivedAt: { type: Date, default: null },
+    // Timestamp of the first time this product was shelved (status flipped to
+    // 'active' during a receipt commit). Drives the "Новий товар" tag and the
+    // "Товари" nav badge — a product counts as new for 7 days after shelving.
+    // Set once; not reset on re-shelving.
+    shelvedAt: { type: Date, default: null },
     originalOrderNumber: { type: Number, default: null },
     restoredFromArchive: { type: Boolean, default: false },
     // Human-friendly Ukrainian description for the card UI. Generated on demand

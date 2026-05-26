@@ -69,6 +69,7 @@ async function ensureReceiptItemProduct(item, session) {
       }
       if (item.shelfQty > 0 && product.status !== 'active') {
         product.status = 'active';
+        if (!product.shelvedAt) product.shelvedAt = new Date();
       }
       await product.save({ session });
       if (item.shelfQty > 0 && !item.stockApplied) {
@@ -93,6 +94,7 @@ async function ensureReceiptItemProduct(item, session) {
       }
       if (item.shelfQty > 0 && product.status !== 'active') {
         product.status = 'active';
+        if (!product.shelvedAt) product.shelvedAt = new Date();
       }
       await product.save({ session });
       if (item.shelfQty > 0 && !item.stockApplied) {
@@ -121,6 +123,7 @@ async function ensureReceiptItemProduct(item, session) {
     brand: item.name || '',
     model: '',
     status: item.shelfQty > 0 ? 'active' : 'pending',
+    shelvedAt: item.shelfQty > 0 ? new Date() : null,
     source: 'receipt',
     imageUrls: [item.photoUrl],
     imageNames: [item.photoName],
