@@ -8,7 +8,7 @@ const User = require('../models/User');
 const { requireTelegramRoles } = require('../middleware/telegramAuth');
 const { getProductTitle } = require('../services/archiveProduct');
 const { buildPickingTasksFromOrders } = require('../services/taskBuilder');
-const { isOrderingOpen, getWarsawNow, DAY_FULL_UK, getOrderingWindowCloseAt } = require('../utils/orderingSchedule');
+const { isOrderingOpen, getWarsawNow, DAY_FULL_UK, getOrderingWindowCloseAt, getOrderingWindowOpenAt } = require('../utils/orderingSchedule');
 const { getOrCreateSessionId } = require('../utils/getOrCreateSession');
 const { normalizeDeliveryGroup } = require('../utils/deliveryGroupHelpers');
 const { getOrderingSchedule } = require('../utils/getOrderingSchedule');
@@ -148,9 +148,11 @@ router.post('/start-session', requireTelegramRoles(['warehouse', 'admin']), asyn
 
     const groupForSession = normalizeDeliveryGroup(await DeliveryGroup.findById(deliveryGroupId, 'dayOfWeek name').lean());
     let currentSessionId = null;
+    let sessionOpenAt = null;
     if (groupForSession) {
       const schedule = await getOrderingSchedule();
       currentSessionId = await getOrCreateSessionId(String(deliveryGroupId), groupForSession.dayOfWeek, schedule);
+      sessionOpenAt = getOrderingWindowOpenAt(groupForSession.dayOfWeek, schedule);
       // Fix any products left un-archived from a previous crashed out-of-stock flow
       await archiveOrphanedOutOfStockProducts(deliveryGroupId);
       await reconcileActiveTasksForSession(deliveryGroupId, currentSessionId);
@@ -167,8 +169,15 @@ router.post('/start-session', requireTelegramRoles(['warehouse', 'admin']), asyn
 
     const existingActiveCount = await PickingTask.countDocuments(activeFilter);
     const availableCount = await PickingTask.countDocuments(pendingFilter);
+    // Count only completed tasks from the CURRENT ordering session window.
+    // Without the date filter, tasks from previous weeks would make the system
+    // think this week's session is already confirmed, blocking new task creation.
     const completedCount = existingActiveCount === 0
-      ? await PickingTask.countDocuments({ status: 'completed', deliveryGroupId: String(deliveryGroupId) })
+      ? await PickingTask.countDocuments({
+          status: 'completed',
+          deliveryGroupId: String(deliveryGroupId),
+          ...(sessionOpenAt ? { updatedAt: { $gte: sessionOpenAt } } : {}),
+        })
       : 0;
 
     if (existingActiveCount > 0 || completedCount > 0) {
@@ -190,7 +199,13 @@ router.post('/start-session', requireTelegramRoles(['warehouse', 'admin']), asyn
     }
 
     // Without explicit confirmation, don't build tasks — user must press the button.
+    // Exception: if pickingConfirmedAt is already set but no tasks exist, the session
+    // was previously confirmed and found empty (noOrders) — restore that state on reload.
     if (!confirm) {
+      const confirmedGroupCheck = await DeliveryGroup.findById(deliveryGroupId, 'pickingConfirmedAt').lean();
+      if (confirmedGroupCheck?.pickingConfirmedAt) {
+        return res.json({ noOrders: true });
+      }
       return res.json({ preStart: true });
     }
 
@@ -266,7 +281,11 @@ router.post('/start-session', requireTelegramRoles(['warehouse', 'admin']), asyn
       }));
 
       const taskCount = await PickingTask.countDocuments(pendingFilter);
+      // Clear completed tasks from any previous session so the shift-board counter resets.
+      await PickingTask.deleteMany({ deliveryGroupId: String(deliveryGroupId), status: 'completed' });
       if (taskCount === 0) {
+        await DeliveryGroup.updateOne({ _id: deliveryGroupId }, { $set: { pickingConfirmedAt: new Date() } });
+        await bustGroupCaches(deliveryGroupId);
         return res.json({ noOrders: true, staleWarnings });
       }
       await DeliveryGroup.updateOne({ _id: deliveryGroupId }, { $set: { pickingConfirmedAt: new Date() } });
