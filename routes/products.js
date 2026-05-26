@@ -53,6 +53,12 @@ const s3Client = new S3Client({
 
 const ALLOWED_UPLOAD_FOLDERS = ['products', 'originals'];
 
+// Product photos are content-addressed (UUID filenames never change), so they
+// can be cached forever. Signed into the presigned PUTs and echoed by the
+// client so the SigV4 signature matches; the R2 bucket CORS must allow the
+// Cache-Control request header for the browser→R2 preflight to pass.
+const UPLOAD_CACHE_CONTROL = 'public, max-age=31536000, immutable';
+
 function r2PublicUrl(folder, filename) {
   const base = process.env.R2_PUBLIC_URL.replace(/\/$/, '');
   return `${base}/${folder}/${filename}`;
@@ -64,6 +70,7 @@ async function r2Put(key, body, contentType = 'image/jpeg') {
     Key: key,
     Body: body,
     ContentType: contentType,
+    CacheControl: UPLOAD_CACHE_CONTROL,
   }));
 }
 
@@ -95,31 +102,38 @@ router.get('/upload-url', staffOnly, asyncHandler(async (req, res) => {
     Bucket: process.env.R2_BUCKET_NAME,
     Key: key,
     ContentType: 'image/jpeg',
+    CacheControl: UPLOAD_CACHE_CONTROL,
   });
   const uploadUrl = await getSignedUrl(s3Client, command, { expiresIn: 300 });
   res.json({
     uploadUrl,
     filename,
+    cacheControl: UPLOAD_CACHE_CONTROL,
     url: r2PublicUrl(safeFolder, filename),
     thumbUrl: r2PublicUrl('thumbs', filename),
   });
 }));
 
-// GET /api/v1/products/upload-url-pair — presigned PUTs for products/<file> AND
-// thumbs/<file> sharing one filename. Lets the client resize + make the thumbnail
-// itself and upload both straight to R2 (no image bytes through the server).
+// GET /api/v1/products/upload-url-pair?folder=products|defects — presigned PUTs
+// for <folder>/<file> AND thumbs/<file> sharing one filename. Lets the client
+// resize + make the thumbnail itself and upload both straight to R2 (no image
+// bytes through the server). `folder` defaults to products (back-compatible);
+// defect-evidence photos pass folder=defects so resolveThumbUrl resolves them.
+const ALLOWED_PAIR_FOLDERS = ['products', 'defects'];
 router.get('/upload-url-pair', staffOnly, asyncHandler(async (req, res) => {
+  const folderRaw = String(req.query.folder || 'products');
+  const folder = ALLOWED_PAIR_FOLDERS.includes(folderRaw) ? folderRaw : 'products';
   const filename = `${crypto.randomUUID()}.jpg`;
   const sign = (key) => getSignedUrl(
     s3Client,
-    new PutObjectCommand({ Bucket: process.env.R2_BUCKET_NAME, Key: key, ContentType: 'image/jpeg' }),
+    new PutObjectCommand({ Bucket: process.env.R2_BUCKET_NAME, Key: key, ContentType: 'image/jpeg', CacheControl: UPLOAD_CACHE_CONTROL }),
     { expiresIn: 300 },
   );
   const [mainUrl, thumbUrl] = await Promise.all([
-    sign(`products/${filename}`),
+    sign(`${folder}/${filename}`),
     sign(`thumbs/${filename}`),
   ]);
-  res.json({ filename, mainUrl, thumbUrl });
+  res.json({ filename, mainUrl, thumbUrl, cacheControl: UPLOAD_CACHE_CONTROL });
 }));
 
 // GET /api/v1/products/upload-url-triple — presigned PUTs for ALL THREE variants
@@ -133,7 +147,7 @@ router.get('/upload-url-triple', staffOnly, asyncHandler(async (req, res) => {
   const filename = `${crypto.randomUUID()}.jpg`;
   const sign = (key) => getSignedUrl(
     s3Client,
-    new PutObjectCommand({ Bucket: process.env.R2_BUCKET_NAME, Key: key, ContentType: 'image/jpeg' }),
+    new PutObjectCommand({ Bucket: process.env.R2_BUCKET_NAME, Key: key, ContentType: 'image/jpeg', CacheControl: UPLOAD_CACHE_CONTROL }),
     { expiresIn: 300 },
   );
   const [originalUrl, productUrl, thumbUrl] = await Promise.all([
@@ -141,7 +155,7 @@ router.get('/upload-url-triple', staffOnly, asyncHandler(async (req, res) => {
     sign(`products/${filename}`),
     sign(`thumbs/${filename}`),
   ]);
-  res.json({ filename, originalUrl, productUrl, thumbUrl });
+  res.json({ filename, originalUrl, productUrl, thumbUrl, cacheControl: UPLOAD_CACHE_CONTROL });
 }));
 
 // GET /api/v1/products/upload-url-public?ext=jpg — public presigned PUT URL for missing-product reports (no auth required)

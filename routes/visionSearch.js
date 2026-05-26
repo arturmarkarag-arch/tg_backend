@@ -186,7 +186,8 @@ router.post('/query-vector', staffOnly, asyncHandler(async (req, res) => {
         // no intermediate text description, hence no "reasoning" to show.
         const g = await geminiEmbedImageUrl(imageUrl);
         embedding = g.embedding;
-        reasoning = 'Gemini multimodal — вектор напряму з фото (без проміжного опису)';
+
+        reasoning = 'Google Gemini Embadded 2 API мультимодальний векторний пошук.';
       } catch (err) {
         console.error('[visionSearch] query-vector Gemini error:', err.message);
         return res.status(502).json({ error: 'gemini_api_error', message: err.message });

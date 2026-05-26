@@ -251,6 +251,16 @@ async function uploadDefectPhotos(parsedFiles, max = 3) {
   return urls;
 }
 
+/**
+ * Build defects/ public URLs from client-supplied filenames. Defect photos are
+ * now uploaded straight to R2 by the browser (defects/<f> + thumbs/<f>); only
+ * their sanitized filenames reach us. Bad/forged names are dropped.
+ */
+function defectUrlsFromFilenames(rawField, max = 3) {
+  const names = safeParseArray(rawField) || [];
+  return names.map(safeUploadName).filter(Boolean).slice(0, max).map((fn) => r2Url('defects', fn));
+}
+
 /** Parses a form-field string to a safe non-negative integer. Returns fallback on NaN/negative/missing. */
 function parseIntField(val, fallback = 0) {
   const n = Math.trunc(Number(val));
@@ -469,7 +479,11 @@ router.post('/:id/items', staffOnly, asyncHandler(async (req, res) => {
     // must never be the price/quantity-labelled photo (which is in products/).
     originalPhotoUrl = r2Url('originals', originalFilename);
   }
-  const defectPhotoUrls = await uploadDefectPhotos(parsed.files);
+  // Prefer client-direct R2 filenames; fall back to legacy multipart bytes.
+  const defectFilenameUrls = defectUrlsFromFilenames(parsed.fields.defectFilenames);
+  const defectPhotoUrls = defectFilenameUrls.length
+    ? defectFilenameUrls
+    : await uploadDefectPhotos(parsed.files);
   // SAVE-tier rule: a line can be parked with just photo + arrived qty (no
   // price yet). Price / qtyPerPackage are only required later to CONFIRM.
   const notes = String(parsed.fields.notes || '').trim();
@@ -692,7 +706,9 @@ router.patch('/:id/items/:itemId', staffOnly, asyncHandler(async (req, res) => {
   if (parsed.fields.deliveryGroupIds !== undefined && !arraysEqual(deliveryGroupIds, item.deliveryGroupIds || [])) changedFields.push('deliveryGroupIds');
   if (parsed.fields.qtyPerShop !== undefined && qtyPerShop !== (item.qtyPerShop || 0)) changedFields.push('qtyPerShop');
   if (parsed.fields.notes !== undefined && String(parsed.fields.notes).trim() !== (item.notes || '')) changedFields.push('notes');
-  const hasNewDefectPhotos = (parsed.files || []).some((f) => f.field === 'defectPhoto');
+  const newDefectUrls = defectUrlsFromFilenames(parsed.fields.defectFilenames);
+  const hasMultipartDefect = (parsed.files || []).some((f) => f.field === 'defectPhoto');
+  const hasNewDefectPhotos = newDefectUrls.length > 0 || hasMultipartDefect;
   // keptDefectPhotoUrls = the subset of EXISTING defect photos the client wants
   // to keep (lets the UI delete individual photos). Absent => keep all existing.
   const keptDefectUrls = parsed.fields.keptDefectPhotoUrls !== undefined
@@ -771,7 +787,9 @@ router.patch('/:id/items/:itemId', staffOnly, asyncHandler(async (req, res) => {
   let uploadedDefectUrls = [];
   if (defectsTouched) {
     const kept = keptDefectUrls !== null ? keptDefectUrls : (item.defectPhotoUrls || []);
-    uploadedDefectUrls = hasNewDefectPhotos ? await uploadDefectPhotos(parsed.files) : [];
+    uploadedDefectUrls = newDefectUrls.length
+      ? newDefectUrls
+      : (hasMultipartDefect ? await uploadDefectPhotos(parsed.files) : []);
     item.defectPhotoUrls = [...kept, ...uploadedDefectUrls].slice(0, 3);
   }
 
