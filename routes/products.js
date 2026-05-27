@@ -948,14 +948,17 @@ router.patch('/:id', staffOnly, asyncHandler(async (req, res) => {
     try {
       await session.withTransaction(async () => {
         if (orderChanged) {
+          // status:{$ne:archived} — archived products hold orderNumber:0 and must
+          // never be touched by a reorder shift. Matches archiveProduct/archive.js;
+          // this PATCH path was the lone shifter missing the filter.
           if (parsedOrderNumber < previousOrderNumber) {
             await shiftUp(
-              { _id: { $ne: product._id }, orderNumber: { $gte: parsedOrderNumber, $lt: previousOrderNumber } },
+              { _id: { $ne: product._id }, status: { $ne: 'archived' }, orderNumber: { $gte: parsedOrderNumber, $lt: previousOrderNumber } },
               session,
             );
           } else {
             await shiftDown(
-              { _id: { $ne: product._id }, orderNumber: { $gt: previousOrderNumber, $lte: parsedOrderNumber } },
+              { _id: { $ne: product._id }, status: { $ne: 'archived' }, orderNumber: { $gt: previousOrderNumber, $lte: parsedOrderNumber } },
               session,
             );
           }

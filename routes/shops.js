@@ -203,6 +203,11 @@ router.patch('/:id', telegramAuth, requireTelegramRole('admin'), asyncHandler(as
 
   const { name, cityId, deliveryGroupId, address, isActive } = req.body;
 
+  // Snapshot the delivery group BEFORE mutation so we can detect a real change
+  // and cascade it to the shop's sellers (their deliveryGroupId/warehouseZone are
+  // denormalized copies — see users.js sanitizeUserPayload).
+  const prevDeliveryGroupId = shop.deliveryGroupId ? String(shop.deliveryGroupId) : '';
+
   if (name !== undefined) shop.name = String(name).trim();
   if (address !== undefined) shop.address = String(address).trim();
   if (isActive !== undefined) shop.isActive = Boolean(isActive);
@@ -253,6 +258,28 @@ router.patch('/:id', telegramAuth, requireTelegramRole('admin'), asyncHandler(as
         );
       }
     }
+  }
+
+  // Cascade a delivery-group change onto the shop's sellers. deliveryGroupId and
+  // warehouseZone are denormalized onto each seller's User doc; without this they
+  // keep computing their ordering window / picking group from the OLD group until
+  // someone re-saves each user individually.
+  //
+  // NOTE: already-placed ACTIVE orders are intentionally NOT moved to the new
+  // group — an order belongs to the ordering session / picking run it was placed
+  // in (its orderingSessionId is tied to the old group). Only the sellers move, so
+  // their NEXT order lands in the new group. The current run finishes where it was.
+  const newDeliveryGroupId = shop.deliveryGroupId ? String(shop.deliveryGroupId) : '';
+  if (deliveryGroupId !== undefined && newDeliveryGroupId !== prevDeliveryGroupId) {
+    let warehouseZone = '';
+    if (newDeliveryGroupId) {
+      const grp = await DeliveryGroup.findById(newDeliveryGroupId).lean();
+      warehouseZone = grp?.name || '';
+    }
+    await User.updateMany(
+      { shopId: shop._id, role: 'seller' },
+      { $set: { deliveryGroupId: newDeliveryGroupId, warehouseZone } },
+    );
   }
 
   res.json(shop);

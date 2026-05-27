@@ -105,7 +105,10 @@ async function ensureReceiptItemProduct(item, session) {
     }
   }
 
-  const maxProduct = await Product.findOne({}, 'orderNumber').sort({ orderNumber: -1 }).session(session).lean();
+  // Filter archived products: they keep orderNumber:0 (archiveProduct), so excluding
+  // them matches the other allocation paths (products.js add/receive) and guards
+  // against any future archived doc that retains a high number poisoning the max.
+  const maxProduct = await Product.findOne({ status: { $ne: 'archived' } }, 'orderNumber').sort({ orderNumber: -1 }).session(session).lean();
   const nextOrderNumber = (maxProduct?.orderNumber ?? 0) + 1;
   const pm = item.photoMeta || {};
   const labelPositions = {};
@@ -137,7 +140,14 @@ async function ensureReceiptItemProduct(item, session) {
   try {
     await product.save({ session });
   } catch (err) {
-    if (err.code === 11000 && err.keyPattern?.barcode) throw appError('product_barcode_duplicate');
+    if (err.code === 11000) {
+      if (err.keyPattern?.barcode) throw appError('product_barcode_duplicate');
+      // Two concurrent confirms both read the same max orderNumber and raced for
+      // max+1. E11000 is NOT a TransientTransactionError, so withTransaction does
+      // NOT auto-retry it — surface a clear "try again" instead of the generic
+      // duplicate_key the central handler would otherwise emit.
+      if (err.keyPattern?.orderNumber) throw appError('product_order_number_conflict');
+    }
     throw err;
   }
   item.createdProductId = product._id;
@@ -1013,16 +1023,18 @@ router.post('/:id/items/:itemId/confirm', staffOnly, asyncHandler(async (req, re
       };
       confirmedItem.productCurrentQty = product?.quantity ?? null;
       confirmedItem.barcodeChecked = product?.barcodeChecked ?? false;
-
-      ReceiptItemLog.create({
-        receiptId: receipt._id,
-        itemId: item._id,
-        itemName: item.name,
-        action: 'confirm',
-        actor: getActor(req),
-        changes: [{ field: 'status', label: 'Статус', from: 'draft', to: 'confirmed' }],
-      }).catch((e) => console.error('[ReceiptItemLog] confirm error:', e));
     });
+    // Audit log AFTER commit (not inside the callback): withTransaction re-runs the
+    // callback on a WriteConflict, so an in-callback create would write one log row
+    // per attempt — and a row even if the transaction ultimately aborted.
+    ReceiptItemLog.create({
+      receiptId: confirmedItem.receiptId,
+      itemId: confirmedItem._id,
+      itemName: confirmedItem.name,
+      action: 'confirm',
+      actor: getActor(req),
+      changes: [{ field: 'status', label: 'Статус', from: 'draft', to: 'confirmed' }],
+    }).catch((e) => console.error('[ReceiptItemLog] confirm error:', e));
     // The shop mirror / shop-owned doc is now durable — schedule background embedding.
     for (const [doc, reason] of embedTargets) embedShopProductAsync(doc, reason);
     const io = getIO();
@@ -1043,7 +1055,9 @@ router.post('/:id/items/:itemId/unconfirm', staffOnly, asyncHandler(async (req, 
   const session = await mongoose.connection.startSession();
   try {
     let updatedItem = null;
+    let didUnconfirm = false;
     await session.withTransaction(async () => {
+      didUnconfirm = false; // reset per attempt (withTransaction may re-run this)
       const receipt = await Receipt.findById(req.params.id).session(session);
       const item = await ReceiptItem.findOne({ _id: req.params.itemId, receiptId: req.params.id }).session(session);
       if (!item) throw appError('receipt_item_not_found');
@@ -1087,19 +1101,23 @@ router.post('/:id/items/:itemId/unconfirm', staffOnly, asyncHandler(async (req, 
         // Stock was reversed above — allow a later re-confirm to re-apply it.
         item.stockApplied = false;
         await item.save({ session });
-
-        ReceiptItemLog.create({
-          receiptId: receipt._id,
-          itemId: item._id,
-          itemName: item.name,
-          action: 'confirm',
-          actor: getActor(req),
-          changes: [{ field: 'status', label: 'Статус', from: 'confirmed', to: 'draft' }],
-        }).catch((e) => console.error('[ReceiptItemLog] unconfirm error:', e));
+        didUnconfirm = true;
       }
 
       updatedItem = item.toObject();
     });
+
+    // Audit log AFTER commit — see the confirm handler note (avoid per-retry / phantom rows).
+    if (didUnconfirm && updatedItem) {
+      ReceiptItemLog.create({
+        receiptId: updatedItem.receiptId,
+        itemId: updatedItem._id,
+        itemName: updatedItem.name,
+        action: 'confirm',
+        actor: getActor(req),
+        changes: [{ field: 'status', label: 'Статус', from: 'confirmed', to: 'draft' }],
+      }).catch((e) => console.error('[ReceiptItemLog] unconfirm error:', e));
+    }
 
     const io = getIO();
     if (io) {

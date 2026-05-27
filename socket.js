@@ -264,7 +264,7 @@ function initSocket(httpServer) {
 
     // Move item between blocks
     // Auth is via socket.telegramId only — never trust a userId from the payload.
-    socket.on('move_item', async ({ productId, fromBlock, toBlock, toIndex }) => {
+    socket.on('move_item', async ({ productId, fromBlock, toBlock, toIndex, expectedFromVersion, expectedToVersion }) => {
       if (!['admin', 'warehouse'].includes(socket.userRole)) {
         socket.emit('move_error', { error: 'Forbidden: insufficient role' });
         return;
@@ -282,6 +282,19 @@ function initSocket(httpServer) {
 
             if (!source || !target) {
               throw Object.assign(new Error('Block not found'), { code: 'BLOCK_NOT_FOUND' });
+            }
+
+            // Optimistic lock — parity with the HTTP route (routes/blocks.js /move).
+            // The transaction's WriteConflict+retry already prevents a same-document
+            // lost update, but the version check additionally rejects a move issued
+            // from a STALE client view (the board moved under the user's feet) so the
+            // drag doesn't silently apply to state the user never saw. Inert unless
+            // the client sends the expected versions.
+            if (expectedFromVersion != null && Number(expectedFromVersion) !== source.version) {
+              throw Object.assign(new Error('Block changed'), { code: 'BLOCK_STALE', blockId: source.blockId, currentVersion: source.version });
+            }
+            if (fromBlock !== toBlock && expectedToVersion != null && Number(expectedToVersion) !== target.version) {
+              throw Object.assign(new Error('Block changed'), { code: 'BLOCK_STALE', blockId: target.blockId, currentVersion: target.version });
             }
 
             const idx = source.productIds.findIndex((id) => id.toString() === productId);
@@ -303,6 +316,17 @@ function initSocket(httpServer) {
               await target.save({ session });
             }
           });
+        } catch (txErr) {
+          // The productIds unique multikey index is the final barrier: if the product
+          // is already in another block (a concurrent placement), the save throws
+          // E11000. Map it to a clear error instead of leaking a raw driver message —
+          // parity with routes/blocks.js add/move.
+          if (txErr && txErr.code === 11000) {
+            const placed = await Block.findOne({ productIds: productId }).lean();
+            socket.emit('move_error', { error: 'product_in_other_block', existingBlockId: placed?.blockId ?? null });
+            return;
+          }
+          throw txErr;
         } finally {
           await session.endSession();
         }
