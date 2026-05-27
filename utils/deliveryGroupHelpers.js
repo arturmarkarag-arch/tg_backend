@@ -19,7 +19,8 @@ function normalizeDeliveryGroup(group) {
   const validDayOfWeek = numericDayOfWeek !== null && numericDayOfWeek >= 0 && numericDayOfWeek <= 6 ? numericDayOfWeek : null;
   const guessedDayOfWeek = guessDayOfWeekFromName(group.name);
 
-  if (guessedDayOfWeek !== null && guessedDayOfWeek !== validDayOfWeek) {
+  // Only use guessed day when the stored dayOfWeek is missing/invalid
+  if (validDayOfWeek === null && guessedDayOfWeek !== null) {
     return { ...group, dayOfWeek: guessedDayOfWeek };
   }
 

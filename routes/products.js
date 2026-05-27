@@ -244,9 +244,17 @@ router.get('/', async (req, res) => {
 
   const isV1 = String(req.baseUrl || '').includes('/api/v1') || String(req.originalUrl || '').startsWith('/api/v1');
 
-  // For the seller-facing catalogue (v1), show only products placed in blocks.
+  // For the seller-facing catalogue (v1), show only products placed in blocks
+  // AND older than NEW_DAYS — newer products live on the "Нові товари" page.
+  // Products with shelvedAt=null pre-date the Прийомка flow and go straight to the catalogue.
   // Use $lookup aggregation to do the join server-side — avoids loading all productIds into Node.js memory.
+  const NEW_DAYS_CUTOFF = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000);
   if (isV1) {
+    query.$or = [
+      { shelvedAt: null },
+      { shelvedAt: { $exists: false } },
+      { shelvedAt: { $lt: NEW_DAYS_CUTOFF } },
+    ];
     const basePipeline = [
       { $match: query },
       {
