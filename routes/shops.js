@@ -12,6 +12,7 @@ const cache = require('../utils/cache');
 const { invalidateShop } = require('../utils/modelCache');
 const { migrateSellerShop } = require('../services/migrateSellerShop');
 const { unassignSellerAndPark } = require('../services/unassignSeller');
+const { activeOrderShopFilter } = require('../utils/orderShopFilter');
 
 const router = express.Router();
 
@@ -237,7 +238,7 @@ router.patch('/:id', telegramAuth, requireTelegramRole('admin'), asyncHandler(as
       'buyerSnapshot.shopAddress': shop.address || '',
     };
     const activeOrders = await Order.find(
-      { shopId: shop._id, status: { $in: ['new', 'in_progress'] } },
+      activeOrderShopFilter(shop._id),
       '_id',
     ).lean();
     if (activeOrders.length) {
@@ -274,10 +275,9 @@ router.delete('/:id', telegramAuth, requireTelegramRole('admin'), asyncHandler(a
       }).session(session);
       if (sellerCount > 0) throw appError('shop_has_sellers', { sellerCount });
 
-      const activeOrders = await Order.countDocuments({
-        shopId: shop._id,
-        status: { $in: ['new', 'in_progress'] },
-      }).session(session);
+      const activeOrders = await Order.countDocuments(
+        activeOrderShopFilter(shop._id),
+      ).session(session);
       if (activeOrders > 0) throw appError('shop_has_active_orders', { activeOrders });
 
       await Shop.deleteOne({ _id: shop._id }, { session });

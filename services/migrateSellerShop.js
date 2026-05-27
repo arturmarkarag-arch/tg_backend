@@ -14,6 +14,7 @@ const { getOrderingSchedule } = require('../utils/getOrderingSchedule');
 const { appError } = require('../utils/errors');
 const { invalidateShop } = require('../utils/modelCache');
 const { logShopTransition } = require('./shopAudit');
+const { activeOrderShopFilter } = require('../utils/orderShopFilter');
 
 async function ensureOrderNotInPickingPipeline(orderId, session) {
   const exists = await PickingTask.exists({
@@ -98,14 +99,9 @@ async function migrateSellerShop({
     let activeOrder = null;
 
     if (oldShopId) {
-      const legacyOrderQuery = {
+      const legacyOrderQuery = activeOrderShopFilter(existingUser.shopId, {
         buyerTelegramId: existingUser.telegramId,
-        status: { $in: ['new', 'in_progress'] },
-        $or: [
-          { shopId: existingUser.shopId },
-          { 'buyerSnapshot.shopId': String(existingUser.shopId) },
-        ],
-      };
+      });
 
       // Move ONLY the seller's order from the CURRENT ordering session of the old
       // shop. A stale order from an EARLIER session is deliberately NOT moved:

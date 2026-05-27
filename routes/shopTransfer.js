@@ -12,6 +12,7 @@ const PickingTask = require('../models/PickingTask');
 const { migrateSellerShop } = require('../services/migrateSellerShop');
 const { invalidateShop } = require('../utils/modelCache');
 const { computeTargetShopState } = require('../utils/shopConflict');
+const { activeOrderShopFilter } = require('../utils/orderShopFilter');
 const { getIO } = require('../socket');
 
 const router = express.Router();
@@ -34,7 +35,7 @@ async function buildConflictSnapshot(toShopId, fromShopId) {
   const targetSeller = sellers[0] || null;
 
   const sourceActiveOrder = await Order.findOne(
-    { shopId: fromShopId, status: { $in: ['new', 'in_progress'] } }, '_id'
+    activeOrderShopFilter(fromShopId), '_id'
   ).lean();
 
   let targetSellerHasActiveOrder = false;
@@ -252,11 +253,7 @@ router.post('/:id/approve', telegramAuth, requireTelegramRole('admin'), asyncHan
         // Якщо ще не в pipeline — паркуємо: відв'язуємо від магазину, щоб замовлення
         // пішло за продавцем після наступного призначення через migrateSellerShop.
         const displacedActiveOrder = await Order.findOne(
-          {
-            buyerTelegramId: targetCurrentSeller.telegramId,
-            shopId: String(effectiveToShopId),
-            status: { $in: ['new', 'in_progress'] },
-          },
+          activeOrderShopFilter(effectiveToShopId, { buyerTelegramId: targetCurrentSeller.telegramId }),
           '_id',
         ).session(session).lean();
 

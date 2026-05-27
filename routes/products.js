@@ -352,10 +352,10 @@ router.get('/pending', asyncHandler(async (req, res) => {
   res.json(products);
 }));
 
-// Count of products shelved within the last `days` (default 7) that are visible
-// in the seller catalogue (placed in a block). Drives the "Товари" nav badge.
+// Count of products shelved within the last `days` (default 14) that are visible
+// in the seller catalogue (placed in a block). Drives the "Нові товари" nav badge.
 router.get('/new-count', asyncHandler(async (req, res) => {
-  const days = Math.min(90, Math.max(1, Number(req.query.days) || 7));
+  const days = Math.min(90, Math.max(1, Number(req.query.days) || 14));
   const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
   const [result] = await Product.aggregate([
     { $match: { status: { $ne: 'archived' }, shelvedAt: { $gte: cutoff } } },
@@ -372,6 +372,39 @@ router.get('/new-count', asyncHandler(async (req, res) => {
     { $count: 'count' },
   ]);
   res.json({ count: result?.count ?? 0 });
+}));
+
+// List of products shelved within the last `days` (default 14) that are visible
+// in the seller catalogue (placed in a block). Powers the "Нові товари" page.
+router.get('/new-list', asyncHandler(async (req, res) => {
+  const days = Math.min(90, Math.max(1, Number(req.query.days) || 14));
+  const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+  const products = await Product.aggregate([
+    { $match: { status: { $ne: 'archived' }, shelvedAt: { $gte: cutoff } } },
+    {
+      $lookup: {
+        from: 'blocks',
+        localField: '_id',
+        foreignField: 'productIds',
+        as: '_block',
+        pipeline: [{ $project: { _id: 1 } }],
+      },
+    },
+    { $match: { '_block.0': { $exists: true } } },
+    { $sort: { shelvedAt: -1 } },
+    {
+      $project: {
+        name: 1,
+        brand: 1,
+        price: 1,
+        quantity: 1,
+        shelvedAt: 1,
+        imageUrls: 1,
+        image_url: 1,
+      },
+    },
+  ]);
+  res.json({ products });
 }));
 
 router.patch('/reorder', staffOnly, asyncHandler(async (req, res) => {
@@ -855,8 +888,14 @@ router.patch('/:id', staffOnly, asyncHandler(async (req, res) => {
     product.archivedAt = null;
   }
   const previousPrice = Number(product.price || 0);
-  if (price !== undefined) product.price = Number(price);
-  if (quantity !== undefined) product.quantity = Number(quantity);
+  if (price !== undefined) {
+    const p = Number(price);
+    if (Number.isFinite(p)) product.price = p;
+  }
+  if (quantity !== undefined) {
+    const q = Number(quantity);
+    if (Number.isFinite(q)) product.quantity = q;
+  }
   if (fields.notes !== undefined) product.notes = String(fields.notes);
   if (fields.labelPositions !== undefined) {
     const lp = fields.labelPositions;

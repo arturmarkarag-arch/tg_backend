@@ -178,9 +178,18 @@ router.get('/:groupId/shop-status', telegramAuth, requireTelegramRoles(['admin',
     .lean();
 
   const shopIds = shops.map((s) => s._id);
+  // buyerSnapshot.shopId is stored as ObjectId in some paths and as a String in
+  // others — match both forms so direct-add orders (null top-level shopId) are
+  // counted. Without this, pre-start showed "0 orders" while the task builder
+  // (which keys off buyerSnapshot.deliveryGroupId) still built tasks.
+  const shopIdStrs = shopIds.map((id) => String(id));
 
   const orders = await Order.find({
-    shopId: { $in: shopIds },
+    $or: [
+      { shopId: { $in: shopIds } },
+      { 'buyerSnapshot.shopId': { $in: shopIds } },
+      { 'buyerSnapshot.shopId': { $in: shopIdStrs } },
+    ],
     orderingSessionId: currentSessionId,
     status: { $in: ['new', 'in_progress'] },
   }).select('buyerSnapshot shopId buyerTelegramId items orderNumber _id createdAt history').lean();

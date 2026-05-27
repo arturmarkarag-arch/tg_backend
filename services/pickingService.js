@@ -13,6 +13,7 @@ const DeliveryGroup = require('../models/DeliveryGroup');
 const { archiveProduct, getProductTitle } = require('./archiveProduct');
 const { getOrderingSchedule } = require('../utils/getOrderingSchedule');
 const { getIO } = require('../socket');
+const { withLock } = require('../utils/lock');
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -222,7 +223,8 @@ async function outOfStockPickingTask({ taskId, userTelegramId, userFirstName = '
   if (task.status === 'completed') {
     const productForRetry = await Product.findById(task.productId);
     if (productForRetry && productForRetry.status !== 'archived') {
-      await runOperationWithRetry(() => archiveProduct(productForRetry, { notifyBuyers: false, bot: null }));
+      // archiveProduct now retries transient tx errors internally.
+      await archiveProduct(productForRetry, { notifyBuyers: false, bot: null });
     }
     const fromBlockRetry = typeof nextBlock === 'number' ? nextBlock : task.blockId;
     const { task: nextRaw, wrappedAround } = await findAndLockNext(userTelegramId, fromBlockRetry, task.deliveryGroupId || null);
@@ -275,7 +277,8 @@ async function outOfStockPickingTask({ taskId, userTelegramId, userFirstName = '
   // Phase 2: archive product (idempotent on retry via completed-status guard above)
   const productDoc = await Product.findById(task.productId._id || task.productId);
   if (productDoc && productDoc.status !== 'archived') {
-    await runOperationWithRetry(() => archiveProduct(productDoc, { notifyBuyers: false, bot: null }));
+    // archiveProduct now retries transient tx errors internally.
+    await archiveProduct(productDoc, { notifyBuyers: false, bot: null });
   }
 
   const fromBlock = typeof nextBlock === 'number' ? nextBlock : task.blockId;
@@ -365,15 +368,45 @@ async function reconcileActiveTasksForSession(deliveryGroupId, orderingSessionId
 }
 
 /**
- * Find completed tasks whose product was never archived after a crash.
- * Re-runs archiveProduct for each affected product.
+ * Recover from a crash where an out-of-stock task was marked `completed` (phase 1)
+ * but its product was never archived (phase 2). Re-runs archiveProduct for each
+ * affected product.
+ *
+ * Fired fire-and-forget on every next-task poll, so it is serialised per group
+ * (skip-if-busy) and processes products sequentially with retries — see impl.
  */
 async function archiveOrphanedOutOfStockProducts(deliveryGroupId) {
   const groupId = String(deliveryGroupId || '');
   if (!groupId) return { fixedCount: 0 };
 
+  // waitMs: 0 → if a sweep for this group is already running, skip immediately
+  // instead of queueing. Concurrent sweeps each spawn archiveProduct
+  // transactions that all shift the same orderNumber space (shiftDown) and
+  // deadlock with "Write conflict ... yielding is disabled".
+  try {
+    return await withLock(
+      `picking:orphan-archive:${groupId}`,
+      () => archiveOrphanedOutOfStockProductsImpl(groupId),
+      { ttlMs: 120_000, waitMs: 0 },
+    );
+  } catch (err) {
+    if (err && (err.code === 'lock_busy' || err.errorCode === 'lock_busy')) return { fixedCount: 0 };
+    throw err;
+  }
+}
+
+async function archiveOrphanedOutOfStockProductsImpl(groupId) {
+  // Only OUT-OF-STOCK completions need archiving. A normal completion packs
+  // every shop (all items.packed === true) and the product MUST stay active for
+  // future sessions. An out-of-stock completion (full or partial) always leaves
+  // at least one item with packed === false. Without this $elemMatch filter the
+  // sweep archived in-stock products that had just been packed normally.
   const completedTasks = await PickingTask.find(
-    { deliveryGroupId: groupId, status: 'completed' },
+    {
+      deliveryGroupId: groupId,
+      status: 'completed',
+      items: { $elemMatch: { packed: false } },
+    },
     'productId',
   ).sort({ updatedAt: -1 }).limit(200).lean();
 
@@ -382,20 +415,23 @@ async function archiveOrphanedOutOfStockProducts(deliveryGroupId) {
   const productIds = [...new Set(completedTasks.map((t) => String(t.productId)))];
   let fixedCount   = 0;
 
-  await Promise.all(
-    productIds.map(async (pid) => {
-      try {
-        const product = await Product.findOne({ _id: pid, status: { $ne: 'archived' } });
-        if (!product) return;
-        const activeTask = await PickingTask.findOne({ productId: product._id, status: { $in: ['pending', 'locked'] } }).lean();
-        if (activeTask) return;
-        await archiveProduct(product, { notifyBuyers: false, bot: null });
-        fixedCount += 1;
-      } catch (err) {
-        console.warn(`[pickingService] orphan archive failed for ${pid}:`, err.message);
-      }
-    })
-  );
+  // Sequential (NOT Promise.all): each archiveProduct runs shiftDown over the
+  // same orderNumber range, so parallel calls write-conflict. Each is retried on
+  // transient transaction errors.
+  for (const pid of productIds) {
+    try {
+      const product = await Product.findOne({ _id: pid, status: { $ne: 'archived' } });
+      if (!product) continue;
+      const activeTask = await PickingTask.findOne({ productId: product._id, status: { $in: ['pending', 'locked'] } }).lean();
+      if (activeTask) continue;
+      // archiveProduct retries transient tx errors internally; the per-group
+      // lock + sequential loop already prevent concurrent shiftDown conflicts.
+      await archiveProduct(product, { notifyBuyers: false, bot: null });
+      fixedCount += 1;
+    } catch (err) {
+      console.warn(`[pickingService] orphan archive failed for ${pid}:`, err.message);
+    }
+  }
 
   return { fixedCount };
 }

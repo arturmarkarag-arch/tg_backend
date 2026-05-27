@@ -25,6 +25,7 @@ const { withLock } = require('../utils/lock');
 const { migrateSellerShop } = require('../services/migrateSellerShop');
 const { computeTargetShopState } = require('../utils/shopConflict');
 const { unassignSellerAndPark } = require('../services/unassignSeller');
+const { activeOrderShopFilter } = require('../utils/orderShopFilter');
 
 async function getAllDeliveryGroups() {
   let groups = await cache.get(cache.KEYS.DELIVERY_GROUPS);
@@ -440,7 +441,7 @@ router.get('/', async (req, res) => {
   });
 });
 
-router.get('/transit/active', staffOnly, async (req, res) => {
+router.get('/transit/active', staffOnly, async (req, res, next) => {
   try {
     const maxLimit = 200;
     const limit = Math.min(maxLimit, Math.max(1, Number(req.query.limit) || maxLimit));
@@ -914,11 +915,9 @@ router.patch('/:id/snapshot', staffOnly, async (req, res) => {
 
   // Warn if target shop already has an active order from someone else — creates a new conflict.
   // $or covers legacy orders where shopId was null at creation time but buyerSnapshot.shopId was set.
-  const targetConflict = await Order.findOne({
-    $or: [{ shopId: shop._id }, { 'buyerSnapshot.shopId': String(shop._id) }],
-    status: { $in: ['new', 'in_progress'] },
-    _id: { $ne: order._id },
-  }).lean();
+  const targetConflict = await Order.findOne(
+    activeOrderShopFilter(shop._id, { _id: { $ne: order._id } }),
+  ).lean();
   if (targetConflict) {
     return res.status(409).json({
       error: 'target_shop_has_order',
@@ -946,11 +945,9 @@ router.patch('/:id/snapshot', staffOnly, async (req, res) => {
       // Re-check inside the transaction to close the TOCTOU window.
       // Two admins may both pass the optimistic check above, but only one can
       // commit — the second will see the conflict here and abort cleanly.
-      const conflictInTx = await Order.findOne({
-        $or: [{ shopId: shop._id }, { 'buyerSnapshot.shopId': String(shop._id) }],
-        status: { $in: ['new', 'in_progress'] },
-        _id: { $ne: order._id },
-      }).session(session).lean();
+      const conflictInTx = await Order.findOne(
+        activeOrderShopFilter(shop._id, { _id: { $ne: order._id } }),
+      ).session(session).lean();
       if (conflictInTx) {
         txConflict = true;
         // Throwing a plain Error aborts the transaction without triggering a
@@ -1320,6 +1317,11 @@ router.post('/upsert-item', telegramAuth, requireOrderingWindowOpen, asyncHandle
         order = new Order({
           orderNumber: await getNextOrderNumber(),
           buyerTelegramId: user.telegramId,
+          // Mirror the cart-submit path (see ~L789): always set the top-level
+          // shopId, not just buyerSnapshot.shopId. Leaving it null broke
+          // unassignSeller/shop-status (both query by top-level shopId) and
+          // caused the "0 orders on pre-start vs N tasks built" desync.
+          shopId: user.shopId || null,
           buyerSnapshot,
           orderingSessionId: currentSessionId,
           status: 'new',

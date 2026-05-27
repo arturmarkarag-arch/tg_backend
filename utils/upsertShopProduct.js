@@ -3,6 +3,39 @@
 const ShopProduct = require('../models/ShopProduct');
 const { embedShopProductAsync } = require('./shopProductEmbedding');
 
+const MIRROR_MAX_RETRIES = 3;
+
+// Retryable = transient infra hiccup (WriteConflict / transient-tx label /
+// network blip). The mirror writes are pure idempotent `$set`s, so re-running is
+// always safe. Without this a single blip left the mirror silently stale forever
+// (fire-and-forget catch just logged). Logic errors (e.g. conflict code 40) are
+// NOT retried — they would fail every time.
+function isRetryableErr(err) {
+  const labels = Array.isArray(err?.errorLabels) ? err.errorLabels : [];
+  const name = String(err?.name || '');
+  return (
+    err?.code === 112 ||
+    err?.codeName === 'WriteConflict' ||
+    labels.includes('TransientTransactionError') ||
+    err?.hasErrorLabel?.('TransientTransactionError') ||
+    name.includes('MongoNetworkError') ||
+    name.includes('PoolClearedError')
+  );
+}
+
+// Only used on the NON-transactional (fire-and-forget) path. Transactional
+// callers must let errors propagate so the enclosing commit aborts cleanly.
+async function withMirrorRetry(fn) {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      return await fn();
+    } catch (err) {
+      if (!isRetryableErr(err) || attempt >= MIRROR_MAX_RETRIES) throw err;
+      await new Promise((r) => setTimeout(r, 100 * (attempt + 1)));
+    }
+  }
+}
+
 // Upsert a ShopProduct ("Товари Магазинів") from a warehouse Product. Used when a
 // product goes active (products route) and when a receipt item is confirmed.
 // $setOnInsert means manually-edited shop catalog data is never overwritten;
@@ -42,13 +75,13 @@ async function upsertShopProductFromProduct(product, { session = null } = {}) {
   // Transactional caller: let errors abort the confirm; defer embedding to caller.
   if (session) return run();
   try {
-    const doc = await run();
+    const doc = await withMirrorRetry(run);
     if (doc && !doc.embedding && (doc.imageUrl || doc.originalImageUrl)) {
       embedShopProductAsync(doc, 'upsert-from-product');
     }
     return doc;
   } catch (err) {
-    console.error('[shop-upsert] failed:', err.code, err.message);
+    console.error('[shop-upsert] failed after retries:', err.code, err.message);
     return null;
   }
 }
@@ -102,14 +135,14 @@ async function pushSharedFieldsToMirror(product, { photoChanged = false, session
   if (session) return run();
 
   try {
-    const doc = await run();
+    const doc = await withMirrorRetry(run);
     // New photo → the mirror's embedding is stale; re-index in the background.
     if (doc && photoChanged && (doc.imageUrl || doc.originalImageUrl)) {
       embedShopProductAsync(doc, 'mirror-push');
     }
     return doc;
   } catch (err) {
-    console.error('[shop-mirror-push] failed:', err.code, err.message);
+    console.error('[shop-mirror-push] failed after retries:', err.code, err.message);
     return null;
   }
 }

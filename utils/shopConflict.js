@@ -1,6 +1,7 @@
 'use strict';
 const User = require('../models/User');
 const Order = require('../models/Order');
+const { activeOrderShopFilter } = require('./orderShopFilter');
 
 // Computes the conflict state of a shop from FRESH reads: every seller assigned to
 // it and every active order on it (by distinct buyer). `excludeTelegramId` lets the
@@ -12,7 +13,7 @@ async function computeTargetShopState(toShopId, excludeTelegramId = '', session 
 
   const sellersQ = User.find(sellerFilter).select('telegramId firstName lastName').lean();
   const ordersQ = Order.find(
-    { shopId: String(toShopId), status: { $in: ['new', 'in_progress'] } },
+    activeOrderShopFilter(toShopId),
     '_id buyerTelegramId',
   ).lean();
   if (session) { sellersQ.session(session); ordersQ.session(session); }

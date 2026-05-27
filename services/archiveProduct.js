@@ -29,20 +29,60 @@ function getProductTitle(product) {
   return product.brand || product.model || product.category || `#${product.orderNumber}`;
 }
 
-async function archiveProduct(product, { notifyBuyers = false, bot = null } = {}) {
-  const orderNotifications = []; // collected inside tx, emitted after commit
-  const affectedGroupIds = new Set();
-  let cancelledCount = 0;
-  let oldOrderNumber;
-  let affectedBlockIds = [];
-  const groupOpenCache = new Map();
-  let cachedSchedule = null;
-  let scheduleLoaded = false;
+const ARCHIVE_MAX_RETRIES = 3;
 
-  const session = await mongoose.connection.startSession();
-  session.startTransaction();
-  try {
-    const isGroupOrderingOpen = async (deliveryGroupId) => {
+// A WriteConflict (code 112) is transient: two transactions touched the same
+// docs (e.g. concurrent archives both running shiftDown over the orderNumber
+// space). Retrying with a fresh read resolves it.
+function isTransientTxError(err) {
+  const labels = Array.isArray(err?.errorLabels) ? err.errorLabels : [];
+  return (
+    err?.code === 112 ||
+    err?.codeName === 'WriteConflict' ||
+    labels.includes('TransientTransactionError') ||
+    err?.hasErrorLabel?.('TransientTransactionError')
+  );
+}
+
+/**
+ * Accepts a Product mongoose doc OR a product id. Retry + the fresh per-attempt
+ * re-read live INSIDE this function, so every caller (manual delete, out-of-stock,
+ * orphan sweep) is protected automatically — no external runOperationWithRetry
+ * wrapper needed, and no risk of a stale in-memory doc leaking across attempts.
+ */
+async function archiveProduct(productOrId, { notifyBuyers = false, bot = null } = {}) {
+  const productId = (productOrId && productOrId._id) ? productOrId._id : productOrId;
+
+  // Captured from the committed attempt; emitted AFTER commit (once).
+  let product;
+  let orderNotifications = [];
+  let affectedGroupIds = new Set();
+  let cancelledCount = 0;
+  let affectedBlockIds = [];
+
+  for (let attempt = 0; ; attempt += 1) {
+    // Per-attempt accumulators — reset on every retry.
+    const attemptNotifications = [];
+    const attemptGroupIds = new Set();
+    let attemptCancelled = 0;
+    let oldOrderNumber;
+    let attemptBlockIds = [];
+    const groupOpenCache = new Map();
+    let cachedSchedule = null;
+    let scheduleLoaded = false;
+
+    const session = await mongoose.connection.startSession();
+    session.startTransaction();
+    try {
+      // Re-read FRESH inside the session each attempt. Idempotent no-op if the
+      // product vanished or was already archived by a concurrent path.
+      product = await Product.findById(productId).session(session);
+      if (!product || product.status === 'archived') {
+        await session.abortTransaction();
+        return { cancelledCount: 0 }; // finally ends the session
+      }
+
+      const isGroupOrderingOpen = async (deliveryGroupId) => {
       const key = String(deliveryGroupId || '');
       if (!key) return false;
       if (groupOpenCache.has(key)) return groupOpenCache.get(key);
@@ -88,7 +128,7 @@ async function archiveProduct(product, { notifyBuyers = false, bot = null } = {}
       for (const item of matchingItems) {
         order.totalPrice = Math.max(0, require('../utils/money').roundMoney(order.totalPrice - item.price * item.quantity));
         item.cancelled = true;
-        cancelledCount += 1;
+        attemptCancelled += 1;
       }
 
       const orderingOpenNow = await isGroupOrderingOpen(order.buyerSnapshot?.deliveryGroupId);
@@ -103,9 +143,9 @@ async function archiveProduct(product, { notifyBuyers = false, bot = null } = {}
       }
 
       await order.save({ session });
-      orderNotifications.push({ orderId: String(order._id), buyerTelegramId: order.buyerTelegramId });
+      attemptNotifications.push({ orderId: String(order._id), buyerTelegramId: order.buyerTelegramId });
       if (order.buyerSnapshot?.deliveryGroupId) {
-        affectedGroupIds.add(String(order.buyerSnapshot.deliveryGroupId));
+        attemptGroupIds.add(String(order.buyerSnapshot.deliveryGroupId));
       }
     }
 
@@ -128,22 +168,33 @@ async function archiveProduct(product, { notifyBuyers = false, bot = null } = {}
     await shiftDown({ status: { $ne: 'archived' }, orderNumber: { $gt: oldOrderNumber } }, session);
 
     // ── 5. Remove from blocks (inside transaction so it's atomic with archive) ──
-    const affectedBlocks = await Block.find({ productIds: product._id }, 'blockId').session(session).lean();
-    affectedBlockIds = affectedBlocks.map((b) => b.blockId);
-    if (affectedBlockIds.length) {
-      await Block.updateMany(
-        { productIds: product._id },
-        { $pull: { productIds: product._id }, $inc: { version: 1 } },
-        { session }
-      );
-    }
+      const affectedBlocks = await Block.find({ productIds: product._id }, 'blockId').session(session).lean();
+      attemptBlockIds = affectedBlocks.map((b) => b.blockId);
+      if (attemptBlockIds.length) {
+        await Block.updateMany(
+          { productIds: product._id },
+          { $pull: { productIds: product._id }, $inc: { version: 1 } },
+          { session }
+        );
+      }
 
-    await session.commitTransaction();
-  } catch (err) {
-    await session.abortTransaction();
-    throw err;
-  } finally {
-    session.endSession();
+      await session.commitTransaction();
+
+      // Promote this attempt's results to the outer scope for post-tx emits.
+      cancelledCount     = attemptCancelled;
+      orderNotifications = attemptNotifications;
+      affectedGroupIds   = attemptGroupIds;
+      affectedBlockIds   = attemptBlockIds;
+      break;
+    } catch (err) {
+      await session.abortTransaction();
+      // finally runs on both throw and continue, so endSession happens once there.
+      if (!isTransientTxError(err) || attempt >= ARCHIVE_MAX_RETRIES) throw err;
+      await new Promise((r) => setTimeout(r, 50 * (attempt + 1)));
+      continue;
+    } finally {
+      session.endSession();
+    }
   }
 
   // ── Post-transaction: socket emissions + Telegram notifications ──────────

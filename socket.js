@@ -10,21 +10,56 @@ const { createAdapter } = require('@socket.io/redis-adapter');
 let io = null;
 
 // Tracks which items are currently locked by a user
-// Map<productId, { userId, userName, timestamp }>
+// Map<productId, { userId, userName, timestamp, socketId, timer }>
 const lockedItems = new Map();
+
+// Remove a lock and clear its auto-unlock timer so timers don't pile up under
+// heavy drag-and-drop (each lock_item schedules a setTimeout).
+function releaseLock(productId) {
+  const lock = lockedItems.get(productId);
+  if (lock?.timer) clearTimeout(lock.timer);
+  lockedItems.delete(productId);
+}
 
 // Tracks which sellers are currently viewing a given shop room
 // Map<shopId, Map<telegramId, { telegramId, name }>>
-const shopSellers = new Map();
-
+// Presence is derived live from actual room membership rather than a parallel
+// Map — that way a socket that left the room (explicit leave_shop or disconnect)
+// can never linger as a phantom seller, and multiple tabs of one user collapse
+// to a single entry (deduped by telegramId).
 function broadcastShopSellers(shopId) {
-  const sellers = shopSellers.get(shopId);
-  const list = sellers ? Array.from(sellers.values()) : [];
-  if (io) io.to(`shop_${shopId}`).emit('shop_sellers_updated', { shopId, sellers: list, count: list.length });
+  if (!io) return;
+  const room = `shop_${shopId}`;
+  const socketIds = io.sockets.adapter.rooms.get(room);
+  const byTelegramId = new Map();
+  if (socketIds) {
+    for (const sid of socketIds) {
+      const s = io.sockets.sockets.get(sid);
+      if (!s) continue;
+      byTelegramId.set(s.telegramId, { telegramId: s.telegramId, name: s.userName || s.telegramId });
+    }
+  }
+  const list = Array.from(byTelegramId.values());
+  io.to(room).emit('shop_sellers_updated', { shopId, sellers: list, count: list.length });
 }
 
-// Tracks users in receipt rooms: Map<receiptId, Map<telegramId, { telegramId, name }>>
-const receiptParticipants = new Map();
+// Receipt viewers are derived live from room membership (same rationale as
+// broadcastShopSellers): a socket that left the room or disconnected can never
+// linger as a phantom viewer, and multiple tabs collapse to one entry.
+function broadcastReceiptParticipants(receiptId) {
+  if (!io) return;
+  const room = `receipt_${receiptId}`;
+  const socketIds = io.sockets.adapter.rooms.get(room);
+  const byTelegramId = new Map();
+  if (socketIds) {
+    for (const sid of socketIds) {
+      const s = io.sockets.sockets.get(sid);
+      if (!s) continue;
+      byTelegramId.set(s.telegramId, { telegramId: s.telegramId, name: s.userName || s.telegramId });
+    }
+  }
+  io.to(room).emit('receipt_users_updated', Array.from(byTelegramId.values()));
+}
 
 /**
  * Returns a lightweight block payload for socket broadcasts.
@@ -153,10 +188,6 @@ function initSocket(httpServer) {
       socket.join(room);
       socket.shopIds = socket.shopIds || new Set();
       socket.shopIds.add(String(shopId));
-
-      const sellers = shopSellers.get(String(shopId)) || new Map();
-      sellers.set(socket.telegramId, { telegramId: socket.telegramId, name: socket.userName || socket.telegramId });
-      shopSellers.set(String(shopId), sellers);
       broadcastShopSellers(String(shopId));
     });
 
@@ -164,12 +195,7 @@ function initSocket(httpServer) {
       if (!shopId) return;
       socket.leave(`shop_${shopId}`);
       socket.shopIds?.delete(String(shopId));
-      const sellers = shopSellers.get(String(shopId));
-      if (sellers) {
-        sellers.delete(socket.telegramId);
-        if (sellers.size === 0) shopSellers.delete(String(shopId));
-        broadcastShopSellers(String(shopId));
-      }
+      broadcastShopSellers(String(shopId));
     });
 
     socket.on('join_receipt', (receiptId) => {
@@ -177,31 +203,14 @@ function initSocket(httpServer) {
       const room = `receipt_${receiptId}`;
       socket.join(room);
       socket.receiptIds.add(receiptId);
-
-      const participants = receiptParticipants.get(receiptId) || new Map();
-      participants.set(socket.telegramId, {
-        telegramId: socket.telegramId,
-        name: socket.userName || socket.telegramId,
-      });
-      receiptParticipants.set(receiptId, participants);
-      io.to(room).emit('receipt_users_updated', Array.from(participants.values()));
+      broadcastReceiptParticipants(receiptId);
     });
 
     socket.on('leave_receipt', (receiptId) => {
       const room = `receipt_${receiptId}`;
       socket.leave(room);
       socket.receiptIds.delete(receiptId);
-
-      const participants = receiptParticipants.get(receiptId);
-      if (participants) {
-        participants.delete(socket.telegramId);
-        if (participants.size === 0) {
-          receiptParticipants.delete(receiptId);
-        } else {
-          receiptParticipants.set(receiptId, participants);
-        }
-        io.to(room).emit('receipt_users_updated', Array.from(participants.values()));
-      }
+      broadcastReceiptParticipants(receiptId);
     });
 
     // Lock an item — prevents others from selecting it
@@ -220,20 +229,23 @@ function initSocket(httpServer) {
         }
       }
 
+      // Clear any prior auto-unlock timer (re-lock by the same user) so it
+      // can't fire later and drop the refreshed lock.
+      const prior = lockedItems.get(productId);
+      if (prior?.timer) clearTimeout(prior.timer);
+
       const lockData = { userId, userName, timestamp: Date.now(), socketId: socket.id };
-      lockedItems.set(productId, lockData);
-
-      // Broadcast lock to everyone except sender
-      socket.broadcast.emit('item_locked', { productId, userId, userName });
-
-      // Auto-unlock after timeout
-      setTimeout(() => {
+      lockData.timer = setTimeout(() => {
         const current = lockedItems.get(productId);
         if (current && current.socketId === socket.id) {
           lockedItems.delete(productId);
           io.emit('item_unlocked', { productId });
         }
       }, LOCK_TIMEOUT_MS);
+      lockedItems.set(productId, lockData);
+
+      // Broadcast lock to everyone except sender
+      socket.broadcast.emit('item_locked', { productId, userId, userName });
     });
 
     // Unlock an item
@@ -245,13 +257,14 @@ function initSocket(httpServer) {
       const userId = socket.telegramId;
       const existing = lockedItems.get(productId);
       if (existing && existing.userId === userId) {
-        lockedItems.delete(productId);
+        releaseLock(productId);
         io.emit('item_unlocked', { productId });
       }
     });
 
     // Move item between blocks
-    socket.on('move_item', async ({ productId, fromBlock, toBlock, toIndex, userId }) => {
+    // Auth is via socket.telegramId only — never trust a userId from the payload.
+    socket.on('move_item', async ({ productId, fromBlock, toBlock, toIndex }) => {
       if (!['admin', 'warehouse'].includes(socket.userRole)) {
         socket.emit('move_error', { error: 'Forbidden: insufficient role' });
         return;
@@ -306,7 +319,7 @@ function initSocket(httpServer) {
         }
 
         // Unlock the moved item
-        lockedItems.delete(productId);
+        releaseLock(productId);
         io.emit('item_unlocked', { productId });
 
         // Notify the mover — only blockIds needed, data arrives via block_updated
@@ -331,33 +344,19 @@ function initSocket(httpServer) {
       console.log(`[Socket] Client disconnected: ${socket.id} (telegramId=${socket.telegramId}) reason=${reason}`);
       for (const [productId, data] of lockedItems) {
         if (data.socketId === socket.id) {
-          lockedItems.delete(productId);
+          releaseLock(productId);
           io.emit('item_unlocked', { productId });
         }
       }
 
-      // Remove from shop presence rooms
+      // This socket has already left its rooms by the time 'disconnect' fires,
+      // so re-broadcasting derives the correct remaining presence.
       for (const shopId of socket.shopIds || []) {
-        const sellers = shopSellers.get(shopId);
-        if (sellers) {
-          sellers.delete(socket.telegramId);
-          if (sellers.size === 0) shopSellers.delete(shopId);
-          broadcastShopSellers(shopId);
-        }
+        broadcastShopSellers(shopId);
       }
 
       for (const receiptId of socket.receiptIds || []) {
-        const room = `receipt_${receiptId}`;
-        const participants = receiptParticipants.get(receiptId);
-        if (participants) {
-          participants.delete(socket.telegramId);
-          if (participants.size === 0) {
-            receiptParticipants.delete(receiptId);
-          } else {
-            receiptParticipants.set(receiptId, participants);
-          }
-          io.to(room).emit('receipt_users_updated', Array.from(participants.values()));
-        }
+        broadcastReceiptParticipants(receiptId);
       }
     });
   });

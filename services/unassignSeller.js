@@ -3,6 +3,7 @@ const Order = require('../models/Order');
 const User = require('../models/User');
 const PickingTask = require('../models/PickingTask');
 const { logShopTransition } = require('./shopAudit');
+const { activeOrderShopFilter } = require('../utils/orderShopFilter');
 
 // Unassign a seller from their shop and PARK their active orders that the
 // warehouse has not started picking yet (shopId=null so the order follows the
@@ -17,11 +18,12 @@ async function unassignSellerAndPark({ session, seller, fromShopId, actor, reaso
   const leftInPipelineIds = [];
 
   if (shopIdStr) {
-    const activeOrders = await Order.find({
-      buyerTelegramId: String(seller.telegramId),
-      shopId: shopIdStr,
-      status: { $in: ['new', 'in_progress'] },
-    }).session(session);
+    // Match by BOTH shopId and buyerSnapshot.shopId (ObjectId + string forms).
+    // Legacy/direct-add orders may have a null top-level shopId while
+    // buyerSnapshot.shopId holds the real shop — top-level only would skip them.
+    const activeOrders = await Order.find(
+      activeOrderShopFilter(shopIdStr, { buyerTelegramId: String(seller.telegramId) }),
+    ).session(session);
 
     for (const ord of activeOrders) {
       const inPipeline = await PickingTask.exists({
