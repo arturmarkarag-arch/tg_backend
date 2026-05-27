@@ -528,6 +528,40 @@ router.patch('/:id', telegramAuth, requireTelegramRole('admin'), asyncHandler(as
   if (!group) throw appError('group_not_found');
 
   const { name, dayOfWeek } = req.body;
+
+  // Guard: dayOfWeek is the key the ordering/picking SESSION identity is derived
+  // from (getOpenDateWarsaw → OrderingSession {groupId, openDate}). Changing it
+  // mid-cycle would re-key "current session": orders placed before the change keep
+  // their old orderingSessionId and fall out of the new current session — stranded,
+  // not picked. So we refuse the change while a cycle is in progress. Changing it
+  // once the cycle is over naturally applies to the NEXT session.
+  const dayIsChanging = dayOfWeek !== undefined && Number(dayOfWeek) !== Number(group.dayOfWeek);
+  if (dayIsChanging) {
+    const schedule = await getOrderingSchedule();
+    const groupIdStr = String(group._id);
+
+    // 1) ordering window currently open for this group?
+    const { isOpen } = isOrderingOpen(group.dayOfWeek, schedule);
+
+    // 2) active orders in the CURRENT session, or 3) active picking tasks?
+    const currentSessionId = await getOrCreateSessionId(groupIdStr, group.dayOfWeek, schedule);
+    const [activeOrder, activeTask] = await Promise.all([
+      Order.exists({
+        'buyerSnapshot.deliveryGroupId': groupIdStr,
+        orderingSessionId: currentSessionId,
+        status: { $in: ['new', 'in_progress'] },
+      }),
+      PickingTask.exists({ deliveryGroupId: groupIdStr, status: { $in: ['pending', 'locked'] } }),
+    ]);
+
+    if (isOpen || activeOrder || activeTask) {
+      const reason = isOpen ? 'вікно замовлень відкрите'
+        : activeOrder ? 'є активні замовлення в поточній сесії'
+        : 'триває збирання';
+      throw appError('group_day_change_session_active', { reason });
+    }
+  }
+
   if (name !== undefined) group.name = name;
   if (dayOfWeek !== undefined) group.dayOfWeek = dayOfWeek;
 

@@ -334,6 +334,10 @@ const ERRORS = {
   group_name_or_day_required:{ status: 400, message: 'Поля name та dayOfWeek обовʼязкові' },
   group_no_members:         { status: 400, message: 'Група не має учасників' },
   group_broadcast_failed:   { status: 500, message: 'Не вдалося надіслати розсилку' },
+  group_day_change_session_active: { status: 409, message: ({ reason } = {}) =>
+                                `Не можна змінити день доставки під час активної сесії (${reason || 'цикл у процесі'}). ` +
+                                'День доставки визначає сесію замовлень і збирання — зміна осиротила б поточні замовлення. ' +
+                                'Змініть день після завершення поточного циклу — він застосується до наступної сесії.' },
 };
 
 // ─── Dev-time integrity guard ────────────────────────────────────────────────
