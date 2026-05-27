@@ -1,4 +1,5 @@
 const express = require('express');
+const crypto = require('crypto');
 const mongoose = require('mongoose');
 const { appError, asyncHandler } = require('../utils/errors');
 const Shop = require('../models/Shop');
@@ -392,6 +393,48 @@ router.patch('/:id/sellers', telegramAuth, requireTelegramRole('admin'), asyncHa
     .lean();
 
   res.json({ sellers: updatedSellers });
+}));
+
+// ─── POST /api/shops/:id/transfer-hash ────────────────────────────────────────
+// Generate (or regenerate) a one-time seller-transfer hash for this shop.
+// The admin hands the returned code to a seller, who pastes it into the bot and
+// is moved to THIS shop with no further confirmation. Single-use semantics:
+//   • Generating a new code OVERWRITES any previous one (old value invalidated).
+//   • The bot CLEARS the field the moment it is consumed (see telegramBot.js).
+// We retry on the rare unique-index collision so a code is always distinct.
+router.post('/:id/transfer-hash', telegramAuth, requireTelegramRole('admin'), asyncHandler(async (req, res) => {
+  const shop = await Shop.findById(req.params.id);
+  if (!shop) throw appError('shop_not_found');
+
+  // Format: ZP-XXXXXXXXXXXX (upper hex). Prefix makes it self-evidently a
+  // transfer code in chat and lets the bot match it without false positives.
+  const makeHash = () => `ZP-${crypto.randomBytes(6).toString('hex').toUpperCase()}`;
+
+  let saved = null;
+  for (let attempt = 0; attempt < 5 && !saved; attempt += 1) {
+    const candidate = makeHash();
+    try {
+      shop.transferHash = candidate;
+      shop.transferHashCreatedAt = new Date();
+      await shop.save();
+      saved = candidate;
+    } catch (err) {
+      // 11000 → another shop already holds this (extremely unlikely) code; retry.
+      if (err?.code === 11000) continue;
+      throw err;
+    }
+  }
+  if (!saved) throw appError('shop_transfer_hash_failed');
+
+  await invalidateShop(shop._id);
+
+  // Deep link the admin can forward directly: the seller taps it, hits one
+  // "Start" button, and is moved with no further steps. The ZP-<hex> format is
+  // already Telegram start-param safe ([A-Za-z0-9_-], ≤64 chars) — no encoding.
+  const botUsername = (process.env.TELEGRAM_BOT_USERNAME || '').replace(/^@/, '').trim();
+  const deepLink = botUsername ? `https://t.me/${botUsername}?start=${saved}` : null;
+
+  res.json({ transferHash: saved, transferHashCreatedAt: shop.transferHashCreatedAt, deepLink });
 }));
 
 module.exports = router;

@@ -34,6 +34,15 @@ async function buildConflictSnapshot(toShopId, fromShopId) {
 
   const targetSeller = sellers[0] || null;
 
+  // Admins assigned to the target shop — they are NOT displaced, shown for info only
+  const targetAdmins = await User.find(
+    { shopId: String(toShopId), role: 'admin' },
+    'firstName lastName',
+  ).lean();
+  const targetShopAdminNames = targetAdmins.map(
+    (a) => [a.firstName, a.lastName].filter(Boolean).join(' '),
+  );
+
   const sourceActiveOrder = await Order.findOne(
     activeOrderShopFilter(fromShopId), '_id'
   ).lean();
@@ -42,8 +51,14 @@ async function buildConflictSnapshot(toShopId, fromShopId) {
   let targetSellerActiveOrderId = null;
 
   if (targetSeller) {
-    targetSellerHasActiveOrder = activeOrders.length > 0;
-    targetSellerActiveOrderId = activeOrders[0]?._id || null;
+    // Filter to orders placed BY THIS specific seller, not any order on the shop.
+    // A shop can have orders from an admin or other staff — attributing those
+    // to the displaced seller produces a false-positive "has active order" warning.
+    const sellerOrders = activeOrders.filter(
+      (o) => String(o.buyerTelegramId) === String(targetSeller.telegramId),
+    );
+    targetSellerHasActiveOrder = sellerOrders.length > 0;
+    targetSellerActiveOrderId = sellerOrders[0]?._id || null;
   }
 
   return {
@@ -54,6 +69,7 @@ async function buildConflictSnapshot(toShopId, fromShopId) {
     targetShopSellerTelegramId: targetSeller?.telegramId || '',
     targetSellerHasActiveOrder,
     targetSellerActiveOrderId,
+    targetShopAdminNames,
     sourceShopHasActiveOrder: !!sourceActiveOrder,
     sourceShopActiveOrderId: sourceActiveOrder?._id || null,
     targetShopSellerCount: sellers.length,

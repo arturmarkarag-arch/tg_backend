@@ -5,6 +5,7 @@ const RegistrationRequest = require('./models/RegistrationRequest');
 const SearchProduct = require('./models/SearchProduct');
 const DeliveryGroup = require('./models/DeliveryGroup');
 const Shop = require('./models/Shop');
+const { redeemTransferHash } = require('./services/redeemTransferHash');
 
 async function updateUserBotActivity(chatId) {
   try {
@@ -262,6 +263,42 @@ async function handleBotBlocked(telegramId) {
   }
 }
 
+// Shared seller-transfer redemption: used by BOTH entry points — a pasted code
+// and a `/start ZP-...` deep link. Moves the seller (no admin confirmation),
+// replies, and live-refreshes any open admin/picking views.
+async function handleTransferHashRedeem(chatId, hash) {
+  try {
+    const result = await redeemTransferHash({ hash, sellerTelegramId: chatId });
+    if (result.ok) {
+      const shopLabel = [result.shop?.name, result.shop?.cityId?.name].filter(Boolean).join(', ');
+      await bot.sendMessage(chatId, `✅ Вас переведено на магазин: ${shopLabel || result.shop?.name || ''}.`);
+      try {
+        const { getIO } = require('./socket');
+        const io = getIO();
+        if (result.movedOrder) {
+          if (result.prevGroupId) io.to(`picking_group_${result.prevGroupId}`).emit('shop_status_changed', { groupId: result.prevGroupId });
+          if (result.newGroupId && result.newGroupId !== result.prevGroupId) {
+            io.to(`picking_group_${result.newGroupId}`).emit('shop_status_changed', { groupId: result.newGroupId });
+          }
+          io.emit('user_order_updated', { buyerTelegramId: chatId });
+        }
+      } catch (e) { console.warn('[Bot] transfer-hash socket emit failed:', e?.message); }
+    } else {
+      const msgByReason = {
+        not_found:     'Код переведення недійсний або вже використаний.',
+        hash_consumed: 'Код переведення недійсний або вже використаний.',
+        not_seller:    'Цей код може активувати лише продавець.',
+        same_shop:     'Ви вже привʼязані до цього магазину.',
+        shop_inactive: 'Магазин для цього коду неактивний. Зверніться до адміністратора.',
+      };
+      await bot.sendMessage(chatId, msgByReason[result.reason] || 'Не вдалося активувати код переведення.');
+    }
+  } catch (e) {
+    console.error('[Bot] redeemTransferHash failed:', e);
+    await bot.sendMessage(chatId, 'Сталася помилка під час переведення. Спробуйте ще раз або зверніться до адміністратора.');
+  }
+}
+
 async function sendAdminNotification(text) {
   const admins = await User.find({ role: 'admin' }, 'telegramId').lean();
   const adminIds = admins.map((a) => a.telegramId).filter(Boolean);
@@ -369,6 +406,21 @@ async function initBot(token) {
           return;
         }
 
+        // Deep-link payload: `/start ZP-...` — a seller opened the transfer
+        // link an admin sent them. Telegram only allows [A-Za-z0-9_-] here,
+        // which our ZP-<hex> format already satisfies (no decoding needed).
+        // We redeem through the SAME path as a pasted code.
+        const startPayload = rawText.split(/\s+/)[1] || '';
+        const startHashMatch = startPayload.toUpperCase().match(/^ZP-[0-9A-F]{12}$/);
+        if (startHashMatch) {
+          if (!user) {
+            await bot.sendMessage(chatId, getUnknownUserMessage());
+            return;
+          }
+          await handleTransferHashRedeem(chatId, startHashMatch[0]);
+          return;
+        }
+
         if (!user) {
           const message = 'Вас не знайдено в системі. Натисніть кнопку, щоб зареєструватися через Mini App.';
           if (WEB_APP_URL.startsWith('https://')) {
@@ -413,6 +465,22 @@ async function initBot(token) {
 
         await bot.sendMessage(chatId, `Відкрийте Mini App: ${miniAppUrl}`);
         return;
+      }
+
+      // ── Shop transfer hash redemption (private chat only) ──
+      // A seller pastes the one-time code an admin gave them; we move them to
+      // the hash's shop with no admin confirmation. We scan the message for a
+      // code anywhere in the text (admins often paste it with a note).
+      if (!isGroupChat && rawText) {
+        const hashMatch = rawText.toUpperCase().match(/ZP-[0-9A-F]{12}/);
+        if (hashMatch) {
+          if (!user) {
+            await bot.sendMessage(chatId, getUnknownUserMessage());
+            return;
+          }
+          await handleTransferHashRedeem(chatId, hashMatch[0]);
+          return;
+        }
       }
 
       if (!user) {

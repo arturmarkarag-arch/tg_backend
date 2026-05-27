@@ -327,6 +327,7 @@ const ERRORS = {
   shop_delivery_group_not_found:{ status: 400, message: 'Групу доставки для магазину не знайдено' },
   shop_create_failed:       { status: 500, message: 'Не вдалося створити магазин' },
   shop_update_failed:       { status: 500, message: 'Не вдалося оновити магазин' },
+  shop_transfer_hash_failed:{ status: 500, message: 'Не вдалося згенерувати код переведення' },
 
   // ── Delivery groups (extra) ────────────────────────────────────────────────
   group_name_or_day_required:{ status: 400, message: 'Поля name та dayOfWeek обовʼязкові' },
