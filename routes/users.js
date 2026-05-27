@@ -132,9 +132,13 @@ router.get('/', asyncHandler(async (req, res) => {
   if (isSellerGroupView) {
     const group = await DeliveryGroup.findById(groupFilter).lean();
     if (group) {
-      const { isOpen } = isOrderingOpen(group.dayOfWeek);
+      // Pass the DB-configured schedule — never let these fall back to the
+      // module's hardcoded 16:00/07:30, which would compute the window status
+      // against stale hours after an admin changes the schedule.
+      const schedule = await getOrderingSchedule();
+      const { isOpen } = isOrderingOpen(group.dayOfWeek, schedule);
       windowIsOpen = isOpen;
-      windowOpenAt = getOrderingWindowOpenAt(group.dayOfWeek);
+      windowOpenAt = getOrderingWindowOpenAt(group.dayOfWeek, schedule);
     }
   }
 

@@ -51,6 +51,31 @@ OrderSchema.index({ idempotencyKey: 1 }, { unique: true, sparse: true });
 OrderSchema.index({ orderingSessionId: 1 });
 OrderSchema.index({ orderNumber: 1 }, { unique: true, sparse: true });
 
+// At most ONE active (new/in_progress) order per (buyer, shop, ordering session).
+// This is the DB-level backstop for the duplicate-order race: two concurrent
+// POST /orders with DIFFERENT idempotency keys each find no existing active order
+// and each insert one. A MongoDB transaction does NOT prevent that (two distinct
+// inserts never write-conflict); the Redis placement lock does, but it degrades to
+// a per-process mutex when REDIS_URL is unset — so on a multi-worker deploy without
+// Redis the lock is a no-op across workers and duplicates slip through. This unique
+// partial index makes the invariant hold regardless of Redis: the second insert
+// throws E11000, which the placement handler catches and resolves to the existing
+// order (see routes/orders.js). The partialFilterExpression scopes uniqueness to
+// fully-keyed active orders only, so parked orders (shopId:null), terminal orders,
+// and the no-delivery-group fallback path (empty orderingSessionId) are unaffected.
+OrderSchema.index(
+  { buyerTelegramId: 1, shopId: 1, orderingSessionId: 1 },
+  {
+    unique: true,
+    name: 'one_active_order_per_buyer_shop_session',
+    partialFilterExpression: {
+      status: { $in: ['new', 'in_progress'] },
+      shopId: { $type: 'objectId' },
+      orderingSessionId: { $gt: '' },
+    },
+  },
+);
+
 function normalizeOrderItems(items = []) {
   const grouped = new Map();
   for (const item of items) {

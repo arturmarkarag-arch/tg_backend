@@ -14,6 +14,23 @@ const { invalidateShop } = require('../utils/modelCache');
 const { computeTargetShopState } = require('../utils/shopConflict');
 const { activeOrderShopFilter } = require('../utils/orderShopFilter');
 const { getIO } = require('../socket');
+const { withLock } = require('../utils/lock');
+
+/**
+ * Run `fn` while holding the per-seller shop locks for every telegramId in `ids`.
+ * Locks are acquired in a STABLE sorted order so two concurrent operations that
+ * touch the same pair of sellers can never deadlock (both queue on the lower id
+ * first). Duplicate / empty ids are dropped. Mirrors the `user:<id>:shop` lock
+ * namespace used by the admin reassignment and transfer-hash redeem paths, so an
+ * approve can no longer race a seller's own concurrent action on the same account.
+ */
+async function withSellerLocks(ids, fn) {
+  const unique = [...new Set(ids.filter(Boolean).map(String))].sort();
+  const run = (i) => (i >= unique.length
+    ? fn()
+    : withLock(`user:${unique[i]}:shop`, () => run(i + 1)));
+  return run(0);
+}
 
 const router = express.Router();
 
@@ -193,9 +210,28 @@ router.post('/:id/approve', telegramAuth, requireTelegramRole('admin'), asyncHan
     }
   }
 
+  // Identify the displaced seller (if the target shop is currently occupied) BEFORE
+  // taking locks, so we can serialise this approve against that seller's own
+  // concurrent actions too — not just the incoming seller's. This read is only for
+  // lock scoping; the authoritative re-read happens inside the transaction below.
+  let displacedSellerId = '';
+  if (!requestDoc.isProfileOnly && effectiveToShopId) {
+    const occupant = await User.findOne({
+      shopId: String(effectiveToShopId),
+      role: 'seller',
+      telegramId: { $ne: requestDoc.sellerTelegramId },
+    }, 'telegramId').lean();
+    if (occupant) displacedSellerId = String(occupant.telegramId);
+  }
+
   let migrationResult = null;
   let resolvedRequest = null;
 
+  // Hold the shop locks for BOTH the incoming seller and the displaced seller
+  // (if any) for the whole transaction. Previously the approve held no seller
+  // lock at all, so a displaced seller's parking ($set shopId:null + order park)
+  // could interleave with that seller placing/editing an order on another worker.
+  await withSellerLocks([requestDoc.sellerTelegramId, displacedSellerId], async () => {
   const session = await mongoose.connection.startSession();
   try {
     await session.withTransaction(async () => {
@@ -379,9 +415,10 @@ router.post('/:id/approve', telegramAuth, requireTelegramRole('admin'), asyncHan
   } finally {
     session.endSession();
   }
+  }); // withSellerLocks
 
-  // Post-commit cache invalidation — outside withTransaction so other workers
-  // don't repopulate L1 with pre-commit reads.
+  // Post-commit cache invalidation — outside withTransaction AND outside the
+  // seller locks so other workers don't repopulate L1 with pre-commit reads.
   if (migrationResult?.invalidate) {
     try { await migrationResult.invalidate(); }
     catch (e) { console.warn('[shopTransfer approve] cache invalidate failed:', e?.message); }

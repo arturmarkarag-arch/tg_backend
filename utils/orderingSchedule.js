@@ -19,10 +19,27 @@
 
 const TIMEZONE = 'Europe/Warsaw';
 
-const OPEN_HOUR = 16;
-const OPEN_MINUTE = 0;
-const CLOSE_HOUR = 7;
-const CLOSE_MINUTE = 30;
+// No hardcoded schedule defaults. The window hours live ONLY in AppSetting
+// ('ordering.schedule', read via utils/getOrderingSchedule) so an admin change
+// takes effect everywhere. Previously these functions defaulted to 16:00/07:30
+// via `schedule.openHour ?? OPEN_HOUR`, which silently computed the window against
+// stale hours whenever a caller forgot to pass the schedule (e.g. users.js list
+// view). requireScheduleFields makes every entry point fail loudly instead.
+function requireScheduleFields(schedule, fields) {
+  const s = schedule || {};
+  const out = {};
+  for (const f of fields) {
+    const v = s[f];
+    if (typeof v !== 'number' || !Number.isFinite(v)) {
+      throw new Error(
+        `orderingSchedule: missing/invalid '${f}' — a schedule from getOrderingSchedule() ` +
+        'must be passed (no hardcoded fallback). Got: ' + JSON.stringify(s),
+      );
+    }
+    out[f] = v;
+  }
+  return out;
+}
 
 const DAY_SHORT_UK = ['Нд', 'Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб'];
 const DAY_FULL_UK  = ['неділю', 'понеділок', 'вівторок', 'середу', 'четвер', "п'ятницю", 'суботу'];
@@ -84,11 +101,9 @@ function fmt(h, m) {
  * @param {{ openHour?: number, openMinute?: number, closeHour?: number, closeMinute?: number }} [schedule]
  * @returns {{ isOpen: boolean, message: string }}
  */
-function isOrderingOpen(deliveryDayOfWeek, schedule = {}) {
-  const openHour    = schedule.openHour    ?? OPEN_HOUR;
-  const openMinute  = schedule.openMinute  ?? OPEN_MINUTE;
-  const closeHour   = schedule.closeHour   ?? CLOSE_HOUR;
-  const closeMinute = schedule.closeMinute ?? CLOSE_MINUTE;
+function isOrderingOpen(deliveryDayOfWeek, schedule) {
+  const { openHour, openMinute, closeHour, closeMinute } =
+    requireScheduleFields(schedule, ['openHour', 'openMinute', 'closeHour', 'closeMinute']);
 
   const { dayOfWeek, hour, minute } = getWarsawNow();
 
@@ -155,11 +170,9 @@ function isOrderingOpen(deliveryDayOfWeek, schedule = {}) {
 /**
  * Returns window times for display purposes.
  */
-function getWindowDescription(deliveryDayOfWeek, schedule = {}) {
-  const openHour    = schedule.openHour    ?? OPEN_HOUR;
-  const openMinute  = schedule.openMinute  ?? OPEN_MINUTE;
-  const closeHour   = schedule.closeHour   ?? CLOSE_HOUR;
-  const closeMinute = schedule.closeMinute ?? CLOSE_MINUTE;
+function getWindowDescription(deliveryDayOfWeek, schedule) {
+  const { openHour, openMinute, closeHour, closeMinute } =
+    requireScheduleFields(schedule, ['openHour', 'openMinute', 'closeHour', 'closeMinute']);
 
   const dayBefore = (deliveryDayOfWeek - 1 + 7) % 7;
   const openDay  = dayBefore === 0 ? 6 : dayBefore;
@@ -208,9 +221,8 @@ function warsawWallClockToUTC(year, month, day, hour, minute) {
  * @param {{ openHour?: number, openMinute?: number }} [schedule]
  * @returns {Date}
  */
-function getOrderingWindowOpenAt(deliveryDayOfWeek, schedule = {}) {
-  const openHour   = schedule.openHour   ?? OPEN_HOUR;
-  const openMinute = schedule.openMinute ?? OPEN_MINUTE;
+function getOrderingWindowOpenAt(deliveryDayOfWeek, schedule) {
+  const { openHour, openMinute } = requireScheduleFields(schedule, ['openHour', 'openMinute']);
 
   // Which weekday does the window open on? (day before delivery; Sunday → Saturday)
   const dayBefore = (deliveryDayOfWeek - 1 + 7) % 7;
@@ -252,16 +264,60 @@ function getOrderingWindowOpenAt(deliveryDayOfWeek, schedule = {}) {
  * Returns the Warsaw calendar date string ("YYYY-MM-DD") for the day the ordering window
  * opens for the given delivery group. Stable even if admin changes the open time.
  *
+ * This is the unique key (with groupId) of an OrderingSession, so it MUST be
+ * derived purely from calendar arithmetic — never from a UTC timestamp round-trip.
+ * The previous implementation went Warsaw-date → wall-clock 16:00 → UTC (via the
+ * one-step offset approximation in warsawWallClockToUTC) → format back to a Warsaw
+ * date. On the two DST-transition days per year that round-trip could land the UTC
+ * moment on the far side of midnight and format back to the ADJACENT calendar date,
+ * splitting one logical ordering window into two OrderingSession documents (orders
+ * scattered across two orderingSessionIds → false conflicts + half-built picking).
+ * Computing the date directly from (today − daysBack) in the Warsaw calendar removes
+ * the timestamp from the equation entirely, so DST cannot shift the key. openAt
+ * (the precise instant) is still computed separately via getOrderingWindowOpenAt.
+ *
  * @param {number} deliveryDayOfWeek  0=Sun … 6=Sat
  * @param {{ openHour?: number, openMinute?: number }} [schedule]
  * @returns {string}  e.g. "2024-01-20"
  */
-function getOpenDateWarsaw(deliveryDayOfWeek, schedule = {}) {
-  const windowOpenAt = getOrderingWindowOpenAt(deliveryDayOfWeek, schedule);
-  return new Intl.DateTimeFormat('en-CA', {
+function getOpenDateWarsaw(deliveryDayOfWeek, schedule) {
+  const { openHour, openMinute } = requireScheduleFields(schedule, ['openHour', 'openMinute']);
+
+  // Which weekday does the window open on? (day before delivery; Sunday → Saturday)
+  const dayBefore = (deliveryDayOfWeek - 1 + 7) % 7;
+  const openDay   = dayBefore === 0 ? 6 : dayBefore;
+
+  const { dayOfWeek: nowDOW, hour: nowHour, minute: nowMinute } = getWarsawNow();
+  const nowMins  = nowHour * 60 + nowMinute;
+  const openMins = openHour * 60 + openMinute;
+
+  // How many days back is the last occurrence of openDay?
+  let daysBack = (nowDOW - openDay + 7) % 7;
+  // If today IS openDay but we haven't passed openTime yet → look back a full week.
+  // (Mirrors getOrderingWindowOpenAt so openDate and openAt always agree on which
+  // window is "current".)
+  if (daysBack === 0 && nowMins < openMins) {
+    daysBack = 7;
+  }
+
+  // Today's Warsaw calendar date, then step back daysBack whole days. Date.UTC is
+  // used only as a calendar (no timezone semantics): we read Y/M/D in Warsaw,
+  // subtract days, and re-read Y/M/D — midnight UTC of a date carries that date's
+  // Y/M/D, so this is pure calendar math, immune to DST.
+  const now = new Date();
+  const dateParts = new Intl.DateTimeFormat('en-US', {
     timeZone: TIMEZONE,
     year: 'numeric', month: '2-digit', day: '2-digit',
-  }).format(windowOpenAt);
+    hour12: false,
+  }).formatToParts(now);
+  const gd = (t) => parseInt(dateParts.find((p) => p.type === t)?.value ?? '0', 10);
+
+  const target = new Date(Date.UTC(gd('year'), gd('month') - 1, gd('day') - daysBack));
+
+  const y = target.getUTCFullYear();
+  const m = String(target.getUTCMonth() + 1).padStart(2, '0');
+  const d = String(target.getUTCDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
 }
 
 /**
@@ -272,10 +328,9 @@ function getOpenDateWarsaw(deliveryDayOfWeek, schedule = {}) {
  * @param {{ closeHour?: number, closeMinute?: number }} [schedule]
  * @returns {Date}
  */
-function getOrderingWindowCloseAt(deliveryDayOfWeek, schedule = {}) {
-  const closeHour   = schedule.closeHour   ?? CLOSE_HOUR;
-  const closeMinute = schedule.closeMinute ?? CLOSE_MINUTE;
-  const closeDay    = deliveryDayOfWeek;
+function getOrderingWindowCloseAt(deliveryDayOfWeek, schedule) {
+  const { closeHour, closeMinute } = requireScheduleFields(schedule, ['closeHour', 'closeMinute']);
+  const closeDay = deliveryDayOfWeek;
 
   const { dayOfWeek: nowDOW, hour: nowHour, minute: nowMinute } = getWarsawNow();
   const nowMins   = nowHour * 60 + nowMinute;
@@ -315,9 +370,8 @@ function getOrderingWindowCloseAt(deliveryDayOfWeek, schedule = {}) {
  * @param {{ openHour?: number, openMinute?: number }} schedule
  * @param {number} withinMinutes default 240 (4 hours)
  */
-function isOrderingOpeningSoon(deliveryDayOfWeek, schedule = {}, withinMinutes = 240) {
-  const openHour   = schedule.openHour   ?? 16;
-  const openMinute = schedule.openMinute ?? 0;
+function isOrderingOpeningSoon(deliveryDayOfWeek, schedule, withinMinutes = 240) {
+  const { openHour, openMinute } = requireScheduleFields(schedule, ['openHour', 'openMinute']);
   const { dayOfWeek, hour, minute } = getWarsawNow();
 
   const dayBefore = (deliveryDayOfWeek - 1 + 7) % 7;

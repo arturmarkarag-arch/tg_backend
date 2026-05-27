@@ -834,11 +834,22 @@ async function placeOrderImpl(req, res) {
     return { sentResponse: false };
   } catch (err) {
     // withTransaction has already aborted the transaction. On a non-transient
-    // error it rethrows here. Idempotency key collision = another request already
-    // created this order under the same key → return the existing one.
-    if (err.code === 11000 && sanitizedKey) {
-      const existing = await Order.findOne({ idempotencyKey: sanitizedKey }).lean();
-      if (existing) { res.status(200).json(existing); return { sentResponse: true }; }
+    // error it rethrows here. A duplicate-key (11000) means a concurrent request
+    // already created the active order for this buyer — resolve to the existing one
+    // instead of surfacing a 500. Two sources can trigger it:
+    //   1. idempotencyKey collision — same client retried with the same key.
+    //   2. the one_active_order_per_buyer_shop_session unique index — two requests
+    //      with DIFFERENT keys both passed the in-tx "no active order" check and
+    //      both inserted; the loser hits the index. This is the DB backstop that
+    //      holds even when the Redis placement lock degrades to per-process.
+    if (err.code === 11000) {
+      if (sanitizedKey) {
+        const existing = await Order.findOne({ idempotencyKey: sanitizedKey }).lean();
+        if (existing) { res.status(200).json(existing); return { sentResponse: true }; }
+      }
+      // Fall back to the active-order identity used for merge/uniqueness.
+      const existingActive = await Order.findOne(existingOrderQuery).lean();
+      if (existingActive) { res.status(200).json(existingActive); return { sentResponse: true }; }
     }
     throw err;
   } finally {
@@ -892,71 +903,66 @@ async function placeOrderImpl(req, res) {
 
 // PATCH /:id/snapshot — admin reassigns order to a different shop
 router.patch('/:id/snapshot', staffOnly, async (req, res) => {
-  const order = await Order.findById(req.params.id);
-  if (!order) throw appError('order_not_found');
-
-  // Only allow reassigning active orders — reassigning fulfilled/cancelled orders
-  // would incorrectly move the buyer to a new shop based on historical data
-  if (!['new', 'in_progress'].includes(order.status)) {
-    return res.status(409).json({
-      error: 'order_not_active',
-      message: `Замовлення вже ${order.status === 'fulfilled' ? 'виконано' : 'скасовано'} — перенос неможливий.`,
-    });
-  }
-
-  // Hard guard: once the order is in picking pipeline, admin reassignment is forbidden.
-  await ensureOrderNotInPickingPipeline(order._id);
-
   const { shopId } = req.body;
   if (!shopId) throw appError('order_shop_required');
 
+  // Target shop is an immutable reference for this request — safe to load once
+  // outside the transaction.
   const shop = await Shop.findById(shopId).populate('cityId', 'name').lean();
   if (!shop) throw appError('order_shop_not_found');
-
-  // Warn if target shop already has an active order from someone else — creates a new conflict.
-  // $or covers legacy orders where shopId was null at creation time but buyerSnapshot.shopId was set.
-  const targetConflict = await Order.findOne(
-    activeOrderShopFilter(shop._id, { _id: { $ne: order._id } }),
-  ).lean();
-  if (targetConflict) {
-    return res.status(409).json({
-      error: 'target_shop_has_order',
-      message: `Магазин "${shop.name}" вже має активне замовлення. Переніс створить конфлікт. Спочатку вирішіть той конфлікт.`,
-    });
-  }
-
-  const prevGroupId = order.buyerSnapshot?.deliveryGroupId
-    ? String(order.buyerSnapshot.deliveryGroupId)
-    : null;
-
-  const prevSnapshot = order.buyerSnapshot
-    ? { shopName: order.buyerSnapshot.shopName, shopCity: order.buyerSnapshot.shopCity }
-    : null;
 
   // All writes (Order, PickingTask, User) must commit atomically — partial commits
   // would leave the buyer pointing at one shop while the order points at another,
   // causing phantom conflicts and stale buyerSnapshot data on the next /orders POST.
-  // Всі мутації order виконуються ВСЕРЕДИНІ транзакції, щоб abort залишав
-  // in-memory об'єкт незміненим і не провокував помилкових повторних збережень.
+  //
+  // CRITICAL: the order is read INSIDE the transaction (not once up-front). On a
+  // WriteConflict, withTransaction re-runs this callback; a closure-captured
+  // pre-tx document would carry a stale `items` array, and re-saving it would
+  // silently revert a seller's concurrent set-item-qty / remove-item edit that
+  // committed in between. Re-reading per attempt makes every retry start from the
+  // current document, so the last writer's items survive.
   const session = await mongoose.connection.startSession();
+  let order = null;
+  let prevGroupId = null;
   let txConflict = null;
+  let notActiveStatus = null;
   try {
     await session.withTransaction(async () => {
-      // Re-check inside the transaction to close the TOCTOU window.
-      // Two admins may both pass the optimistic check above, but only one can
-      // commit — the second will see the conflict here and abort cleanly.
+      // reset per-attempt so a retry recomputes cleanly
+      txConflict = null;
+      notActiveStatus = null;
+
+      const fresh = await Order.findById(req.params.id).session(session);
+      if (!fresh) throw appError('order_not_found');
+
+      // Only allow reassigning active orders — moving fulfilled/cancelled orders
+      // would relocate the buyer based on historical data.
+      if (!['new', 'in_progress'].includes(fresh.status)) {
+        notActiveStatus = fresh.status;
+        throw Object.assign(new Error('order_not_active'), { code: 'order_not_active' });
+      }
+
+      // Hard guard: once the order is in the picking pipeline, reassignment is forbidden.
+      await ensureOrderNotInPickingPipeline(fresh._id, session);
+
+      // Target shop must not already hold someone else's active order — that would
+      // create a fresh conflict. Re-checked here (inside the tx) so two concurrent
+      // admins can't both pass; only one commits, the other aborts cleanly.
       const conflictInTx = await Order.findOne(
-        activeOrderShopFilter(shop._id, { _id: { $ne: order._id } }),
+        activeOrderShopFilter(shop._id, { _id: { $ne: fresh._id } }),
       ).session(session).lean();
       if (conflictInTx) {
         txConflict = true;
-        // Throwing a plain Error aborts the transaction without triggering a
-        // TransientTransactionError retry in the Mongoose driver.
+        // Plain Error → aborts without a TransientTransactionError retry.
         throw Object.assign(new Error('tx_conflict'), { code: 'target_shop_has_order' });
       }
 
-      // Re-check in transaction to close the race with the picking board.
-      await ensureOrderNotInPickingPipeline(order._id, session);
+      prevGroupId = fresh.buyerSnapshot?.deliveryGroupId
+        ? String(fresh.buyerSnapshot.deliveryGroupId)
+        : null;
+      const prevSnapshot = fresh.buyerSnapshot
+        ? { shopName: fresh.buyerSnapshot.shopName, shopCity: fresh.buyerSnapshot.shopCity }
+        : null;
 
       // Resolve delivery group data once inside the transaction
       let newSessionId = null;
@@ -970,37 +976,37 @@ router.patch('/:id/snapshot', staffOnly, async (req, res) => {
         }
       }
 
-      // Mutate order document here so abort leaves the in-memory object untouched
-      if (!order.buyerSnapshot) order.buyerSnapshot = {};
-      order.buyerSnapshot.shopId = String(shop._id);
-      order.buyerSnapshot.shopName = shop.name || '';
-      order.buyerSnapshot.shopCity = shop.cityId?.name || '';
-      order.buyerSnapshot.deliveryGroupId = shop.deliveryGroupId ? String(shop.deliveryGroupId) : '';
-      order.shopId = shop._id;
-      if (newSessionId) order.orderingSessionId = newSessionId;
-      order.markModified('buyerSnapshot');
-      order.history.push({
+      if (!fresh.buyerSnapshot) fresh.buyerSnapshot = {};
+      fresh.buyerSnapshot.shopId = String(shop._id);
+      fresh.buyerSnapshot.shopName = shop.name || '';
+      fresh.buyerSnapshot.shopCity = shop.cityId?.name || '';
+      fresh.buyerSnapshot.deliveryGroupId = shop.deliveryGroupId ? String(shop.deliveryGroupId) : '';
+      fresh.shopId = shop._id;
+      if (newSessionId) fresh.orderingSessionId = newSessionId;
+      fresh.markModified('buyerSnapshot');
+      fresh.history.push({
         ...actorFromReq(req),
         action: 'shop_reassigned',
         meta: { from: prevSnapshot, to: { shopName: shop.name || '', shopCity: shop.cityId?.name || '' } },
       });
 
-      await order.save({ session });
+      await fresh.save({ session });
+      order = fresh;
 
       // Sync shopName in any active PickingTask items that reference this order.
       // Failure here MUST abort the transaction — picking workers would otherwise
       // see a stale shop name on items they're packing.
       await PickingTask.updateMany(
-        { 'items.orderId': order._id, status: { $in: ['pending', 'locked'] } },
+        { 'items.orderId': fresh._id, status: { $in: ['pending', 'locked'] } },
         { $set: { 'items.$[elem].shopName': shop.name || '' } },
-        { arrayFilters: [{ 'elem.orderId': order._id }], session },
+        { arrayFilters: [{ 'elem.orderId': fresh._id }], session },
       );
 
       // Update the buyer: move them to the new shop with the FULL set of derived
       // fields (shopName/shopCity/deliveryGroupId/warehouseZone) so legacy fallbacks
       // never read stale values, and clear their cart since the active order moved.
-      if (order.buyerTelegramId) {
-        const buyerUser = await User.findOne({ telegramId: order.buyerTelegramId }).session(session).lean();
+      if (fresh.buyerTelegramId) {
+        const buyerUser = await User.findOne({ telegramId: fresh.buyerTelegramId }).session(session).lean();
         const userUpdate = {
           shopId: shop._id,
           deliveryGroupId: shop.deliveryGroupId ? String(shop.deliveryGroupId) : '',
@@ -1013,12 +1019,23 @@ router.patch('/:id/snapshot', staffOnly, async (req, res) => {
           userUpdate.warehouseZone = warehouseZone;
         }
         await User.updateOne(
-          { telegramId: order.buyerTelegramId },
+          { telegramId: fresh.buyerTelegramId },
           { $set: userUpdate },
           { session },
         );
       }
     });
+  } catch (err) {
+    // order_not_active is a clean 409, not a 500 — surface it as before.
+    if (err && err.code === 'order_not_active') {
+      return res.status(409).json({
+        error: 'order_not_active',
+        message: `Замовлення вже ${notActiveStatus === 'fulfilled' ? 'виконано' : 'скасовано'} — перенос неможливий.`,
+      });
+    }
+    // target_shop_has_order is handled via the txConflict flag below; any other
+    // error propagates to the central handler.
+    if (!(err && err.code === 'target_shop_has_order')) throw err;
   } finally {
     session.endSession();
   }

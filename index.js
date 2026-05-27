@@ -17,6 +17,8 @@ const { initSocket } = require('./socket');
 const AppSetting = require('./models/AppSetting');
 const { migrateOrdersToSessionIds } = require('./utils/getOrCreateSession');
 const { ensureShopProductIndexes } = require('./utils/ensureShopProductIndexes');
+const { isEnabled: redisEnabled } = require('./utils/redis');
+const Order = require('./models/Order');
 
 let httpServer = null;
 let shuttingDown = false;
@@ -66,10 +68,43 @@ async function startServer() {
     if (!MONGODB_URI) {
       throw new Error('MONGODB_URI is required in production');
     }
+
+    // Fail-fast: the order-placement de-dup relies on a cross-worker Redis lock.
+    // Without REDIS_URL that lock degrades to a per-PROCESS mutex, so running more
+    // than one worker without Redis lets two workers each accept a "first" order
+    // for the same buyer/session → duplicate active orders (the unique index below
+    // is the DB backstop, but we refuse to boot a config that knowingly races).
+    // WEB_CONCURRENCY is the standard worker-count env on Render/Heroku-style hosts.
+    const workerCount = Number(process.env.WEB_CONCURRENCY) || 1;
+    if (workerCount > 1 && !redisEnabled()) {
+      throw new Error(
+        `Refusing to start: WEB_CONCURRENCY=${workerCount} (>1) without REDIS_URL. ` +
+        'The distributed lock for order placement, socket fan-out and cache ' +
+        'invalidation requires Redis in multi-worker mode. Set REDIS_URL or run a single worker.',
+      );
+    }
+
     await mongoose.connect(MONGODB_URI, { useNewUrlParser: true, useUnifiedTopology: true });
     console.log('Connected to MongoDB');
     await migrateOrdersToSessionIds();
     await ensureShopProductIndexes();
+
+    // Build the Order indexes explicitly (incl. one_active_order_per_buyer_shop_session).
+    // syncIndexes surfaces a failure here loudly instead of letting Mongoose's
+    // background autoIndex swallow it on connection.on('index'). If pre-existing
+    // active-order duplicates exist the unique build throws E11000 — we log the
+    // exact error so it can be cleaned up, but do NOT crash the whole server over
+    // an index that is a backstop (the Redis lock still guards the live path).
+    try {
+      await Order.syncIndexes();
+      console.log('[indexes] Order indexes synced');
+    } catch (err) {
+      console.error(
+        '[indexes] Order.syncIndexes failed — likely pre-existing duplicate active ' +
+        'orders blocking one_active_order_per_buyer_shop_session. Resolve duplicates ' +
+        'then restart. Continuing without the unique backstop. Error:', err.message,
+      );
+    }
 
 
     // Prefer key stored in DB (via admin settings), fall back to env
