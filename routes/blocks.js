@@ -61,8 +61,11 @@ router.get('/', asyncHandler(async (req, res) => {
     .lean();
 
   if (limit !== undefined) {
-    const total = await Block.countDocuments();
-    return res.json({ items: blocks, total });
+    const [total, maxDoc] = await Promise.all([
+      Block.countDocuments(),
+      Block.findOne({}, 'blockId').sort({ blockId: -1 }).lean(),
+    ]);
+    return res.json({ items: blocks, total, maxBlockId: maxDoc?.blockId ?? 0 });
   }
 
   res.json(blocks);
