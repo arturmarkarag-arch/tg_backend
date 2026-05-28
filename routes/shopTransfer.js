@@ -60,9 +60,9 @@ async function buildConflictSnapshot(toShopId, fromShopId) {
     (a) => [a.firstName, a.lastName].filter(Boolean).join(' '),
   );
 
-  const sourceActiveOrder = await Order.findOne(
-    activeOrderShopFilter(fromShopId), '_id'
-  ).lean();
+  const sourceActiveOrder = fromShopId
+    ? await Order.findOne(activeOrderShopFilter(fromShopId), '_id').lean()
+    : null;
 
   let targetSellerHasActiveOrder = false;
   let targetSellerActiveOrderId = null;
