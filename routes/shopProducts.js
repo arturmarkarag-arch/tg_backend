@@ -12,6 +12,9 @@ const { describeImageUrl } = require('../utils/productDescribe');
 
 const staffOnly  = requireTelegramRoles(['admin', 'warehouse']);
 const adminOnly  = requireTelegramRoles(['admin']);
+// Read-only browse — sellers see the same catalogue but in a stripped-down,
+// non-editable card on the page. Write endpoints below stay staff-only.
+const anyRole    = requireTelegramRoles(['admin', 'warehouse', 'seller']);
 
 const router = express.Router();
 
@@ -48,7 +51,7 @@ function safeFilename(raw) {
 }
 
 // ── GET / — list with pagination + search ─────────────────────────────────────
-router.get('/', staffOnly, asyncHandler(async (req, res) => {
+router.get('/', anyRole, asyncHandler(async (req, res) => {
   const limit  = Math.min(100, Math.max(1, Number(req.query.limit)  || 50));
   const offset = Math.max(0, Number(req.query.offset) || 0);
   const query  = {};

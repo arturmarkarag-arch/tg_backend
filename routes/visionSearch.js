@@ -160,7 +160,8 @@ router.post('/embed-all', adminOnly, asyncHandler(async (req, res) => {
 // Body: { key, threshold? }. The query photo was uploaded straight to R2 (vision-tmp/);
 // OpenAI reads it by URL (no bytes through us), then we delete it. Describes the
 // photo, embeds it, and ranks the catalog via Atlas $vectorSearch (no fallback).
-router.post('/query-vector', staffOnly, asyncHandler(async (req, res) => {
+// Allowed for sellers too — the ShopProducts page surfaces this via PhotoSearchModal.
+router.post('/query-vector', anyRole, asyncHandler(async (req, res) => {
   const key = req.body?.key;
   if (!isVisionTmpKey(key)) return res.status(400).json({ error: 'photo_required', message: 'Не вказано фото' });
 
@@ -265,7 +266,12 @@ async function attachWarehouseLocations(items) {
 // space — so it finds the product photo even with no name/description text. Gemini
 // only; returns FULL ShopProduct docs ordered by similarity (so the catalog list
 // can render + edit them like a normal page).
-router.post('/query-text', staffOnly, asyncHandler(async (req, res) => {
+// Allowed for sellers — they read-only browse the same paginated results.
+//
+// Pagination: we rank up to TOP_K_CAP candidates by similarity once, then the
+// client pages through that ordered top-K with offset/limit. Atlas $vectorSearch
+// has no native $skip, so the cap + $facet pattern is the standard trick.
+router.post('/query-text', anyRole, asyncHandler(async (req, res) => {
   const text = String(req.body?.text || '').trim();
   if (!text) return res.status(400).json({ error: 'text_required', message: 'Порожній запит' });
 
@@ -273,7 +279,9 @@ router.post('/query-text', staffOnly, asyncHandler(async (req, res) => {
     return res.status(503).json({ error: 'gemini_not_configured', message: getGeminiStatus().error || 'Gemini не підключено' });
   }
 
-  const limit = Math.min(50, Math.max(1, parseInt(req.body?.limit, 10) || 20));
+  const TOP_K_CAP = 200;
+  const limit  = Math.min(50, Math.max(1, parseInt(req.body?.limit, 10) || 20));
+  const offset = Math.min(TOP_K_CAP, Math.max(0, parseInt(req.body?.offset, 10) || 0));
 
   // Which catalog to search: shopproducts (Товари Магазинів, default) | products (Товари Складу).
   const collection = String(req.body?.collection || 'shopproducts').toLowerCase() === 'products' ? 'products' : 'shopproducts';
@@ -288,22 +296,29 @@ router.post('/query-text', staffOnly, asyncHandler(async (req, res) => {
     console.error('[visionSearch] query-text Gemini error:', err.message);
     return res.status(502).json({ error: 'gemini_api_error', message: err.message });
   }
-  if (!embedding) return res.json({ items: [], total: 0 });
+  if (!embedding) return res.json({ items: [], total: 0, offset, limit });
 
-  let items;
+  let result;
   try {
-    items = await Model.aggregate([
+    result = await Model.aggregate([
       {
         $vectorSearch: {
           index:         idxName,
           path:          'geminiVector',
           queryVector:   embedding,
-          numCandidates: Math.max(100, limit * 20),
-          limit,
+          numCandidates: Math.max(200, TOP_K_CAP * 10),
+          limit:         TOP_K_CAP,
         },
       },
       { $addFields: { _score: { $meta: 'vectorSearchScore' } } },
-      { $project: { geminiVector: 0, embedding: 0 } }, // drop heavy vectors from the payload
+      { $facet: {
+          items: [
+            { $skip: offset },
+            { $limit: limit },
+            { $project: { geminiVector: 0, embedding: 0 } },
+          ],
+          counts: [{ $count: 'total' }],
+      } },
     ]);
   } catch (err) {
     console.error('[visionSearch] query-text vector search error:', err.message);
@@ -313,8 +328,11 @@ router.post('/query-text', staffOnly, asyncHandler(async (req, res) => {
     });
   }
 
+  const items = result?.[0]?.items || [];
+  const total = result?.[0]?.counts?.[0]?.total || 0;
+
   if (collection === 'products') await attachWarehouseLocations(items);
-  res.json({ items, total: items.length });
+  res.json({ items, total, offset, limit });
 }));
 
 // ─── POST /query-vector-warehouse — photo search over WAREHOUSE products ──────
