@@ -9,7 +9,7 @@ const User = require('../models/User');
 const Order = require('../models/Order');
 const DeliveryGroup = require('../models/DeliveryGroup');
 const PickingTask = require('../models/PickingTask');
-const { getOrCreateSessionId } = require('../utils/getOrCreateSession');
+const { getOrCreateSessionId, getOrCreateNextSessionId } = require('../utils/getOrCreateSession');
 const { getOrderingSchedule } = require('../utils/getOrderingSchedule');
 const { appError } = require('../utils/errors');
 const { invalidateShop } = require('../utils/modelCache');
@@ -82,12 +82,41 @@ async function migrateSellerShop({
   // in place — see the lookup below.
 
   let newSessionId = null;
+  let targetSessionId = null;
+  let routedToNextSession = false;
   let warehouseZone = '';
   if (newDeliveryGroupId) {
     const newGroup = await DeliveryGroup.findById(newDeliveryGroupId).session(session).lean();
     if (newGroup) {
       warehouseZone = newGroup.name || '';
       newSessionId = await getOrCreateSessionId(String(newGroup._id), newGroup.dayOfWeek, schedule);
+      targetSessionId = newSessionId;
+
+      // If the destination group's CURRENT session is already being picked, an
+      // order added now would never get a PickingTask: start-session is idempotent
+      // (won't rebuild once tasks exist) and reconcile only removes/trims, never
+      // adds. So such an order would sit task-less, then expire as stale next cycle.
+      // Detect "picking already started" robustly = a task references one of this
+      // session's orders (ignores leftover tasks from older sessions). If so, park
+      // the incoming order in the NEXT session — it is collected next cycle instead
+      // of being stranded. If no tasks reference current orders yet (incl. the
+      // confirmed-but-zero-tasks case), start-session will still rebuild, so the
+      // current session is the correct target.
+      const currentSessionOrderIds = (await Order.find(
+        { 'buyerSnapshot.deliveryGroupId': newDeliveryGroupId, orderingSessionId: newSessionId },
+        '_id',
+      ).session(session).lean()).map((o) => o._id);
+
+      const currentSessionInPicking = currentSessionOrderIds.length > 0 && !!(await PickingTask.exists({
+        deliveryGroupId: newDeliveryGroupId,
+        status: { $in: ['pending', 'locked', 'completed'] },
+        'items.orderId': { $in: currentSessionOrderIds },
+      }).session(session));
+
+      if (currentSessionInPicking) {
+        targetSessionId = await getOrCreateNextSessionId(String(newGroup._id), newGroup.dayOfWeek, schedule);
+        routedToNextSession = true;
+      }
     }
   }
 
@@ -142,7 +171,7 @@ async function migrateSellerShop({
       activeOrder.buyerSnapshot.shopName = newShopName;
       activeOrder.buyerSnapshot.shopCity = newShopCity;
       activeOrder.buyerSnapshot.deliveryGroupId = newDeliveryGroupId;
-      if (newSessionId) activeOrder.orderingSessionId = newSessionId;
+      if (targetSessionId) activeOrder.orderingSessionId = targetSessionId;
       activeOrder.markModified('buyerSnapshot');
       activeOrder.history.push({
         by: String(actor.telegramId),
@@ -153,6 +182,9 @@ async function migrateSellerShop({
           from: { shopName: oldShopFull?.name || '', deliveryGroupId: oldShopFull?.deliveryGroupId || '' },
           to:   { shopName: newShopName, shopCity: newShopCity, deliveryGroupId: newDeliveryGroupId },
           reason,
+          // True when the destination's current session was already being picked,
+          // so this order was parked in the NEXT session (collected next cycle).
+          routedToNextSession,
         },
       });
       await activeOrder.save({ session });

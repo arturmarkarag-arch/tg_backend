@@ -97,6 +97,15 @@ router.get('/barcode/:code', asyncHandler(async (req, res) => {
   res.json(item);
 }));
 
+// ── GET /:id — single ShopProduct by id ───────────────────────────────────────
+// Used by the shop-products deep-link (?product=<shopProductId>): the page
+// fetches the doc, pulls its barcode, and drops that into the search box.
+router.get('/:id', anyRole, asyncHandler(async (req, res) => {
+  const item = await ShopProduct.findById(req.params.id).lean();
+  if (!item) throw appError('product_not_found');
+  res.json(item);
+}));
+
 // ── POST / — create ───────────────────────────────────────────────────────────
 router.post('/', staffOnly, asyncHandler(async (req, res) => {
   const { barcode, name, price, quantityPerPackage, notes, source, filename, originalFilename } = req.body;

@@ -52,6 +52,44 @@ async function getOrCreateSessionId(groupId, dayOfWeek, schedule = {}) {
 }
 
 /**
+ * Adds whole days to a "YYYY-MM-DD" string using pure calendar math (Date.UTC as
+ * a calendar, no timezone semantics). Immune to DST.
+ */
+function addDaysToDateStr(dateStr, days) {
+  const [y, m, d] = String(dateStr).split('-').map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d + days));
+  const yy = dt.getUTCFullYear();
+  const mm = String(dt.getUTCMonth() + 1).padStart(2, '0');
+  const dd = String(dt.getUTCDate()).padStart(2, '0');
+  return `${yy}-${mm}-${dd}`;
+}
+
+/**
+ * Returns the stable id of the NEXT ordering session (one week after the current
+ * one) for a delivery group, creating its document if absent. Sessions repeat
+ * weekly, so next.openDate = current.openDate + 7 days; the same id is returned
+ * when that week naturally becomes current (getOrCreateSessionId computes the
+ * identical openDate). Used to park an order that arrives after the current
+ * session's picking already started, so it is collected next cycle instead of
+ * being stranded.
+ *
+ * @param {string} groupId
+ * @param {number} dayOfWeek   0=Sun … 6=Sat
+ * @param {object} [schedule]
+ * @returns {Promise<string>}  ObjectId as string
+ */
+async function getOrCreateNextSessionId(groupId, dayOfWeek, schedule = {}) {
+  const gid          = String(groupId);
+  const curOpenAt    = getOrderingWindowOpenAt(dayOfWeek, schedule);
+  const curOpenDate  = getOpenDateWarsaw(dayOfWeek, schedule);
+  const nextOpenDate = addDaysToDateStr(curOpenDate, 7);
+  const nextOpenAt   = new Date(curOpenAt.getTime() + 7 * 24 * 60 * 60 * 1000);
+
+  const doc = await upsertSession(gid, nextOpenDate, nextOpenAt);
+  return String(doc._id);
+}
+
+/**
  * One-shot startup migration: converts old-format orderingSessionId strings
  * ("<24-hex-groupId>:<ISO timestamp>") on ALL existing orders to stable
  * OrderingSession ObjectId strings.  Safe to re-run — find-or-create is idempotent.
@@ -102,4 +140,4 @@ async function migrateOrdersToSessionIds() {
   }
 }
 
-module.exports = { getOrCreateSessionId, migrateOrdersToSessionIds };
+module.exports = { getOrCreateSessionId, getOrCreateNextSessionId, migrateOrdersToSessionIds };

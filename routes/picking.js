@@ -4,11 +4,12 @@ const Product = require('../models/Product');
 const Order = require('../models/Order');
 const Block = require('../models/Block');
 const DeliveryGroup = require('../models/DeliveryGroup');
+const OrderingSession = require('../models/OrderingSession');
 const User = require('../models/User');
 const { requireTelegramRoles } = require('../middleware/telegramAuth');
 const { getProductTitle } = require('../services/archiveProduct');
 const { buildPickingTasksFromOrders } = require('../services/taskBuilder');
-const { isOrderingOpen, getWarsawNow, DAY_FULL_UK, getOrderingWindowCloseAt, getOrderingWindowOpenAt } = require('../utils/orderingSchedule');
+const { isOrderingOpen, getOrderingWindowCloseAt, getOrderingWindowOpenAt, getOpenDateWarsaw } = require('../utils/orderingSchedule');
 const { getOrCreateSessionId } = require('../utils/getOrCreateSession');
 const { normalizeDeliveryGroup } = require('../utils/deliveryGroupHelpers');
 const { getOrderingSchedule } = require('../utils/getOrderingSchedule');
@@ -47,6 +48,43 @@ const router = express.Router();
 // ---------------------------------------------------------------------------
 // Local helpers (route-layer only — not business logic)
 // ---------------------------------------------------------------------------
+
+// Distinct products ordered in a group's CURRENT ordering session (active orders).
+// Counts product "positions" (one per productId, matching task granularity), not
+// units. Read-only: resolves the session via getOpenDateWarsaw + a findOne (no
+// upsert) so a polling GET never mutates. Best-effort — returns 0 on any failure.
+async function countOrderedPositions(deliveryGroupId) {
+  try {
+    const group = await DeliveryGroup.findById(deliveryGroupId, 'dayOfWeek').lean();
+    if (!group) return 0;
+    const schedule = await getOrderingSchedule();
+    const openDate = getOpenDateWarsaw(group.dayOfWeek, schedule);
+    const session = await OrderingSession.findOne(
+      { groupId: String(deliveryGroupId), openDate },
+      '_id',
+    ).lean();
+    if (!session) return 0;
+    const orders = await Order.find(
+      {
+        'buyerSnapshot.deliveryGroupId': String(deliveryGroupId),
+        status: { $in: ['new', 'in_progress'] },
+        orderingSessionId: String(session._id),
+      },
+      'items.productId items.packed items.cancelled',
+    ).lean();
+    const products = new Set();
+    for (const o of orders) {
+      for (const it of o.items || []) {
+        if (it.packed || it.cancelled || !it.productId) continue;
+        products.add(String(it.productId));
+      }
+    }
+    return products.size;
+  } catch (err) {
+    console.warn('[picking/queue-stats] countOrderedPositions failed:', err?.message || err);
+    return 0;
+  }
+}
 
 async function buildTaskResponse(task, { wrappedAround = false, isSecondChance = false } = {}) {
   if (!task) return null;
@@ -132,15 +170,12 @@ router.post('/start-session', requireTelegramRoles(['warehouse', 'admin']), asyn
         await bustGroupCaches(deliveryGroupId);
         return res.json({ windowOpen: true, message, windowCloseAt });
       }
-      // Picking is only allowed on the actual delivery day.
-      const { dayOfWeek: nowDOW } = getWarsawNow();
-      if (nowDOW !== group.dayOfWeek) {
-        return res.json({
-          wrongDay: true,
-          deliveryDayOfWeek: group.dayOfWeek,
-          deliveryDayName: DAY_FULL_UK[group.dayOfWeek],
-        });
-      }
+      // Window is closed → picking is allowed for the entire dead-time between
+      // this session's close and the next ordering window opening (a full week),
+      // not only on the delivery day. There is no separate day-gate: session
+      // resolution (getOpenDateWarsaw) already maps to the SAME current session
+      // throughout that interval, and isOrderingOpen flips back to true exactly
+      // when the next window opens — at which point picking blocks via windowOpen.
     }
 
     // 2. Idempotent: if tasks already exist, return their count.
@@ -500,7 +535,12 @@ router.get('/queue-stats', requireTelegramRoles(['warehouse', 'admin']), async (
     ]);
 
     const activeCount = pendingCount + lockedByMeCount + lockedByOtherCount;
-    res.json({ pendingCount, lockedByMeCount, lockedByOtherCount, activeCount });
+    // orderedPositions = distinct products ordered in the CURRENT session (from Orders),
+    // not built tasks. This is what the pre-start "Сумарно замовлено" banner shows: it
+    // is meaningful before picking starts (tasks aren't built yet) and stays stable as
+    // workers pack (pendingCount shrinks). Best-effort: never break queue polling.
+    const orderedPositions = await countOrderedPositions(deliveryGroupId);
+    res.json({ pendingCount, lockedByMeCount, lockedByOtherCount, activeCount, orderedPositions });
   } catch (err) {
     if (err && err.name === 'AppError') return next(err);
     console.error('[picking/queue-stats]', err);
