@@ -201,6 +201,86 @@ router.get('/drafts', staffOnly, asyncHandler(async (req, res) => {
   res.json(products);
 }));
 
+// GET /api/v1/products/:id/position — absolute index of a product in the
+// unfiltered seller catalogue (used for deep-links). Matches the GET / filter
+// (not archived + in a block + older than NEW_DAYS or unshelved) and sort
+// (orderNumber asc, createdAt desc, _id asc) exactly, so the returned
+// `position` lines up with the `offset` clients use to page in.
+//
+// Returns:
+//   200 { position, total }     — found in the catalogue
+//   404 { error: 'in_new_products' } — product is "new" (<14 days), lives on the New Products tab
+//   404 { error: 'not_in_catalog' }  — archived / not in any block / otherwise hidden
+//   400 { error: 'invalid_id' }      — malformed id
+router.get('/:id/position', asyncHandler(async (req, res) => {
+  const { id } = req.params;
+  if (!mongoose.Types.ObjectId.isValid(id)) {
+    return res.status(400).json({ error: 'invalid_id' });
+  }
+  const isV1 = String(req.baseUrl || '').includes('/api/v1') || String(req.originalUrl || '').startsWith('/api/v1');
+  if (!isV1) {
+    return res.status(404).json({ error: 'v1_only' });
+  }
+  const target = await Product.findById(id).lean();
+  if (!target) return res.status(404).json({ error: 'not_in_catalog' });
+
+  const NEW_DAYS_CUTOFF = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000);
+  const catalogMatch = {
+    status: { $ne: 'archived' },
+    $or: [
+      { shelvedAt: null },
+      { shelvedAt: { $exists: false } },
+      { shelvedAt: { $lt: NEW_DAYS_CUTOFF } },
+    ],
+  };
+  const basePipeline = [
+    { $match: catalogMatch },
+    {
+      $lookup: {
+        from: 'blocks',
+        localField: '_id',
+        foreignField: 'productIds',
+        as: '_block',
+        pipeline: [{ $project: { _id: 1 } }],
+      },
+    },
+    { $match: { '_block.0': { $exists: true } } },
+    { $project: { _block: 0 } },
+  ];
+  const targetObjectId = new mongoose.Types.ObjectId(id);
+
+  // Is the target itself in the catalogue?
+  const [selfRes] = await Product.aggregate([
+    ...basePipeline,
+    { $match: { _id: targetObjectId } },
+    { $count: 'count' },
+  ]);
+  if (!selfRes?.count) {
+    const isNew = target.shelvedAt && new Date(target.shelvedAt) >= NEW_DAYS_CUTOFF
+      && target.status !== 'archived';
+    return res.status(404).json({ error: isNew ? 'in_new_products' : 'not_in_catalog' });
+  }
+
+  // Count catalogue products that sort strictly before the target. Mirrors the
+  // GET / sort exactly so `position` == `offset` for paging.
+  const targetOrderNumber = target.orderNumber ?? 0;
+  const beforeMatch = {
+    $or: [
+      { orderNumber: { $lt: targetOrderNumber } },
+      { orderNumber: targetOrderNumber, createdAt: { $gt: target.createdAt } },
+      { orderNumber: targetOrderNumber, createdAt: target.createdAt, _id: { $lt: targetObjectId } },
+    ],
+  };
+  const [beforeRes, totalRes] = await Promise.all([
+    Product.aggregate([...basePipeline, { $match: beforeMatch }, { $count: 'count' }]),
+    Product.aggregate([...basePipeline, { $count: 'count' }]),
+  ]);
+  res.json({
+    position: beforeRes[0]?.count ?? 0,
+    total: totalRes[0]?.count ?? 0,
+  });
+}));
+
 router.get('/', async (req, res) => {
   const limit = Math.min(50, Math.max(1, Number(req.query.limit) || 24));
   const offset = Math.max(0, Number(req.query.offset) || 0);
@@ -275,7 +355,9 @@ router.get('/', async (req, res) => {
 
     const products = await Product.aggregate([
       ...basePipeline,
-      { $sort: { orderNumber: 1, createdAt: -1 } },
+      // _id as final tiebreak keeps the order deterministic so the
+      // /:id/position endpoint can compute an offset that matches this list.
+      { $sort: { orderNumber: 1, createdAt: -1, _id: 1 } },
       { $skip: offset },
       { $limit: limit },
     ]);

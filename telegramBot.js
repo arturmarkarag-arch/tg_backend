@@ -421,6 +421,27 @@ async function initBot(token) {
           return;
         }
 
+        // Deep-link to a specific product. Sent by the mini-app's "Скопіювати
+        // лінк" button. We pass the productId through the WebApp URL as a
+        // query param — the mini-app reads ?product= and resolves position
+        // via GET /api/v1/products/:id/position. Open for any chat: auth
+        // happens inside the mini-app.
+        const startProductMatch = startPayload.match(/^product-([a-fA-F0-9]{24})$/);
+        if (startProductMatch) {
+          const productId = startProductMatch[1];
+          if (WEB_APP_URL.startsWith('https://')) {
+            const targetUrl = `${WEB_APP_URL.replace(/\/$/, '')}?page=orders&product=${productId}`;
+            await bot.sendMessage(chatId, 'Відкрийте товар у Mini App:', {
+              reply_markup: {
+                inline_keyboard: [[{ text: 'Відкрити товар', web_app: { url: targetUrl } }]],
+              },
+            });
+          } else {
+            await bot.sendMessage(chatId, `Відкрийте: ${WEB_APP_URL}?page=orders&product=${productId}`);
+          }
+          return;
+        }
+
         if (!user) {
           const message = 'Вас не знайдено в системі. Натисніть кнопку, щоб зареєструватися через Mini App.';
           if (WEB_APP_URL.startsWith('https://')) {
