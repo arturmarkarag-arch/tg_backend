@@ -13,6 +13,7 @@ const {
   getOrderingWindowOpenAt,
 } = require('../utils/orderingSchedule');
 const { getOrCreateSessionId } = require('../utils/getOrCreateSession');
+const { pushSessionEvent } = require('../utils/sessionStatus');
 const { normalizeDeliveryGroup } = require('../utils/deliveryGroupHelpers');
 
 const { getOrderingSchedule } = require('../utils/getOrderingSchedule');
@@ -402,6 +403,12 @@ router.post('/:id/close-ordering-session', telegramAuth, requireTelegramRole('ad
   const group = await DeliveryGroup.findById(req.params.id).lean();
   if (!group) throw appError('group_not_found');
 
+  const admin = req.telegramUser || {};
+  const adminActor = {
+    by: String(admin.telegramId || ''),
+    byName: [admin.firstName, admin.lastName].filter(Boolean).join(' '),
+  };
+
   const schedule = await getOrderingSchedule();
   const status = isOrderingOpen(group.dayOfWeek, schedule);
   const currentSessionId = await getOrCreateSessionId(String(group._id), group.dayOfWeek, schedule);
@@ -444,6 +451,23 @@ router.post('/:id/close-ordering-session', telegramAuth, requireTelegramRole('ad
     });
   } finally {
     session.endSession();
+  }
+
+  // Log "Закінчилась" on the session timeline — but only when the window for
+  // THIS session is actually closing. If the admin clicks "close" while the
+  // window is still open (intent = "just clean up stale orders from a previous
+  // cycle"), we'd otherwise stamp the current cycle's session with a misleading
+  // window-closed event even though its window remains open.
+  if (!status.isOpen) {
+    try {
+      await pushSessionEvent(currentSessionId, {
+        type: 'window_closed',
+        ...adminActor,
+        meta: { expiredCount },
+      });
+    } catch (e) {
+      console.warn('[deliveryGroups/close-ordering-session] event push failed:', e.message);
+    }
   }
 
   res.json({
@@ -527,6 +551,12 @@ router.patch('/:id', telegramAuth, requireTelegramRole('admin'), asyncHandler(as
   const group = await DeliveryGroup.findById(req.params.id);
   if (!group) throw appError('group_not_found');
 
+  const admin = req.telegramUser || {};
+  const adminActor = {
+    by: String(admin.telegramId || ''),
+    byName: [admin.firstName, admin.lastName].filter(Boolean).join(' '),
+  };
+
   const { name, dayOfWeek } = req.body;
 
   // Guard: dayOfWeek is the key the ordering/picking SESSION identity is derived
@@ -536,6 +566,9 @@ router.patch('/:id', telegramAuth, requireTelegramRole('admin'), asyncHandler(as
   // not picked. So we refuse the change while a cycle is in progress. Changing it
   // once the cycle is over naturally applies to the NEXT session.
   const dayIsChanging = dayOfWeek !== undefined && Number(dayOfWeek) !== Number(group.dayOfWeek);
+  let oldSessionId = null;
+  let fromDay = null;
+  let toDay = null;
   if (dayIsChanging) {
     const schedule = await getOrderingSchedule();
     const groupIdStr = String(group._id);
@@ -560,6 +593,15 @@ router.patch('/:id', telegramAuth, requireTelegramRole('admin'), asyncHandler(as
         : 'триває збирання';
       throw appError('group_day_change_session_active', { reason });
     }
+
+    // Resolve the soon-to-be-orphaned session BEFORE we mutate dayOfWeek — the
+    // session identity is derived from it, so reading after the save would point
+    // at the new day's session and "Перенесена" would land on the wrong doc.
+    // The guard above already materialised this session via getOrCreateSessionId,
+    // so reusing the id is free (no extra round-trip).
+    oldSessionId = currentSessionId;
+    fromDay = Number(group.dayOfWeek);
+    toDay = Number(dayOfWeek);
   }
 
   if (name !== undefined) group.name = name;
@@ -568,6 +610,18 @@ router.patch('/:id', telegramAuth, requireTelegramRole('admin'), asyncHandler(as
   await group.save();
   await cache.invalidate(cache.KEYS.DELIVERY_GROUPS);
   await invalidateDeliveryGroup(group._id);
+
+  if (dayIsChanging && oldSessionId) {
+    try {
+      await pushSessionEvent(oldSessionId, {
+        type: 'rescheduled',
+        ...adminActor,
+        meta: { fromDay, toDay },
+      });
+    } catch (e) {
+      console.warn('[deliveryGroups/PATCH] rescheduled event push failed:', e.message);
+    }
+  }
   res.json(group);
 }));
 

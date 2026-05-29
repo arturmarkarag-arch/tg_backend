@@ -15,8 +15,29 @@ const { telegramAuth, requireTelegramRoles } = require('../middleware/telegramAu
 const { getIO } = require('../socket');
 const { isOrderingOpen, getOrderingWindowOpenAt } = require('../utils/orderingSchedule');
 const { getOrCreateSessionId } = require('../utils/getOrCreateSession');
+const OrderingSession = require('../models/OrderingSession');
+const { pushSessionEvent } = require('../utils/sessionStatus');
 
 const { getOrderingSchedule } = require('../utils/getOrderingSchedule');
+
+// Fire-and-forget: log "Оновлена" on the session timeline only when picking has
+// already started. Used by every Order CREATE path (cart submit, restore-stale,
+// admin set-item-qty) so the timeline is populated regardless of entry point.
+// A failed event push must NEVER abort the order flow — best-effort by design.
+function pushOrderAddedEventIfStarted(orderingSessionId, order, actor) {
+  if (!orderingSessionId || !order?._id) return;
+  OrderingSession.findById(orderingSessionId, 'pickingStatus').lean()
+    .then((sess) => {
+      if (!sess || sess.pickingStatus === 'pending') return null;
+      return pushSessionEvent(orderingSessionId, {
+        type: 'order_added',
+        by:     String(actor?.by || ''),
+        byName: String(actor?.byName || ''),
+        meta: { orderId: String(order._id), orderNumber: order.orderNumber },
+      });
+    })
+    .catch((e) => console.warn('[orders] order_added event push failed:', e.message));
+}
 const { appError, asyncHandler } = require('../utils/errors');
 const { normalizeDeliveryGroup } = require('../utils/deliveryGroupHelpers');
 const cache = require('../utils/cache');
@@ -861,6 +882,12 @@ async function placeOrderImpl(req, res) {
   // stop here so we don't fall through to the socket-emit / response code.
   if (placement && placement.sentResponse) return;
 
+  // "Оновлена" on the session timeline (only if picking already started).
+  pushOrderAddedEventIfStarted(currentSessionId, order, {
+    by: String(buyer.telegramId || ''),
+    byName: [buyer.firstName, buyer.lastName].filter(Boolean).join(' '),
+  });
+
   // Save order position count and clear the user's cart (order is placed — cart is done)
   // NOTE: cart-clear is now performed INSIDE the transaction above (atomic with
   // order.save). Тут лише пост-дії: емітимо сокет і повертаємо клієнту явний
@@ -1193,11 +1220,30 @@ router.post('/:id/stale/restore-to-cart', telegramAuth, adminOnly, asyncHandler(
         { session: mongoSession },
       );
 
-      result = { orderId: String(staleOrder._id), buyerTelegramId, deliveryGroupId, restoredPositions };
+      result = {
+        orderId: String(staleOrder._id),
+        buyerTelegramId,
+        deliveryGroupId,
+        restoredPositions,
+        // Carry the NEW order + session id out of the transaction so the
+        // post-commit event push references the destination, not the expired
+        // stale doc. Restoring during in-progress picking is exactly the
+        // scenario "Оновлена" exists to surface.
+        restoredOrderId: String(newOrder._id),
+        restoredOrderNumber: newOrder.orderNumber || null,
+        currentSessionId,
+        actorSnapshot: actor,
+      };
     });
   } finally {
     mongoSession.endSession();
   }
+
+  pushOrderAddedEventIfStarted(
+    result.currentSessionId,
+    { _id: result.restoredOrderId, orderNumber: result.restoredOrderNumber },
+    { by: result.actorSnapshot?.by, byName: result.actorSnapshot?.byName },
+  );
 
   try {
     const io = getIO();

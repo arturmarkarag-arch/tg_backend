@@ -172,12 +172,17 @@ async function buildPickingTasksImpl(targetDeliveryGroupId = null, options = {})
     }
 
     if (toAppend.size) {
+      // Stamp orderingSessionId on the task we append to (only when this build is
+      // session-scoped) so detection stays membership-based. Never overwrite with
+      // null from an unscoped build.
       await Promise.all(
         Array.from(toAppend.values()).map(({ taskId, newItems }) =>
           PickingTask.updateOne(
             { _id: taskId },
             // addToSet by orderId to prevent duplicates in multi-process environments
-            { $addToSet: { items: { $each: newItems } } }
+            orderingSessionId
+              ? { $addToSet: { items: { $each: newItems } }, $set: { orderingSessionId } }
+              : { $addToSet: { items: { $each: newItems } } }
           )
         )
       );
@@ -196,6 +201,7 @@ async function buildPickingTasksImpl(targetDeliveryGroupId = null, options = {})
       tasks.push({
         productId: group.productId,
         deliveryGroupId: group.deliveryGroupId,
+        orderingSessionId,
         blockId: position.blockId,
         positionIndex: position.index + 1,
         items: group.items,

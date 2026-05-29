@@ -15,22 +15,8 @@ const { normalizeDeliveryGroup } = require('../utils/deliveryGroupHelpers');
 const { getOrderingSchedule } = require('../utils/getOrderingSchedule');
 const { appError } = require('../utils/errors');
 const { withLock } = require('../utils/lock');
-const cache = require('../utils/cache');
-const { invalidateDeliveryGroup } = require('../utils/modelCache');
-
-// Every write to a DeliveryGroup (here: pickingConfirmedAt) must bust BOTH the
-// per-id model cache (dg:<id>, read by orders.js/getDeliveryGroup) AND the
-// full-list cache (KEYS.DELIVERY_GROUPS, read by dashboards). Without this the
-// picking dashboard / ordering window serve a stale confirmed-state for up to
-// 10 min across workers. Best-effort: a cache miss must never break picking.
-async function bustGroupCaches(id) {
-  try {
-    await cache.invalidate(cache.KEYS.DELIVERY_GROUPS);
-    await invalidateDeliveryGroup(id);
-  } catch (e) {
-    console.warn('[picking] delivery-group cache bust failed:', e.message);
-  }
-}
+const { transitionPickingStatus, maybeCompleteSession } = require('../utils/sessionStatus');
+const { getSessionVocab } = require('../utils/sessionVocab');
 
 const {
   findAndLockNext,
@@ -145,9 +131,13 @@ router.get('/schedule', requireTelegramRoles(['warehouse', 'admin']), async (req
 
 // ---------------------------------------------------------------------------
 // POST /api/picking/start-session
-// Body: { deliveryGroupId?: string }
-// Checks ordering window, then atomically builds picking tasks for the group.
-// Idempotent: if tasks already exist for this group, returns count without rebuilding.
+// Body: { deliveryGroupId, confirm? }
+//
+// Detection is SESSION-SCOPED: every decision is derived from the
+// OrderingSession document (pickingStatus + events) plus tasks filtered by
+// orderingSessionId. There is no `updatedAt >= sessionOpenAt` heuristic and no
+// DeliveryGroup.pickingConfirmedAt — both were the source of the cross-session
+// leak that stranded late orders when the admin changed the delivery day.
 // ---------------------------------------------------------------------------
 router.post('/start-session', requireTelegramRoles(['warehouse', 'admin']), async (req, res, next) => {
   try {
@@ -157,182 +147,179 @@ router.post('/start-session', requireTelegramRoles(['warehouse', 'admin']), asyn
       return next(appError('picking_delivery_group_required'));
     }
 
-    // 1. Check ordering window and delivery day.
+    const actor = {
+      by: String(user.telegramId || ''),
+      byName: [user.firstName, user.lastName].filter(Boolean).join(' '),
+    };
+
+    // 1. Ordering window — picking blocked while sellers can still place orders.
     const group = normalizeDeliveryGroup(await DeliveryGroup.findById(deliveryGroupId, 'dayOfWeek name').lean());
-    if (group) {
-      // getOrderingSchedule() throws if the key is absent from DB — error propagates to catch below.
-      const schedule = await getOrderingSchedule();
-      const { isOpen, message } = isOrderingOpen(group.dayOfWeek, schedule);
-      if (isOpen) {
-        const windowCloseAt = getOrderingWindowCloseAt(group.dayOfWeek, schedule).toISOString();
-        // Reset confirmed flag so next picking session starts fresh
-        await DeliveryGroup.updateOne({ _id: deliveryGroupId }, { $set: { pickingConfirmedAt: null } });
-        await bustGroupCaches(deliveryGroupId);
-        return res.json({ windowOpen: true, message, windowCloseAt });
-      }
-      // Window is closed → picking is allowed for the entire dead-time between
-      // this session's close and the next ordering window opening (a full week),
-      // not only on the delivery day. There is no separate day-gate: session
-      // resolution (getOpenDateWarsaw) already maps to the SAME current session
-      // throughout that interval, and isOrderingOpen flips back to true exactly
-      // when the next window opens — at which point picking blocks via windowOpen.
-    }
+    if (!group) throw appError('group_not_found');
 
-    // 2. Idempotent: if tasks already exist, return their count.
+    const schedule = await getOrderingSchedule();
+    const { isOpen, message } = isOrderingOpen(group.dayOfWeek, schedule);
+    if (isOpen) {
+      const windowCloseAt = getOrderingWindowCloseAt(group.dayOfWeek, schedule).toISOString();
+      return res.json({ windowOpen: true, message, windowCloseAt });
+    }
+    // Window closed → picking allowed for the whole dead-time until the next
+    // window opens; session identity (groupId + openDate) stays the same.
+
+    // 2. Resolve session, free this worker's stale locks, archive orphans,
+    //    drop tasks whose orders no longer belong to the current session.
     await releaseWorkerAndStaleLocks(user.telegramId, deliveryGroupId);
+    const currentSessionId = await getOrCreateSessionId(String(deliveryGroupId), group.dayOfWeek, schedule);
+    await archiveOrphanedOutOfStockProducts(deliveryGroupId);
+    await reconcileActiveTasksForSession(deliveryGroupId, currentSessionId);
 
-    const groupForSession = normalizeDeliveryGroup(await DeliveryGroup.findById(deliveryGroupId, 'dayOfWeek name').lean());
-    let currentSessionId = null;
-    let sessionOpenAt = null;
-    if (groupForSession) {
-      const schedule = await getOrderingSchedule();
-      currentSessionId = await getOrCreateSessionId(String(deliveryGroupId), groupForSession.dayOfWeek, schedule);
-      sessionOpenAt = getOrderingWindowOpenAt(groupForSession.dayOfWeek, schedule);
-      // Fix any products left un-archived from a previous crashed out-of-stock flow
-      await archiveOrphanedOutOfStockProducts(deliveryGroupId);
-      await reconcileActiveTasksForSession(deliveryGroupId, currentSessionId);
-    }
-
-    const activeFilter = {
-      status: { $in: ['pending', 'locked'] },
-      deliveryGroupId: String(deliveryGroupId),
-    };
-    const pendingFilter = {
-      status: 'pending',
-      deliveryGroupId: String(deliveryGroupId),
-    };
-
-    const existingActiveCount = await PickingTask.countDocuments(activeFilter);
-    const availableCount = await PickingTask.countDocuments(pendingFilter);
-    // Count only completed tasks from the CURRENT ordering session window.
-    // Without the date filter, tasks from previous weeks would make the system
-    // think this week's session is already confirmed, blocking new task creation.
-    const completedCount = existingActiveCount === 0
-      ? await PickingTask.countDocuments({
-          status: 'completed',
-          deliveryGroupId: String(deliveryGroupId),
-          ...(sessionOpenAt ? { updatedAt: { $gte: sessionOpenAt } } : {}),
-        })
-      : 0;
-
-    if (existingActiveCount > 0 || completedCount > 0) {
-      const inProgressCount = existingActiveCount > 0
-        ? await PickingTask.countDocuments({
-            status: { $in: ['locked', 'completed'] },
-            deliveryGroupId: String(deliveryGroupId),
-          })
-        : 0;
-      if (confirm) {
-        await DeliveryGroup.updateOne({ _id: deliveryGroupId }, { $set: { pickingConfirmedAt: new Date() } });
-        await bustGroupCaches(deliveryGroupId);
-      }
-      // When all tasks are completed (none pending/locked), the session is done — treat as confirmed
-      // so the frontend shows 'ready' state instead of showing "Розпочати збирання" again.
-      const confirmedGroup = await DeliveryGroup.findById(deliveryGroupId, 'pickingConfirmedAt').lean();
-      const sessionConfirmed = !!(confirmedGroup?.pickingConfirmedAt) || completedCount > 0;
-      return res.json({ alreadyStarted: true, taskCount: availableCount, sessionActive: inProgressCount > 0, sessionConfirmed });
-    }
-
-    // Without explicit confirmation, don't build tasks — user must press the button.
-    // Exception: if pickingConfirmedAt is already set but no tasks exist, the session
-    // was previously confirmed and found empty (noOrders) — restore that state on reload.
-    if (!confirm) {
-      const confirmedGroupCheck = await DeliveryGroup.findById(deliveryGroupId, 'pickingConfirmedAt').lean();
-      if (confirmedGroupCheck?.pickingConfirmedAt) {
-        return res.json({ noOrders: true });
-      }
-      return res.json({ preStart: true });
-    }
-
-    // 3. Detect stale orders from previous sessions.
-    // These orders should NOT block warehouse flow; admins resolve them separately.
-    const group2 = groupForSession;
-    if (group2) {
-      if (!currentSessionId) {
-        const schedule2 = await getOrderingSchedule();
-        currentSessionId = await getOrCreateSessionId(String(deliveryGroupId), group2.dayOfWeek, schedule2);
-      }
-
-      // BLOCK start while there are UNRESOLVED conflicts: a shop in THIS group's
-      // CURRENT session holding active orders from 2+ distinct buyers (two sellers'
-      // orders collided on one shop). Picking must not begin until staff resolve
-      // them (move/unassign a seller) via the conflict panel. Same definition as
-      // GET /v1/orders/conflicts, scoped to this group+session. The client already
-      // renders this response (usePickingSession → 'unresolved_conflicts').
-      const sessionActiveOrders = await Order.find(
-        {
-          'buyerSnapshot.deliveryGroupId': String(deliveryGroupId),
-          status: { $in: ['new', 'in_progress'] },
-          orderingSessionId: currentSessionId,
-        },
-        '_id shopId buyerSnapshot buyerTelegramId orderNumber',
-      ).lean();
-
-      const ordersByShop = new Map();
-      for (const o of sessionActiveOrders) {
-        const sid = String(o.shopId || o.buyerSnapshot?.shopId || '');
-        if (!sid) continue;
-        if (!ordersByShop.has(sid)) ordersByShop.set(sid, []);
-        ordersByShop.get(sid).push(o);
-      }
-      const conflictShopIds = [...ordersByShop.entries()]
-        .filter(([, orders]) => new Set(orders.map((o) => String(o.buyerTelegramId))).size > 1)
-        .map(([sid]) => sid);
-
-      if (conflictShopIds.length > 0) {
-        const conflicts = [];
-        for (const sid of conflictShopIds) {
-          for (const o of ordersByShop.get(sid)) {
-            conflicts.push({
-              orderId: String(o._id),
-              orderNumber: o.orderNumber,
-              shopName: o.buyerSnapshot?.shopName || '—',
-              shopCity: o.buyerSnapshot?.shopCity || '',
-            });
-          }
-        }
-        // Do NOT build tasks or mark confirmed — staff must resolve first.
-        return res.json({ unresolved: true, conflicts });
-      }
-
-      const staleOrders = await Order.find(
-        {
-          'buyerSnapshot.deliveryGroupId': String(deliveryGroupId),
-          status: { $in: ['new', 'in_progress'] },
-          orderingSessionId: { $ne: currentSessionId },
-        },
-        'buyerSnapshot buyerTelegramId orderingSessionId',
-      ).lean();
-
-      // 4. Build picking tasks only from the CURRENT session.
+    // 3. Late-order absorption. If picking already left `pending` and new
+    //    same-session orders arrived, materialise them as tasks and reopen the
+    //    session if needed. This is the structural fix for the "8 stranded
+    //    items" bug — detection is membership-based, not time-based.
+    let session = await OrderingSession.findById(currentSessionId).lean();
+    if (session && session.pickingStatus !== 'pending') {
       await buildPickingTasksFromOrders(deliveryGroupId, { orderingSessionId: currentSessionId });
-
-      // 5. Return stale warnings for admin visibility without blocking start.
-      const staleWarnings = staleOrders.map((o) => ({
-        orderId: String(o._id),
-        shopName: o.buyerSnapshot?.shopName || '—',
-        shopCity: o.buyerSnapshot?.shopCity || '',
-        buyerTelegramId: String(o.buyerTelegramId),
-      }));
-
-      const taskCount = await PickingTask.countDocuments(pendingFilter);
-      // Clear completed tasks from any previous session so the shift-board counter resets.
-      await PickingTask.deleteMany({ deliveryGroupId: String(deliveryGroupId), status: 'completed' });
-      if (taskCount === 0) {
-        await DeliveryGroup.updateOne({ _id: deliveryGroupId }, { $set: { pickingConfirmedAt: new Date() } });
-        await bustGroupCaches(deliveryGroupId);
-        return res.json({ noOrders: true, staleWarnings });
+      const newActiveCount = await PickingTask.countDocuments({
+        orderingSessionId: currentSessionId,
+        status: { $in: ['pending', 'locked'] },
+      });
+      if (newActiveCount > 0 && session.pickingStatus === 'completed') {
+        // allowReopen flips completed → in_progress so the UI shows work pending.
+        const reopened = await transitionPickingStatus(
+          currentSessionId, 'in_progress',
+          { actor, meta: { reason: 'late_order_absorbed' }, allowReopen: true },
+        );
+        if (reopened) session = reopened.toObject ? reopened.toObject() : reopened;
       }
-      await DeliveryGroup.updateOne({ _id: deliveryGroupId }, { $set: { pickingConfirmedAt: new Date() } });
-      await bustGroupCaches(deliveryGroupId);
-      return res.json({ started: true, taskCount, staleWarnings });
     }
 
-    // Reaching here means deliveryGroupId did not resolve to a real DeliveryGroup.
-    // In the clean architecture every picking session is scoped to a real group +
-    // ordering session, so this is an error — we never silently build tasks from
-    // ALL active orders without session scoping (the removed legacy fallback).
-    throw appError('group_not_found');
+    const sessionActiveCount = await PickingTask.countDocuments({
+      orderingSessionId: currentSessionId,
+      status: { $in: ['pending', 'locked'] },
+    });
+    const sessionPendingCount = await PickingTask.countDocuments({
+      orderingSessionId: currentSessionId,
+      status: 'pending',
+    });
+
+    const recentEvents = (session?.events || []).slice(-10);
+    // vocab travels with the events so the UI never hardcodes status/event
+    // labels — backend stays the single source of truth for the enum + labels.
+    // Payload is ~500 bytes and start-session is not a hot path.
+    const baseEnvelope = {
+      pickingStatus: session?.pickingStatus || 'pending',
+      events: recentEvents,
+      vocab: getSessionVocab(),
+    };
+
+    // 4. Branch on session status. Frontend keeps its existing envelope keys
+    //    (windowOpen / preStart / alreadyStarted / started / noOrders / unresolved)
+    //    so usePickingSession does not have to change.
+    if (session && session.pickingStatus !== 'pending') {
+      // Already confirmed at some point — never show pre_start again.
+      return res.json({
+        alreadyStarted: true,
+        taskCount: sessionPendingCount,
+        sessionActive: session.pickingStatus === 'in_progress',
+        sessionConfirmed: true,
+        ...baseEnvelope,
+      });
+    }
+
+    if (!confirm) {
+      // Pending session, button not pressed yet.
+      return res.json({ preStart: true, ...baseEnvelope });
+    }
+
+    // 5. Confirm flow — block on unresolved cross-seller conflicts.
+    const sessionActiveOrders = await Order.find(
+      {
+        'buyerSnapshot.deliveryGroupId': String(deliveryGroupId),
+        status: { $in: ['new', 'in_progress'] },
+        orderingSessionId: currentSessionId,
+      },
+      '_id shopId buyerSnapshot buyerTelegramId orderNumber',
+    ).lean();
+
+    const ordersByShop = new Map();
+    for (const o of sessionActiveOrders) {
+      const sid = String(o.shopId || o.buyerSnapshot?.shopId || '');
+      if (!sid) continue;
+      if (!ordersByShop.has(sid)) ordersByShop.set(sid, []);
+      ordersByShop.get(sid).push(o);
+    }
+    const conflictShopIds = [...ordersByShop.entries()]
+      .filter(([, orders]) => new Set(orders.map((o) => String(o.buyerTelegramId))).size > 1)
+      .map(([sid]) => sid);
+
+    if (conflictShopIds.length > 0) {
+      const conflicts = [];
+      for (const sid of conflictShopIds) {
+        for (const o of ordersByShop.get(sid)) {
+          conflicts.push({
+            orderId: String(o._id),
+            orderNumber: o.orderNumber,
+            shopName: o.buyerSnapshot?.shopName || '—',
+            shopCity: o.buyerSnapshot?.shopCity || '',
+          });
+        }
+      }
+      return res.json({ unresolved: true, conflicts, ...baseEnvelope });
+    }
+
+    // 6. Stale-order warnings (informational; don't block start).
+    const staleOrders = await Order.find(
+      {
+        'buyerSnapshot.deliveryGroupId': String(deliveryGroupId),
+        status: { $in: ['new', 'in_progress'] },
+        orderingSessionId: { $ne: currentSessionId },
+      },
+      'buyerSnapshot buyerTelegramId orderingSessionId',
+    ).lean();
+    const staleWarnings = staleOrders.map((o) => ({
+      orderId: String(o._id),
+      shopName: o.buyerSnapshot?.shopName || '—',
+      shopCity: o.buyerSnapshot?.shopCity || '',
+      buyerTelegramId: String(o.buyerTelegramId),
+    }));
+
+    // 7. Build tasks, then move pending → confirmed.
+    await buildPickingTasksFromOrders(deliveryGroupId, { orderingSessionId: currentSessionId });
+    const builtCount = await PickingTask.countDocuments({
+      orderingSessionId: currentSessionId,
+      status: 'pending',
+    });
+
+    const confirmed = await transitionPickingStatus(currentSessionId, 'confirmed', {
+      actor, meta: { taskCount: builtCount },
+    });
+    const confirmedDoc = confirmed ? (confirmed.toObject ? confirmed.toObject() : confirmed) : null;
+
+    if (builtCount === 0) {
+      // Empty session — close it out immediately so reloads see noOrders.
+      const completed = await maybeCompleteSession(currentSessionId, {
+        actor, meta: { reason: 'empty' },
+      });
+      const finalDoc = completed
+        ? (completed.toObject ? completed.toObject() : completed)
+        : confirmedDoc;
+      return res.json({
+        noOrders: true,
+        staleWarnings,
+        pickingStatus: finalDoc?.pickingStatus || 'completed',
+        events: (finalDoc?.events || []).slice(-10),
+        vocab: getSessionVocab(),
+      });
+    }
+
+    return res.json({
+      started: true,
+      taskCount: builtCount,
+      staleWarnings,
+      pickingStatus: confirmedDoc?.pickingStatus || 'confirmed',
+      events: (confirmedDoc?.events || []).slice(-10),
+      vocab: getSessionVocab(),
+    });
   } catch (err) {
     if (err && err.name === 'AppError') return next(err);
     console.error('[picking/start-session]', err);
@@ -758,9 +745,21 @@ router.get('/shift-board', requireTelegramRoles(['warehouse', 'admin']), async (
     const dgId = String(deliveryGroupId);
 
     // Group name + session start time
-    const group = await DeliveryGroup.findById(dgId, 'name pickingConfirmedAt').lean();
+    const group = await DeliveryGroup.findById(dgId, 'name dayOfWeek').lean();
     const groupName = group?.name || '';
-    const sessionStart = group?.pickingConfirmedAt || null;
+
+    // Session start = when this picking session was confirmed. Lives on the
+    // OrderingSession (not the group), so changing the delivery day cannot
+    // stamp the start time of a future cycle onto a finished one.
+    let sessionStart = null;
+    let sessionId = null;
+    if (group) {
+      const schedule = await getOrderingSchedule();
+      sessionId = await getOrCreateSessionId(dgId, group.dayOfWeek, schedule);
+      const sessionDoc = await OrderingSession.findById(sessionId, 'pickingConfirmedAt').lean();
+      sessionStart = sessionDoc?.pickingConfirmedAt || null;
+    }
+    const sessionScope = sessionId ? { orderingSessionId: sessionId } : { deliveryGroupId: dgId };
 
     // Active workers (currently have a locked task)
     const lockedTasks = await PickingTask.find(
@@ -769,9 +768,12 @@ router.get('/shift-board', requireTelegramRoles(['warehouse', 'admin']), async (
     ).lean();
     const activeWorkerIds = new Set(lockedTasks.map((t) => String(t.lockedBy)));
 
-    // Task counts per worker from completed tasks (updatedAt = completion time)
+    // Completed-task counts scoped to the CURRENT session so finished cycles
+    // do not keep inflating the board. Previously this was kept clean by a
+    // deleteMany on start-session; with session stamping the filter does it
+    // structurally and history survives.
     const completedTasks = await PickingTask.find(
-      { deliveryGroupId: dgId, status: 'completed' },
+      { ...sessionScope, status: 'completed' },
       'updatedAt',
     ).lean();
     const totalCompleted = completedTasks.length;

@@ -5,8 +5,12 @@ const { telegramAuth, requireTelegramRole } = require('../middleware/telegramAut
 const AppSetting = require('../models/AppSetting');
 const City = require('../models/City');
 const Shop = require('../models/Shop');
+const DeliveryGroup   = require('../models/DeliveryGroup');
+const OrderingSession = require('../models/OrderingSession');
 const { listOpenAIModels, initOpenAI } = require('../openaiClient');
-const { invalidateOrderingScheduleCache } = require('../utils/getOrderingSchedule');
+const { invalidateOrderingScheduleCache, getOrderingSchedule } = require('../utils/getOrderingSchedule');
+const { isOrderingOpen, getOpenDateWarsaw } = require('../utils/orderingSchedule');
+const { pushSessionEvent } = require('../utils/sessionStatus');
 const cache = require('../utils/cache');
 
 const router = express.Router();
@@ -95,8 +99,48 @@ router.post('/ordering-schedule', telegramAuth, requireTelegramRole('admin'), as
   const openMins  = schedule.openHour  * 60 + schedule.openMinute;
   const closeMins = schedule.closeHour * 60 + schedule.closeMinute;
   if (openMins === closeMins) throw appError('schedule_zero_duration');
+
+  // Snapshot the previous schedule BEFORE saving so the "Змінені години" event
+  // payload carries the actual transition. Read via the same setter helper.
+  const previous = await getAppSetting(ORDERING_SCHEDULE_KEY, ORDERING_SCHEDULE_DEFAULTS);
+
   const saved = await setAppSetting(ORDERING_SCHEDULE_KEY, schedule);
   await invalidateOrderingScheduleCache();
+
+  // Tell every group whose ordering window is OPEN right now that hours moved.
+  // Sellers in those groups are mid-decision; warehouse needs the audit trail.
+  // Best-effort, off the response path — a slow Mongo here must not delay the
+  // settings response or surface as a 500.
+  const admin = req.telegramUser || {};
+  const adminActor = {
+    by: String(admin.telegramId || ''),
+    byName: [admin.firstName, admin.lastName].filter(Boolean).join(' '),
+  };
+  (async () => {
+    try {
+      const groups = await DeliveryGroup.find({}, 'dayOfWeek').lean();
+      const freshSchedule = await getOrderingSchedule();
+      const targetGroups = groups.filter((g) => isOrderingOpen(g.dayOfWeek, freshSchedule).isOpen);
+      for (const g of targetGroups) {
+        // Only push the event to an EXISTING session — never auto-create one
+        // here. A brand-new group with no orders this cycle shouldn't get a
+        // spurious empty session doc just to host an "Змінені години" entry.
+        const openDate = getOpenDateWarsaw(g.dayOfWeek, freshSchedule);
+        const existing = await OrderingSession.findOne(
+          { groupId: String(g._id), openDate },
+          '_id',
+        ).lean();
+        if (!existing) continue;
+        await pushSessionEvent(String(existing._id), {
+          type: 'hours_changed',
+          ...adminActor,
+          meta: { from: previous, to: schedule },
+        });
+      }
+    } catch (e) {
+      console.warn('[admin/ordering-schedule] hours_changed event push failed:', e.message);
+    }
+  })();
 
   res.json(saved);
 }));

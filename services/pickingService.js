@@ -14,6 +14,7 @@ const { archiveProduct, getProductTitle } = require('./archiveProduct');
 const { getOrderingSchedule } = require('../utils/getOrderingSchedule');
 const { getIO } = require('../socket');
 const { withLock } = require('../utils/lock');
+const { transitionPickingStatus, maybeCompleteSession } = require('../utils/sessionStatus');
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -202,7 +203,21 @@ async function completePickingTask({ taskId, userTelegramId, userFirstName = '',
 
     await task.save({ session });
     await markOrderItemsPacked(task.items, task.productId, actor, session);
+
+    // First completion of this session flips it to "В роботі" (in_progress).
+    // Idempotent: only confirmed → in_progress matches; later completions no-op.
+    if (task.orderingSessionId) {
+      await transitionPickingStatus(
+        task.orderingSessionId, 'in_progress', { actor: { by: actor.by, byName: actor.byName } }, session,
+      );
+    }
   });
+
+  // After commit: if this was the last active task of the session, mark it
+  // completed (всі товари зібрані). Idempotent + concurrency-safe.
+  if (task.orderingSessionId) {
+    await maybeCompleteSession(task.orderingSessionId, { actor: { by: actor.by, byName: actor.byName } });
+  }
 
   const fromBlock = typeof nextBlock === 'number' ? nextBlock : task.blockId;
   const { task: nextRaw, wrappedAround } = await findAndLockNext(userTelegramId, fromBlock, task.deliveryGroupId || null);
@@ -272,6 +287,12 @@ async function outOfStockPickingTask({ taskId, userTelegramId, userFirstName = '
     await fresh.save({ session });
     await markOrderItemsPacked(fresh.items, fresh.productId, actor, session);
     task = fresh; // keep downstream block/product lookups consistent
+
+    if (fresh.orderingSessionId) {
+      await transitionPickingStatus(
+        fresh.orderingSessionId, 'in_progress', { actor: { by: actor.by, byName: actor.byName } }, session,
+      );
+    }
   });
 
   // Phase 2: archive product (idempotent on retry via completed-status guard above)
@@ -279,6 +300,10 @@ async function outOfStockPickingTask({ taskId, userTelegramId, userFirstName = '
   if (productDoc && productDoc.status !== 'archived') {
     // archiveProduct now retries transient tx errors internally.
     await archiveProduct(productDoc, { notifyBuyers: false, bot: null });
+  }
+
+  if (task.orderingSessionId) {
+    await maybeCompleteSession(task.orderingSessionId, { actor: { by: actor.by, byName: actor.byName } });
   }
 
   const fromBlock = typeof nextBlock === 'number' ? nextBlock : task.blockId;

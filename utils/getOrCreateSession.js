@@ -18,7 +18,15 @@ async function upsertSession(gid, openDate, openAt) {
   try {
     return await OrderingSession.findOneAndUpdate(
       { groupId: gid, openDate },
-      { $setOnInsert: { groupId: gid, openDate, openAt } },
+      {
+        $setOnInsert: {
+          groupId: gid,
+          openDate,
+          openAt,
+          pickingStatus: 'pending',
+          events: [{ at: new Date(), type: 'created' }],
+        },
+      },
       { upsert: true, new: true },
     );
   } catch (err) {
