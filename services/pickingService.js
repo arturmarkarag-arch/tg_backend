@@ -111,12 +111,20 @@ async function markOrderItemsPacked(taskItems, productId, actor = { by: 'system'
 /**
  * Atomically find and lock the next pending task for a worker.
  * Pass 1: fromBlock → end; Pass 2: 1 → fromBlock-1 (wrap-around).
+ *
+ * deliveryGroupId is REQUIRED. An absent/empty group must never fall through to
+ * "the globally-next pending task" — that would lock (and hand a worker) a task
+ * from a delivery group they are not picking, silently stealing another group's
+ * work. Callers that derive the group from a task (complete / out-of-stock) pass
+ * the task's own group; a groupless task simply yields no next task here.
  */
 async function findAndLockNext(userTelegramId, fromBlock, deliveryGroupId = null) {
+  const groupId = deliveryGroupId ? String(deliveryGroupId) : '';
+  if (!groupId) return { task: null, wrappedAround: false };
+
   const lock = { $set: { status: 'locked', lockedBy: userTelegramId, lockedAt: new Date() } };
   const opts = { sort: { blockId: 1, positionIndex: 1 }, new: true };
-  const fresh = { status: 'pending' };
-  if (deliveryGroupId) fresh.deliveryGroupId = String(deliveryGroupId);
+  const fresh = { status: 'pending', deliveryGroupId: groupId };
 
   let task = await PickingTask.findOneAndUpdate({ ...fresh, blockId: { $gte: fromBlock } }, lock, opts);
   if (task) return { task, wrappedAround: false };
@@ -338,8 +346,17 @@ async function forceClaimPickingTask({ taskId, userTelegramId }) {
     throw tooSoonErr;
   }
 
+  // Pin lockedBy + lockedAt to the doc we evaluated the 3-min guard against.
+  // Without this the update matches on `status:'locked'` alone, so:
+  //   - two workers can both pass the guard and both findOneAndUpdate → the
+  //     second silently re-steals, yet BOTH clients receive a task they think
+  //     they own (double picking); and
+  //   - a worker who legitimately (re)claimed the task 1s ago can be stolen
+  //     from by someone whose in-memory copy still shows the old, stale lock.
+  // If anything changed since we read, the filter matches nothing → the caller
+  // gets picking_claim_unavailable and re-syncs from the live queue.
   const claimed = await PickingTask.findOneAndUpdate(
-    { _id: task._id, status: 'locked' },
+    { _id: task._id, status: 'locked', lockedBy: task.lockedBy, lockedAt: task.lockedAt },
     { $set: { status: 'locked', lockedBy: userTelegramId, lockedAt: new Date() } },
     { new: true },
   );

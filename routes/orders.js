@@ -654,9 +654,18 @@ async function placeOrderImpl(req, res) {
   const realProducts = await Product.find({ _id: { $in: productIds } }).lean();
   const productMap = new Map(realProducts.map((product) => [String(product._id), product]));
 
+  // Products physically present in a shipping block. A product that exists and is
+  // active but sits in NO block (warehouse pulled it back to "надходження", or it
+  // is mid-move between blocks) has no floor location and will never get a
+  // PickingTask — so it is treated as UNAVAILABLE here, exactly like an archived
+  // product: that single item is dropped and the rest of the order goes through.
+  // (Previously a not-in-block item returned 422 and rejected the WHOLE order.)
+  const inBlockIds = await Block.distinct('productIds', { productIds: { $in: realProducts.map((p) => p._id) } });
+  const inBlockSet = new Set(inBlockIds.map(String));
+
   let totalPrice = 0;
   const validItems = [];
-  const archivedItems = []; // items that exist but are already archived
+  const archivedItems = []; // items dropped because unavailable (archived OR not in any block)
 
   for (const item of items) {
     const productId = String(item?.productId || '');
@@ -666,6 +675,16 @@ async function placeOrderImpl(req, res) {
       archivedItems.push({
         productId,
         name: buildProductLabel(product),
+        reason: 'archived',
+      });
+      continue;
+    }
+    // Active but not placed in any block → no picking location, drop like archived.
+    if (!inBlockSet.has(String(product._id))) {
+      archivedItems.push({
+        productId,
+        name: buildProductLabel(product),
+        reason: 'not_in_block',
       });
       continue;
     }
@@ -690,23 +709,6 @@ async function placeOrderImpl(req, res) {
 
   if (validItems.length === 0) {
     throw appError('order_no_valid_items');
-  }
-
-  // Guard: all buyers cannot order products that are not placed in any block.
-  // Such products have no physical location on the warehouse floor and will
-  // never generate a PickingTask in buildPickingTasksFromOrders.
-  {
-    const validProductIds = validItems.map((i) => i.productId);
-    const inBlockIds = await Block.distinct('productIds', { productIds: { $in: validProductIds } });
-    const inBlockSet = new Set(inBlockIds.map(String));
-    const notInBlock = validItems.filter((i) => !inBlockSet.has(String(i.productId)));
-    if (notInBlock.length > 0) {
-      return res.status(422).json({
-        error: 'product_not_in_block',
-        message: `Товар "${notInBlock[0].name}" ще не розміщений у жодному блоці на складі. Замовлення неможливе.`,
-        productIds: notInBlock.map((i) => String(i.productId)),
-      });
-    }
   }
 
   // Build existingOrder query: sellers merge per SHOP within the current ordering session.

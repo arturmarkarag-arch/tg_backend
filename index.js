@@ -19,6 +19,7 @@ const { migrateOrdersToSessionIds } = require('./utils/getOrCreateSession');
 const { ensureShopProductIndexes } = require('./utils/ensureShopProductIndexes');
 const { isEnabled: redisEnabled } = require('./utils/redis');
 const Order = require('./models/Order');
+const PickingTask = require('./models/PickingTask');
 
 let httpServer = null;
 let shuttingDown = false;
@@ -103,6 +104,25 @@ async function startServer() {
         '[indexes] Order.syncIndexes failed — likely pre-existing duplicate active ' +
         'orders blocking one_active_order_per_buyer_shop_session. Resolve duplicates ' +
         'then restart. Continuing without the unique backstop. Error:', err.message,
+      );
+    }
+
+    // PickingTask indexes are syncIndexes()'d (not just background autoIndex) so a
+    // STALE index removed from the schema is actually DROPPED, not left behind.
+    // Specifically this drops the legacy `productId_1` unique index: a remnant of
+    // the pre-delivery-group schema that enforced ONE active task per product
+    // GLOBALLY. While it lingered, a product ordered in two delivery groups whose
+    // picking overlapped lost the second group's task to a swallowed E11000 in
+    // taskBuilder — the item was silently never picked. The schema only declares
+    // the correct per-(product, deliveryGroup) unique index.
+    try {
+      await PickingTask.syncIndexes();
+      console.log('[indexes] PickingTask indexes synced');
+    } catch (err) {
+      console.error(
+        '[indexes] PickingTask.syncIndexes failed. Continuing — the legacy global ' +
+        'productId_1 unique index may still be present and can strand a product ' +
+        'ordered across two concurrently-picked delivery groups. Error:', err.message,
       );
     }
 

@@ -368,6 +368,14 @@ router.get('/next-task', requireTelegramRoles(['warehouse', 'admin']), async (re
       return next(appError('picking_current_block_invalid'));
     }
 
+    // deliveryGroupId is REQUIRED for next-task: this endpoint acquires a lock,
+    // and findAndLockNext with a null group would lock the globally-next pending
+    // task — potentially from a different delivery group the worker isn't picking.
+    // Every real caller (per-group PickingPage) always sends it.
+    if (!deliveryGroupId) {
+      return next(appError('picking_delivery_group_required'));
+    }
+
     // Release stale locks:
     //  - always release this worker's own locks (from a previous request / page reload)
     //  - release any worker's lock that is older than timeout (abandoned tasks)
@@ -432,7 +440,13 @@ router.get('/block-tasks', requireTelegramRoles(['warehouse', 'admin']), async (
       return next(appError('picking_block_invalid'));
     }
 
-    await releaseWorkerAndStaleLocks(user.telegramId, deliveryGroupId);
+    // Do NOT release the caller's own lock here. The block picker is polled every
+    // 5s while open and is reachable from the toolbar WHILE a task is active
+    // (ReadyToolbar renders even with a locked task). With releaseOwnLocks=true a
+    // worker who opened the picker to glance at another block had their active
+    // task quietly released mid-pick → another worker grabbed it → the first got
+    // `expired_lock` on complete. Stale locks of OTHER workers are still swept.
+    await releaseWorkerAndStaleLocks(user.telegramId, deliveryGroupId, { releaseOwnLocks: false });
 
     const filter = {
       blockId,
@@ -857,11 +871,17 @@ router.get('/shift-board', requireTelegramRoles(['warehouse', 'admin']), async (
 router.post('/tasks/:taskId/force-claim', requireTelegramRoles(['warehouse', 'admin']), async (req, res, next) => {
   try {
     const user = req.telegramUser;
+    const taskId = String(req.params.taskId);
 
-    const { task: claimed } = await forceClaimPickingTask({
-      taskId: req.params.taskId,
-      userTelegramId: user.telegramId,
-    });
+    // Same lock key as the normal claim so a regular "Взяти" and a "Перехопити"
+    // on the SAME task serialise against each other across all workers. The
+    // pinned lockedBy/lockedAt filter inside forceClaimPickingTask is the
+    // correctness backstop; this lock removes the contention window entirely.
+    const { task: claimed } = await withLock(
+      `picking:${taskId}:claim`,
+      () => forceClaimPickingTask({ taskId, userTelegramId: user.telegramId }),
+      { ttlMs: 10_000, waitMs: 5_000 },
+    );
 
     const taskData = await buildTaskResponse(claimed);
     if (!taskData) return next(appError('picking_product_not_found'));
