@@ -106,9 +106,12 @@ const ERRORS = {
   cart_stale:               { status: 409, message: 'Кошик було змінено з іншого пристрою. Перевірте склад і повторіть.' },
 
   // ── Auth / middleware ─────────────────────────────────────────────────────
-  auth_invalid_init_data:   { status: 401, message: ({ reason } = {}) => reason
-                                ? `Невалідні дані Telegram: ${reason}`
-                                : 'Невалідні дані авторизації Telegram' },
+  auth_invalid_init_data:   { status: 401, message: ({ reason } = {}) =>
+                                reason === 'initData expired'
+                                  ? 'Сесія Telegram застаріла. Закрийте додаток і відкрийте знову.'
+                                  : reason
+                                    ? `Помилка авторизації Telegram: ${reason}`
+                                    : 'Невалідні дані авторизації Telegram' },
   auth_telegram_id_missing: { status: 400, message: 'Не передано Telegram user id' },
   auth_not_registered:      { status: 403, message: 'Користувача не зареєстровано' },
   // Backwards-compat alias used by mini-app client code that switches on `error` value.

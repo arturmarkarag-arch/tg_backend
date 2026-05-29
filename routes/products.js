@@ -1008,13 +1008,12 @@ router.patch('/:id', staffOnly, asyncHandler(async (req, res) => {
       const safe = String(fn).replace(/[^a-zA-Z0-9._-]/g, '');
       if (safe) { imageUrls.push(r2PublicUrl('products', safe)); imageNames.push(safe); }
     }
-    // Prefer an explicit originalFilename from the client (raw camera capture).
-    // Fall back to promoting the current imageUrls[0] on the first edit.
+    // Update clean original only when the client explicitly provides one (raw camera
+    // capture uploaded to originals/). Never promote a products/ labeled file as the
+    // original — that would cause labels to stack on subsequent canvas edits.
     if (fields.originalFilename) {
       const safeOrig = String(fields.originalFilename).replace(/[^a-zA-Z0-9._-]/g, '');
       if (safeOrig) product.originalImageUrl = r2PublicUrl('originals', safeOrig);
-    } else if (!product.originalImageUrl && product.imageUrls?.[0]) {
-      product.originalImageUrl = product.imageUrls[0];
     }
     product.imageUrls = imageUrls;
     product.imageNames = imageNames;
@@ -1190,12 +1189,13 @@ router.post('/:id/describe', staffOnly, asyncHandler(async (req, res) => {
   }
 
   try {
-    const { text } = await describeImageUrl(url);
+    const { text, name: aiName } = await describeImageUrl(url);
     if (!text) return res.status(502).json({ error: 'empty_description', message: 'Не вдалося згенерувати опис' });
     product.aiDescription = text;
+    // Auto-fill name only when the product has none — never overwrite an existing name.
+    if (aiName && !product.name) product.name = aiName;
     await product.save();
-    res.json({ _id: product._id, aiDescription: product.aiDescription });
-    // Keep the linked mirror's description in sync (fire-and-forget — same as PATCH).
+    res.json({ _id: product._id, aiDescription: product.aiDescription, aiName: aiName || null });
     pushSharedFieldsToMirror(product, {}).catch((err) =>
       console.error('[products/describe] ShopProduct mirror push failed:', err.message));
   } catch (err) {

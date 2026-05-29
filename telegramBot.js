@@ -6,6 +6,7 @@ const SearchProduct = require('./models/SearchProduct');
 const DeliveryGroup = require('./models/DeliveryGroup');
 const Shop = require('./models/Shop');
 const { redeemTransferHash } = require('./services/redeemTransferHash');
+const { trackMemberFromMessage, handleChatMemberUpdate, setMemberPhoto } = require('./services/groupMemberSync');
 
 async function updateUserBotActivity(chatId) {
   try {
@@ -164,6 +165,38 @@ async function setRoleCommands(chatId, role) {
 
 function getUnknownUserMessage() {
   return 'Вас не знайдено в системі. Будь ласка, зверніться до адміністратора або зареєструйтеся через веб-інтерфейс.';
+}
+
+// Sends a welcome + registration-link message to the group after 10 s.
+// Used for both chat_member and new_chat_members join paths.
+function escapeHtml(str) {
+  return String(str || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+async function scheduleGroupWelcome(groupChatId, telegramId, from) {
+  setTimeout(async () => {
+    try {
+      const nowRegistered = await User.findOne({ telegramId }).lean();
+      if (nowRegistered) return;
+      const me = await bot.getMe();
+      const botUsername = me?.username;
+      if (!botUsername) return;
+      const displayName = escapeHtml([from.first_name, from.last_name].filter(Boolean).join(' ') || telegramId);
+      const mention = from.username
+        ? `@${from.username}`
+        : `<a href="tg://user?id=${telegramId}">${displayName}</a>`;
+      const text = [
+        `👋 ${mention}, вітаємо в групі!`,
+        '',
+        'Щоб отримати доступ до системи Замовлень, потрібно зареєструватися в телеграм Боті.',
+        '',
+        `➡️ <a href="https://t.me/${botUsername}?start=register">Натисніть тут щоб зареєструватись</a>`,
+      ].join('\n');
+      await bot.sendMessage(groupChatId, text, { parse_mode: 'HTML' });
+    } catch (err) {
+      console.warn('[Bot] welcome message failed:', err.message);
+    }
+  }, 10_000);
 }
 
 function getPhotoUrl(photoUrl) {
@@ -333,7 +366,7 @@ async function initBot(token) {
     bot = new TelegramBot(token, {
       polling: {
         params: {
-          allowed_updates: ['message', 'callback_query', 'my_chat_member'],
+          allowed_updates: ['message', 'callback_query', 'my_chat_member', 'chat_member'],
         },
       },
     });
@@ -357,6 +390,22 @@ async function initBot(token) {
 
       if (isGroupChat && !(await isAuthorizedGroup(chatId))) {
         return;
+      }
+
+      if (isGroupChat && msg.from) {
+        trackMemberFromMessage(chatId, msg.from).catch(() => {});
+      }
+
+      // new_chat_members fires in basic groups (not supergroups) when someone joins.
+      // Supergroups use chat_member updates handled separately.
+      if (isGroupChat && msg.new_chat_members?.length) {
+        for (const newMember of msg.new_chat_members) {
+          if (newMember.is_bot) continue;
+          const memberId = String(newMember.id);
+          trackMemberFromMessage(chatId, newMember).catch(() => {});
+          const existing = await User.findOne({ telegramId: memberId }).lean();
+          if (!existing) scheduleGroupWelcome(chatId, memberId, newMember);
+        }
       }
 
       if (isGroupChat && msg.reply_to_message && rawText && !rawText.startsWith('/')) {
@@ -513,6 +562,35 @@ async function initBot(token) {
       await bot.sendMessage(chatId, 'Невідома команда. Використайте /miniapp, щоб відкрити додаток.');
       } catch (err) {
         console.error('[Bot] Message handler error:', err);
+      }
+    });
+
+    // ── New member joins an authorized group ──────────────────────────────────
+    bot.on('chat_member', async (update) => {
+      try {
+        const groupChatId = String(update.chat?.id || '');
+        if (!groupChatId || !(await isAuthorizedGroup(groupChatId))) return;
+
+        const joined = await handleChatMemberUpdate(update);
+        if (!joined) return; // left / kicked / already known / bot
+
+        const { telegramId, from } = joined;
+
+        // Check immediately — if already registered, nothing to do
+        const existing = await User.findOne({ telegramId }).lean();
+        if (existing) return;
+
+        // Fetch avatar in background (non-blocking)
+        bot.getUserProfilePhotos(Number(telegramId), { limit: 1 })
+          .then((photos) => {
+            const fileId = photos?.photos?.[0]?.[0]?.file_id;
+            if (fileId) setMemberPhoto(groupChatId, telegramId, fileId).catch(() => {});
+          })
+          .catch(() => {});
+
+        scheduleGroupWelcome(groupChatId, telegramId, from);
+      } catch (err) {
+        console.error('[Bot] chat_member handler error:', err);
       }
     });
 

@@ -305,6 +305,18 @@ router.delete('/telegram-groups/:groupId', telegramAuth, requireTelegramRole('ad
   }
 });
 
+// ── Group members ─────────────────────────────────────────────────────────────
+
+router.get('/telegram-groups/:groupId/members', telegramAuth, requireTelegramRole('admin'), asyncHandler(async (req, res) => {
+  const { getMembersWithStatus } = require('../services/groupMemberSync');
+  const groupId = String(req.params.groupId).trim();
+  const allowedIds = await getAllowedGroupIds();
+  if (!allowedIds.includes(groupId)) return res.status(403).json({ error: 'Група не авторизована' });
+
+  const members = await getMembersWithStatus(groupId);
+  res.json(members);
+}));
+
 // ── OpenAI Costs & Usage (Admin Key required) ─────────────────────────────────
 
 async function fetchOpenAIAdmin(path) {

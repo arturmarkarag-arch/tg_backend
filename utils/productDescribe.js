@@ -10,39 +10,60 @@ const { generateTextFromImageUrl, getGeminiStatus } = require('../geminiClient')
 
 const DESCRIBE_PROVIDER = String(process.env.DESCRIBE_PROVIDER || 'gemini').toLowerCase();
 
-// Same intent/wording as the OpenAI explainer so output style stays consistent.
 const PRODUCT_EXPLAIN_PROMPT =
-  'Ти пояснюєш товар працівнику магазину, який не знає цей продукт і не розуміє написів на упаковці. ' +
-  'Відповідай УКРАЇНСЬКОЮ мовою, просто і ДУЖЕ СТИСЛО. ' +
-  'Опиши: що це за товар, для чого він, бренд/виробника (якщо видно), основні характеристики, обʼєм/вагу/розмір, як використовувати (коротко), важливий текст з етикетки (якщо є). ' +
-  'Не вигадуй інформацію, якої не видно на фото. ' +
-  'Не додавай зайвих пояснень, припущень чи рекламних фраз. ' +
-  'Якщо текст або товар погано видно — так і напиши.';
+  'Ти аналізуєш фото товару для працівника магазину, який не знає цей продукт і не розуміє написів на упаковці. ' +
+  'Відповідай ТІЛЬКИ валідним JSON без зайвого тексту, у форматі: {"name":"...","description":"..."}. ' +
+  'name — коротка назва товару УКРАЇНСЬКОЮ (2-5 слів, наприклад "Шампунь Head & Shoulders 400мл"). ' +
+  'description — детальний опис УКРАЇНСЬКОЮ: що це за товар, для чого він, бренд/виробник (якщо видно), основні характеристики, обʼєм/вага/розмір, як використовувати (коротко), важливий текст з етикетки. ' +
+  'Не вигадуй інформацію, якої не видно на фото. Не додавай рекламних фраз. ' +
+  'Якщо товар погано видно — зазнач це у description, name залиш найкращим здогадом.';
 
-// Returns { text, usage }. usage is {} for Gemini (free / not token-metered here).
+// Strips optional ```json ... ``` fences that some models wrap around JSON output.
+function parseDescribeResponse(raw) {
+  try {
+    const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
+    const parsed = JSON.parse(cleaned);
+    return {
+      name:        (parsed.name        || '').trim(),
+      description: (parsed.description || '').trim(),
+    };
+  } catch {
+    // Model returned plain text instead of JSON — treat the whole response as description.
+    return { name: '', description: raw.trim() };
+  }
+}
+
+// Returns { text, name, usage }.
+// text   — human-readable description (saved to aiDescription)
+// name   — short product name extracted by the model (empty string if unavailable)
+// usage  — token usage or {} for Gemini
 async function describeImageUrl(url) {
-  if (!url) return { text: '', usage: {} };
+  if (!url) return { text: '', name: '', usage: {} };
 
   const preferGemini = DESCRIBE_PROVIDER !== 'openai' && getGeminiStatus().connected;
 
   if (preferGemini) {
     try {
-      const { text } = await generateTextFromImageUrl(url, PRODUCT_EXPLAIN_PROMPT);
-      if (text) return { text, usage: {} };
+      const { text: raw } = await generateTextFromImageUrl(url, PRODUCT_EXPLAIN_PROMPT);
+      if (raw) {
+        const { name, description } = parseDescribeResponse(raw);
+        return { text: description || raw, name, usage: {} };
+      }
     } catch (err) {
       console.error('[describe:gemini]', err.message);
-      if (!getOpenAIStatus().connected) throw err; // no fallback available
+      if (!getOpenAIStatus().connected) throw err;
     }
   }
 
-  // OpenAI path (explicit choice, or Gemini unavailable/empty).
   if (getOpenAIStatus().connected) {
-    return explainProductImageUrl(url);
+    const { text: raw, usage } = await explainProductImageUrl(url);
+    const { name, description } = parseDescribeResponse(raw || '');
+    return { text: description || raw, name, usage };
   }
 
-  // Last resort: Gemini even if it wasn't preferred (e.g. OpenAI off).
-  const { text } = await generateTextFromImageUrl(url, PRODUCT_EXPLAIN_PROMPT);
-  return { text, usage: {} };
+  const { text: raw } = await generateTextFromImageUrl(url, PRODUCT_EXPLAIN_PROMPT);
+  const { name, description } = parseDescribeResponse(raw || '');
+  return { text: description || raw, name, usage: {} };
 }
 
 module.exports = { describeImageUrl };

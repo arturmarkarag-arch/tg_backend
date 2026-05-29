@@ -226,11 +226,12 @@ router.post('/:id/describe', staffOnly, asyncHandler(async (req, res) => {
   }
 
   try {
-    const { text } = await describeImageUrl(url);
+    const { text, name: aiName } = await describeImageUrl(url);
     if (!text) return res.status(502).json({ error: 'empty_description', message: 'Не вдалося згенерувати опис' });
     item.aiDescription = text;
+    if (aiName && !item.name) item.name = aiName;
     await item.save();
-    res.json({ _id: item._id, aiDescription: item.aiDescription });
+    res.json({ _id: item._id, aiDescription: item.aiDescription, aiName: aiName || null });
   } catch (err) {
     console.error('[shopProducts] describe error:', err.message);
     return res.status(502).json({ error: 'describe_api_error', message: err.message });
