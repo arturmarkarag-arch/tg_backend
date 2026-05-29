@@ -527,7 +527,33 @@ router.get('/queue-stats', requireTelegramRoles(['warehouse', 'admin']), async (
     // is meaningful before picking starts (tasks aren't built yet) and stays stable as
     // workers pack (pendingCount shrinks). Best-effort: never break queue polling.
     const orderedPositions = await countOrderedPositions(deliveryGroupId);
-    res.json({ pendingCount, lockedByMeCount, lockedByOtherCount, activeCount, orderedPositions });
+
+    // Live pickingStatus + last events so the SessionStatusHeader chip and
+    // timeline refresh on the same 5-second poll the rest of the UI uses.
+    // Without this the header is frozen on whatever /start-session returned at
+    // mount: after the last task is packed and maybeCompleteSession flips the
+    // session to 'completed', the chip would still read "Очікує підтвердження".
+    let pickingStatus = null;
+    let events = [];
+    try {
+      const groupDoc = await DeliveryGroup.findById(deliveryGroupId, 'dayOfWeek').lean();
+      if (groupDoc) {
+        const schedule = await getOrderingSchedule();
+        const sessionId = await getOrCreateSessionId(String(deliveryGroupId), groupDoc.dayOfWeek, schedule);
+        const sessionDoc = await OrderingSession.findById(sessionId, 'pickingStatus events').lean();
+        if (sessionDoc) {
+          pickingStatus = sessionDoc.pickingStatus || 'pending';
+          events = (sessionDoc.events || []).slice(-10);
+        }
+      }
+    } catch (e) {
+      console.warn('[picking/queue-stats] session status fetch failed:', e.message);
+    }
+
+    res.json({
+      pendingCount, lockedByMeCount, lockedByOtherCount, activeCount,
+      orderedPositions, pickingStatus, events,
+    });
   } catch (err) {
     if (err && err.name === 'AppError') return next(err);
     console.error('[picking/queue-stats]', err);

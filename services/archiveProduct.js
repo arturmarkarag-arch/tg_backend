@@ -17,6 +17,7 @@
 
 const mongoose = require('mongoose');
 const Order = require('../models/Order');
+const Product = require('../models/Product');
 const PickingTask = require('../models/PickingTask');
 const Block = require('../models/Block');
 const DeliveryGroup = require('../models/DeliveryGroup');

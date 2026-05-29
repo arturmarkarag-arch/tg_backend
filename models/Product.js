@@ -56,11 +56,15 @@ const ProductSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-// Унікальний частковий індекс: orderNumber унікальний тільки серед не-archived
-// Захищає від race condition при одночасному restore двох товарів на одну позицію
+// Унікальний частковий індекс: orderNumber унікальний ТІЛЬКИ для товарів на
+// полиці (status='active'). Pending у Надходженні (source='receive') не має
+// позиції — два таких документи з однаковим (застарілим) orderNumber дозволені.
+// Pending у блоці (block_photo flow) також не блокується тут, бо нормальний
+// потік присвоює послідовні номери транзакційно; справжня позиційна
+// унікальність enforcиться в момент переходу 'pending' → 'active'.
 ProductSchema.index(
   { orderNumber: 1 },
-  { unique: true, partialFilterExpression: { status: { $ne: 'archived' } } }
+  { unique: true, partialFilterExpression: { status: 'active' } }
 );
 
 // Унікальний частковий індекс: barcode унікальний тільки серед не-порожніх значень.

@@ -3,7 +3,6 @@ const mongoose = require('mongoose');
 const { S3Client, DeleteObjectCommand } = require('@aws-sdk/client-s3');
 const Product = require('../models/Product');
 const Block = require('../models/Block');
-const { shiftUp } = require('../utils/shiftOrderNumbers');
 const { getIO } = require('../socket');
 const { telegramAuth, requireTelegramRoles } = require('../middleware/telegramAuth');
 const { appError, asyncHandler } = require('../utils/errors');
@@ -95,7 +94,19 @@ router.get('/', asyncHandler(async (req, res) => {
 
 /**
  * POST /api/archive/:id/restore
- * Restore an archived product back to active status.
+ *
+ * HARD INVARIANT — restore lands the product in "Надходження" (incoming queue),
+ * NEVER on a shelf. The product:
+ *   • gets status='pending' + source='receive' (matches the /api/products/drafts
+ *     filter that powers the IncomingProductsPage)
+ *   • does NOT get a shelf position assigned (no orderNumber computation, no
+ *     shiftUp, no use of originalOrderNumber)
+ *   • later transitions to 'active' through the normal receipt/placement flow,
+ *     and ONLY THEN gets an orderNumber assigned by the warehouse worker
+ *
+ * Do NOT "improve" this by re-shelving in one step. The user has explained
+ * this rule repeatedly. Restore = back into receiving, not back onto the shelf.
+ * See [[product-restore-from-archive]] memory record for the full reasoning.
  */
 router.post('/:id/restore', asyncHandler(async (req, res) => {
   const session = await mongoose.startSession();
@@ -106,28 +117,14 @@ router.post('/:id/restore', asyncHandler(async (req, res) => {
       if (!product) throw appError('product_not_found');
       if (product.status !== 'archived') throw appError('product_not_archived');
 
-      let restoreOrder;
-      if (product.originalOrderNumber) {
-        restoreOrder = product.originalOrderNumber;
-        await shiftUp({ status: { $ne: 'archived' }, orderNumber: { $gte: restoreOrder } }, session);
-      } else {
-        const maxOrder = await Product.findOne({ status: { $ne: 'archived' } })
-          .sort({ orderNumber: -1 })
-          .select('orderNumber')
-          .session(session)
-          .lean();
-        restoreOrder = (maxOrder?.orderNumber || 0) + 1;
-      }
-
-      // Restore to 'pending' (not 'active') so the warehouse worker can place
-      // the item via the incoming queue. It transitions to 'active' when confirmed
-      // there, which also triggers the ShopProduct mirror sync.
       product.status = 'pending';
-      product.archivedAt = null;
-      product.originalOrderNumber = null;
-      product.restoredFromArchive = true;
       product.source = 'receive';
-      product.orderNumber = restoreOrder;
+      product.archivedAt = null;
+      product.originalOrderNumber = null; // old shelf slot is forgotten — placement decision happens again in Надходження
+      product.restoredFromArchive = true;
+      // orderNumber intentionally NOT touched — the unique partial index in
+      // Product.js excludes (status='pending' AND source='receive') so the
+      // leftover value can never collide with an active shelf position.
       await product.save({ session });
     });
   } finally {
