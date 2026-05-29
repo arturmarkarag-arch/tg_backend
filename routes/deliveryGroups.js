@@ -538,9 +538,10 @@ router.get('/', async (req, res) => {
 
 router.post('/', telegramAuth, requireTelegramRole('admin'), asyncHandler(async (req, res) => {
   const { name, dayOfWeek } = req.body;
-  if (!name || dayOfWeek === undefined) throw appError('group_name_or_day_required');
+  const trimmedName = typeof name === 'string' ? name.trim() : '';
+  if (!trimmedName || dayOfWeek === undefined) throw appError('group_name_or_day_required');
 
-  const group = new DeliveryGroup({ name, dayOfWeek });
+  const group = new DeliveryGroup({ name: trimmedName, dayOfWeek });
   await group.save();
   await cache.invalidate(cache.KEYS.DELIVERY_GROUPS);
   await invalidateDeliveryGroup(group._id);
@@ -604,7 +605,11 @@ router.patch('/:id', telegramAuth, requireTelegramRole('admin'), asyncHandler(as
     toDay = Number(dayOfWeek);
   }
 
-  if (name !== undefined) group.name = name;
+  if (name !== undefined) {
+    const trimmedName = String(name).trim();
+    if (!trimmedName) throw appError('group_name_or_day_required');
+    group.name = trimmedName;
+  }
   if (dayOfWeek !== undefined) group.dayOfWeek = dayOfWeek;
 
   await group.save();

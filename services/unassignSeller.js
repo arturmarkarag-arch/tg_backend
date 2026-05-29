@@ -38,6 +38,13 @@ async function unassignSellerAndPark({ session, seller, fromShopId, actor, reaso
       ord.buyerSnapshot.shopId = null;
       ord.buyerSnapshot.shopName = '';
       ord.buyerSnapshot.shopCity = '';
+      // CRITICAL: clear the delivery-group ref too — otherwise the order still
+      // matches the OLD group's filter in taskBuilder ('buyerSnapshot.deliveryGroupId'),
+      // gets pulled into the next picking build, and stamps PickingTask.items.shopName
+      // as "невідомий магазин". The order follows the seller; the shop must be
+      // left without seller AND without order, not orphaned in the picking pool.
+      // migrateSellerShop will re-stamp deliveryGroupId on the next assignment.
+      ord.buyerSnapshot.deliveryGroupId = '';
       ord.markModified('buyerSnapshot');
       ord.history.push({
         at: new Date(),

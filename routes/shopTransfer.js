@@ -325,6 +325,12 @@ router.post('/:id/approve', telegramAuth, requireTelegramRole('admin'), asyncHan
                   'buyerSnapshot.shopId': null,
                   'buyerSnapshot.shopName': '',
                   'buyerSnapshot.shopCity': '',
+                  // Drop the delivery-group ref too — otherwise the parked order
+                  // still matches the OLD group's filter in taskBuilder and shows
+                  // up in picking as "невідомий магазин". The displaced seller's
+                  // order must follow them; the new seller's shop must not inherit
+                  // it via the picking pool.
+                  'buyerSnapshot.deliveryGroupId': '',
                 },
                 $push: {
                   history: {

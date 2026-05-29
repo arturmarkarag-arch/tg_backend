@@ -208,6 +208,14 @@ router.patch('/:id', telegramAuth, requireTelegramRole('admin'), asyncHandler(as
   // denormalized copies — see users.js sanitizeUserPayload).
   const prevDeliveryGroupId = shop.deliveryGroupId ? String(shop.deliveryGroupId) : '';
 
+  // Match POST: name and cityId must never become empty on an existing shop.
+  // An empty name cascades into buyerSnapshot.shopName='' on every active order
+  // and from there into PickingTask.items.shopName, which then either renders
+  // blank in the picking UI or, on a fresh build, gets stamped with the
+  // "невідомий магазин" fallback in taskBuilder.
+  if (name !== undefined && !String(name).trim()) throw appError('shop_name_required');
+  if (cityId !== undefined && !cityId) throw appError('shop_city_required');
+
   if (name !== undefined) shop.name = String(name).trim();
   if (address !== undefined) shop.address = String(address).trim();
   if (isActive !== undefined) shop.isActive = Boolean(isActive);
