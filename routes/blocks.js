@@ -139,14 +139,21 @@ router.post('/', staffOnly, asyncHandler(async (req, res) => {
   throw appError('block_id_conflict');
 }));
 
-// GET /api/blocks/incoming/products — products not assigned to any block
+// GET /api/blocks/incoming/products — products not assigned to any block.
+// qty>0 hides normal receipts that have nothing to place, but restoredFromArchive
+// items are surfaced regardless of quantity — restore lands them with qty=0
+// pending the worker's physical count, so they must be visible to be bumpable.
+// See [[product-restore-from-archive]].
 router.get('/incoming/products', asyncHandler(async (req, res) => {
   const assignedIds = await Block.distinct('productIds');
   const products = await Product.find({
     status: 'active',
     source: { $in: ['receive', 'receipt'] },
-    quantity: { $gt: 0 },
     _id: { $nin: assignedIds },
+    $or: [
+      { quantity: { $gt: 0 } },
+      { restoredFromArchive: true },
+    ],
   })
     .sort('-createdAt')
     .lean();

@@ -95,18 +95,26 @@ router.get('/', asyncHandler(async (req, res) => {
 /**
  * POST /api/archive/:id/restore
  *
- * HARD INVARIANT — restore lands the product in "Надходження" (incoming queue),
- * NEVER on a shelf. The product:
- *   • gets status='pending' + source='receive' (matches the /api/products/drafts
- *     filter that powers the IncomingProductsPage)
- *   • does NOT get a shelf position assigned (no orderNumber computation, no
- *     shiftUp, no use of originalOrderNumber)
- *   • later transitions to 'active' through the normal receipt/placement flow,
- *     and ONLY THEN gets an orderNumber assigned by the warehouse worker
+ * HARD INVARIANT — restore lands the product in "Надходження" (incoming queue
+ * на ReceivePage / IncomingProductsPage), NEVER on a shelf (= никогда в Block).
  *
- * Do NOT "improve" this by re-shelving in one step. The user has explained
- * this rule repeatedly. Restore = back into receiving, not back onto the shelf.
- * See [[product-restore-from-archive]] memory record for the full reasoning.
+ * Shelf placement in this codebase = Block.productIds membership. orderNumber
+ * is the GLOBAL catalog sort sequence, NOT a shelf slot. The user's complaint
+ * "не йде на полицю в номер відразу" targets two things:
+ *   1. Inserting the product into an existing Block (a real shelf). FORBIDDEN.
+ *   2. Restoring the OLD orderNumber via shiftUp (cascading every active item
+ *      up by one to make room). FORBIDDEN — it's a silent catalog mutation.
+ *
+ * What restore DOES do (the minimum to make the item appear in Надходження):
+ *   • status='active', source='receive' — matches the IncomingProductsPage
+ *     filter (`active + receive/receipt + qty>0 + not in any Block`).
+ *   • orderNumber = max + 1 (append to the catalog tail). No shiftUp, no use
+ *     of originalOrderNumber. The worker decides shelving in Надходження.
+ *   • restoredFromArchive=true so the "З архіву" badge surfaces in the UI.
+ *
+ * Do NOT "improve" this by re-shelving in one step (don't push into a Block),
+ * and do NOT restore the original orderNumber via shiftUp. The user has
+ * explained this rule 5+ times. See [[product-restore-from-archive]].
  */
 router.post('/:id/restore', asyncHandler(async (req, res) => {
   const session = await mongoose.startSession();
@@ -117,14 +125,30 @@ router.post('/:id/restore', asyncHandler(async (req, res) => {
       if (!product) throw appError('product_not_found');
       if (product.status !== 'archived') throw appError('product_not_archived');
 
-      product.status = 'pending';
+      // Append-to-tail orderNumber so it doesn't collide with any active doc.
+      // No shiftUp anywhere — that was the "fucked-up numbers logic" the user
+      // banned. The worker assigns a real shelf position later via Block.
+      const tail = await Product.findOne({ status: { $ne: 'archived' } })
+        .sort({ orderNumber: -1 })
+        .select('orderNumber')
+        .session(session)
+        .lean();
+      const newOrderNumber = (tail?.orderNumber || 0) + 1;
+
+      product.status = 'active';
       product.source = 'receive';
       product.archivedAt = null;
-      product.originalOrderNumber = null; // old shelf slot is forgotten — placement decision happens again in Надходження
+      product.originalOrderNumber = null; // old position is forgotten on purpose
       product.restoredFromArchive = true;
-      // orderNumber intentionally NOT touched — the unique partial index in
-      // Product.js excludes (status='pending' AND source='receive') so the
-      // leftover value can never collide with an active shelf position.
+      product.orderNumber = newOrderNumber;
+      // Quantity reset to 0 — restore is the moment the warehouse worker
+      // declares "this product is back"; the actual incoming count is unknown
+      // until they physically check it. They bump it via ProductRow in the
+      // Надходження UI. The incoming-products endpoint relaxes its qty>0 filter
+      // for restoredFromArchive=true so the row remains visible at qty=0.
+      product.quantity = 0;
+      // Intentionally NOT pushing into any Block — placement is decided in
+      // Надходження by the warehouse worker, not silently by this endpoint.
       await product.save({ session });
     });
   } finally {
