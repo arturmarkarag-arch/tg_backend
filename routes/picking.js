@@ -643,6 +643,41 @@ router.get('/block-tasks', requireTelegramRoles(['warehouse', 'admin']), async (
 });
 
 // ---------------------------------------------------------------------------
+// GET /api/picking/blocks-overview?deliveryGroupId=...
+// Returns all blocks that still have pending/locked tasks, with item counts.
+// Used by the "Показати замовлення" block-picker UI (no block input needed).
+// ---------------------------------------------------------------------------
+router.get('/blocks-overview', requireTelegramRoles(['warehouse', 'admin']), async (req, res, next) => {
+  try {
+    const deliveryGroupId = req.query.deliveryGroupId || null;
+
+    const filter = {
+      status: { $in: ['pending', 'locked'] },
+      ...(deliveryGroupId ? { deliveryGroupId: String(deliveryGroupId) } : {}),
+    };
+
+    const tasks = await PickingTask.find(filter, 'blockId items status').lean();
+
+    const byBlock = new Map();
+    for (const task of tasks) {
+      const bid = task.blockId;
+      if (!byBlock.has(bid)) byBlock.set(bid, { blockId: bid, taskCount: 0, totalQty: 0, lockedCount: 0 });
+      const entry = byBlock.get(bid);
+      entry.taskCount += 1;
+      entry.totalQty += (task.items || []).reduce((s, it) => s + Number(it.quantity || 0), 0);
+      if (task.status === 'locked') entry.lockedCount += 1;
+    }
+
+    const blocks = [...byBlock.values()].sort((a, b) => a.blockId - b.blockId);
+    res.json({ blocks });
+  } catch (err) {
+    if (err && err.name === 'AppError') return next(err);
+    console.error('[picking/blocks-overview]', err);
+    next(appError('picking_next_failed'));
+  }
+});
+
+// ---------------------------------------------------------------------------
 // GET /api/picking/queue-stats?deliveryGroupId=...
 // Live queue counters for UI (pending/locked split).
 // ---------------------------------------------------------------------------
