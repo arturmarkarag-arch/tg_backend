@@ -1249,9 +1249,12 @@ router.post('/:id/commit', staffOnly, asyncHandler(async (req, res) => {
           }
           if (item.price !== null) currentProduct.price = item.price;
           if (item.qtyPerPackage) currentProduct.quantityPerPackage = item.qtyPerPackage;
-          if (item.shelfQty > 0 && currentProduct.status !== 'active') {
-            currentProduct.status = 'active';
-          }
+          // INVARIANT «active ⟺ лежить у блоці»: commit НЕ робить товар active.
+          // Отриманий товар лишається 'pending' (Надходження), доки склад не
+          // покладе його в блок (blocks.js POST /:n/add). Єдиний прямий шлях у
+          // 'active' — block_photo (вантажиться одразу в блок). Раніше тут було
+          // status='active' → товар ставав active без блока: не видно в Надходженні,
+          // збирач не може знайти. Прибрано.
           await currentProduct.save({ session });
           item.createdProductId = currentProduct._id;
           if (item.shelfQty > 0) item.stockApplied = true;
@@ -1264,9 +1267,10 @@ router.post('/:id/commit', staffOnly, asyncHandler(async (req, res) => {
         if (currentProduct) {
           if (item.price !== null) currentProduct.price = item.price;
           if (item.qtyPerPackage) currentProduct.quantityPerPackage = item.qtyPerPackage;
-          if (item.shelfQty > 0) {
-            if (!stockAlreadyApplied) currentProduct.quantity = item.shelfQty;
-            if (currentProduct.status !== 'active') currentProduct.status = 'active';
+          // Лише кількість (ідемпотентно через stockApplied). Статус лишається
+          // 'pending' — active тільки при розкладанні в блок (див. інваріант вище).
+          if (item.shelfQty > 0 && !stockAlreadyApplied) {
+            currentProduct.quantity = item.shelfQty;
           }
           await currentProduct.save({ session });
         }
@@ -1282,7 +1286,10 @@ router.post('/:id/commit', staffOnly, asyncHandler(async (req, res) => {
           name: item.name || '',
           brand: item.name || '',
           model: '',
-          status: item.shelfQty > 0 ? 'active' : 'pending',
+          // Ніколи не active автоматично: новий товар ще не в блоці → 'pending'
+          // (Надходження), доки його не розкладуть. (Дістається лише якщо confirm
+          // чомусь не створив товар; лишаємо коректним про всяк випадок.)
+          status: 'pending',
           source: 'receipt',
           imageUrls: [item.photoUrl],
           imageNames: [item.photoName],
