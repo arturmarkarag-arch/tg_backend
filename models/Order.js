@@ -31,7 +31,7 @@ const OrderSchema = new mongoose.Schema(
     buyerTelegramId: { type: String, required: true },
     shopId: { type: mongoose.Schema.Types.ObjectId, ref: 'Shop', default: null },
     items: { type: [OrderItemSchema], required: true },
-    status: { type: String, enum: ['new', 'in_progress', 'confirmed', 'fulfilled', 'cancelled', 'expired'], default: 'new' },
+    status: { type: String, enum: ['new', 'in_progress', 'fulfilled', 'expired'], default: 'new' },
     totalPrice: { type: Number, default: 0 },
     orderType: { type: String, enum: ['manual', 'direct_allocation'], default: 'manual' },
     receiptId: { type: mongoose.Schema.Types.ObjectId, ref: 'Receipt', default: null },

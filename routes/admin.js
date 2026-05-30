@@ -317,6 +317,14 @@ router.get('/telegram-groups/:groupId/members', telegramAuth, requireTelegramRol
   res.json(members);
 }));
 
+router.get('/group-members/unregistered-count', telegramAuth, requireTelegramRole('admin'), asyncHandler(async (req, res) => {
+  const { getMembersWithStatus } = require('../services/groupMemberSync');
+  const groupIds = await getAllowedGroupIds();
+  const results = await Promise.all(groupIds.map((id) => getMembersWithStatus(id)));
+  const count = results.flat().filter((r) => !r.isRegistered).length;
+  res.json({ count });
+}));
+
 // ── OpenAI Costs & Usage (Admin Key required) ─────────────────────────────────
 
 async function fetchOpenAIAdmin(path) {

@@ -355,8 +355,6 @@ router.post('/mini-app/state', asyncHandler(async (req, res) => {
   // Кошик зберігається на продавці (User), а не на магазині — кожен має ізольований кошик
   let cartState = normalizeCartState(null);
   if (user) {
-    const modifierName = [user.firstName, user.lastName].filter(Boolean).join(' ') || String(telegramId);
-
     // Optimistic concurrency control for cart writes.
     // Two browser tabs can race: each holds its own snapshot, both POST a "full"
     // orderItems object, and the later one silently overwrites the earlier one's
@@ -421,18 +419,6 @@ router.post('/mini-app/state', asyncHandler(async (req, res) => {
         try {
           if (groupId) io.to(`picking_group_${groupId}`).emit('shop_status_changed', { groupId: String(groupId) });
         } catch (_) { /* non-critical */ }
-
-        // Broadcast to shop room — clients filter out their own events by telegramId
-        try {
-          const shopRoom = `shop_${String(user.shopId)}`;
-          const itemCount = sanitizedOrderItemIds.length;
-          io.to(shopRoom).emit('shop_cart_changed', {
-            shopId: String(user.shopId),
-            modifiedBy: { telegramId: String(telegramId), name: modifierName },
-            updatedAt: cartState.updatedAt,
-            itemCount,
-          });
-        } catch (_) { /* non-critical */ }
       }
     }
   }
@@ -491,18 +477,6 @@ router.post('/mini-app/reset-state', asyncHandler(async (req, res) => {
         const shopDoc = await Shop.findById(user.shopId).select('deliveryGroupId').lean();
         const groupId = shopDoc?.deliveryGroupId;
         if (groupId) io.to(`picking_group_${String(groupId)}`).emit('shop_status_changed', { groupId: String(groupId) });
-      } catch (_) { /* non-critical */ }
-
-      try {
-        io.to(`shop_${String(user.shopId)}`).emit('shop_cart_changed', {
-          shopId: String(user.shopId),
-          modifiedBy: {
-            telegramId: String(telegramId),
-            name: [user.firstName, user.lastName].filter(Boolean).join(' ') || String(telegramId),
-          },
-          updatedAt: cartState.updatedAt,
-          itemCount: 0,
-        });
       } catch (_) { /* non-critical */ }
     }
   }

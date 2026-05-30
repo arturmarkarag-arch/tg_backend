@@ -199,13 +199,12 @@ async function archiveProduct(productOrId, { notifyBuyers = false, bot = null } 
   }
 
   // ── Post-transaction: socket emissions + Telegram notifications ──────────
-  for (const { orderId, buyerTelegramId } of orderNotifications) {
+  for (const { buyerTelegramId } of orderNotifications) {
     try {
       const io = getIO();
-      io.emit('order_updated', { orderId, buyerTelegramId });
       io.emit('user_order_updated', { buyerTelegramId });
     } catch (e) {
-      console.warn('[archiveProduct] socket order_updated failed:', e.message);
+      console.warn('[archiveProduct] socket user_order_updated failed:', e.message);
     }
 
     if (notifyBuyers && bot) {

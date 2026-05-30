@@ -51,13 +51,13 @@ async function pushSessionEvent(sessionId, { type, by = '', byName = '', meta = 
 
 /**
  * Move a session's pickingStatus forward (or, with allowReopen, back from
- * completed when late orders revive it). Idempotent + concurrency-safe: the
- * findOneAndUpdate filter pins the allowed source status, so a no-op transition
- * matches nothing and emits no duplicate event. Returns the updated doc, or null
- * when the transition did not apply (already there / illegal).
+ * completed when late orders revive it), or back to pending (cancel-start).
+ * Idempotent + concurrency-safe: the findOneAndUpdate filter pins the allowed
+ * source status, so a no-op transition matches nothing and emits no duplicate event.
+ * Returns the updated doc, or null when the transition did not apply.
  *
  * @param {string} sessionId
- * @param {'confirmed'|'in_progress'|'completed'} toStatus
+ * @param {'pending'|'confirmed'|'in_progress'|'completed'} toStatus
  * @param {{ actor?: object, meta?: object, allowReopen?: boolean }} [opts]
  * @param {object} [mongoSession]
  */
@@ -72,7 +72,11 @@ async function transitionPickingStatus(sessionId, toStatus, { actor = {}, meta =
   let fromStatuses;
   const set = { pickingStatus: toStatus };
 
-  if (toStatus === 'confirmed') {
+  if (toStatus === 'pending') {
+    // cancel-start: only allowed from confirmed (nobody packed yet)
+    fromStatuses = ['confirmed'];
+    set.pickingConfirmedAt = null;
+  } else if (toStatus === 'confirmed') {
     fromStatuses = ['pending'];
     set.pickingConfirmedAt = now;
   } else if (toStatus === 'in_progress') {

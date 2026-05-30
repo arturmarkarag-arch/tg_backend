@@ -101,7 +101,6 @@ async function markOrderItemsPacked(taskItems, productId, actor = { by: 'system'
       try {
         const order = await Order.findById(orderId, 'buyerTelegramId').lean();
         const io = getIO();
-        io.emit('order_updated', { orderId, buyerTelegramId: order?.buyerTelegramId });
         if (order?.buyerTelegramId) io.emit('user_order_updated', { buyerTelegramId: order.buyerTelegramId });
       } catch { /* non-critical — socket may not be initialised in test env */ }
     })

@@ -15,6 +15,7 @@ const { telegramAuth, requireTelegramRoles } = require('../middleware/telegramAu
 const { getIO } = require('../socket');
 const { isOrderingOpen, getOrderingWindowOpenAt } = require('../utils/orderingSchedule');
 const { getOrCreateSessionId } = require('../utils/getOrCreateSession');
+const { ensureSessionSeq } = require('../utils/sessionSeq');
 const OrderingSession = require('../models/OrderingSession');
 const { pushSessionEvent } = require('../utils/sessionStatus');
 
@@ -889,6 +890,15 @@ async function placeOrderImpl(req, res) {
     by: String(buyer.telegramId || ''),
     byName: [buyer.firstName, buyer.lastName].filter(Boolean).join(' '),
   });
+
+  // Assign the per-group sequential session number on the FIRST order of the
+  // session (idempotent + gap-free). Fire-and-forget: numbering must never add
+  // latency to, or block, an order being placed.
+  if (currentSessionId) {
+    ensureSessionSeq(currentSessionId, String(order.buyerSnapshot?.deliveryGroupId || '')).catch((e) =>
+      console.warn('[orders] ensureSessionSeq failed:', e?.message || e),
+    );
+  }
 
   // Save order position count and clear the user's cart (order is placed — cart is done)
   // NOTE: cart-clear is now performed INSIDE the transaction above (atomic with

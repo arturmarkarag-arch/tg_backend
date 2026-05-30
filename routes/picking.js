@@ -16,7 +16,7 @@ const { getOrderingSchedule } = require('../utils/getOrderingSchedule');
 const { appError } = require('../utils/errors');
 const { withLock } = require('../utils/lock');
 const { transitionPickingStatus, maybeCompleteSession } = require('../utils/sessionStatus');
-const { getSessionVocab } = require('../utils/sessionVocab');
+const { getSessionVocab, deriveSessionPhase } = require('../utils/sessionVocab');
 
 const {
   findAndLockNext,
@@ -72,6 +72,53 @@ async function countOrderedPositions(deliveryGroupId) {
   }
 }
 
+// Derive the single UI phase for a session. Centralised so /start-session and
+// /queue-stats can never disagree. "hasWork" is order-based for live phases and
+// task-based for a completed session (its orders are already fulfilled, so an
+// active-order count would wrongly read 0 and label a real cycle as idle).
+async function computeSessionPhase({ deliveryGroupId, sessionId, pickingStatus, dayOfWeek, schedule }) {
+  const windowOpen = isOrderingOpen(dayOfWeek, schedule).isOpen;
+  let hasWork;
+  if (pickingStatus === 'completed') {
+    hasWork = (await PickingTask.countDocuments({ orderingSessionId: String(sessionId), status: 'completed' })) > 0;
+  } else {
+    hasWork = !!(await Order.exists({
+      'buyerSnapshot.deliveryGroupId': String(deliveryGroupId),
+      status: { $in: ['new', 'in_progress'] },
+      orderingSessionId: String(sessionId),
+    }));
+  }
+  return deriveSessionPhase({ pickingStatus, windowOpen, hasWork });
+}
+
+// Summary line shown under the status chip:
+//   - completed phase → THIS session: { current:true, seq, openDate, orderCount }
+//       "Сесія №X (Чт, 29.05) — зібрано N замовлень"
+//   - idle phase      → the most recent PRIOR completed session (so an empty
+//       just-rolled group still tells the operator the last cycle finished):
+//       { current:false, ... } or null if there is no prior numbered session.
+//   - any other phase → null (the chip + live counters already say enough).
+async function buildSessionSummary(phase, { deliveryGroupId, sessionId, session }) {
+  if (phase === 'completed') {
+    const orderCount = await Order.countDocuments({
+      orderingSessionId: String(sessionId), status: 'fulfilled',
+    });
+    return { current: true, seq: session?.seq ?? null, openDate: session?.openDate ?? null, orderCount };
+  }
+  if (phase === 'idle') {
+    const last = await OrderingSession.findOne(
+      { groupId: String(deliveryGroupId), pickingStatus: 'completed', seq: { $ne: null }, _id: { $ne: sessionId } },
+      'seq openDate',
+    ).sort({ openDate: -1 }).lean();
+    if (!last) return null;
+    const orderCount = await Order.countDocuments({
+      orderingSessionId: String(last._id), status: 'fulfilled',
+    });
+    return { current: false, seq: last.seq, openDate: last.openDate, orderCount };
+  }
+  return null;
+}
+
 async function buildTaskResponse(task, { wrappedAround = false, isSecondChance = false } = {}) {
   if (!task) return null;
   const product = await Product.findById(task.productId).lean();
@@ -109,6 +156,22 @@ async function buildTaskResponse(task, { wrappedAround = false, isSecondChance =
  * Removes task items that belong to orders outside the target session and
  * drops empty active tasks so old sessions cannot block a new picking start.
  */
+
+// ---------------------------------------------------------------------------
+// GET /api/picking/session-status?groupId=...
+// Lightweight: returns only pickingStatus for the current session of a group.
+// Used by the seller catalog to hide "ordered" badge once picking has started.
+// ---------------------------------------------------------------------------
+router.get('/session-status', requireTelegramRoles(['warehouse', 'admin', 'seller']), asyncHandler(async (req, res) => {
+  const { groupId } = req.query;
+  if (!groupId) return res.json({ pickingStatus: 'pending' });
+  const group = await DeliveryGroup.findById(groupId, 'dayOfWeek').lean();
+  if (!group) return res.json({ pickingStatus: 'pending' });
+  const schedule = await getOrderingSchedule();
+  const sessionId = await getOrCreateSessionId(String(groupId), group.dayOfWeek, schedule);
+  const session = await OrderingSession.findById(sessionId, 'pickingStatus').lean();
+  res.json({ pickingStatus: session?.pickingStatus || 'pending' });
+}));
 
 // ---------------------------------------------------------------------------
 // GET /api/picking/schedule
@@ -203,11 +266,26 @@ router.post('/start-session', requireTelegramRoles(['warehouse', 'admin']), asyn
     });
 
     const recentEvents = (session?.events || []).slice(-10);
+    // Window is closed here (the isOpen branch returned above), so phase derives
+    // from pickingStatus + whether the session has real work.
+    const basePhase = await computeSessionPhase({
+      deliveryGroupId,
+      sessionId: currentSessionId,
+      pickingStatus: session?.pickingStatus || 'pending',
+      dayOfWeek: group.dayOfWeek,
+      schedule,
+    });
+    const baseSummary = await buildSessionSummary(basePhase, {
+      deliveryGroupId, sessionId: currentSessionId, session,
+    });
     // vocab travels with the events so the UI never hardcodes status/event
     // labels — backend stays the single source of truth for the enum + labels.
     // Payload is ~500 bytes and start-session is not a hot path.
     const baseEnvelope = {
       pickingStatus: session?.pickingStatus || 'pending',
+      phase: basePhase,
+      sessionSummary: baseSummary,
+      groupDayOfWeek: group.dayOfWeek,
       events: recentEvents,
       vocab: getSessionVocab(),
     };
@@ -307,6 +385,13 @@ router.post('/start-session', requireTelegramRoles(['warehouse', 'admin']), asyn
         noOrders: true,
         staleWarnings,
         pickingStatus: finalDoc?.pickingStatus || 'completed',
+        phase: await computeSessionPhase({
+          deliveryGroupId,
+          sessionId: currentSessionId,
+          pickingStatus: finalDoc?.pickingStatus || 'completed',
+          dayOfWeek: group.dayOfWeek,
+          schedule,
+        }),
         events: (finalDoc?.events || []).slice(-10),
         vocab: getSessionVocab(),
       });
@@ -317,6 +402,13 @@ router.post('/start-session', requireTelegramRoles(['warehouse', 'admin']), asyn
       taskCount: builtCount,
       staleWarnings,
       pickingStatus: confirmedDoc?.pickingStatus || 'confirmed',
+      phase: await computeSessionPhase({
+        deliveryGroupId,
+        sessionId: currentSessionId,
+        pickingStatus: confirmedDoc?.pickingStatus || 'confirmed',
+        dayOfWeek: group.dayOfWeek,
+        schedule,
+      }),
       events: (confirmedDoc?.events || []).slice(-10),
       vocab: getSessionVocab(),
     });
@@ -326,6 +418,46 @@ router.post('/start-session', requireTelegramRoles(['warehouse', 'admin']), asyn
     next(appError('picking_session_failed'));
   }
 });
+
+// ---------------------------------------------------------------------------
+// POST /api/picking/cancel-start
+// Rolls back a confirmed (but not yet in_progress) session to pending.
+// Blocked if any task has already been completed.
+// Body: { deliveryGroupId }
+// ---------------------------------------------------------------------------
+router.post('/cancel-start', requireTelegramRoles(['warehouse', 'admin']), asyncHandler(async (req, res) => {
+  const { deliveryGroupId } = req.body;
+  if (!deliveryGroupId) throw appError('picking_delivery_group_required');
+
+  const group = await DeliveryGroup.findById(deliveryGroupId, 'dayOfWeek name').lean();
+  if (!group) throw appError('group_not_found');
+
+  const schedule = await getOrderingSchedule();
+  const sessionId = await getOrCreateSessionId(String(deliveryGroupId), group.dayOfWeek, schedule);
+  const session = await OrderingSession.findById(sessionId).lean();
+
+  if (!session || session.pickingStatus !== 'confirmed') {
+    return res.status(409).json({ error: 'Скасування можливе лише поки жоден товар ще не зібраний.' });
+  }
+
+  const completedCount = await PickingTask.countDocuments({
+    orderingSessionId: String(sessionId),
+    status: 'completed',
+  });
+  if (completedCount > 0) {
+    return res.status(409).json({ error: 'Збирання вже розпочалось — є виконані завдання.' });
+  }
+
+  await PickingTask.deleteMany({ orderingSessionId: String(sessionId), status: { $in: ['pending', 'locked'] } });
+
+  const actor = {
+    by: String(req.telegramUser.telegramId || ''),
+    byName: [req.telegramUser.firstName, req.telegramUser.lastName].filter(Boolean).join(' '),
+  };
+  await transitionPickingStatus(sessionId, 'pending', { actor, allowReopen: true });
+
+  res.json({ ok: true, pickingStatus: 'pending' });
+}));
 
 // ---------------------------------------------------------------------------
 // GET /api/picking/my-task?deliveryGroupId=...
@@ -549,15 +681,29 @@ router.get('/queue-stats', requireTelegramRoles(['warehouse', 'admin']), async (
     // session to 'completed', the chip would still read "Очікує підтвердження".
     let pickingStatus = null;
     let events = [];
+    let phase = null;
+    let sessionSummary = null;
+    let groupDayOfWeek = null;
     try {
       const groupDoc = await DeliveryGroup.findById(deliveryGroupId, 'dayOfWeek').lean();
       if (groupDoc) {
+        groupDayOfWeek = groupDoc.dayOfWeek;
         const schedule = await getOrderingSchedule();
         const sessionId = await getOrCreateSessionId(String(deliveryGroupId), groupDoc.dayOfWeek, schedule);
-        const sessionDoc = await OrderingSession.findById(sessionId, 'pickingStatus events').lean();
+        const sessionDoc = await OrderingSession.findById(sessionId, 'pickingStatus events seq openDate').lean();
         if (sessionDoc) {
           pickingStatus = sessionDoc.pickingStatus || 'pending';
           events = (sessionDoc.events || []).slice(-10);
+          phase = await computeSessionPhase({
+            deliveryGroupId,
+            sessionId,
+            pickingStatus,
+            dayOfWeek: groupDoc.dayOfWeek,
+            schedule,
+          });
+          sessionSummary = await buildSessionSummary(phase, {
+            deliveryGroupId, sessionId, session: sessionDoc,
+          });
         }
       }
     } catch (e) {
@@ -566,7 +712,7 @@ router.get('/queue-stats', requireTelegramRoles(['warehouse', 'admin']), async (
 
     res.json({
       pendingCount, lockedByMeCount, lockedByOtherCount, activeCount,
-      orderedPositions, pickingStatus, events,
+      orderedPositions, pickingStatus, events, phase, sessionSummary, groupDayOfWeek,
     });
   } catch (err) {
     if (err && err.name === 'AppError') return next(err);
@@ -777,7 +923,7 @@ router.get('/locked-tasks', requireTelegramRoles(['warehouse', 'admin']), async 
 // Live "shift board": who is working, how many tasks each person completed,
 // session start time, last activity time.
 // ---------------------------------------------------------------------------
-router.get('/shift-board', requireTelegramRoles(['warehouse', 'admin']), async (req, res, next) => {
+router.get('/shift-board', requireTelegramRoles(['admin']), async (req, res, next) => {
   try {
     const { deliveryGroupId } = req.query;
     if (!deliveryGroupId) return res.json({ workers: [], totalCompleted: 0, totalPending: 0, sessionStart: null, lastActivity: null, groupName: '' });

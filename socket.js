@@ -21,30 +21,8 @@ function releaseLock(productId) {
   lockedItems.delete(productId);
 }
 
-// Tracks which sellers are currently viewing a given shop room
-// Map<shopId, Map<telegramId, { telegramId, name }>>
-// Presence is derived live from actual room membership rather than a parallel
-// Map — that way a socket that left the room (explicit leave_shop or disconnect)
-// can never linger as a phantom seller, and multiple tabs of one user collapse
-// to a single entry (deduped by telegramId).
-function broadcastShopSellers(shopId) {
-  if (!io) return;
-  const room = `shop_${shopId}`;
-  const socketIds = io.sockets.adapter.rooms.get(room);
-  const byTelegramId = new Map();
-  if (socketIds) {
-    for (const sid of socketIds) {
-      const s = io.sockets.sockets.get(sid);
-      if (!s) continue;
-      byTelegramId.set(s.telegramId, { telegramId: s.telegramId, name: s.userName || s.telegramId });
-    }
-  }
-  const list = Array.from(byTelegramId.values());
-  io.to(room).emit('shop_sellers_updated', { shopId, sellers: list, count: list.length });
-}
-
-// Receipt viewers are derived live from room membership (same rationale as
-// broadcastShopSellers): a socket that left the room or disconnected can never
+// Receipt viewers are derived live from room membership: a socket that left
+// the room or disconnected can never
 // linger as a phantom viewer, and multiple tabs collapse to one entry.
 function broadcastReceiptParticipants(receiptId) {
   if (!io) return;
@@ -176,26 +154,6 @@ function initSocket(httpServer) {
 
     socket.on('leave_picking_group', (groupId) => {
       if (groupId) socket.leave(`picking_group_${groupId}`);
-    });
-
-    // Join a shop room for co-seller presence awareness.
-    // A seller may only ever observe presence in their OWN shop; admins and
-    // warehouse staff may observe any shop.
-    socket.on('join_shop', (shopId) => {
-      if (!shopId) return;
-      if (socket.userRole === 'seller' && String(shopId) !== socket.shopId) return;
-      const room = `shop_${shopId}`;
-      socket.join(room);
-      socket.shopIds = socket.shopIds || new Set();
-      socket.shopIds.add(String(shopId));
-      broadcastShopSellers(String(shopId));
-    });
-
-    socket.on('leave_shop', (shopId) => {
-      if (!shopId) return;
-      socket.leave(`shop_${shopId}`);
-      socket.shopIds?.delete(String(shopId));
-      broadcastShopSellers(String(shopId));
     });
 
     socket.on('join_receipt', (receiptId) => {
@@ -375,10 +333,6 @@ function initSocket(httpServer) {
 
       // This socket has already left its rooms by the time 'disconnect' fires,
       // so re-broadcasting derives the correct remaining presence.
-      for (const shopId of socket.shopIds || []) {
-        broadcastShopSellers(shopId);
-      }
-
       for (const receiptId of socket.receiptIds || []) {
         broadcastReceiptParticipants(receiptId);
       }

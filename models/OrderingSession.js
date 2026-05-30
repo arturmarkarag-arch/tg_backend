@@ -22,6 +22,12 @@ const SessionEventSchema = new mongoose.Schema(
 const OrderingSessionSchema = new mongoose.Schema(
   {
     groupId:  { type: String, required: true },
+    // Human-facing sequential number, PER delivery group, assigned the moment the
+    // FIRST order of the session is placed (see utils/sessionSeq.ensureSessionSeq).
+    // null until then, so empty weeks (nobody ordered) never consume a number and
+    // the sequence the operator sees stays gap-free ("Сесія №12"). Sourced from the
+    // atomic Counter collection under name `session-seq:<groupId>`.
+    seq: { type: Number, default: null },
     // "YYYY-MM-DD" in Warsaw timezone — the calendar date the window opens on.
     // Using the date (not the exact timestamp) means a time change by the admin
     // (e.g. 16:00 → 15:00) does NOT produce a new session document, so all orders
