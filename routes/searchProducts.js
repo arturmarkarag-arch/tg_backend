@@ -74,24 +74,21 @@ router.get('/check', asyncHandler(async (req, res) => {
       title: record.title,
       caption: record.caption,
       imageUrl: record.imageUrl,
-      groupChatId: record.groupChatId,
-      adminTelegramId: record.adminTelegramId,
-      adminName: record.adminName,
       createdAt: record.createdAt,
     },
   });
 }));
 
 router.get('/', asyncHandler(async (req, res) => {
+  // Public endpoint — a barcode is REQUIRED so it can only return the single
+  // record being scanned, never the whole catalogue.
   const barcodeValue = String(req.query.barcode || '').trim();
-  const query = { status: 'active' };
-  if (barcodeValue) {
-    const normalizedBarcode = normalizeBarcode(barcodeValue);
-    if (normalizedBarcode) {
-      query.barcode = normalizedBarcode;
-    }
-  }
-  const items = await SearchProduct.find(query).sort({ createdAt: -1 }).lean();
+  const normalizedBarcode = normalizeBarcode(barcodeValue);
+  if (!normalizedBarcode) throw appError('product_barcode_required');
+
+  const items = await SearchProduct.find({ status: 'active', barcode: normalizedBarcode })
+    .sort({ createdAt: -1 })
+    .lean();
   res.json({ items });
 }));
 
