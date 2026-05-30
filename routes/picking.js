@@ -230,7 +230,11 @@ router.post('/start-session', requireTelegramRoles(['warehouse', 'admin']), asyn
 
     // 2. Resolve session, free this worker's stale locks, archive orphans,
     //    drop tasks whose orders no longer belong to the current session.
-    await releaseWorkerAndStaleLocks(user.telegramId, deliveryGroupId);
+    // releaseOwnLocks:false — a worker re-opening the picking page (which re-runs
+    // start-session on mount) must NOT lose their active pick. Genuinely abandoned
+    // own locks are still swept by the >LOCK_TIMEOUT_MS age condition. Same guard as
+    // block-tasks / queue-stats already use.
+    await releaseWorkerAndStaleLocks(user.telegramId, deliveryGroupId, { releaseOwnLocks: false });
     const currentSessionId = await getOrCreateSessionId(String(deliveryGroupId), group.dayOfWeek, schedule);
     await archiveOrphanedOutOfStockProducts(deliveryGroupId);
     await reconcileActiveTasksForSession(deliveryGroupId, currentSessionId);
@@ -649,6 +653,7 @@ router.get('/block-tasks', requireTelegramRoles(['warehouse', 'admin']), async (
 // ---------------------------------------------------------------------------
 router.get('/blocks-overview', requireTelegramRoles(['warehouse', 'admin']), async (req, res, next) => {
   try {
+    const me = String(req.telegramUser.telegramId || '');
     const deliveryGroupId = req.query.deliveryGroupId || null;
 
     const filter = {
@@ -656,7 +661,7 @@ router.get('/blocks-overview', requireTelegramRoles(['warehouse', 'admin']), asy
       ...(deliveryGroupId ? { deliveryGroupId: String(deliveryGroupId) } : {}),
     };
 
-    const tasks = await PickingTask.find(filter, 'blockId items status').lean();
+    const tasks = await PickingTask.find(filter, 'blockId items status lockedBy').lean();
 
     const byBlock = new Map();
     for (const task of tasks) {
@@ -664,8 +669,15 @@ router.get('/blocks-overview', requireTelegramRoles(['warehouse', 'admin']), asy
       if (!byBlock.has(bid)) byBlock.set(bid, { blockId: bid, taskCount: 0, totalQty: 0, lockedCount: 0 });
       const entry = byBlock.get(bid);
       entry.taskCount += 1;
-      entry.totalQty += (task.items || []).reduce((s, it) => s + Number(it.quantity || 0), 0);
-      if (task.status === 'locked') entry.lockedCount += 1;
+      // totalQty = units STILL to collect: skip shops already packed (partial
+      // progress survives on a pending task after its lock is released).
+      entry.totalQty += (task.items || []).reduce(
+        (s, it) => s + (it.packed ? 0 : Number(it.quantity || 0)),
+        0,
+      );
+      // "Зайнято" means a COLLEAGUE holds it — the worker's own lock never blocks
+      // them, so it must not dim the tile or inflate the count.
+      if (task.status === 'locked' && String(task.lockedBy || '') !== me) entry.lockedCount += 1;
     }
 
     const blocks = [...byBlock.values()].sort((a, b) => a.blockId - b.blockId);
