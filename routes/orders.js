@@ -1595,3 +1595,7 @@ router.post('/remove-item', telegramAuth, requireOrderingWindowOpen, asyncHandle
 }));
 
 module.exports = router;
+// Exposed for the lifecycle E2E harness (Тести Е2Е/test-lifecycle.js): lets a
+// test drive the REAL order-placement path (window check, session assignment,
+// merge, order numbering) with a mocked req/res instead of duplicating it.
+module.exports.placeOrderImpl = placeOrderImpl;

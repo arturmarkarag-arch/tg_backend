@@ -13,7 +13,7 @@ const { isOrderingOpen, getOrderingWindowCloseAt, getOrderingWindowOpenAt, getOp
 const { getOrCreateSessionId } = require('../utils/getOrCreateSession');
 const { normalizeDeliveryGroup } = require('../utils/deliveryGroupHelpers');
 const { getOrderingSchedule } = require('../utils/getOrderingSchedule');
-const { appError } = require('../utils/errors');
+const { appError, asyncHandler } = require('../utils/errors');
 const { withLock } = require('../utils/lock');
 const { transitionPickingStatus, maybeCompleteSession } = require('../utils/sessionStatus');
 const { getSessionVocab, deriveSessionPhase } = require('../utils/sessionVocab');

@@ -31,7 +31,11 @@ const OrderSchema = new mongoose.Schema(
     buyerTelegramId: { type: String, required: true },
     shopId: { type: mongoose.Schema.Types.ObjectId, ref: 'Shop', default: null },
     items: { type: [OrderItemSchema], required: true },
-    status: { type: String, enum: ['new', 'in_progress', 'fulfilled', 'expired'], default: 'new' },
+    // 'confirmed' (some items packed, rest OOS-cancelled) and 'cancelled' (all
+    // items OOS-cancelled) are written by services/archiveProduct.js via
+    // order.save() — they MUST be in the enum, else the OOS path throws a
+    // validation error mid-transaction (product not archived, task not completed → 500).
+    status: { type: String, enum: ['new', 'in_progress', 'confirmed', 'fulfilled', 'cancelled', 'expired'], default: 'new' },
     totalPrice: { type: Number, default: 0 },
     orderType: { type: String, enum: ['manual', 'direct_allocation'], default: 'manual' },
     receiptId: { type: mongoose.Schema.Types.ObjectId, ref: 'Receipt', default: null },
