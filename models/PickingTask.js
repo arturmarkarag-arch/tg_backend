@@ -24,6 +24,14 @@ const PickingTaskSchema = new mongoose.Schema(
         packed: { type: Boolean, default: false },
       },
     ],
+    // A completed out-of-stock task (status:'completed' with an item packed:false) is
+    // the orphan-archive sweep's standing signal to (re)archive the product
+    // (services/pickingService.archiveOrphanedOutOfStockProducts). Product
+    // restore-from-archive (routes/archive.js) sets this true to CONSUME that signal:
+    // restore deliberately un-archives the product, so its old OOS task must stop
+    // re-triggering the sweep — otherwise the next next-task/start-session poll
+    // re-archives the just-restored product. The sweep filters archiveReconciled:{$ne:true}.
+    archiveReconciled: { type: Boolean, default: false },
   },
   { timestamps: true }
 );

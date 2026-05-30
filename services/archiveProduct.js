@@ -5,7 +5,6 @@
  *  - Cancels unpacked items in active orders and recomputes order status/totalPrice
  *  - Closes pending/locked PickingTasks for this product
  *  - Sets product status → 'archived', preserves originalOrderNumber
- *  - Shifts orderNumbers of remaining products down
  *  - Removes the product from any warehouse blocks and broadcasts block_updated
  *
  * @param {import('../models/Product').default} product  Mongoose document (must be a full doc, not lean)
@@ -21,7 +20,6 @@ const Product = require('../models/Product');
 const PickingTask = require('../models/PickingTask');
 const Block = require('../models/Block');
 const DeliveryGroup = require('../models/DeliveryGroup');
-const { shiftDown } = require('../utils/shiftOrderNumbers');
 const { isOrderingOpen } = require('../utils/orderingSchedule');
 const { getOrderingSchedule } = require('../utils/getOrderingSchedule');
 const { getIO } = require('../socket');
@@ -33,8 +31,8 @@ function getProductTitle(product) {
 const ARCHIVE_MAX_RETRIES = 3;
 
 // A WriteConflict (code 112) is transient: two transactions touched the same
-// docs (e.g. concurrent archives both running shiftDown over the orderNumber
-// space). Retrying with a fresh read resolves it.
+// docs (e.g. concurrent archives reconciling the same order or block).
+// Retrying with a fresh read resolves it.
 function isTransientTxError(err) {
   const labels = Array.isArray(err?.errorLabels) ? err.errorLabels : [];
   return (
@@ -165,10 +163,7 @@ async function archiveProduct(productOrId, { notifyBuyers = false, bot = null } 
     product.orderNumber = 0;
     await product.save({ session });
 
-    // ── 4. Shift remaining products down ────────────────────────────────────
-    await shiftDown({ status: { $ne: 'archived' }, orderNumber: { $gt: oldOrderNumber } }, session);
-
-    // ── 5. Remove from blocks (inside transaction so it's atomic with archive) ──
+    // ── 4. Remove from blocks (inside transaction so it's atomic with archive) ──
       const affectedBlocks = await Block.find({ productIds: product._id }, 'blockId').session(session).lean();
       attemptBlockIds = affectedBlocks.map((b) => b.blockId);
       if (attemptBlockIds.length) {

@@ -447,6 +447,10 @@ async function archiveOrphanedOutOfStockProductsImpl(groupId) {
       deliveryGroupId: groupId,
       status: 'completed',
       items: { $elemMatch: { packed: false } },
+      // Skip tasks whose archive intent was deliberately consumed by a
+      // product restore-from-archive — otherwise restore is silently undone
+      // on the next poll (the product is re-archived). See models/PickingTask.
+      archiveReconciled: { $ne: true },
     },
     'productId',
   ).sort({ updatedAt: -1 }).limit(200).lean();
@@ -465,6 +469,16 @@ async function archiveOrphanedOutOfStockProductsImpl(groupId) {
       if (!product) continue;
       const activeTask = await PickingTask.findOne({ productId: product._id, status: { $in: ['pending', 'locked'] } }).lean();
       if (activeTask) continue;
+      // Re-read at archive time: a concurrent product restore-from-archive may have
+      // consumed the OOS signal (archiveReconciled=true) AFTER this sweep's initial
+      // find() snapshot. Without re-checking, a sweep that is still grinding through
+      // a large backlog could re-archive a product that was just restored. Restore
+      // must win, so skip if no unreconciled OOS task remains for this product.
+      const orphanTask = await PickingTask.findOne(
+        { productId: product._id, status: 'completed', 'items.packed': false, archiveReconciled: { $ne: true } },
+        '_id',
+      ).lean();
+      if (!orphanTask) continue;
       // archiveProduct retries transient tx errors internally; the per-group
       // lock + sequential loop already prevent concurrent shiftDown conflicts.
       await archiveProduct(product, { notifyBuyers: false, bot: null });

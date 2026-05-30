@@ -3,6 +3,7 @@ const mongoose = require('mongoose');
 const { S3Client, DeleteObjectCommand } = require('@aws-sdk/client-s3');
 const Product = require('../models/Product');
 const Block = require('../models/Block');
+const PickingTask = require('../models/PickingTask');
 const { getIO } = require('../socket');
 const { telegramAuth, requireTelegramRoles } = require('../middleware/telegramAuth');
 const { appError, asyncHandler } = require('../utils/errors');
@@ -153,6 +154,20 @@ router.post('/:id/restore', asyncHandler(async (req, res) => {
       // Intentionally NOT pushing into any Block — placement is decided in
       // Надходження by the warehouse worker, not silently by this endpoint.
       await product.save({ session });
+
+      // Restore deliberately reverses the out-of-stock. Consume this product's
+      // completed OOS picking tasks so the orphan-archive sweep
+      // (services/pickingService.archiveOrphanedOutOfStockProducts) stops treating
+      // them as a standing "(re)archive me" signal. Without this, the next
+      // next-task/start-session poll for the group re-archives the just-restored
+      // product — a completed task with an unpacked item + a non-archived product is
+      // exactly what the sweep matches. Scoped to this product across all groups,
+      // and atomic with the restore itself (same transaction).
+      await PickingTask.updateMany(
+        { productId: product._id, status: 'completed', 'items.packed': false, archiveReconciled: { $ne: true } },
+        { $set: { archiveReconciled: true } },
+        { session },
+      );
     });
   } finally {
     await session.endSession();
