@@ -90,6 +90,7 @@ const ERRORS = {
   product_in_other_block:   { status: 409, message: ({ existingBlockId } = {}) =>
                                 `Товар вже у блоці #${existingBlockId}` },
   product_not_in_block:     { status: 404, message: 'Товар не у цьому блоці' },
+  product_archived_cannot_shelve: { status: 409, message: 'Архівований товар не можна розмістити в блоці — спершу відновіть його з архіву' },
   product_not_in_source_block:{ status: 400, message: 'Товар не у вихідному блоці' },
   block_move_invalid_fields:{ status: 400, message: 'Невалідні параметри переносу: productId, fromBlock, toBlock, toIndex' },
   block_concurrent_modification: { status: 409, message: 'Блок змінюється кількома користувачами одночасно. Спробуйте ще раз.' },

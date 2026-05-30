@@ -135,7 +135,10 @@ router.post('/:id/restore', asyncHandler(async (req, res) => {
         .lean();
       const newOrderNumber = (tail?.orderNumber || 0) + 1;
 
-      product.status = 'active';
+      // Restore lands the product in Надходження (NOT in a block), so per the
+      // active⟺in-block invariant it must be 'pending' until the worker places it
+      // into a block (block-add flips it to 'active').
+      product.status = 'pending';
       product.source = 'receive';
       product.archivedAt = null;
       product.originalOrderNumber = null; // old position is forgotten on purpose

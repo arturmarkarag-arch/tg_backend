@@ -67,10 +67,11 @@ async function ensureReceiptItemProduct(item, session) {
       if (item.qtyPerPackage) {
         product.quantityPerPackage = item.qtyPerPackage;
       }
-      if (item.shelfQty > 0 && product.status !== 'active') {
-        product.status = 'active';
-        if (!product.shelvedAt) product.shelvedAt = new Date();
-      }
+      // INVARIANT: status follows BLOCK membership, not receipt confirm. A received
+      // product stays 'pending' (in Надходження) until it is physically placed into
+      // a block — only then does block-add flip it to 'active'. shelvedAt still
+      // records the receive moment for the "Нові товари" recency split.
+      if (item.shelfQty > 0 && !product.shelvedAt) product.shelvedAt = new Date();
       await product.save({ session });
       if (item.shelfQty > 0 && !item.stockApplied) {
         item.stockApplied = true;
@@ -92,10 +93,11 @@ async function ensureReceiptItemProduct(item, session) {
       if (item.qtyPerPackage) {
         product.quantityPerPackage = item.qtyPerPackage;
       }
-      if (item.shelfQty > 0 && product.status !== 'active') {
-        product.status = 'active';
-        if (!product.shelvedAt) product.shelvedAt = new Date();
-      }
+      // INVARIANT: status follows BLOCK membership, not receipt confirm. A received
+      // product stays 'pending' (in Надходження) until it is physically placed into
+      // a block — only then does block-add flip it to 'active'. shelvedAt still
+      // records the receive moment for the "Нові товари" recency split.
+      if (item.shelfQty > 0 && !product.shelvedAt) product.shelvedAt = new Date();
       await product.save({ session });
       if (item.shelfQty > 0 && !item.stockApplied) {
         item.stockApplied = true;
@@ -125,7 +127,9 @@ async function ensureReceiptItemProduct(item, session) {
     name: item.name || '',
     brand: item.name || '',
     model: '',
-    status: item.shelfQty > 0 ? 'active' : 'pending',
+    // New receipt product is NOT in a block yet → 'pending' (Надходження). It
+    // becomes 'active' only when placed into a block. shelvedAt records receive time.
+    status: 'pending',
     shelvedAt: item.shelfQty > 0 ? new Date() : null,
     source: 'receipt',
     imageUrls: [item.photoUrl],

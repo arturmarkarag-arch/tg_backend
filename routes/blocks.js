@@ -147,7 +147,8 @@ router.post('/', staffOnly, asyncHandler(async (req, res) => {
 router.get('/incoming/products', asyncHandler(async (req, res) => {
   const assignedIds = await Block.distinct('productIds');
   const products = await Product.find({
-    status: 'active',
+    // Надходження = NOT in a block, awaiting placement → 'pending' (active⟺in-block).
+    status: 'pending',
     source: { $in: ['receive', 'receipt'] },
     _id: { $nin: assignedIds },
     $or: [
@@ -332,6 +333,13 @@ router.delete('/:number/products/:productId', staffOnly, asyncHandler(async (req
   }
   if (!updatedRaw) throw appError('block_concurrent_modification');
 
+  // Out of every block ⟹ back to warehouse 'pending' (findable in Надходження),
+  // never left as an 'active' orphan that nobody can locate. Archived stays archived.
+  await Product.updateOne(
+    { _id: productId, status: { $ne: 'archived' } },
+    { $set: { status: 'pending' } },
+  );
+
   const updated = await Block.findById(updatedRaw._id)
     .populate({ path: 'productIds', match: { status: { $in: ['active', 'pending'] } } })
     .lean();
@@ -360,6 +368,14 @@ router.post('/:number/add', staffOnly, asyncHandler(async (req, res) => {
   if (!num || num < 1) throw appError('block_invalid_number');
   if (!productId) throw appError('block_missing_product_id');
   if (!mongoose.Types.ObjectId.isValid(productId)) throw appError('block_invalid_product_id');
+
+  // INVARIANT (server-enforced): a product becomes 'active' the instant it enters
+  // a block, and an archived product may NEVER be shelved (restore it first).
+  // This is the single gate — no client path can place a non-active product into
+  // a block, so "in a block" is always equivalent to "active / orderable".
+  const productDoc = await Product.findById(productId, 'status').lean();
+  if (!productDoc) throw appError('product_not_found');
+  if (productDoc.status === 'archived') throw appError('product_archived_cannot_shelve');
 
   const MAX_RETRIES = 5;
   let updatedRaw = null;
@@ -459,6 +475,9 @@ router.post('/:number/add', staffOnly, asyncHandler(async (req, res) => {
     }
   }
   if (!updatedRaw) throw appError('block_concurrent_modification');
+
+  // In-block ⟹ active (invariant). Idempotent; the product just entered a block.
+  await Product.updateOne({ _id: productId }, { $set: { status: 'active' } });
 
   const updated = await Block.findById(updatedRaw._id)
     .populate({ path: 'productIds', match: { status: { $in: ['active', 'pending'] } } })

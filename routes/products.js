@@ -767,7 +767,10 @@ router.post('/block-upload-photos', staffOnly, asyncHandler(async (req, res) => 
           orderNumber: nextOrderNumber,
           price: 0,
           quantity: 0,
-          status: 'pending',
+          // block_photo products bypass накладна/Надходження and go STRAIGHT into a
+          // block, so they are live immediately → 'active', not 'pending'. 'pending'
+          // is reserved for the receive flow (restored/incoming awaiting placement).
+          status: 'active',
           source: 'block_photo',
           imageUrls: [imageUrl],
           imageNames: [safeFilename],
