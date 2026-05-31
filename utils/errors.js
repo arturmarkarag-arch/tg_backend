@@ -270,6 +270,7 @@ const ERRORS = {
                                 `Поле «${field || 'currentIndex'}» має бути цілим невідʼємним числом` },
   init_data_required:       { status: 400, message: 'Відсутні дані Telegram (initData)' },
   registration_not_in_group: { status: 403, message: 'Реєстрація доступна лише учасникам робочої групи. Зверніться до адміністратора.' },
+  registration_token_invalid: { status: 403, message: 'Посилання для реєстрації недійсне або прострочене. Відкрийте реєстрацію через бота — напишіть йому /start.' },
   registration_pending:     { status: 403, message: 'Ваша заявка на реєстрацію очікує підтвердження адміністратора' },
   registration_blocked:     { status: 403, message: 'Ваша реєстрація заблокована. Зверніться до адміністратора.' },
   registration_rejected:    { status: 403, message: 'Вашу заявку було відхилено. Ви можете надіслати нову заявку.' },

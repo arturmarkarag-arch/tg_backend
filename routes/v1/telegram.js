@@ -7,6 +7,7 @@ const DeliveryGroup = require('../../models/DeliveryGroup');
 const Shop = require('../../models/Shop');
 const { sendAdminNotification, sendRegistrationApprovedMessage, isUserInAllowedGroup, deleteWelcomeFor } = require('../../telegramBot');
 const { resolveAndCreateUser } = require('../../services/createUserFromRequest');
+const { consumeRegistrationToken } = require('../../services/registrationToken');
 const { getOrderingWindowOpenAt } = require('../../utils/orderingSchedule');
 const { normalizeDeliveryGroup } = require('../../utils/deliveryGroupHelpers');
 const { getOrderingSchedule } = require('../../utils/getOrderingSchedule');
@@ -468,7 +469,7 @@ router.post('/mini-app/reset-state', asyncHandler(async (req, res) => {
 }));
 
 router.post('/register-request', asyncHandler(async (req, res) => {
-  const { firstName, lastName, phoneNumber, shopId, role } = req.body;
+  const { firstName, lastName, phoneNumber, shopId, role, regToken } = req.body;
 
   const { valid, telegramId, error } = getTelegramAuth(req, process.env.TELEGRAM_BOT_TOKEN);
   if (!valid) throw appError('auth_invalid_init_data', { reason: error });
@@ -478,13 +479,17 @@ router.post('/register-request', asyncHandler(async (req, res) => {
   if (!['seller', 'warehouse'].includes(role)) throw appError('registration_invalid_role');
   if (role === 'seller' && !shopId) throw appError('registration_seller_shop_required');
 
-  // ── Registration gate ──────────────────────────────────────────────────────
-  // Only LIVE members of an allowed group may register (fail-closed: any API
-  // error counts as "not a member"). The welcome link is therefore safe — the
-  // permission is enforced here on the server, not by holding the URL.
+  // ── Registration gate (defense in depth) ────────────────────────────────────
+  // 1. LIVE membership: only current members of an allowed group (fail-closed —
+  //    any getChatMember error counts as "not a member").
   if (!(await isUserInAllowedGroup(telegramId))) {
     throw appError('registration_not_in_group');
   }
+  // 2. Personal one-time invite token, minted server-side for THIS telegramId
+  //    (rides in from the group link / bot button). Consumed atomically; only
+  //    valid for the authenticated identity — the URL is never trusted for id.
+  const consumedInvite = await consumeRegistrationToken(regToken, telegramId);
+  if (!consumedInvite) throw appError('registration_token_invalid');
 
   const existingUser = await User.findOne({ telegramId }).lean();
   if (existingUser) throw appError('registration_user_exists');

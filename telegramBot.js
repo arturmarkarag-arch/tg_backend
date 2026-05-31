@@ -8,6 +8,7 @@ const Shop = require('./models/Shop');
 const GroupMember = require('./models/GroupMember');
 const { redeemTransferHash } = require('./services/redeemTransferHash');
 const { trackMemberFromMessage, handleChatMemberUpdate, setMemberPhoto } = require('./services/groupMemberSync');
+const { issueRegistrationToken, peekRegistrationToken } = require('./services/registrationToken');
 
 async function updateUserBotActivity(chatId) {
   try {
@@ -182,6 +183,11 @@ async function scheduleGroupWelcome(groupChatId, telegramId, from) {
       const me = await bot.getMe();
       const botUsername = me?.username;
       if (!botUsername) return;
+      // Per-person invite token bound to THIS member's telegramId. Safe to post
+      // in the public group: it only works for its owner (server checks
+      // token.telegramId === authenticated telegramId), so another member
+      // clicking it cannot register as someone else.
+      const regToken = await issueRegistrationToken(telegramId);
       const displayName = escapeHtml([from.first_name, from.last_name].filter(Boolean).join(' ') || telegramId);
       const mention = from.username
         ? `@${from.username}`
@@ -191,7 +197,7 @@ async function scheduleGroupWelcome(groupChatId, telegramId, from) {
         '',
         'Щоб отримати доступ до системи Замовлень, потрібно зареєструватися в телеграм Боті.',
         '',
-        `➡️ <a href="https://t.me/${botUsername}?start=register">Натисніть тут щоб зареєструватись</a>`,
+        `➡️ <a href="https://t.me/${botUsername}?start=${regToken}">Натисніть тут щоб зареєструватись</a>`,
       ].join('\n');
       const sent = await bot.sendMessage(groupChatId, text, { parse_mode: 'HTML' });
       // Remember the message so we can delete it once the user registers.
@@ -549,15 +555,34 @@ async function initBot(token) {
         }
 
         if (!user) {
-          const message = 'Вас не знайдено в системі. Натисніть кнопку, щоб зареєструватися через Mini App.';
+          // Registration handshake. Resolve a valid invite token for THIS user:
+          //  - reuse the one from the deep link if it's theirs and still valid;
+          //  - otherwise, if they are a live group member, mint a fresh one.
+          // No token + not a member → refuse (the register gate would reject
+          // them anyway). The token rides into the mini-app as ?regToken=… and
+          // is required + consumed by register-request.
+          let regToken = null;
+          const peeked = startPayload ? await peekRegistrationToken(startPayload, chatId) : null;
+          if (peeked) {
+            regToken = peeked.token;
+          } else if (await isUserInAllowedGroup(chatId)) {
+            regToken = await issueRegistrationToken(chatId);
+          }
+
+          if (!regToken) {
+            await bot.sendMessage(chatId, 'Реєстрація доступна лише учасникам робочої групи. Зверніться до адміністратора.');
+            return;
+          }
+
+          const regUrl = `${WEB_APP_URL}${WEB_APP_URL.includes('?') ? '&' : '?'}regToken=${encodeURIComponent(regToken)}`;
           if (WEB_APP_URL.startsWith('https://')) {
-            await bot.sendMessage(chatId, message, {
+            await bot.sendMessage(chatId, 'Натисніть кнопку, щоб зареєструватися через Mini App.', {
               reply_markup: {
-                inline_keyboard: [[{ text: 'Реєстрація в Mini App', web_app: { url: WEB_APP_URL } }]],
+                inline_keyboard: [[{ text: 'Реєстрація в Mini App', web_app: { url: regUrl } }]],
               },
             });
           } else {
-            await bot.sendMessage(chatId, `Відкрийте Mini App: ${WEB_APP_URL}`);
+            await bot.sendMessage(chatId, `Відкрийте Mini App: ${regUrl}`);
           }
           return;
         }

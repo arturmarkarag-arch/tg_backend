@@ -132,9 +132,10 @@ async function startServer() {
     try {
       await require('./models/User').syncIndexes();
       await require('./models/GoogleLinkToken').syncIndexes();
-      console.log('[indexes] User + GoogleLinkToken indexes synced');
+      await require('./models/RegistrationToken').syncIndexes();
+      console.log('[indexes] User + GoogleLinkToken + RegistrationToken indexes synced');
     } catch (err) {
-      console.error('[indexes] User/GoogleLinkToken.syncIndexes failed:', err.message);
+      console.error('[indexes] User/GoogleLinkToken/RegistrationToken.syncIndexes failed:', err.message);
     }
 
 
