@@ -6,6 +6,7 @@ const SearchProduct = require('./models/SearchProduct');
 const DeliveryGroup = require('./models/DeliveryGroup');
 const Shop = require('./models/Shop');
 const GroupMember = require('./models/GroupMember');
+const GoogleLinkToken = require('./models/GoogleLinkToken');
 const { redeemTransferHash } = require('./services/redeemTransferHash');
 const { trackMemberFromMessage, handleChatMemberUpdate, setMemberPhoto } = require('./services/groupMemberSync');
 const { issueRegistrationToken, peekRegistrationToken } = require('./services/registrationToken');
@@ -274,14 +275,6 @@ async function isUserInAllowedGroup(telegramId) {
   return false;
 }
 
-// Tells a user (via the bot) that a Google account was just linked to them — a
-// tripwire against a silent account capture through the link flow.
-async function notifyGoogleLinked(telegramId, email) {
-  if (!bot) return;
-  const text = `✅ До вашого акаунта привʼязано Google: ${email}.\n` +
-    'Якщо це були не Ви — негайно зверніться до адміністратора.';
-  await sendMessageWithRetry(String(telegramId), text);
-}
 
 function getPhotoUrl(photoUrl) {
   if (!photoUrl) return null;
@@ -552,6 +545,48 @@ async function initBot(token) {
           }
           await handleTransferHashRedeem(chatId, startHashMatch[0]);
           return;
+        }
+
+        // ── Google→Telegram link ────────────────────────────────────────────
+        // A browser user proved a Google identity (sub) and opened this deep link
+        // to bind it to their Telegram account. The token carries googleSub; the
+        // telegramId here (chatId) is Telegram-authenticated (ctx.from.id). We
+        // bind only an EXISTING, in-group user; a sub already on someone else is
+        // refused. Re-linking your own account overwrites (change Google).
+        if (startPayload) {
+          const glDoc = await GoogleLinkToken.findOne({
+            token: startPayload, usedAt: null, expiresAt: { $gt: new Date() },
+          }).lean();
+          if (glDoc) {
+            if (!user) {
+              await bot.sendMessage(chatId, 'Щоб привʼязати Google, спершу зареєструйтесь у системі через бота.');
+              return;
+            }
+            if (!(await isUserInAllowedGroup(chatId))) {
+              await bot.sendMessage(chatId, 'Привʼязка Google доступна лише учасникам робочої групи.');
+              return;
+            }
+            const subOwner = await User.findOne({ googleSub: glDoc.googleSub }).select('telegramId').lean();
+            if (subOwner && String(subOwner.telegramId) !== String(chatId)) {
+              await bot.sendMessage(chatId, 'Цей Google-акаунт уже привʼязано до іншого користувача.');
+              return;
+            }
+            // Atomically consume so the link can't be replayed.
+            const consumed = await GoogleLinkToken.findOneAndUpdate(
+              { _id: glDoc._id, usedAt: null },
+              { $set: { usedAt: new Date() } },
+            );
+            if (!consumed) {
+              await bot.sendMessage(chatId, 'Це посилання для привʼязки вже використано або прострочене.');
+              return;
+            }
+            await User.updateOne(
+              { telegramId: chatId },
+              { $set: { googleSub: glDoc.googleSub, googleEmail: glDoc.googleEmail } },
+            );
+            await bot.sendMessage(chatId, `✅ Google${glDoc.googleEmail ? ` (${glDoc.googleEmail})` : ''} привʼязано до вашого акаунта.\nПоверніться на сайт і увійдіть через Google ще раз.`);
+            return;
+          }
         }
 
         if (!user) {
@@ -875,5 +910,4 @@ module.exports = {
   sendRegistrationApprovedMessage,
   isUserInAllowedGroup,
   deleteWelcomeFor,
-  notifyGoogleLinked,
 };

@@ -7,8 +7,7 @@ const { appError, asyncHandler } = require('../../utils/errors');
 const { verifyTelegramWidget } = require('../../utils/telegramWidget');
 const { verifyGoogleIdToken, isConfigured: googleConfigured } = require('../../utils/googleAuth');
 const { signSession, verifySession, isSessionNotRevoked } = require('../../utils/jwt');
-const { getTelegramAuth } = require('../../utils/validateTelegramInitData');
-const { getBot, notifyGoogleLinked } = require('../../telegramBot');
+const { getBot } = require('../../telegramBot');
 const { buildUserProfile } = require('./telegram');
 
 const router = express.Router();
@@ -26,22 +25,22 @@ async function throwRegistrationState(telegramId) {
   throw appError('not_registered', { telegramId });
 }
 
+// The .env only carries the bot TOKEN, not its username — resolve it once via
+// getMe and cache it (used for the config + the Google-link bot deep link).
 let cachedBotUsername = null;
-
-// The .env only carries the bot TOKEN, not its username — but the Telegram
-// Login Widget needs the username. Resolve it once via getMe and cache it.
-router.get('/config', asyncHandler(async (req, res) => {
-  if (!cachedBotUsername) {
-    const bot = getBot();
-    if (bot) {
-      try {
-        const me = await bot.getMe();
-        cachedBotUsername = me?.username || null;
-      } catch { /* bot not ready — client will retry */ }
-    }
+async function resolveBotUsername() {
+  if (cachedBotUsername) return cachedBotUsername;
+  const bot = getBot();
+  if (bot) {
+    try { const me = await bot.getMe(); cachedBotUsername = me?.username || null; }
+    catch { /* bot not ready — caller will retry */ }
   }
+  return cachedBotUsername;
+}
+
+router.get('/config', asyncHandler(async (req, res) => {
   res.json({
-    botUsername: cachedBotUsername,
+    botUsername: await resolveBotUsername(),
     // Single-sourced so the client doesn't need its own build-time env.
     googleClientId: process.env.GOOGLE_AUTH_CLIENT_ID || '',
   });
@@ -75,93 +74,32 @@ router.post('/google', asyncHandler(async (req, res) => {
     }
   }
 
-  if (!user) throw appError('google_email_not_linked', { email });
+  if (!user) {
+    // Valid Google, but not linked to any account yet. Don't hard-fail — offer
+    // to LINK it via the bot (Google→Telegram): mint a one-time token bound to
+    // this googleSub and hand back a bot deep link. The browser shows a
+    // "continue in Telegram" button; the bot does the actual binding (where the
+    // telegramId is Telegram-authenticated). After linking, the user signs in
+    // with Google again and is found by sub.
+    const token = crypto.randomBytes(32).toString('base64url');
+    await GoogleLinkToken.create({
+      token,
+      googleSub: sub,
+      googleEmail: email,
+      expiresAt: new Date(Date.now() + 10 * 60 * 1000), // 10 min
+    });
+    const username = await resolveBotUsername();
+    return res.json({
+      needsLink: true,
+      email,
+      botStartUrl: username ? `https://t.me/${username}?start=${token}` : null,
+    });
+  }
+
   if (user.botBlocked) throw appError('registration_blocked');
 
   const token = signSession(user.telegramId);
   res.json({ token, profile: await buildUserProfile(user) });
-}));
-
-// ── Google account linking (system-browser OAuth proof) ──────────────────────
-// Google blocks OAuth inside the Telegram webview (disallowed_useragent), so the
-// mini-app opens the link page in the system browser via Telegram.WebApp.openLink.
-// A one-time token (bound server-side to the telegramId) carries the identity —
-// never a tg= URL param.
-
-// Start: mini-app calls this WITH initData. We mint a single-use token bound to
-// the verified telegramId and hand back the system-browser link URL.
-router.post('/google/link/start', asyncHandler(async (req, res) => {
-  const { valid, telegramId, error } = getTelegramAuth(req, process.env.TELEGRAM_BOT_TOKEN);
-  if (!valid) throw appError('auth_invalid_init_data', { reason: error });
-  if (!telegramId) throw appError('auth_telegram_id_missing');
-
-  const token = crypto.randomBytes(32).toString('base64url');
-  const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 min
-  await GoogleLinkToken.create({ token, telegramId, expiresAt });
-
-  const base = String(process.env.WEB_APP_URL || '').replace(/\/+$/, '');
-  res.json({ linkUrl: `${base}/link-google?lt=${token}` });
-}));
-
-// Complete: the /link-google page (running in the system browser, NOT logged in)
-// posts the Google credential + the link token. Authorization is the token alone;
-// the telegramId comes from the server-stored record, never from the request.
-router.post('/google/link/complete', asyncHandler(async (req, res) => {
-  if (!googleConfigured()) throw appError('google_auth_not_configured');
-
-  const { credential, lt } = req.body || {};
-  const result = await verifyGoogleIdToken(credential);
-  if (!result) throw appError('google_invalid_token');
-  if (!result.emailVerified) throw appError('google_email_unverified');
-
-  // Atomically consume the token: only an unused, unexpired token flips usedAt.
-  // A replay/expired/forged token matches nothing → google_link_invalid.
-  const now = new Date();
-  const linkDoc = await GoogleLinkToken.findOneAndUpdate(
-    { token: String(lt || ''), usedAt: null, expiresAt: { $gt: now } },
-    { $set: { usedAt: now } },
-    { new: true },
-  );
-  if (!linkDoc) throw appError('google_link_invalid');
-
-  const telegramId = linkDoc.telegramId; // server-trusted, NOT from the request
-  const { sub, email } = result;
-
-  // Collision guards.
-  const subOwner = await User.findOne({ googleSub: sub }).select('telegramId').lean();
-  if (subOwner && String(subOwner.telegramId) !== String(telegramId)) {
-    throw appError('google_sub_taken');
-  }
-  const target = await User.findOne({ telegramId }).lean();
-  if (!target) throw appError('user_not_found');
-  if (target.googleSub && target.googleSub !== sub) {
-    throw appError('google_already_linked');
-  }
-
-  await User.updateOne({ telegramId }, { $set: { googleSub: sub, googleEmail: email } });
-
-  // Notify the user in Telegram so a silent hijack can't go unnoticed.
-  notifyGoogleLinked(telegramId, email).catch((err) =>
-    console.warn('[auth] notifyGoogleLinked failed:', err?.message || err));
-
-  res.json({ ok: true, email });
-}));
-
-// Unlink: clears the Google identity from the caller's account. /v1/auth is in
-// publicApiPaths (no global telegramAuth), so — like /me and link/start — this
-// verifies initData itself. Called from the mini-app profile, where initData is
-// present. Changing Google = unlink + link again.
-router.post('/google/unlink', asyncHandler(async (req, res) => {
-  const { valid, telegramId, error } = getTelegramAuth(req, process.env.TELEGRAM_BOT_TOKEN);
-  if (!valid) throw appError('auth_invalid_init_data', { reason: error });
-  if (!telegramId) throw appError('auth_telegram_id_missing');
-
-  const result = await User.updateOne(
-    { telegramId },
-    { $set: { googleSub: '', googleEmail: '' } },
-  );
-  if (!result.matchedCount) throw appError('user_not_found');
-  res.json({ ok: true });
 }));
 
 // Telegram Login Widget callback. Body = the object the widget passes to
