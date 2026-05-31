@@ -214,6 +214,43 @@ router.post(
   }),
 );
 
+// POST /api/v1/products/ask-group-price
+// Raw image body (express.raw). Fire-and-forget: forwards the photo to every
+// «Група ціна на товар» (telegram.priceGroupIds) with the caption «Яка ціна?».
+// Unlike /report-missing, nothing is stored — no SearchProduct, no R2, no barcode.
+router.post(
+  '/ask-group-price',
+  express.raw({ type: () => true, limit: '30mb' }),
+  asyncHandler(async (req, res) => {
+    if (!Buffer.isBuffer(req.body) || req.body.length === 0) {
+      throw appError('product_photo_required');
+    }
+
+    const { getPriceGroupIds } = require('./admin');
+    const priceGroupIds = await getPriceGroupIds();
+    if (!priceGroupIds.length) throw appError('telegram_groups_not_configured');
+
+    const { getBot } = require('../telegramBot');
+    const bot = getBot();
+    if (!bot) throw appError('telegram_bot_not_initialized');
+
+    const caption = 'Яка ціна?';
+    const sendResults = await Promise.all(priceGroupIds.map(async (chatId) => {
+      try {
+        await bot.sendPhoto(Number(chatId), req.body, { caption, filename: 'price-request.jpg' });
+        return { chatId, sent: true };
+      } catch (err) {
+        console.error('Failed to send price request to group', chatId, err.message || err);
+        return { chatId, sent: false };
+      }
+    }));
+
+    const sentCount = sendResults.filter((r) => r.sent).length;
+    if (sentCount === 0) throw appError('search_resend_failed');
+    res.json({ sent: sentCount, total: priceGroupIds.length });
+  }),
+);
+
 // GET /api/products/drafts — pending (unconfirmed) products
 router.get('/drafts', staffOnly, asyncHandler(async (req, res) => {
   const products = await Product.find({ status: 'pending', source: 'receive' })

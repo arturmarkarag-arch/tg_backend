@@ -305,6 +305,54 @@ router.delete('/telegram-groups/:groupId', telegramAuth, requireTelegramRole('ad
   }
 });
 
+// ── Price groups (Telegram «Група ціна на товар») ─────────────────────────────
+// Separate list from TELEGRAM_GROUPS_KEY: groups that receive «Яка ціна?» photo
+// requests from the photo-search page. No env fallback — DB only.
+const PRICE_GROUPS_KEY = 'telegram.priceGroupIds';
+
+async function getPriceGroupIds() {
+  const fromDb = await getAppSetting(PRICE_GROUPS_KEY, null);
+  return Array.isArray(fromDb) ? fromDb.map(String) : [];
+}
+
+router.get('/price-groups', telegramAuth, requireTelegramRole('admin'), async (req, res) => {
+  try {
+    res.json({ groups: await getPriceGroupIds() });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.post('/price-groups', telegramAuth, requireTelegramRole('admin'), async (req, res) => {
+  try {
+    const groupId = String(req.body?.groupId || '').trim();
+    if (!groupId || !/^-?\d+$/.test(groupId)) {
+      return res.status(400).json({ error: 'groupId має бути числом' });
+    }
+    const current = await getPriceGroupIds();
+    if (current.includes(groupId)) {
+      return res.status(409).json({ error: 'Ця група вже додана' });
+    }
+    const updated = [...current, groupId];
+    await setAppSetting(PRICE_GROUPS_KEY, updated);
+    res.json({ groups: updated });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+router.delete('/price-groups/:groupId', telegramAuth, requireTelegramRole('admin'), async (req, res) => {
+  try {
+    const groupId = String(req.params.groupId).trim();
+    const current = await getPriceGroupIds();
+    const updated = current.filter((id) => id !== groupId);
+    await setAppSetting(PRICE_GROUPS_KEY, updated);
+    res.json({ groups: updated });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ── Group members ─────────────────────────────────────────────────────────────
 
 router.get('/telegram-groups/:groupId/members', telegramAuth, requireTelegramRole('admin'), asyncHandler(async (req, res) => {
@@ -365,4 +413,5 @@ router.get('/openai/usage', telegramAuth, requireTelegramRole('admin'), asyncHan
 }));
 
 router.getAllowedGroupIds = getAllowedGroupIds;
+router.getPriceGroupIds = getPriceGroupIds;
 module.exports = router;
