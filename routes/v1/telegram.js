@@ -1,12 +1,12 @@
 const express = require('express');
 const { validateTelegramInitData, getInitDataFromRequest, getTelegramId, getTelegramAuth } = require('../../utils/validateTelegramInitData');
 const { requireTelegramRole } = require('../../middleware/telegramAuth');
-const { DAY_SHORT } = require('../../utils/dayNames');
 const User = require('../../models/User');
 const RegistrationRequest = require('../../models/RegistrationRequest');
 const DeliveryGroup = require('../../models/DeliveryGroup');
 const Shop = require('../../models/Shop');
-const { sendAdminNotification, sendRegistrationApprovedMessage } = require('../../telegramBot');
+const { sendAdminNotification, sendRegistrationApprovedMessage, isUserInAllowedGroup, deleteWelcomeFor } = require('../../telegramBot');
+const { resolveAndCreateUser } = require('../../services/createUserFromRequest');
 const { getOrderingWindowOpenAt } = require('../../utils/orderingSchedule');
 const { normalizeDeliveryGroup } = require('../../utils/deliveryGroupHelpers');
 const { getOrderingSchedule } = require('../../utils/getOrderingSchedule');
@@ -15,7 +15,6 @@ const { getIO } = require('../../socket');
 const { appError, asyncHandler } = require('../../utils/errors');
 const { withLock } = require('../../utils/lock');
 const { getShop, getDeliveryGroup } = require('../../utils/modelCache');
-const { normalizeEmail, isValidEmail } = require('../../utils/email');
 
 const router = express.Router();
 const adminOnly = requireTelegramRole('admin');
@@ -263,7 +262,9 @@ router.patch('/me/profile', asyncHandler(async (req, res) => {
   if (!user) throw appError('auth_required');
   if (!['seller', 'warehouse'].includes(user.role)) throw appError('forbidden');
 
-  const { firstName, lastName, phoneNumber, googleEmail } = req.body || {};
+  // Google linking is no longer a typed field here — it is proven via OAuth
+  // through /auth/google/link/*. This route handles only plain contact data.
+  const { firstName, lastName, phoneNumber } = req.body || {};
   const patch = {};
   if (typeof firstName === 'string') {
     const v = firstName.trim();
@@ -275,24 +276,6 @@ router.patch('/me/profile', asyncHandler(async (req, res) => {
   }
   if (phoneNumber !== undefined && phoneNumber !== null) {
     patch.phoneNumber = normalizePhoneNumber(phoneNumber);
-  }
-  // Personal data, like phoneNumber — applied directly, no admin approval.
-  // Empty string clears the link; a non-empty value must be a valid email
-  // not already owned by another account.
-  if (typeof googleEmail === 'string') {
-    const email = normalizeEmail(googleEmail);
-    if (email === '') {
-      patch.googleEmail = '';
-    } else if (!isValidEmail(email)) {
-      throw appError('profile_email_invalid');
-    } else {
-      const taken = await User.findOne({
-        googleEmail: email,
-        telegramId: { $ne: user.telegramId },
-      }).select('_id').lean();
-      if (taken) throw appError('profile_email_taken');
-      patch.googleEmail = email;
-    }
   }
 
   if (Object.keys(patch).length === 0) throw appError('me_profile_no_changes');
@@ -485,7 +468,7 @@ router.post('/mini-app/reset-state', asyncHandler(async (req, res) => {
 }));
 
 router.post('/register-request', asyncHandler(async (req, res) => {
-  const { firstName, lastName, phoneNumber, shopId, role, googleEmail } = req.body;
+  const { firstName, lastName, phoneNumber, shopId, role } = req.body;
 
   const { valid, telegramId, error } = getTelegramAuth(req, process.env.TELEGRAM_BOT_TOKEN);
   if (!valid) throw appError('auth_invalid_init_data', { reason: error });
@@ -495,13 +478,12 @@ router.post('/register-request', asyncHandler(async (req, res) => {
   if (!['seller', 'warehouse'].includes(role)) throw appError('registration_invalid_role');
   if (role === 'seller' && !shopId) throw appError('registration_seller_shop_required');
 
-  // Optional Gmail for browser login. Validate + reject if already linked.
-  let cleanEmail = '';
-  if (googleEmail !== undefined && googleEmail !== null && String(googleEmail).trim() !== '') {
-    cleanEmail = normalizeEmail(googleEmail);
-    if (!isValidEmail(cleanEmail)) throw appError('registration_email_invalid');
-    const emailTaken = await User.findOne({ googleEmail: cleanEmail }).select('_id').lean();
-    if (emailTaken) throw appError('registration_email_taken');
+  // ── Registration gate ──────────────────────────────────────────────────────
+  // Only LIVE members of an allowed group may register (fail-closed: any API
+  // error counts as "not a member"). The welcome link is therefore safe — the
+  // permission is enforced here on the server, not by holding the URL.
+  if (!(await isUserInAllowedGroup(telegramId))) {
+    throw appError('registration_not_in_group');
   }
 
   const existingUser = await User.findOne({ telegramId }).lean();
@@ -521,6 +503,8 @@ router.post('/register-request', asyncHandler(async (req, res) => {
     }
   }
 
+  const cleanPhone = normalizePhoneNumber(phoneNumber);
+
   let shop = null;
   let group = null;
   if (role === 'seller') {
@@ -531,32 +515,63 @@ router.post('/register-request', asyncHandler(async (req, res) => {
     if (!group) throw appError('registration_group_not_found');
   }
 
-  const cleanPhone = normalizePhoneNumber(phoneNumber);
+  // ── Seller: auto-register. Group membership IS the authorization — no admin
+  // step, no RegistrationRequest. (Role grants no access beyond the seller's own
+  // shop; a wrong shop is later fixed via shop-transfer.) ──────────────────────
+  if (role === 'seller') {
+    const mongoose = require('mongoose');
+    const session = await mongoose.connection.startSession();
+    let createdUser = null;
+    try {
+      await session.withTransaction(async () => {
+        const existing = await User.findOne({ telegramId }).session(session).lean();
+        if (existing) throw appError('registration_user_exists');
+        createdUser = await resolveAndCreateUser({
+          session,
+          telegramId,
+          role: 'seller',
+          firstName,
+          lastName,
+          phoneNumber: cleanPhone,
+          shopId: String(shop._id),
+          deliveryGroupId: shop.deliveryGroupId,
+        });
+      });
+    } catch (err) {
+      if (err && err.code === 11000) throw appError('registration_user_exists');
+      throw err;
+    } finally {
+      session.endSession();
+    }
 
+    // Post-commit, best-effort side effects.
+    deleteWelcomeFor(telegramId).catch((e) =>
+      console.warn('[register-request] deleteWelcomeFor failed:', e?.message || e));
+    sendRegistrationApprovedMessage(createdUser.telegramId, createdUser.role).catch((e) =>
+      console.warn('[register-request] approved message failed:', e?.message || e));
+
+    return res.status(201).json({ registered: true, role: 'seller', telegramId });
+  }
+
+  // ── Warehouse: still requires an admin approve ──────────────────────────────
   const request = await RegistrationRequest.create({
     telegramId,
     firstName,
     lastName,
     phoneNumber: cleanPhone,
-    googleEmail: cleanEmail,
-    shopId:          role === 'seller' ? String(shop._id) : null,
-    deliveryGroupId: role === 'seller' ? shop.deliveryGroupId : '',
+    shopId: null,
+    deliveryGroupId: '',
     role,
     status: 'pending',
     meta: { submittedAt: new Date() },
   });
 
-  const roleLabel = role === 'warehouse' ? 'Склад' : 'Продавець';
-  const message = `📥 Нова заявка на реєстрацію (${roleLabel}):\n` +
+  const message = `📥 Нова заявка на реєстрацію (Склад):\n` +
     `Telegram ID: ${telegramId}\n` +
     `Імʼя: ${firstName}\n` +
     `Прізвище: ${lastName}\n` +
     (cleanPhone ? `Телефон: ${cleanPhone}\n` : '') +
-    (cleanEmail ? `Gmail: ${cleanEmail}\n` : '') +
-    `Роль: ${roleLabel}\n` +
-    (role === 'seller'
-      ? `Назва магазину: ${shop.name}\nМісто: ${shop.cityId?.name || 'не вказано'}\nГрупа доставки: ${group.name} (${DAY_SHORT[group.dayOfWeek] || 'День'})\n`
-      : '') +
+    `Роль: Склад\n` +
     `Запит створено: ${new Date().toLocaleString()}`;
 
   sendAdminNotification(message, request._id.toString()).catch(() => {});
@@ -613,47 +628,18 @@ router.post('/register-requests/:id/approve', adminOnly, asyncHandler(async (req
         return; // commit the rejected state; throw after the tx
       }
 
-      // The Gmail may have been linked by someone else between request and
-      // approve. Drop it rather than fail the whole approval — the user can
-      // re-link a different address from their profile afterwards.
-      let resolvedGoogleEmail = request.googleEmail || '';
-      if (resolvedGoogleEmail) {
-        const emailOwner = await User.findOne({ googleEmail: resolvedGoogleEmail })
-          .select('_id').session(session).lean();
-        if (emailOwner) resolvedGoogleEmail = '';
-      }
-
-      let resolvedShopId = null;
-      let resolvedDeliveryGroupId = request.role === 'seller' ? request.deliveryGroupId || '' : '';
-      let resolvedWarehouseZone = '';
-
-      if (request.role === 'seller' && request.shopId) {
-        const shop = await Shop.findOne({ _id: request.shopId, isActive: true })
-          .populate('cityId', 'name').session(session).lean();
-        if (!shop) throw appError('registration_shop_inactive');
-        resolvedShopId = shop._id;
-        resolvedDeliveryGroupId = shop.deliveryGroupId || resolvedDeliveryGroupId;
-        if (resolvedDeliveryGroupId) {
-          const grp = await DeliveryGroup.findById(resolvedDeliveryGroupId).session(session).lean();
-          resolvedWarehouseZone = grp?.name || '';
-        }
-      }
-
-      // create() (not upsert) so a concurrent create of the same telegramId
-      // throws E11000 (unique index) instead of silently returning the other
-      // request's user. Surfaces a loud, correct error.
-      const [u] = await User.create([{
+      // Shared creation: resolves shop → group → zone and create()s the User in
+      // this transaction (E11000 on concurrent dup telegramId → caught below).
+      createdUser = await resolveAndCreateUser({
+        session,
         telegramId: request.telegramId,
         role: request.role,
         firstName: request.firstName,
         lastName: request.lastName,
-        phoneNumber: request.phoneNumber || '',
-        googleEmail: resolvedGoogleEmail,
-        shopId: resolvedShopId,
-        deliveryGroupId: resolvedDeliveryGroupId,
-        warehouseZone: resolvedWarehouseZone,
-      }], { session });
-      createdUser = u;
+        phoneNumber: request.phoneNumber,
+        shopId: request.role === 'seller' ? request.shopId : null,
+        deliveryGroupId: request.deliveryGroupId,
+      });
 
       await RegistrationRequest.deleteOne({ _id: request._id }, { session });
     });
@@ -665,6 +651,10 @@ router.post('/register-requests/:id/approve', adminOnly, asyncHandler(async (req
   }
 
   if (userExists) throw appError('registration_user_exists');
+
+  // Remove the group "register here" welcome now that they're in the system.
+  deleteWelcomeFor(createdUser.telegramId).catch((err) =>
+    console.warn('[approve] deleteWelcomeFor failed:', err?.message || err));
 
   await sendRegistrationApprovedMessage(createdUser.telegramId, createdUser.role).catch((err) => {
     console.warn('[approve] sendRegistrationApprovedMessage failed:', err?.message || err);

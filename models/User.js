@@ -16,7 +16,13 @@ const UserSchema = new mongoose.Schema(
     firstName: { type: String, default: '' },
     lastName: { type: String, default: '' },
     phoneNumber: { type: String, default: '' },
-    // Linked Google account for browser sign-in. Empty string = not linked.
+    // Google identity key for browser sign-in. Proven via OAuth (verifyIdToken),
+    // never typed by hand. Empty string = not linked. This — not googleEmail —
+    // is what /auth/google matches on, so a changed Gmail address can't be used
+    // to squat another account.
+    googleSub: { type: String, default: '' },
+    // Linked Google account email — now DISPLAY ONLY (+ one-time migration bridge
+    // in /auth/google for accounts linked before googleSub existed). Not a key.
     // Lowercased/trimmed on save; queries must normalize the same way.
     googleEmail: { type: String, default: '', lowercase: true, trim: true },
     shopNumber: { type: String, default: '' },
@@ -68,6 +74,13 @@ const UserSchema = new mongoose.Schema(
 UserSchema.index(
   { googleEmail: 1 },
   { unique: true, partialFilterExpression: { googleEmail: { $gt: '' } } },
+);
+
+// Same partial-unique guarantee for the OAuth subject id: at most one account
+// per Google identity. Docs without a linked Google ('' / missing) are excluded.
+UserSchema.index(
+  { googleSub: 1 },
+  { unique: true, partialFilterExpression: { googleSub: { $gt: '' } } },
 );
 
 module.exports = mongoose.model('User', UserSchema);

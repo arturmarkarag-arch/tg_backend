@@ -5,6 +5,7 @@ const RegistrationRequest = require('./models/RegistrationRequest');
 const SearchProduct = require('./models/SearchProduct');
 const DeliveryGroup = require('./models/DeliveryGroup');
 const Shop = require('./models/Shop');
+const GroupMember = require('./models/GroupMember');
 const { redeemTransferHash } = require('./services/redeemTransferHash');
 const { trackMemberFromMessage, handleChatMemberUpdate, setMemberPhoto } = require('./services/groupMemberSync');
 
@@ -192,11 +193,88 @@ async function scheduleGroupWelcome(groupChatId, telegramId, from) {
         '',
         `➡️ <a href="https://t.me/${botUsername}?start=register">Натисніть тут щоб зареєструватись</a>`,
       ].join('\n');
-      await bot.sendMessage(groupChatId, text, { parse_mode: 'HTML' });
+      const sent = await bot.sendMessage(groupChatId, text, { parse_mode: 'HTML' });
+      // Remember the message so we can delete it once the user registers.
+      if (sent?.message_id) {
+        await GroupMember.updateOne(
+          { groupChatId: String(groupChatId), telegramId: String(telegramId) },
+          { $set: { welcomeChatId: String(groupChatId), welcomeMessageId: sent.message_id } },
+        ).catch((e) => console.warn('[Bot] store welcome message_id failed:', e.message));
+      }
     } catch (err) {
       console.warn('[Bot] welcome message failed:', err.message);
     }
   }, 10_000);
+}
+
+// Deletes any outstanding group welcome ("register here") messages for a user
+// who has just registered. Best-effort: Telegram only allows the bot to delete
+// group messages younger than 48h and only with delete-message rights, so any
+// failure is swallowed. Clears the stored ids either way.
+async function deleteWelcomeFor(telegramId) {
+  if (!bot) return;
+  let members = [];
+  try {
+    members = await GroupMember.find({
+      telegramId: String(telegramId),
+      welcomeMessageId: { $ne: null },
+    }).lean();
+  } catch (e) {
+    console.warn('[Bot] deleteWelcomeFor lookup failed:', e.message);
+    return;
+  }
+  for (const m of members) {
+    if (m.welcomeChatId && m.welcomeMessageId) {
+      try {
+        await bot.deleteMessage(m.welcomeChatId, m.welcomeMessageId);
+      } catch (e) {
+        // >48h old or no admin rights — not critical.
+        console.warn('[Bot] deleteWelcome message failed:', e.message);
+      }
+    }
+    await GroupMember.updateOne(
+      { _id: m._id },
+      { $set: { welcomeChatId: '', welcomeMessageId: null } },
+    ).catch(() => {});
+  }
+}
+
+// Live membership gate for registration. Returns true only if the user is a
+// CURRENT member of at least one allowed group (member/administrator/creator).
+// `restricted` (muted/limited) and `left`/`kicked` are rejected. Fail-closed:
+// any API error (bot not in the group, network) counts as "not a member".
+// Precondition: the bot must be a member (ideally admin) of each allowed group.
+async function isUserInAllowedGroup(telegramId) {
+  if (!bot || !telegramId) return false;
+  let groupIds = [];
+  try {
+    const { getAllowedGroupIds } = require('./routes/admin');
+    groupIds = await getAllowedGroupIds();
+  } catch (e) {
+    console.warn('[groupGate] getAllowedGroupIds failed:', e.message);
+    return false;
+  }
+  if (!groupIds.length) return false;
+
+  for (const groupId of groupIds) {
+    try {
+      const member = await bot.getChatMember(groupId, Number(telegramId));
+      if (['member', 'administrator', 'creator'].includes(member?.status)) return true;
+    } catch (e) {
+      // Fail-closed for THIS group; keep checking the rest.
+      console.warn(`[groupGate] getChatMember(${groupId}, ${telegramId}) failed:`, e.message);
+    }
+  }
+  return false;
+}
+
+// Tells a user (via the bot) that a Google account was just linked to them — a
+// tripwire against a silent account capture through the link flow.
+async function notifyGoogleLinked(telegramId, email) {
+  if (!bot) return;
+  const text = `✅ До вашого акаунта привʼязано Google: ${email}.\n` +
+    'Якщо це були не Ви — негайно зверніться до адміністратора.';
+  await sendMessageWithRetry(String(telegramId), text);
 }
 
 function getPhotoUrl(photoUrl) {
@@ -676,32 +754,22 @@ async function initBot(token) {
             await RegistrationRequest.findByIdAndUpdate(requestId, { status: 'rejected' });
             await bot.answerCallbackQuery(query.id, { text: 'Користувач вже зареєстрований', show_alert: true });
           } else {
-            // Resolve shop fresh — shopName/shopCity are NOT stored on User anymore,
-            // they are always read via shopId → Shop lookup at display time.
-            let shopId          = request.shopId || null;
-            let deliveryGroupId = request.deliveryGroupId || '';
-            let warehouseZone   = '';
-            if (shopId) {
-              const shop = await Shop.findById(shopId).populate('cityId', 'name').lean();
-              if (shop) {
-                deliveryGroupId = shop.deliveryGroupId || '';
-                if (deliveryGroupId) {
-                  const grp = await DeliveryGroup.findById(deliveryGroupId).lean();
-                  warehouseZone = grp?.name || '';
-                }
-              }
-            }
-            const user = new User({
+            // Same shared creation as the web approve path (resolves shop →
+            // group → zone). No session here — the inline-button flow isn't
+            // transactional; the existingUser check above guards the common case.
+            const { resolveAndCreateUser } = require('./services/createUserFromRequest');
+            await resolveAndCreateUser({
               telegramId: request.telegramId,
               role: request.role,
               firstName: request.firstName,
               lastName: request.lastName,
-              shopId:          request.role === 'seller' ? shopId          : null,
-              deliveryGroupId: request.role === 'seller' ? deliveryGroupId : '',
-              warehouseZone:   request.role === 'seller' ? warehouseZone   : '',
+              phoneNumber: request.phoneNumber,
+              shopId: request.role === 'seller' ? request.shopId : null,
+              deliveryGroupId: request.deliveryGroupId,
             });
-            await user.save();
             await RegistrationRequest.findByIdAndDelete(requestId);
+            deleteWelcomeFor(request.telegramId).catch((e) =>
+              console.warn('[Bot] deleteWelcomeFor failed:', e.message));
             await bot.answerCallbackQuery(query.id, { text: 'Заявку схвалено', show_alert: false });
             await sendRegistrationApprovedMessage(request.telegramId, request.role);
           }
@@ -771,4 +839,7 @@ module.exports = {
   getBot: () => bot,
   sendAdminNotification,
   sendRegistrationApprovedMessage,
+  isUserInAllowedGroup,
+  deleteWelcomeFor,
+  notifyGoogleLinked,
 };

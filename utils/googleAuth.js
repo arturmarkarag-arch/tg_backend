@@ -17,8 +17,9 @@ function isConfigured() {
 }
 
 // Verifies the ID token (signature, issuer, expiry, and that `aud` is OUR
-// client id). Returns the normalized email + whether Google says it's
-// verified, or null on any failure.
+// client id). Returns the Google subject id (`sub` — the stable identity key),
+// normalized email, and whether Google says it's verified, or null on any
+// failure. `sub` is what callers MUST key on; email is display-only.
 async function verifyGoogleIdToken(credential) {
   if (!client || !credential) return null;
   try {
@@ -27,8 +28,9 @@ async function verifyGoogleIdToken(credential) {
       audience: CLIENT_ID,
     });
     const payload = ticket.getPayload();
-    if (!payload?.email) return null;
+    if (!payload?.sub || !payload?.email) return null;
     return {
+      sub: String(payload.sub),
       email: normalizeEmail(payload.email),
       emailVerified: payload.email_verified === true,
     };

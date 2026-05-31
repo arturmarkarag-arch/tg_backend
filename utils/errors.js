@@ -124,7 +124,10 @@ const ERRORS = {
   google_invalid_token:     { status: 401, message: 'Не вдалося перевірити вхід Google. Спробуйте ще раз.' },
   google_email_unverified:  { status: 403, message: 'Ваша Google-пошта не підтверджена. Підтвердьте її в акаунті Google і повторіть.' },
   google_email_not_linked:  { status: 403, message: ({ email } = {}) =>
-                                `Пошту${email ? ` ${email}` : ''} не прив'язано до жодного акаунту. Спершу вкажіть її при реєстрації або в налаштуваннях профілю через Telegram.` },
+                                `Пошту${email ? ` ${email}` : ''} не привʼязано до жодного акаунту. Привʼяжіть Google через кнопку «Привʼязати Google» у профілі Telegram-бота.` },
+  google_sub_taken:         { status: 409, message: 'Цей Google-акаунт уже привʼязано до іншого користувача.' },
+  google_already_linked:    { status: 409, message: 'До вашого акаунта вже привʼязано інший Google. Спершу відвʼяжіть його.' },
+  google_link_invalid:      { status: 400, message: 'Посилання для привʼязки недійсне або прострочене. Почніть привʼязку знову.' },
 
   auth_role_required:       { status: 403, message: ({ allowed = [] } = {}) =>
                                 `Доступ заборонено. Дозволено лише: ${(Array.isArray(allowed) ? allowed : [allowed]).join(', ')}` },
@@ -266,6 +269,7 @@ const ERRORS = {
   me_state_invalid_index:   { status: 400, message: ({ field } = {}) =>
                                 `Поле «${field || 'currentIndex'}» має бути цілим невідʼємним числом` },
   init_data_required:       { status: 400, message: 'Відсутні дані Telegram (initData)' },
+  registration_not_in_group: { status: 403, message: 'Реєстрація доступна лише учасникам робочої групи. Зверніться до адміністратора.' },
   registration_pending:     { status: 403, message: 'Ваша заявка на реєстрацію очікує підтвердження адміністратора' },
   registration_blocked:     { status: 403, message: 'Ваша реєстрація заблокована. Зверніться до адміністратора.' },
   registration_rejected:    { status: 403, message: 'Вашу заявку було відхилено. Ви можете надіслати нову заявку.' },

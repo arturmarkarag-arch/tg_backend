@@ -15,6 +15,11 @@ const schema = new mongoose.Schema({
   joinedAt:     { type: Date, default: null },
   // true = user left/was kicked; false = still member
   left:         { type: Boolean, default: false },
+  // The group welcome ("register here") message we posted for this member, so we
+  // can delete it once they register. message_id null = none outstanding.
+  // (Telegram only lets the bot delete group messages < 48h old + with rights.)
+  welcomeChatId:    { type: String, default: '' },
+  welcomeMessageId: { type: Number, default: null },
 }, { timestamps: true });
 
 schema.index({ groupChatId: 1, telegramId: 1 }, { unique: true });

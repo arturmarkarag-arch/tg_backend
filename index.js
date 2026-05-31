@@ -126,6 +126,17 @@ async function startServer() {
       );
     }
 
+    // User: build the partial-unique googleSub index (Google login is keyed on
+    // sub). GoogleLinkToken: build its TTL index so spent/expired link tokens are
+    // reaped automatically. Non-fatal — log and continue if a build fails.
+    try {
+      await require('./models/User').syncIndexes();
+      await require('./models/GoogleLinkToken').syncIndexes();
+      console.log('[indexes] User + GoogleLinkToken indexes synced');
+    } catch (err) {
+      console.error('[indexes] User/GoogleLinkToken.syncIndexes failed:', err.message);
+    }
+
 
     // Prefer key stored in DB (via admin settings), fall back to env
     const keyFromDb = await AppSetting.findOne({ key: 'openai.apiKey' }).lean();
