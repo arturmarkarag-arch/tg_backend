@@ -158,6 +158,27 @@ router.get('/upload-url-triple', staffOnly, asyncHandler(async (req, res) => {
   res.json({ filename, originalUrl, productUrl, thumbUrl, cacheControl: UPLOAD_CACHE_CONTROL });
 }));
 
+// DELETE /api/v1/products/orphan-photo?filename=<uuid>.jpg — best-effort cleanup
+// for a partially-failed multi-PUT upload. The triple/pair upload primitives PUT
+// 2–3 variants in parallel under one shared filename; if one PUT fails the others
+// may already have landed in R2, and since the filename never reaches a DB doc
+// they become orphans. The client calls this in its catch with the shared
+// filename to wipe every variant (originals/products/thumbs/defects). Idempotent
+// and never throws on a missing key — deleting an absent object is a no-op.
+router.delete('/orphan-photo', staffOnly, asyncHandler(async (req, res) => {
+  const raw = String(req.query.filename || '');
+  // basename only, uuid.jpg shape — refuse anything with a path separator so the
+  // key can't be steered outside the known variant folders.
+  if (!/^[a-f0-9-]+\.(jpg|jpeg|png|webp)$/i.test(raw)) throw appError('product_image_unsupported');
+  await deleteR2Objects([
+    `originals/${raw}`,
+    `products/${raw}`,
+    `thumbs/${raw}`,
+    `defects/${raw}`,
+  ]);
+  res.json({ ok: true });
+}));
+
 // GET /api/v1/products/upload-url-public?ext=jpg — public presigned PUT URL for missing-product reports (no auth required)
 router.get('/upload-url-public', asyncHandler(async (req, res) => {
   const ext = String(req.query.ext || 'jpg').replace(/[^a-zA-Z0-9]/g, '').toLowerCase();

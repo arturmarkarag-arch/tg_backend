@@ -1422,13 +1422,16 @@ router.post('/:id/items/:itemId/describe', staffOnly, asyncHandler(async (req, r
   }
 
   try {
-    const { text } = await describeImageUrl(url);
+    const { text, name } = await describeImageUrl(url);
     if (!text) return res.status(502).json({ error: 'empty_description', message: 'Не вдалося згенерувати опис' });
     item.aiDescription = text;
+    // Fill the name ONLY when the user left it blank — never clobber a manually
+    // typed name with the model's guess.
+    if (name && !String(item.name || '').trim()) item.name = name;
     await item.save();
     const io = getIO();
     if (io) io.to(`receipt_${req.params.id}`).emit('receipt_item_updated', item.toObject());
-    res.json({ _id: item._id, aiDescription: item.aiDescription });
+    res.json({ _id: item._id, aiDescription: item.aiDescription, name: item.name });
   } catch (err) {
     console.error('[receipts] describe error:', err.message);
     return res.status(502).json({ error: 'describe_api_error', message: err.message });

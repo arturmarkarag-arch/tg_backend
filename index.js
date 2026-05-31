@@ -61,7 +61,7 @@ process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT', () => shutdown('SIGINT'));
 
 const PORT = Number(process.env.PORT) || 5000;
-const MONGODB_URI = process.env.MONGODB_URI || (process.env.NODE_ENV === 'production' ? null : 'mongodb://localhost:27017/tg_manager');
+const MONGODB_URI = process.env.MONGODB_URI || null;
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 
 async function startServer() {

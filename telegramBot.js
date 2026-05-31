@@ -80,8 +80,8 @@ async function handleMyChatMemberUpdate(update) {
 }
 
 
-const SERVER_BASE_URL = process.env.SERVER_BASE_URL || (process.env.NODE_ENV === 'production' ? null : `http://localhost:${process.env.PORT || 5000}`);
-const WEB_APP_URL = process.env.WEB_APP_URL || 'http://localhost:5173/mini-app';
+const SERVER_BASE_URL = process.env.SERVER_BASE_URL || null;
+const WEB_APP_URL = process.env.WEB_APP_URL;
 const ALLOWED_TELEGRAM_GROUP_IDS = (process.env.TELEGRAM_ALLOWED_GROUP_IDS || '')
   .split(',')
   .map((id) => id.trim())
