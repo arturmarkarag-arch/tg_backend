@@ -1224,7 +1224,15 @@ router.patch('/:id', staffOnly, asyncHandler(async (req, res) => {
 
   try {
     const io = getIO();
-    if (io) io.emit('incoming_updated');
+    if (io) {
+      io.emit('incoming_updated');
+      // A new photo / repositioned labels change what the catalogue tile shows
+      // (the seller mini-app reads imageUrls[0]). The catalogue is the one view
+      // that stays mounted and only refreshes its window on 'catalogue_updated' —
+      // a bare 'incoming_updated' is just for the Надходження lists. Without this
+      // the edited photo stays stale on every open catalogue until a full reload.
+      if (patchFilenames.length > 0) io.emit('catalogue_updated');
+    }
   } catch (e) {
     console.warn('[products/patch] socket incoming_updated failed:', e.message);
   }
