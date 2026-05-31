@@ -777,7 +777,21 @@ router.get('/proxy-image', asyncHandler(async (req, res) => {
     return res.status(400).json({ error: 'invalid_url' });
   }
   const axios = require('axios');
-  const upstream = await axios.get(url, { responseType: 'arraybuffer', timeout: 15000 });
+  let upstream;
+  try {
+    upstream = await axios.get(url, { responseType: 'arraybuffer', timeout: 15000 });
+  } catch (err) {
+    const status = err?.response?.status;
+    // A missing R2 object (deleted / never finished uploading) makes axios reject.
+    // Surface it as a clean 404 so the client shows a placeholder instead of a
+    // scary 500 — and so it's distinguishable from a real proxy/network failure.
+    if (status === 404 || status === 403) {
+      console.warn('[proxy-image] upstream', status, '(object missing) for', url);
+      return res.status(404).json({ error: 'image_not_found' });
+    }
+    console.error('[proxy-image] upstream fetch failed for', url, '-', err.message);
+    return res.status(502).json({ error: 'image_proxy_failed' });
+  }
   res.set('Content-Type', upstream.headers['content-type'] || 'image/jpeg');
   res.set('Cache-Control', 'private, max-age=300');
   res.set('Access-Control-Allow-Origin', '*');
