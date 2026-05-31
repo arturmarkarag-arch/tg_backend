@@ -571,10 +571,11 @@ async function initBot(token) {
               await bot.sendMessage(chatId, 'Цей Google-акаунт уже привʼязано до іншого користувача.');
               return;
             }
-            // Atomically consume so the link can't be replayed.
+            // Atomically consume so the link can't be replayed, and stamp the
+            // telegramId so the waiting browser can auto-login via the poll.
             const consumed = await GoogleLinkToken.findOneAndUpdate(
               { _id: glDoc._id, usedAt: null },
-              { $set: { usedAt: new Date() } },
+              { $set: { usedAt: new Date(), linkedTelegramId: String(chatId) } },
             );
             if (!consumed) {
               await bot.sendMessage(chatId, 'Це посилання для привʼязки вже використано або прострочене.');

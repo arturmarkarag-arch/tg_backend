@@ -13,6 +13,9 @@ const schema = new mongoose.Schema({
   googleSub:   { type: String, required: true },               // proven via browser OAuth
   googleEmail: { type: String, default: '' },                  // for display / notification
   usedAt:      { type: Date, default: null },                  // set once on consume (in bot)
+  // Set by the bot once it binds the account. The browser polls and, when this
+  // is present, gets auto-logged-in (no second Google sign-in needed).
+  linkedTelegramId: { type: String, default: null },
   expiresAt:   { type: Date, required: true },                 // now + 10 min
 }, { timestamps: true });
 

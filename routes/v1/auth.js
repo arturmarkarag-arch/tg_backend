@@ -92,6 +92,7 @@ router.post('/google', asyncHandler(async (req, res) => {
     return res.json({
       needsLink: true,
       email,
+      pollToken: token, // browser polls /google/link/poll with this for auto-login
       botStartUrl: username ? `https://t.me/${username}?start=${token}` : null,
     });
   }
@@ -100,6 +101,28 @@ router.post('/google', asyncHandler(async (req, res) => {
 
   const token = signSession(user.telegramId);
   res.json({ token, profile: await buildUserProfile(user) });
+}));
+
+// Browser polls this while the user finishes linking in the bot. Once the bot
+// has bound the account (linkedTelegramId set), we issue a session JWT and
+// delete the token (one-time login) — no second Google sign-in needed.
+router.post('/google/link/poll', asyncHandler(async (req, res) => {
+  const token = String(req.body?.token || '');
+  if (!token) return res.json({ status: 'expired' });
+
+  const doc = await GoogleLinkToken.findOne({ token, expiresAt: { $gt: new Date() } }).lean();
+  if (!doc) return res.json({ status: 'expired' });
+  if (!doc.linkedTelegramId) return res.json({ status: 'pending' });
+
+  // Atomically claim → exactly one session is issued for this token.
+  const claimed = await GoogleLinkToken.findOneAndDelete({ token, linkedTelegramId: { $ne: null } });
+  if (!claimed) return res.json({ status: 'pending' });
+
+  const user = await User.findOne({ telegramId: claimed.linkedTelegramId }).lean();
+  if (!user) throw appError('user_not_found');
+  if (user.botBlocked) throw appError('registration_blocked');
+
+  res.json({ status: 'ok', token: signSession(user.telegramId), profile: await buildUserProfile(user) });
 }));
 
 // Telegram Login Widget callback. Body = the object the widget passes to
