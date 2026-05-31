@@ -1271,6 +1271,10 @@ router.post('/:id/describe', staffOnly, asyncHandler(async (req, res) => {
     if (aiName && !product.name) product.name = aiName;
     await product.save();
     res.json({ _id: product._id, aiDescription: product.aiDescription, aiName: aiName || null });
+    // Live-refresh open warehouse boards so the generated name/description shows
+    // without a reload (same channel the photo edit uses).
+    try { const io = getIO(); if (io) io.emit('incoming_updated'); }
+    catch (e) { console.warn('[products/describe] socket emit failed:', e.message); }
     pushSharedFieldsToMirror(product, {}).catch((err) =>
       console.error('[products/describe] ShopProduct mirror push failed:', err.message));
   } catch (err) {
