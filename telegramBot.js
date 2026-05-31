@@ -555,17 +555,26 @@ async function initBot(token) {
         }
 
         if (!user) {
-          // Registration handshake. Resolve a valid invite token for THIS user:
-          //  - reuse the one from the deep link if it's theirs and still valid;
-          //  - otherwise, if they are a live group member, mint a fresh one.
-          // No token + not a member → refuse (the register gate would reject
-          // them anyway). The token rides into the mini-app as ?regToken=… and
-          // is required + consumed by register-request.
+          // Registration handshake. The invite is PER-PERSON. The Telegram id here
+          // (chatId / ctx.from.id) is authenticated by Telegram — not spoofable.
           let regToken = null;
-          const peeked = startPayload ? await peekRegistrationToken(startPayload, chatId) : null;
-          if (peeked) {
-            regToken = peeked.token;
+          const hasTokenInLink = startPayload && startPayload.toLowerCase() !== 'register';
+
+          if (hasTokenInLink) {
+            // A personal token was passed in the link → it MUST belong to THIS
+            // user, be unused and unexpired. Foreign / expired / used → REJECT.
+            // We never re-issue from a link that carried a token, so one person's
+            // link can't open the door for anyone else.
+            const owned = await peekRegistrationToken(startPayload, chatId);
+            if (!owned) {
+              await bot.sendMessage(chatId, 'Це посилання для реєстрації недійсне або призначене не для вас. Відкрийте персональне посилання, яке бот надіслав саме вам у робочій групі.');
+              return;
+            }
+            regToken = owned.token;
           } else if (await isUserInAllowedGroup(chatId)) {
+            // Plain /start (no token in the link) by a live group member → mint
+            // THEIR OWN token, bound to their id, so a member who came without a
+            // link can still register as themselves.
             regToken = await issueRegistrationToken(chatId);
           }
 
