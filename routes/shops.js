@@ -64,8 +64,12 @@ router.get('/', asyncHandler(async (req, res) => {
     const page = Math.max(1, parseInt(req.query.page) || 1);
     const pageSize = Math.min(200, Math.max(1, parseInt(req.query.pageSize) || 20));
 
+    // Sort: most-recently-changed seller assignment first (missing → last),
+    // then alphabetical. Mirrors the previous client-side order.
+    const SHOP_SORT = { lastSellerChangedAt: -1, name: 1 };
+
     let total = null;
-    let query = Shop.find(filter).populate('cityId', 'name country').sort({ name: 1 });
+    let query = Shop.find(filter).populate('cityId', 'name country').sort(SHOP_SORT);
     if (paginate) {
       total = await Shop.countDocuments(filter);
       query = query.skip((page - 1) * pageSize).limit(pageSize);
