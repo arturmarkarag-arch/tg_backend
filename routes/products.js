@@ -421,15 +421,18 @@ router.get('/', async (req, res) => {
       { $limit: limit },
     ]);
 
-    // Every v1 product is guaranteed on a shelf (the _block.0 match above), so
-    // attach its block/position — the Товари Складу card shows it and the
-    // "Показати в блоці" button deep-links to it.
-    const locMap = await buildLocationMap(products.map((p) => p._id));
+    // Shelf location ({ blockId, position, total }) is opt-in via ?withLocation=1
+    // — only the Товари Складу page needs it (card display + "Показати в блоці").
+    // The seller catalogue shares this endpoint on its hottest path, so we skip
+    // the extra Block lookup there. Every v1 product is on a shelf (the _block.0
+    // match above), so when requested the location is always present.
+    const wantLocation = req.query.withLocation === '1' || req.query.withLocation === 'true';
+    const locMap = wantLocation ? await buildLocationMap(products.map((p) => p._id)) : new Map();
 
     const items = products.map((product) => ({
       id: product._id,
       title: getProductTitle(product),
-      location: locMap.get(String(product._id)) || null,
+      location: wantLocation ? (locMap.get(String(product._id)) || null) : undefined,
       name: product.name || '',
       price: product.price,
       quantity: product.quantity,
