@@ -78,6 +78,24 @@ function getProductTitle(product) {
   return product.name || product.brand || product.model || product.category || `#${product.orderNumber}`;
 }
 
+// Builds a productId(string) → { blockId, position, total } map for the given
+// product ids, so the Товари Складу page can show — and deep-link to — where each
+// item sits on the shelves. Mirrors attachWarehouseLocations() in visionSearch.js
+// (semantic/photo search results already carry `location`); this brings the same
+// info to the plain list + single-product fetch.
+async function buildLocationMap(ids = []) {
+  const map = new Map();
+  if (!Array.isArray(ids) || ids.length === 0) return map;
+  const blocks = await Block.find({ productIds: { $in: ids } }, 'blockId productIds').lean();
+  for (const b of blocks) {
+    const pids = (b.productIds || []).map(String);
+    pids.forEach((pid, idx) => {
+      if (!map.has(pid)) map.set(pid, { blockId: b.blockId, position: idx + 1, total: pids.length });
+    });
+  }
+  return map;
+}
+
 const router = express.Router();
 
 // GET /api/v1/products/upload-url?folder=products&ext=jpg — staff presigned PUT URL for direct browser→R2 upload
@@ -403,9 +421,15 @@ router.get('/', async (req, res) => {
       { $limit: limit },
     ]);
 
+    // Every v1 product is guaranteed on a shelf (the _block.0 match above), so
+    // attach its block/position — the Товари Складу card shows it and the
+    // "Показати в блоці" button deep-links to it.
+    const locMap = await buildLocationMap(products.map((p) => p._id));
+
     const items = products.map((product) => ({
       id: product._id,
       title: getProductTitle(product),
+      location: locMap.get(String(product._id)) || null,
       name: product.name || '',
       price: product.price,
       quantity: product.quantity,
@@ -774,8 +798,12 @@ router.get('/proxy-image', asyncHandler(async (req, res) => {
 }));
 
 router.get('/:id', asyncHandler(async (req, res) => {
-  const product = await Product.findById(req.params.id);
+  const product = await Product.findById(req.params.id).lean();
   if (!product) throw appError('product_not_found');
+  // Deep-link pins (?product=) land here — carry the shelf location too so the
+  // single pinned card can show block/position and "Показати в блоці".
+  const locMap = await buildLocationMap([product._id]);
+  product.location = locMap.get(String(product._id)) || null;
   res.json(product);
 }));
 

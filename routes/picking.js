@@ -1055,7 +1055,91 @@ router.get('/shift-board', requireTelegramRoles(['admin']), async (req, res, nex
       };
     }).sort((a, b) => b.tasksCompleted - a.tasksCompleted || (b.isActive ? 1 : 0) - (a.isActive ? 1 : 0));
 
-    res.json({ groupName, sessionStart, lastActivity, workers, totalCompleted, totalPending });
+    // ── Order-level "не завершено" aggregation (read-only data for the Зміна card) ──
+    // Three views the operator wants visibility into, NO actions attached:
+    //   A. currentSession — active orders of THIS session with unpacked positions
+    //      (honest before picking starts, when no PickingTasks exist yet).
+    //   B. stale          — active orders of the group NOT in the current session
+    //      (stranded from a prior cycle / after a reschedule). Mirrors the
+    //      shop-status guard: only reported when the ordering window is CLOSED, to
+    //      avoid the false positives that occur while the window is still open.
+    //   C. abandonedSessions — OrderingSession docs left confirmed/in_progress that
+    //      are NOT the current one (a cycle that never reached completed).
+    // Best-effort: a failure here must never break the shift board.
+    let unfinished = null;
+    try {
+      if (group && sessionId) {
+        const schedule = await getOrderingSchedule();
+        const { isOpen } = isOrderingOpen(group.dayOfWeek, schedule);
+        const sessionMeta = await OrderingSession.findById(sessionId, 'seq openDate pickingStatus').lean();
+
+        const positionsLeft = (o) => (o.items || []).filter((i) => !i.cancelled && !i.packed).length;
+        const mapOrder = (o) => ({
+          orderId: String(o._id),
+          orderNumber: o.orderNumber,
+          shopName: o.buyerSnapshot?.shopName || '—',
+          shopCity: o.buyerSnapshot?.shopCity || '',
+          positionCount: positionsLeft(o),
+        });
+
+        // A. Незібране в поточній сесії
+        const currentOrders = await Order.find(
+          { 'buyerSnapshot.deliveryGroupId': dgId, status: { $in: ['new', 'in_progress'] }, orderingSessionId: sessionId },
+          'orderNumber buyerSnapshot items',
+        ).lean();
+        const currentUnfinished = currentOrders
+          .map(mapOrder)
+          .filter((o) => o.positionCount > 0)
+          .sort((a, b) => (a.orderNumber || 0) - (b.orderNumber || 0));
+        const currentPositionCount = currentUnfinished.reduce((s, o) => s + o.positionCount, 0);
+
+        // B. Застрягле поза сесією (тільки коли вікно закрите)
+        let staleList = [];
+        if (!isOpen) {
+          const staleOrders = await Order.find(
+            { 'buyerSnapshot.deliveryGroupId': dgId, status: { $in: ['new', 'in_progress'] }, orderingSessionId: { $ne: sessionId } },
+            'orderNumber buyerSnapshot items',
+          ).lean();
+          staleList = staleOrders
+            .map(mapOrder)
+            .sort((a, b) => (a.orderNumber || 0) - (b.orderNumber || 0));
+        }
+        const stalePositionCount = staleList.reduce((s, o) => s + o.positionCount, 0);
+
+        // C. Завислі попередні сесії
+        const abandonedDocs = await OrderingSession.find(
+          { groupId: dgId, _id: { $ne: sessionId }, pickingStatus: { $in: ['confirmed', 'in_progress'] } },
+          'seq openDate pickingStatus',
+        ).sort({ openDate: -1 }).limit(10).lean();
+
+        unfinished = {
+          currentSession: {
+            seq: sessionMeta?.seq ?? null,
+            openDate: sessionMeta?.openDate ?? null,
+            pickingStatus: sessionMeta?.pickingStatus ?? 'pending',
+            orderCount: currentUnfinished.length,
+            positionCount: currentPositionCount,
+            orders: currentUnfinished,
+          },
+          stale: {
+            windowOpen: isOpen,
+            orderCount: staleList.length,
+            positionCount: stalePositionCount,
+            orders: staleList,
+          },
+          abandonedSessions: abandonedDocs.map((s) => ({
+            sessionId: String(s._id),
+            seq: s.seq ?? null,
+            openDate: s.openDate || null,
+            pickingStatus: s.pickingStatus,
+          })),
+        };
+      }
+    } catch (e) {
+      console.warn('[picking/shift-board] unfinished aggregation failed:', e.message);
+    }
+
+    res.json({ groupName, sessionStart, lastActivity, workers, totalCompleted, totalPending, unfinished });
   } catch (err) {
     console.error('[picking/shift-board]', err);
     next(appError('picking_next_failed'));
