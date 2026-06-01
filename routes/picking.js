@@ -140,13 +140,19 @@ async function buildTaskResponse(task, { wrappedAround = false, isSecondChance =
     lockedBy: task.lockedBy,
     wrappedAround,
     isSecondChance,
-    items: (task.items || []).map((item) => ({
-      orderId: String(item.orderId),
-      shopName: item.shopName || '',
-      quantity: item.quantity,
-      packedQuantity: item.packedQuantity ?? null,
-      packed: item.packed,
-    })),
+    items: (task.items || [])
+      .map((item) => ({
+        orderId: String(item.orderId),
+        shopName: item.shopName || '',
+        sellerName: item.sellerName || '',
+        orderCreatedAt: item.orderCreatedAt || null,
+        quantity: item.quantity,
+        packedQuantity: item.packedQuantity ?? null,
+        packed: item.packed,
+      }))
+      // Oldest order first: position depends only on when the order was created,
+      // not on when this product happened to be added to it.
+      .sort((a, b) => new Date(a.orderCreatedAt || 0) - new Date(b.orderCreatedAt || 0)),
   };
 }
 

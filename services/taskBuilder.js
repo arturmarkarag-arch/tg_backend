@@ -127,6 +127,8 @@ async function buildPickingTasksImpl(targetDeliveryGroupId = null, options = {})
         group.items.push({
           orderId: order._id,
           shopName: order.buyerSnapshot?.shopName || 'невідомий магазин',
+          sellerName: buyer ? [buyer.firstName, buyer.lastName].filter(Boolean).join(' ') : '',
+          orderCreatedAt: order.createdAt || null,
           quantity: item.quantity || 0,
           packed: false,
         });

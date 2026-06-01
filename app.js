@@ -13,7 +13,7 @@ const telegramV1Router = require('./routes/v1/telegram');
 const authV1Router = require('./routes/v1/auth');
 const adminRouter = require('./routes/admin');
 const searchProductsRouter = require('./routes/searchProducts');
-const { getBotStatus } = require('./telegramBot');
+const { getBotStatus, getWebhookConfig, handleWebhookUpdate } = require('./telegramBot');
 const { verifyOpenAIConnection } = require('./openaiClient');
 const { verifyGeminiConnection } = require('./geminiClient');
 const receiptsRouter = require('./routes/receipts');
@@ -22,7 +22,7 @@ const shopsRouter = require('./routes/shops');
 const shopTransferRouter  = require('./routes/shopTransfer');
 const shopProductsRouter  = require('./routes/shopProducts');
 const visionSearchRouter  = require('./routes/visionSearch');
-const priceRequestsRouter = require('./routes/priceRequests');
+const productFeedbackRouter = require('./routes/productFeedback');
 
 // The warehouse test harness (destructive: cleanup/seed/reset of real
 // collections) must NEVER be reachable in production. It is loaded and mounted
@@ -41,6 +41,26 @@ app.use('/uploads', (req, res, next) => {
 }, express.static(path.join(__dirname, 'uploads')));
 if (ENABLE_TEST_API) {
   app.use('/warehouse-test', express.static(path.join(__dirname, '../Тести Е2Е/test-warehouse')));
+}
+
+// Telegram webhook delivery. Mounted BEFORE the API auth gate: Telegram posts
+// server-to-server with no telegram initData / JWT, so the auth here is the
+// unguessable token-derived path + the secret-token header. Body is already
+// JSON-parsed by express.json() above. Always mounted (dormant in polling mode,
+// since no webhook URL is registered then) — the path is unguessable regardless.
+{
+  const wh = getWebhookConfig();
+  app.post(wh.path, (req, res) => {
+    if (wh.secretToken && req.get('x-telegram-bot-api-secret-token') !== wh.secretToken) {
+      return res.sendStatus(403);
+    }
+    // Ack immediately, then process — never make Telegram wait on (or retry over)
+    // our handler work. processUpdate emits synchronously; handlers run detached.
+    res.sendStatus(200);
+    try { handleWebhookUpdate(req.body); } catch (err) {
+      console.error('[webhook] processUpdate failed:', err?.message);
+    }
+  });
 }
 
 const { telegramAuth } = require('./middleware/telegramAuth');
@@ -132,7 +152,7 @@ app.use('/api/shops', shopsRouter);
 app.use('/api/shop-transfer', shopTransferRouter);
 app.use('/api/shop-products',  shopProductsRouter);
 app.use('/api/vision-search', visionSearchRouter);
-app.use('/api/price-requests', priceRequestsRouter);
+app.use('/api/product-feedback', productFeedbackRouter);
 app.use('/api/v1/telegram', telegramV1Router);
 app.use('/api/v1/auth', authV1Router);
 if (ENABLE_TEST_API) {

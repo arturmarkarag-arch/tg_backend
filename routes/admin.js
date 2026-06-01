@@ -365,6 +365,21 @@ router.get('/telegram-groups/:groupId/members', telegramAuth, requireTelegramRol
   res.json(members);
 }));
 
+// Re-check a single unregistered member's live group status and, if they are
+// still in the group (and still not registered), re-push the registration
+// prompt. If they actually left, mark them so the list drops them.
+router.post('/telegram-groups/:groupId/members/:telegramId/recheck', telegramAuth, requireTelegramRole('admin'), asyncHandler(async (req, res) => {
+  const { recheckAndRepushWelcome } = require('../telegramBot');
+  const groupId = String(req.params.groupId).trim();
+  const telegramId = String(req.params.telegramId).trim();
+  const allowedIds = await getAllowedGroupIds();
+  if (!allowedIds.includes(groupId)) return res.status(403).json({ error: 'Група не авторизована' });
+
+  const result = await recheckAndRepushWelcome(groupId, telegramId);
+  if (!result.ok) return res.status(502).json(result);
+  res.json(result);
+}));
+
 router.get('/group-members/unregistered-count', telegramAuth, requireTelegramRole('admin'), asyncHandler(async (req, res) => {
   const { getMembersWithStatus } = require('../services/groupMemberSync');
   const groupIds = await getAllowedGroupIds();

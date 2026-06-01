@@ -19,6 +19,13 @@ const PickingTaskSchema = new mongoose.Schema(
       {
         orderId: { type: mongoose.Schema.Types.ObjectId, ref: 'Order' },
         shopName: { type: String, default: '' },
+        // First+last name of the buyer (seller) who created this order — shown as a
+        // faint subtitle under the shop name in the packing card.
+        sellerName: { type: String, default: '' },
+        // Order.createdAt at build time — the picking/packing list is sorted by this
+        // (oldest order first) so a shop's position never depends on when THIS
+        // product was added, only on when the order itself was first created.
+        orderCreatedAt: { type: Date, default: null },
         quantity: { type: Number, default: 0 },
         packedQuantity: { type: Number, default: null },
         packed: { type: Boolean, default: false },

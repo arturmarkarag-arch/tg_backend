@@ -1,7 +1,7 @@
 const express = require('express');
 const crypto = require('crypto');
 const mongoose = require('mongoose');
-const { S3Client, PutObjectCommand, GetObjectCommand, HeadBucketCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3');
+const { S3Client, PutObjectCommand, HeadBucketCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 const { shiftUp, shiftDown } = require('../utils/shiftOrderNumbers');
 const { normalizeBarcode } = require('../utils/barcodeScanner');
@@ -62,16 +62,6 @@ const UPLOAD_CACHE_CONTROL = 'public, max-age=31536000, immutable';
 function r2PublicUrl(folder, filename) {
   const base = process.env.R2_PUBLIC_URL.replace(/\/$/, '');
   return `${base}/${folder}/${filename}`;
-}
-
-async function r2Put(key, body, contentType = 'image/jpeg') {
-  await s3Client.send(new PutObjectCommand({
-    Bucket: process.env.R2_BUCKET_NAME,
-    Key: key,
-    Body: body,
-    ContentType: contentType,
-    CacheControl: UPLOAD_CACHE_CONTROL,
-  }));
 }
 
 async function deleteR2Objects(keys = []) {
@@ -179,14 +169,21 @@ router.delete('/orphan-photo', staffOnly, asyncHandler(async (req, res) => {
   res.json({ ok: true });
 }));
 
-// GET /api/v1/products/upload-url-public?ext=jpg — public presigned PUT URL for missing-product reports (no auth required)
+// GET /api/v1/products/upload-url-public?folder=missing-products|price-queries&ext=jpg
+// Presigned PUT for EPHEMERAL query photos: the browser uploads straight to R2
+// (no bytes through Express), then report-missing / ask-group-price hand the
+// object's public URL to Telegram (Telegram fetches it) and delete it. `folder`
+// is allow-listed so the returned key can't be steered outside these two scopes.
+const ALLOWED_PUBLIC_FOLDERS = ['missing-products', 'price-queries'];
 router.get('/upload-url-public', asyncHandler(async (req, res) => {
+  const folderRaw = String(req.query.folder || 'missing-products');
+  const folder = ALLOWED_PUBLIC_FOLDERS.includes(folderRaw) ? folderRaw : 'missing-products';
   const ext = String(req.query.ext || 'jpg').replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
   const allowed = ['jpg', 'jpeg', 'png', 'webp'];
   if (!allowed.includes(ext)) throw appError('product_image_unsupported');
   const safeExt = ext === 'jpeg' ? 'jpg' : ext;
   const filename = `${crypto.randomUUID()}.${safeExt}`;
-  const key = `missing-products/${filename}`;
+  const key = `${folder}/${filename}`;
   const contentType = 'image/jpeg';
   const command = new PutObjectCommand({
     Bucket: process.env.R2_BUCKET_NAME,
@@ -197,59 +194,45 @@ router.get('/upload-url-public', asyncHandler(async (req, res) => {
   res.json({ uploadUrl, filename, key, contentType });
 }));
 
-router.post(
-  '/upload-missing-image',
-  express.raw({ type: () => true, limit: '30mb' }),
-  asyncHandler(async (req, res) => {
-    const ext = String(req.query.ext || 'jpg').replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
-    const allowed = ['jpg', 'jpeg', 'png', 'webp'];
-    const safeExt = allowed.includes(ext) ? (ext === 'jpeg' ? 'jpg' : ext) : 'jpg';
-    if (!Buffer.isBuffer(req.body) || req.body.length === 0) {
-      throw appError('product_photo_required');
+// POST /api/v1/products/ask-group-price  { filename }
+// The browser already PUT the (downscaled) photo straight to R2 under
+// price-queries/<filename> via upload-url-public. Fire-and-forget: we hand
+// Telegram the object's public URL — Telegram fetches it, so no bytes pass
+// through Express — forward to every «Група ціна на товар» (telegram.priceGroupIds)
+// with the caption «Яка ціна?», then delete it. This is a one-shot query: nothing
+// is stored — no SearchProduct, no lingering R2 object, no barcode.
+router.post('/ask-group-price', asyncHandler(async (req, res) => {
+  const filename = String(req.body?.filename || '');
+  if (!/^[a-f0-9-]+\.(jpg|jpeg|png|webp)$/i.test(filename)) throw appError('product_filename_required');
+
+  const { getPriceGroupIds } = require('./admin');
+  const priceGroupIds = await getPriceGroupIds();
+  if (!priceGroupIds.length) throw appError('telegram_groups_not_configured');
+
+  const { getBot } = require('../telegramBot');
+  const bot = getBot();
+  if (!bot) throw appError('telegram_bot_not_initialized');
+
+  const photoUrl = r2PublicUrl('price-queries', filename);
+  const caption = 'Яка ціна?';
+  const sendResults = await Promise.all(priceGroupIds.map(async (chatId) => {
+    try {
+      await bot.sendPhoto(Number(chatId), photoUrl, { caption });
+      return { chatId, sent: true };
+    } catch (err) {
+      console.error('Failed to send price request to group', chatId, err.message || err);
+      return { chatId, sent: false };
     }
-    const filename = `${crypto.randomUUID()}.${safeExt}`;
-    const contentType = req.headers['content-type'] || 'image/jpeg';
-    await r2Put(`missing-products/${filename}`, req.body, contentType);
-    res.json({ filename });
-  }),
-);
+  }));
 
-// POST /api/v1/products/ask-group-price
-// Raw image body (express.raw). Fire-and-forget: forwards the photo to every
-// «Група ціна на товар» (telegram.priceGroupIds) with the caption «Яка ціна?».
-// Unlike /report-missing, nothing is stored — no SearchProduct, no R2, no barcode.
-router.post(
-  '/ask-group-price',
-  express.raw({ type: () => true, limit: '30mb' }),
-  asyncHandler(async (req, res) => {
-    if (!Buffer.isBuffer(req.body) || req.body.length === 0) {
-      throw appError('product_photo_required');
-    }
+  // Telegram has fetched the URL by now (sendPhoto resolves after the message is
+  // sent), so the staging object has served its purpose — drop it.
+  await deleteR2Objects([`price-queries/${filename}`]);
 
-    const { getPriceGroupIds } = require('./admin');
-    const priceGroupIds = await getPriceGroupIds();
-    if (!priceGroupIds.length) throw appError('telegram_groups_not_configured');
-
-    const { getBot } = require('../telegramBot');
-    const bot = getBot();
-    if (!bot) throw appError('telegram_bot_not_initialized');
-
-    const caption = 'Яка ціна?';
-    const sendResults = await Promise.all(priceGroupIds.map(async (chatId) => {
-      try {
-        await bot.sendPhoto(Number(chatId), req.body, { caption, filename: 'price-request.jpg' });
-        return { chatId, sent: true };
-      } catch (err) {
-        console.error('Failed to send price request to group', chatId, err.message || err);
-        return { chatId, sent: false };
-      }
-    }));
-
-    const sentCount = sendResults.filter((r) => r.sent).length;
-    if (sentCount === 0) throw appError('search_resend_failed');
-    res.json({ sent: sentCount, total: priceGroupIds.length });
-  }),
-);
+  const sentCount = sendResults.filter((r) => r.sent).length;
+  if (sentCount === 0) throw appError('search_resend_failed');
+  res.json({ sent: sentCount, total: priceGroupIds.length });
+}));
 
 // GET /api/products/drafts — pending (unconfirmed) products
 router.get('/drafts', staffOnly, asyncHandler(async (req, res) => {
@@ -596,8 +579,11 @@ router.post('/broadcast', async (req, res) => {
 */
 
 // POST /api/v1/products/report-missing
-// Body JSON: { barcode, filename } — client uploads photo to R2 via upload-url-public first, then sends filename
-// Server fetches buffer from missing-products/ folder in R2 and forwards to Telegram groups
+// Body JSON: { barcode, filename }. The browser PUT the (downscaled) photo
+// straight to R2 (missing-products/<filename>) via upload-url-public. We hand
+// Telegram the object's public URL — Telegram fetches it, so no bytes pass
+// through Express — forward to the groups, then DELETE the R2 object: the photo
+// lives on only as a Telegram file_id (reused for resends), never stored in R2.
 router.post('/report-missing', asyncHandler(async (req, res) => {
   const barcodeValue = String(req.body?.barcode || '').trim();
   const filename = String(req.body?.filename || '').replace(/[^a-zA-Z0-9._-]/g, '');
@@ -614,34 +600,23 @@ router.post('/report-missing', asyncHandler(async (req, res) => {
   const bot = getBot();
   if (!bot) throw appError('telegram_bot_not_initialized');
 
-  // Fetch photo buffer from R2
-  const r2Object = await s3Client.send(new GetObjectCommand({
-    Bucket: process.env.R2_BUCKET_NAME,
-    Key: `missing-products/${filename}`,
-  }));
-  const chunks = [];
-  for await (const chunk of r2Object.Body) chunks.push(chunk);
-  const photoBuffer = Buffer.concat(chunks);
-
+  const photoUrl = r2PublicUrl('missing-products', filename);
   const normalizedBarcode = normalizeBarcode(barcodeValue);
   const caption = `Штрихкод: ${normalizedBarcode}\nЯка ціна?`;
   const sendResults = await Promise.all(allowedGroupIds.map(async (chatId) => {
     const groupId = String(chatId);
     const existing = await SearchProduct.findOne({ barcode: normalizedBarcode, groupChatId: groupId, status: 'active' });
-    const photoPublicUrl = r2PublicUrl('missing-products', filename);
 
+    // Already sent this barcode to this group — resend by the Telegram file_id
+    // (it survives the R2 deletion; the object was only ever a delivery handle).
     if (existing && existing.requestTelegramPhotoFileId) {
       try {
         const sent = await bot.sendPhoto(chatId, existing.requestTelegramPhotoFileId, {
           caption: existing.requestCaption || caption,
         });
-        await SearchProduct.findOneAndUpdate(
-          { barcode: normalizedBarcode, groupChatId: groupId, status: 'active' },
-          {
-            requestTelegramMessageId: String(sent.message_id),
-            // Backfill imageUrl for existing records that were saved without it
-            ...(existing.imageUrl ? {} : { imageUrl: photoPublicUrl }),
-          }
+        await SearchProduct.updateOne(
+          { _id: existing._id },
+          { requestTelegramMessageId: String(sent.message_id) },
         );
         return { chatId, sent: true, reused: true };
       } catch (err) {
@@ -650,10 +625,7 @@ router.post('/report-missing', asyncHandler(async (req, res) => {
     }
 
     try {
-      const sent = await bot.sendPhoto(chatId, photoBuffer, {
-        caption,
-        filename: `${normalizedBarcode}.jpg`,
-      });
+      const sent = await bot.sendPhoto(chatId, photoUrl, { caption });
       const sentPhotoFileId = String(sent.photo?.[sent.photo.length - 1]?.file_id || '');
       await SearchProduct.findOneAndUpdate(
         { barcode: normalizedBarcode, groupChatId: groupId, status: 'active' },
@@ -663,7 +635,6 @@ router.post('/report-missing', asyncHandler(async (req, res) => {
           requestTelegramPhotoFileId: sentPhotoFileId,
           requestTelegramMessageId: String(sent.message_id),
           requestCaption: caption,
-          imageUrl: photoPublicUrl,
           status: 'active',
         },
         { upsert: true, new: true, setDefaultsOnInsert: true }
@@ -674,6 +645,10 @@ router.post('/report-missing', asyncHandler(async (req, res) => {
       return { chatId, sent: false, error: err.message || String(err) };
     }
   }));
+
+  // Telegram has fetched the URL (sendPhoto resolves after the message is sent),
+  // so the staging object has served its purpose — drop it.
+  await deleteR2Objects([`missing-products/${filename}`]);
 
   return res.json({ barcode: barcodeValue, caption, sent: sendResults });
 }));

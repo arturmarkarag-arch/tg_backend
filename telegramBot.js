@@ -113,7 +113,33 @@ let status = {
   connected: false,
   startedAt: null,
   error: null,
+  mode: null,
 };
+
+// ── Update delivery: webhook only ────────────────────────────────────────────
+// The bot runs purely on webhook: Telegram pushes updates to us, so there is no
+// constant getUpdates long-poll draining traffic in the background. This requires
+// a stable public HTTPS host reachable by Telegram — SERVER_BASE_URL (Render in
+// prod, the dev tunnel locally). No polling path exists.
+const ALLOWED_UPDATES = ['message', 'callback_query', 'my_chat_member', 'chat_member'];
+
+// Deterministic, unguessable path + secret-token derived from the bot token, so
+// the Express route can be mounted synchronously (before the async bot init runs)
+// and every delivery's X-Telegram-Bot-Api-Secret-Token header can be verified.
+function getWebhookConfig() {
+  const token = process.env.TELEGRAM_BOT_TOKEN || '';
+  const h = require('crypto').createHash('sha256').update(token).digest('hex');
+  return {
+    path: `/telegram/webhook/${h.slice(0, 32)}`,
+    secretToken: h.slice(32, 64),
+  };
+}
+
+// Feed an update delivered to the Express webhook route into the bot's event
+// machinery — emits the same events handlers below listen for.
+function handleWebhookUpdate(update) {
+  if (bot && update) bot.processUpdate(update);
+}
 
 const roleCommands = {
   seller: [
@@ -176,42 +202,113 @@ function escapeHtml(str) {
   return String(str || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
+// In-flight de-dup: a single join can arrive via BOTH the `new_chat_members`
+// service message AND the `chat_member` update, so guard by (group, member)
+// to ensure exactly one welcome is scheduled. Key is cleared once the message
+// is sent (or fails), so a later re-join still gets a fresh welcome.
+const pendingWelcomes = new Set();
+
+// Posts a single welcome + per-person registration link to the group and
+// remembers the message id (so it can be deleted once the user registers).
+// Skips silently if the user is already registered. Returns true if a message
+// was sent. Shared by the auto-schedule path and the manual re-push button.
+async function postGroupWelcome(groupChatId, telegramId, from) {
+  const nowRegistered = await User.findOne({ telegramId }).lean();
+  if (nowRegistered) return false;
+  const me = await bot.getMe();
+  const botUsername = me?.username;
+  if (!botUsername) return false;
+  // Per-person invite token bound to THIS member's telegramId. Safe to post
+  // in the public group: it only works for its owner (server checks
+  // token.telegramId === authenticated telegramId), so another member
+  // clicking it cannot register as someone else.
+  const regToken = await issueRegistrationToken(telegramId);
+  const displayName = escapeHtml([from.first_name, from.last_name].filter(Boolean).join(' ') || telegramId);
+  const mention = from.username
+    ? `@${from.username}`
+    : `<a href="tg://user?id=${telegramId}">${displayName}</a>`;
+  const text = [
+    `👋 ${mention}, вітаємо в групі!`,
+    '',
+    'Щоб отримати доступ до системи Замовлень, потрібно зареєструватися в телеграм Боті.',
+    '',
+    `➡️ <a href="https://t.me/${botUsername}?start=${regToken}">Натисніть тут щоб зареєструватись</a>`,
+  ].join('\n');
+  const sent = await bot.sendMessage(groupChatId, text, { parse_mode: 'HTML' });
+  // Remember the message so we can delete it once the user registers.
+  if (sent?.message_id) {
+    await GroupMember.updateOne(
+      { groupChatId: String(groupChatId), telegramId: String(telegramId) },
+      { $set: { welcomeChatId: String(groupChatId), welcomeMessageId: sent.message_id } },
+    ).catch((e) => console.warn('[Bot] store welcome message_id failed:', e.message));
+  }
+  return true;
+}
+
 async function scheduleGroupWelcome(groupChatId, telegramId, from) {
+  const dedupeKey = `${groupChatId}:${telegramId}`;
+  if (pendingWelcomes.has(dedupeKey)) return;
+  pendingWelcomes.add(dedupeKey);
   setTimeout(async () => {
     try {
-      const nowRegistered = await User.findOne({ telegramId }).lean();
-      if (nowRegistered) return;
-      const me = await bot.getMe();
-      const botUsername = me?.username;
-      if (!botUsername) return;
-      // Per-person invite token bound to THIS member's telegramId. Safe to post
-      // in the public group: it only works for its owner (server checks
-      // token.telegramId === authenticated telegramId), so another member
-      // clicking it cannot register as someone else.
-      const regToken = await issueRegistrationToken(telegramId);
-      const displayName = escapeHtml([from.first_name, from.last_name].filter(Boolean).join(' ') || telegramId);
-      const mention = from.username
-        ? `@${from.username}`
-        : `<a href="tg://user?id=${telegramId}">${displayName}</a>`;
-      const text = [
-        `👋 ${mention}, вітаємо в групі!`,
-        '',
-        'Щоб отримати доступ до системи Замовлень, потрібно зареєструватися в телеграм Боті.',
-        '',
-        `➡️ <a href="https://t.me/${botUsername}?start=${regToken}">Натисніть тут щоб зареєструватись</a>`,
-      ].join('\n');
-      const sent = await bot.sendMessage(groupChatId, text, { parse_mode: 'HTML' });
-      // Remember the message so we can delete it once the user registers.
-      if (sent?.message_id) {
-        await GroupMember.updateOne(
-          { groupChatId: String(groupChatId), telegramId: String(telegramId) },
-          { $set: { welcomeChatId: String(groupChatId), welcomeMessageId: sent.message_id } },
-        ).catch((e) => console.warn('[Bot] store welcome message_id failed:', e.message));
-      }
+      await postGroupWelcome(groupChatId, telegramId, from);
     } catch (err) {
       console.warn('[Bot] welcome message failed:', err.message);
+    } finally {
+      pendingWelcomes.delete(dedupeKey);
     }
   }, 10_000);
+}
+
+// Manual "re-check + re-push" for the admin Unregistered list. Verifies the
+// member is STILL in the group (single getChatMember against this group), then:
+//  - not in group  → mark them `left` so the list drops them; no message.
+//  - registered     → nothing to push (list will drop them on next refresh).
+//  - in group, not registered → delete any stale welcome and post a fresh one.
+// Returns a small status object for the UI.
+async function recheckAndRepushWelcome(groupChatId, telegramId) {
+  if (!bot) return { ok: false, reason: 'bot_unavailable' };
+  const gid = String(groupChatId);
+  const tid = String(telegramId);
+
+  let member = null;
+  try {
+    member = await bot.getChatMember(gid, Number(tid));
+  } catch (e) {
+    console.warn(`[recheck] getChatMember(${gid}, ${tid}) failed:`, e.message);
+    return { ok: false, reason: 'check_failed' };
+  }
+
+  const inGroup = ['member', 'administrator', 'creator', 'restricted'].includes(member?.status);
+  if (!inGroup) {
+    // They actually left/were removed — reflect it so the list stops showing them.
+    await GroupMember.updateOne({ groupChatId: gid, telegramId: tid }, { $set: { left: true } }).catch(() => {});
+    return { ok: true, status: 'left' };
+  }
+
+  const registered = await User.findOne({ telegramId: tid }).lean();
+  if (registered) return { ok: true, status: 'registered' };
+
+  // Build a fresh `from` from the live membership (best name/username available).
+  const u = member?.user || {};
+  const from = {
+    id: Number(tid),
+    first_name: u.first_name || '',
+    last_name: u.last_name || '',
+    username: u.username || '',
+  };
+
+  // Drop the previous welcome (if any) before posting a new one so the group
+  // doesn't accumulate duplicate prompts.
+  try { await deleteWelcomeFor(tid); } catch (_) { /* best-effort */ }
+
+  try {
+    const sent = await postGroupWelcome(gid, tid, from);
+    return { ok: true, status: sent ? 'reposted' : 'registered' };
+  } catch (e) {
+    console.warn(`[recheck] postGroupWelcome(${gid}, ${tid}) failed:`, e.message);
+    return { ok: false, reason: 'send_failed' };
+  }
 }
 
 // Deletes any outstanding group welcome ("register here") messages for a user
@@ -436,18 +533,11 @@ async function initBot(token) {
     return;
   }
 
-  let pollingRestartAttempts = 0;
-  const MAX_POLLING_RESTARTS = 10;
-
   try {
-    bot = new TelegramBot(token, {
-      polling: {
-        params: {
-          allowed_updates: ['message', 'callback_query', 'my_chat_member', 'chat_member'],
-        },
-      },
-    });
+    // Manual mode — updates arrive via the Express webhook route, not getUpdates.
+    bot = new TelegramBot(token);
     status.connected = true;
+    status.mode = 'webhook';
     status.startedAt = new Date().toISOString();
 
     await bot.setMyCommands([
@@ -731,46 +821,13 @@ async function initBot(token) {
       }
     });
 
-    bot.on('polling_error', async (err) => {
-      console.error('Telegram polling error:', err);
-      status.error = err?.message || String(err);
-      status.connected = false;
-
-      const retryable = ![401, 403].includes(err?.response?.body?.error_code);
-      if (!retryable) {
-        console.error('Telegram polling error is not retryable, stopping attempts.');
-        return;
-      }
-
-      pollingRestartAttempts += 1;
-      if (pollingRestartAttempts > MAX_POLLING_RESTARTS) {
-        console.error(`Telegram polling failed ${MAX_POLLING_RESTARTS} times, giving up.`);
-        return;
-      }
-
-      try {
-        await bot.stopPolling();
-      } catch (stopError) {
-        console.warn('Failed to stop polling after error:', stopError);
-      }
-
-      const backoff = Math.min(5000 * Math.pow(2, pollingRestartAttempts - 1), 120000);
-      console.log(`Restarting polling in ${backoff}ms (attempt ${pollingRestartAttempts}/${MAX_POLLING_RESTARTS})`);
-      await delay(backoff);
-
-      try {
-        await bot.startPolling();
-        status.connected = true;
-        status.error = null;
-        pollingRestartAttempts = 0;
-        console.log('Telegram polling restarted after error');
-      } catch (restartError) {
-        console.error('Failed to restart Telegram polling:', restartError);
-      }
-    });
-
     bot.on('error', (err) => {
       console.error('Telegram bot runtime error:', err);
+    });
+
+    bot.on('webhook_error', (err) => {
+      console.error('Telegram webhook error:', err);
+      status.error = err?.message || String(err);
     });
 
     bot.on('callback_query', async (query) => {
@@ -881,7 +938,19 @@ async function initBot(token) {
 
     // Reaction handling by Telegram message_reaction has been disabled.
 
-    console.log('Telegram bot started');
+    // Register the webhook AFTER all handlers are attached, so an update
+    // delivered the instant it goes live already has listeners. setWebHook
+    // replaces any prior URL; secret_token is echoed back in a header the route
+    // verifies. Needs SERVER_BASE_URL to be a public HTTPS host Telegram can reach.
+    if (!process.env.SERVER_BASE_URL) {
+      throw new Error('SERVER_BASE_URL is required for the Telegram webhook');
+    }
+    const { path, secretToken } = getWebhookConfig();
+    const url = `${String(process.env.SERVER_BASE_URL).replace(/\/$/, '')}${path}`;
+    await bot.setWebHook(url, { allowed_updates: ALLOWED_UPDATES, secret_token: secretToken });
+    console.log('[Bot] webhook registered at', url);
+
+    console.log('Telegram bot started (webhook)');
   } catch (error) {
     status.error = error.message || String(error);
     status.connected = false;
@@ -895,7 +964,7 @@ function getBotStatus() {
   return {
     status: statusLabel,
     active: status.connected,
-    mode: 'polling',
+    mode: status.mode || 'webhook',
     startedAt: status.startedAt,
     error: status.error,
     hasToken: Boolean(bot),
@@ -906,9 +975,12 @@ function getBotStatus() {
 module.exports = {
   initBot,
   getBotStatus,
+  getWebhookConfig,
+  handleWebhookUpdate,
   getBot: () => bot,
   sendAdminNotification,
   sendRegistrationApprovedMessage,
   isUserInAllowedGroup,
   deleteWelcomeFor,
+  recheckAndRepushWelcome,
 };

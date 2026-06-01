@@ -345,7 +345,21 @@ router.get('/:groupId/shop-status', telegramAuth, requireTelegramRoles(['admin',
     };
   });
 
-  shopStatuses.sort((a, b) => String(a.shopCity || '').localeCompare(String(b.shopCity || ''), 'uk') || String(a.shopName || '').localeCompare(String(b.shopName || ''), 'uk'));
+  // Sort by the shop's EARLIEST order creation time (oldest first) — same ordering
+  // as the packing card, so a shop appears in the same relative position on both
+  // screens. Shops with no orders this session sort to the bottom, by name.
+  const earliestOrderAt = (shop) => {
+    const times = (shop.orders || [])
+      .map((o) => (o.createdAt ? new Date(o.createdAt).getTime() : null))
+      .filter((t) => t !== null);
+    return times.length ? Math.min(...times) : Infinity;
+  };
+  shopStatuses.sort((a, b) => {
+    const ta = earliestOrderAt(a);
+    const tb = earliestOrderAt(b);
+    if (ta !== tb) return ta - tb;
+    return String(a.shopName || '').localeCompare(String(b.shopName || ''), 'uk');
+  });
 
   res.json({
     groupId: String(group._id),
