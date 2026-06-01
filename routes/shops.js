@@ -8,7 +8,7 @@ const DeliveryGroup = require('../models/DeliveryGroup');
 const User = require('../models/User');
 const Order = require('../models/Order');
 const PickingTask = require('../models/PickingTask');
-const { telegramAuth, requireTelegramRole } = require('../middleware/telegramAuth');
+const { telegramAuth, requireTelegramRole, requireTelegramRoles } = require('../middleware/telegramAuth');
 const cache = require('../utils/cache');
 const { invalidateShop } = require('../utils/modelCache');
 const { migrateSellerShop } = require('../services/migrateSellerShop');
@@ -39,7 +39,7 @@ function toMinimalShop(s) {
 // Public registration uses GET /api/shops/registry instead.
 // Query: ?cityId=xxx  ?deliveryGroupId=xxx  ?includeInactive=true
 router.get('/', asyncHandler(async (req, res) => {
-  const filter = {};
+    const filter = {};
 
     if (req.query.includeInactive !== 'true') {
       filter.isActive = true;
@@ -50,21 +50,46 @@ router.get('/', asyncHandler(async (req, res) => {
     if (req.query.deliveryGroupId) {
       filter.deliveryGroupId = req.query.deliveryGroupId;
     }
+    // Name search — staff Shops tab only; harmless no-op for legacy callers that
+    // never pass it.
+    if (req.query.search?.trim()) {
+      const re = new RegExp(req.query.search.trim().replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+      filter.name = re;
+    }
 
-    const shops = await Shop.find(filter).populate('cityId', 'name country').sort({ name: 1 }).lean();
+    // Pagination is opt-in: only when ?page is present. Legacy callers
+    // (reassign modal, transfer-override shop picker, registration) pass no
+    // ?page and keep getting the full array — unchanged behaviour.
+    const paginate = req.query.page != null;
+    const page = Math.max(1, parseInt(req.query.page) || 1);
+    const pageSize = Math.min(200, Math.max(1, parseInt(req.query.pageSize) || 20));
+
+    let total = null;
+    let query = Shop.find(filter).populate('cityId', 'name country').sort({ name: 1 });
+    if (paginate) {
+      total = await Shop.countDocuments(filter);
+      query = query.skip((page - 1) * pageSize).limit(pageSize);
+    }
+    const shops = await query.lean();
+
+    const envelope = (data) => paginate
+      ? { shops: data, total, page, pageSize, pageCount: Math.max(1, Math.ceil(total / pageSize)) }
+      : data;
 
     // Seller PII is STAFF-ONLY. Sellers (and any other non-staff authenticated
     // role) get a minimal shop list with no personal data.
     if (!['admin', 'warehouse'].includes(req.telegramUser?.role)) {
-      return res.json(shops.map(toMinimalShop));
+      return res.json(envelope(shops.map(toMinimalShop)));
     }
 
     // Sellers per shop — full data so the Shops tab can render cart/activity
-    // status, phone, and "previously assigned" history without a separate
-    // /users round-trip.
+    // status and phone without a separate /users round-trip. NOTE: `history` is
+    // deliberately NOT selected here — it can be large and the "previously
+    // assigned" feature is computed server-side below (lastExSellers) instead of
+    // shipping every seller's full history to the client.
     const shopIds = shops.map((s) => s._id);
     const sellers = await User.find({ role: { $in: ['seller', 'admin'] }, shopId: { $in: shopIds } })
-      .select('shopId firstName lastName telegramId role phoneNumber cartState miniAppState history')
+      .select('shopId firstName lastName telegramId role phoneNumber cartState miniAppState')
       .lean();
 
     // Compute cartItemCount + lastOrderAt the same way GET /users does, so the
@@ -100,6 +125,10 @@ router.get('/', asyncHandler(async (req, res) => {
       sellerNamesByShop[sid].push(s.role === 'admin' ? `${label} (адмін)` : label);
     }
 
+    // "Previously assigned" (last 2 ex-sellers) per shop — computed server-side
+    // for just the shops in this response so we never ship full history arrays.
+    const lastExByShopName = await computeLastExSellersByShopName(shops);
+
     // Active order flags — only when filtered by deliveryGroupId (for reassign modal)
     const activeOrderShopIds = new Set();
     if (req.query.deliveryGroupId) {
@@ -123,12 +152,71 @@ router.get('/', asyncHandler(async (req, res) => {
         sellerCount: shopSellers.length,
         sellerNames: shopSellerNames,
         sellers: shopSellers,
+        lastExSellers: lastExByShopName[s.name] || [],
         hasActiveOrder: activeOrderShopIds.has(sid),
       };
     });
 
-    res.json(result);
+    res.json(envelope(result));
 }));
+
+// Build a { shopName → [{ telegramId, firstName, lastName }] (top 2) } map of the
+// most-recent ex-sellers for the given shops. Mirrors the old client-side logic
+// (ShopsTab.lastExSellersByShopName): sources are sellers' `history` entries that
+// point away from the shop (action 'shop_changed', meta.fromShop === name) plus
+// the shop's own `lastSeller` snapshot. Only loads sellers whose history touches
+// one of these shops, so it scales with the page, not the whole user table.
+async function computeLastExSellersByShopName(shops) {
+  const shopNames = shops.map((s) => s.name).filter(Boolean);
+  const map = {}; // shopName → { telegramId → { seller, at } }
+  if (shopNames.length) {
+    const exSellers = await User.find({
+      role: { $in: ['seller', 'admin'] },
+      history: { $elemMatch: { action: 'shop_changed', 'meta.fromShop': { $in: shopNames } } },
+    }).select('firstName lastName telegramId history').lean();
+
+    for (const s of exSellers) {
+      if (!Array.isArray(s.history)) continue;
+      for (const h of s.history) {
+        if (h.action !== 'shop_changed' || !h.meta?.fromShop) continue;
+        const key = h.meta.fromShop;
+        if (!shopNames.includes(key)) continue;
+        const at = h.at ? new Date(h.at) : null;
+        const tid = s.telegramId;
+        if (!map[key]) map[key] = {};
+        const existing = map[key][tid];
+        if (!existing || (at && at > existing.at)) {
+          map[key][tid] = {
+            seller: { telegramId: s.telegramId, firstName: s.firstName || '', lastName: s.lastName || '' },
+            at,
+          };
+        }
+      }
+    }
+  }
+
+  // Fold in each shop's own lastSeller snapshot.
+  for (const shop of shops) {
+    const ls = shop.lastSeller;
+    if (!ls?.telegramId) continue;
+    if (!map[shop.name]) map[shop.name] = {};
+    if (!map[shop.name][ls.telegramId]) {
+      map[shop.name][ls.telegramId] = {
+        seller: { telegramId: ls.telegramId, firstName: ls.firstName || '', lastName: ls.lastName || '' },
+        at: ls.unassignedAt ? new Date(ls.unassignedAt) : null,
+      };
+    }
+  }
+
+  const out = {};
+  for (const [name, byTid] of Object.entries(map)) {
+    out[name] = Object.values(byTid)
+      .sort((a, b) => (b.at || 0) - (a.at || 0))
+      .slice(0, 2)
+      .map((e) => e.seller);
+  }
+  return out;
+}
 
 // ─── GET /api/shops/cities ────────────────────────────────────────────────────
 // Публічний список міст (для реєстрації та seller)
@@ -151,6 +239,35 @@ router.get('/registry', asyncHandler(async (req, res) => {
   if (req.query.cityId) filter.cityId = req.query.cityId;
   const shops = await Shop.find(filter).populate('cityId', 'name').sort({ name: 1 }).lean();
   res.json(shops.map(toMinimalShop));
+}));
+
+// ─── GET /api/shops/without-seller ────────────────────────────────────────────
+// STAFF-ONLY. Active shops that currently have NO seller/admin assigned — the
+// "Без продавця" warning block on the Shops tab. Global (not page-scoped), so
+// the block stays accurate regardless of which page of the paginated list the
+// admin is viewing. Carries minimal data + lastExSellers (who left last).
+router.get('/without-seller', telegramAuth, requireTelegramRoles(['admin', 'warehouse']), asyncHandler(async (req, res) => {
+  const assignedShopIds = await User.distinct('shopId', {
+    role: { $in: ['seller', 'admin'] },
+    shopId: { $ne: null },
+  });
+  const shops = await Shop.find({ isActive: true, _id: { $nin: assignedShopIds } })
+    .populate('cityId', 'name')
+    .sort({ name: 1 })
+    .lean();
+  const lastExByShopName = await computeLastExSellersByShopName(shops);
+  // Return full shop docs (the list is small — only unassigned shops) so the
+  // warning block can expand a row straight into the edit form (ShopRow/ShopForm
+  // need deliveryGroupId/isActive/etc.). sellers is [] by definition here.
+  const result = shops.map((s) => ({
+    ...s,
+    cityId: s.cityId?._id ? String(s.cityId._id) : (s.cityId || null),
+    city: s.cityId?.name || '',
+    sellers: [],
+    sellerCount: 0,
+    lastExSellers: lastExByShopName[s.name] || [],
+  }));
+  res.json({ shops: result, count: result.length });
 }));
 
 // ─── GET /api/shops/:id ───────────────────────────────────────────────────────

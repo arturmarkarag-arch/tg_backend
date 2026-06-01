@@ -252,11 +252,50 @@ router.get('/', asyncHandler(async (req, res) => {
     { $group: { _id: '$buyerTelegramId', lastOrderAt: { $first: '$createdAt' } } },
   ]);
   const lastOrderMap = new Map(lastOrders.map((item) => [item._id, item.lastOrderAt]));
-  const usersWithLastOrder = users.map((user) => ({
-    ...user,
-    cartItemCount: getCartCount(user),
-    lastOrderAt: lastOrderMap.get(user.telegramId) || null,
-  }));
+  // Resolve each user's current shop (name/city/group) in one round-trip so the
+  // client (e.g. ShopForm's "зайнятий у магазині X" / free-vs-busy list / session
+  // highlight) doesn't need the full shops array to look it up.
+  const userShopIds = [...new Set(users.map((u) => u.shopId).filter(Boolean).map(String))];
+  const shopMap = new Map();
+  if (userShopIds.length) {
+    const shopDocs = await Shop.find({ _id: { $in: userShopIds } }, 'name cityId deliveryGroupId')
+      .populate('cityId', 'name')
+      .lean();
+    for (const s of shopDocs) {
+      shopMap.set(String(s._id), {
+        shopName: s.name || '',
+        shopCity: s.cityId?.name || '',
+        shopDeliveryGroupId: s.deliveryGroupId ? String(s.deliveryGroupId) : '',
+      });
+    }
+  }
+
+  // "Знятий з: X" — for unassigned sellers, the shop they were last removed from.
+  // Sourced from Shop.lastSeller.telegramId (reliable; survives history gaps).
+  const lastShopByTid = new Map();
+  if (telegramIds.length) {
+    const lastShopDocs = await Shop.find(
+      { 'lastSeller.telegramId': { $in: telegramIds } },
+      'name lastSeller.telegramId',
+    ).lean();
+    for (const s of lastShopDocs) {
+      const tid = s.lastSeller?.telegramId;
+      if (tid != null) lastShopByTid.set(String(tid), s.name || '');
+    }
+  }
+
+  const usersWithLastOrder = users.map((user) => {
+    const shop = user.shopId ? shopMap.get(String(user.shopId)) : null;
+    return {
+      ...user,
+      cartItemCount: getCartCount(user),
+      lastOrderAt: lastOrderMap.get(user.telegramId) || null,
+      shopName: shop?.shopName || '',
+      shopCity: shop?.shopCity || '',
+      shopDeliveryGroupId: shop?.shopDeliveryGroupId || '',
+      lastShopName: lastShopByTid.get(String(user.telegramId)) || '',
+    };
+  });
 
   res.json({
     users: usersWithLastOrder,
