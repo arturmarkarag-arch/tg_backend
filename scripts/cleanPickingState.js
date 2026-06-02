@@ -14,7 +14,9 @@
 // run it — orders would vanish. The session invariant guarding the picking
 // lifecycle (see memory: [[session-invariant]]) is unaffected by this wipe.
 
-require('dotenv').config();
+// Pin the env to the repo-root .env (same as index.js), NOT a cwd-relative .env —
+// otherwise running from server/ silently loads a stale server/.env (wrong DB).
+require('dotenv').config({ path: require('path').resolve(__dirname, '../../.env') });
 const mongoose       = require('mongoose');
 const PickingTask    = require('../models/PickingTask');
 const Order          = require('../models/Order');

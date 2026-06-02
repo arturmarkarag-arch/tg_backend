@@ -19,6 +19,7 @@ const Counter = require('../models/Counter');
 const { getIO } = require('../socket');
 const { upsertShopProductFromProduct, upsertShopOwnedFromReceiptItem, pushSharedFieldsToMirror } = require('../utils/upsertShopProduct');
 const { embedShopProductAsync } = require('../utils/shopProductEmbedding');
+const { embedProductAsync } = require('../utils/productEmbedding');
 const { explainProductImageUrl, getOpenAIStatus } = require('../openaiClient');
 const { getGeminiStatus } = require('../geminiClient');
 const { describeImageUrl } = require('../utils/productDescribe');
@@ -1006,8 +1007,15 @@ router.post('/:id/items/:itemId/confirm', staffOnly, asyncHandler(async (req, re
         // so immediately push the warehouse's current shared values across.
         await upsertShopProductFromProduct(product, { session });
         const mirror = await pushSharedFieldsToMirror(product, { session });
+        // Warehouse OWNS the Gemini vector: embed the warehouse product once (post-commit);
+        // it propagates the vector to this mirror. Skip if it already has one (re-receipt).
+        if (!product.geminiVector && (product.originalImageUrl || product.imageUrls?.[0])) {
+          embedTargets.push(['warehouse', product, 'receipt-confirm-warehouse']);
+        }
+        // The mirror still needs its OWN legacy OpenAI vector during the transition
+        // (the warehouse has none to copy); its Gemini vector arrives via propagation.
         if (mirror && !mirror.embedding && (mirror.imageUrl || mirror.originalImageUrl)) {
-          embedTargets.push([mirror, 'upsert-from-product']);
+          embedTargets.push(['mirror-openai', mirror, 'upsert-from-product']);
         }
       } else if ((item.destination || 'shelf') === 'shops' && !item.existingProductId) {
         // brand-new shops item → shop-OWNED ShopProduct (no warehouse product).
@@ -1017,7 +1025,7 @@ router.post('/:id/items/:itemId/confirm', staffOnly, asyncHandler(async (req, re
           item.createdShopProductId = sp._id;
           await item.save({ session });
         }
-        if (sp && (sp.imageUrl || sp.originalImageUrl)) embedTargets.push([sp, 'shop-owned-upsert']);
+        if (sp && (sp.imageUrl || sp.originalImageUrl)) embedTargets.push(['shop-owned', sp, 'shop-owned-upsert']);
       }
 
       confirmedItem = item.toObject();
@@ -1039,8 +1047,14 @@ router.post('/:id/items/:itemId/confirm', staffOnly, asyncHandler(async (req, re
       actor: getActor(req),
       changes: [{ field: 'status', label: 'Статус', from: 'draft', to: 'confirmed' }],
     }).catch((e) => console.error('[ReceiptItemLog] confirm error:', e));
-    // The shop mirror / shop-owned doc is now durable — schedule background embedding.
-    for (const [doc, reason] of embedTargets) embedShopProductAsync(doc, reason);
+    // Docs are now durable — schedule background embedding. Warehouse products embed
+    // via Gemini (and propagate to their mirror); mirrors only refresh OpenAI; shop-owned
+    // products (no warehouse owner) embed both providers.
+    for (const [kind, doc, reason] of embedTargets) {
+      if (kind === 'warehouse')           embedProductAsync(doc, reason);
+      else if (kind === 'mirror-openai')  embedShopProductAsync(doc, reason, { providers: ['openai'] });
+      else                                embedShopProductAsync(doc, reason);
+    }
     const io = getIO();
     if (io) {
       io.to(`receipt_${req.params.id}`).emit('receipt_item_confirmed', confirmedItem);

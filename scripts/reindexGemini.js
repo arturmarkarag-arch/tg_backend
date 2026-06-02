@@ -1,10 +1,14 @@
 'use strict';
 
 // ─── One-shot Gemini re-indexer ─────────────────────────────────────────────
-// Backfills `geminiVector` for every ShopProduct that has a photo, embedding the
-// CLEAN original where available (falls back to whatever photo exists and flags
-// it via geminiFromLabeled). Paces requests under the free-tier 60 req/min
-// limit, so ~2000 products take ~35-40 min and cost $0.
+// Backfills `geminiVector` by EMBEDDING the CLEAN original photo (falls back to
+// whatever photo exists, flagged via geminiFromLabeled). Paces requests under the
+// free-tier 60 req/min limit, so ~2000 products take ~35-40 min and cost $0.
+//
+// Scope: warehouse `products` and shop-OWNED `shopproducts` only. Linked shop
+// MIRRORS (linkedProductId set) are NOT embedded here — they copy their warehouse
+// owner's vector. After reindexing `products`, run scripts/backfill-mirror-vectors.js
+// to fan those vectors out to the mirrors (no Gemini calls).
 //
 // Usage (from the server/ dir):
 //   node scripts/reindexGemini.js                 # embed only docs missing geminiVector
@@ -18,7 +22,10 @@
 // Resumable: re-running without --force picks up where it left off (skips docs
 // that already have a geminiVector).
 
-require('dotenv').config();
+// Pin the env to the repo-root .env (the canonical server env, same as index.js),
+// NOT a cwd-relative .env — otherwise running from server/ silently loads a stale
+// server/.env and connects to the WRONG database.
+require('dotenv').config({ path: require('path').resolve(__dirname, '../../.env') });
 const mongoose = require('mongoose');
 const ShopProduct = require('../models/ShopProduct');
 const Product     = require('../models/Product');
@@ -45,7 +52,10 @@ const TARGETS = {
     Model: ShopProduct,
     index: 'shopproduct_gemini_vector',
     embed: embedGemini,
-    photoFilter: { $or: [{ imageUrl: { $ne: '' } }, { originalImageUrl: { $ne: '' } }] },
+    // Only shop-OWNED products self-embed. Linked mirrors (linkedProductId set) COPY
+    // their warehouse owner's vector — embedding them here would waste a Gemini call on
+    // an identical photo. Fill mirrors via scripts/backfill-mirror-vectors.js instead.
+    photoFilter: { linkedProductId: null, $or: [{ imageUrl: { $ne: '' } }, { originalImageUrl: { $ne: '' } }] },
   },
   products: {
     Model: Product,

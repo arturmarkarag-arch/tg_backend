@@ -61,6 +61,16 @@ async function upsertShopProductFromProduct(product, { session = null } = {}) {
     aiDescription:      product.aiDescription || '',
     source:             'receive',
     barcode,
+    // Mirror shows the SAME photo as its warehouse owner → the Gemini vector is
+    // identical. Copy it on insert (no second Gemini call). If the owner isn't
+    // embedded yet, propagateGeminiVectorToMirrors fills it in once it is.
+    ...(Array.isArray(product.geminiVector) && product.geminiVector.length ? {
+      geminiVector:         product.geminiVector,
+      geminiEmbeddingModel: product.geminiEmbeddingModel || '',
+      geminiEmbeddingDim:   product.geminiEmbeddingDim || product.geminiVector.length,
+      geminiEmbeddedAt:     product.geminiEmbeddedAt || new Date(),
+      geminiFromLabeled:    product.geminiFromLabeled || false,
+    } : {}),
     // NOTE: linkedProductId lives ONLY in $set below. Having it in both $set and
     // $setOnInsert triggers MongoDB conflict code 40 and the whole upsert fails.
   };
@@ -76,8 +86,12 @@ async function upsertShopProductFromProduct(product, { session = null } = {}) {
   if (session) return run();
   try {
     const doc = await withMirrorRetry(run);
+    // The mirror's Gemini vector is copied from the warehouse owner (above / via
+    // propagateGeminiVectorToMirrors) — NEVER self-embedded. Only the legacy OpenAI
+    // vector is self-embedded here, and only during the transition (the warehouse has
+    // no OpenAI vector to copy). Inert once OPENAI_EMBED_ENABLED=false at cutover.
     if (doc && !doc.embedding && (doc.imageUrl || doc.originalImageUrl)) {
-      embedShopProductAsync(doc, 'upsert-from-product');
+      embedShopProductAsync(doc, 'upsert-from-product', { providers: ['openai'] });
     }
     return doc;
   } catch (err) {
@@ -136,9 +150,11 @@ async function pushSharedFieldsToMirror(product, { photoChanged = false, session
 
   try {
     const doc = await withMirrorRetry(run);
-    // New photo → the mirror's embedding is stale; re-index in the background.
+    // New photo → the mirror's vectors are stale. The Gemini one is refreshed by the
+    // warehouse owner's re-embed, which propagates the new vector here (single writer);
+    // we only re-index the mirror's legacy OpenAI vector. Inert after cutover.
     if (doc && photoChanged && (doc.imageUrl || doc.originalImageUrl)) {
-      embedShopProductAsync(doc, 'mirror-push');
+      embedShopProductAsync(doc, 'mirror-push', { providers: ['openai'] });
     }
     return doc;
   } catch (err) {
