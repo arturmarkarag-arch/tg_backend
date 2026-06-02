@@ -406,7 +406,9 @@ router.get('/', async (req, res) => {
         },
       },
       { $match: { '_block.0': { $exists: true } } },
-      { $project: { _block: 0 } },
+      // Aggregation bypasses the schema's select:false, so drop the heavy fields here
+      // explicitly — the catalogue card never needs the vector / pending-update blob.
+      { $project: { _block: 0, geminiVector: 0, geminiEmbeddingModel: 0, geminiEmbeddingDim: 0, geminiEmbeddedAt: 0, geminiFromLabeled: 0, pendingShopUpdate: 0 } },
     ];
 
     const [countResult] = await Product.aggregate([...basePipeline, { $count: 'total' }]);

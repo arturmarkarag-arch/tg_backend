@@ -18,7 +18,9 @@ const ShopProductSchema = new mongoose.Schema(
     // query photo's embedding. embeddedAt/embeddingModel let us re-embed on model
     // upgrades or stale photos.
     descriptor:     { type: String, default: '' },
-    embedding:      { type: [Number], default: undefined },
+    // select:false — heavy OpenAI vector, never sent to the UI. Excluded from every
+    // find/populate by default; offline/backfill code that needs it asks explicitly.
+    embedding:      { type: [Number], default: undefined, select: false },
     embeddingModel: { type: String, default: '' },
     embeddedAt:     { type: Date, default: null },
     // ── Gemini Embedding 2 (multimodal, photo→vector) ─────────────────────────
@@ -28,7 +30,9 @@ const ShopProductSchema = new mongoose.Schema(
     // few legacy docs embedded from a labelled photo (no clean original existed);
     // they should be re-embedded once re-photographed. Has its own Atlas index
     // (shopproduct_gemini_vector, path geminiVector).
-    geminiVector:        { type: [Number], default: undefined },
+    // select:false — same as the warehouse Product vector: ~24 KB/doc, never shown.
+    // Mirrors receive it via propagateGeminiVectorToMirrors ($set), not via a read here.
+    geminiVector:        { type: [Number], default: undefined, select: false },
     geminiEmbeddingModel:{ type: String, default: '' },
     geminiEmbeddingDim:  { type: Number, default: 0 },
     geminiEmbeddedAt:    { type: Date, default: null },

@@ -1009,12 +1009,16 @@ router.post('/:id/items/:itemId/confirm', staffOnly, asyncHandler(async (req, re
         const mirror = await pushSharedFieldsToMirror(product, { session });
         // Warehouse OWNS the Gemini vector: embed the warehouse product once (post-commit);
         // it propagates the vector to this mirror. Skip if it already has one (re-receipt).
-        if (!product.geminiVector && (product.originalImageUrl || product.imageUrls?.[0])) {
+        // Gate on the lightweight `geminiEmbeddedAt` timestamp, not the heavy
+        // `geminiVector` array — the vector is select:false now, so reading it here
+        // would always be undefined and re-embed an already-indexed product every confirm.
+        if (!product.geminiEmbeddedAt && (product.originalImageUrl || product.imageUrls?.[0])) {
           embedTargets.push(['warehouse', product, 'receipt-confirm-warehouse']);
         }
         // The mirror still needs its OWN legacy OpenAI vector during the transition
         // (the warehouse has none to copy); its Gemini vector arrives via propagation.
-        if (mirror && !mirror.embedding && (mirror.imageUrl || mirror.originalImageUrl)) {
+        // Gate on `embeddedAt` (set in lockstep with `embedding`), not the select:false array.
+        if (mirror && !mirror.embeddedAt && (mirror.imageUrl || mirror.originalImageUrl)) {
           embedTargets.push(['mirror-openai', mirror, 'upsert-from-product']);
         }
       } else if ((item.destination || 'shelf') === 'shops' && !item.existingProductId) {

@@ -17,7 +17,7 @@ async function getShippingBlockPositions(productIds) {
     { productIds: { $in: productIds } },
     'blockId productIds'
   )
-    .populate({ path: 'productIds', match: { status: { $in: ['active', 'pending'] } } })
+    .populate({ path: 'productIds', match: { status: { $in: ['active', 'pending'] } }, select: '_id' })
     .sort({ blockId: 1 })
     .lean();
 
@@ -97,7 +97,9 @@ async function buildPickingTasksImpl(targetDeliveryGroupId = null, options = {})
     }
 
     const orders = await Order.find(orderFilter)
-      .populate('items.productId')
+      // Only _id + status are read off the populated product below; pulling the full
+      // doc (× up to 300 items × N orders) would haul vectors+everything into memory.
+      .populate('items.productId', '_id status')
       .sort({ createdAt: 1 })
       .lean();
 

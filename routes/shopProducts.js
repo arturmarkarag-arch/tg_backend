@@ -78,7 +78,10 @@ router.get('/', anyRole, asyncHandler(async (req, res) => {
 
   const [total, items] = await Promise.all([
     ShopProduct.countDocuments(query),
+    // Vectors are select:false; `descriptor` is the GPT embedding text (search-only,
+    // never rendered) so drop it too — the card list stays tiny regardless of catalogue size.
     ShopProduct.find(query)
+      .select('-descriptor')
       .sort({ createdAt: -1 })
       .skip(offset)
       .limit(limit)

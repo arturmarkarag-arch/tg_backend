@@ -90,7 +90,9 @@ async function upsertShopProductFromProduct(product, { session = null } = {}) {
     // propagateGeminiVectorToMirrors) — NEVER self-embedded. Only the legacy OpenAI
     // vector is self-embedded here, and only during the transition (the warehouse has
     // no OpenAI vector to copy). Inert once OPENAI_EMBED_ENABLED=false at cutover.
-    if (doc && !doc.embedding && (doc.imageUrl || doc.originalImageUrl)) {
+    // Gate on `embeddedAt` (lightweight, always set with `embedding`) — the vector
+    // itself is select:false, so `doc.embedding` is undefined on a normal read.
+    if (doc && !doc.embeddedAt && (doc.imageUrl || doc.originalImageUrl)) {
       embedShopProductAsync(doc, 'upsert-from-product', { providers: ['openai'] });
     }
     return doc;

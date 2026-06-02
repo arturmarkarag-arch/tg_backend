@@ -21,6 +21,14 @@ const { pushSessionEvent } = require('../utils/sessionStatus');
 
 const { getOrderingSchedule } = require('../utils/getOrderingSchedule');
 
+// Fields the UI actually reads off a populated order item's product (a warehouse
+// Product) — the union across OrderSummary / MyOrders / OrderHistory / CrossDocking
+// and ProductImage(productImagePath). name + price live in the item SNAPSHOT, so the
+// live product is needed only for the photo + qty-per-pack. Narrowing this keeps each
+// populated item at ~0.3 KB instead of the full doc — critical because an order holds
+// 100–300 items and a list page populates them across many orders.
+const ORDER_ITEM_PRODUCT_FIELDS = '_id name imageUrls localImageUrl originalImageUrl quantityPerPackage status';
+
 // Fire-and-forget: log "Оновлена" on the session timeline only when picking has
 // already started. Used by every Order CREATE path (cart submit, restore-stale,
 // admin set-item-qty) so the timeline is populated regardless of entry point.
@@ -423,7 +431,10 @@ router.get('/', async (req, res) => {
 
   const total = await Order.countDocuments(filter);
   const orderQuery = Order.find(filter)
-    .populate('items.productId')
+    // `history` (audit trail, grows per action) is never rendered in any list view —
+    // drop it here; the single-order detail (GET /:id) still returns it.
+    .select('-history')
+    .populate('items.productId', ORDER_ITEM_PRODUCT_FIELDS)
     .populate('receiptId', 'receiptNumber')
     .sort({ createdAt: -1 });
 
@@ -471,7 +482,8 @@ router.get('/transit/active', staffOnly, async (req, res, next) => {
       orderType: 'direct_allocation',
       status: { $nin: ['fulfilled', 'cancelled'] },
     })
-      .populate('items.productId')
+      .select('-history')
+      .populate('items.productId', ORDER_ITEM_PRODUCT_FIELDS)
       .populate('receiptId', 'receiptNumber')
       .sort({ createdAt: -1 })
       .limit(limit)
@@ -519,7 +531,7 @@ router.get('/:id', async (req, res) => {
   const telegramId = req.telegramId;
   const authUser = req.telegramUser;
 
-  const order = await Order.findById(req.params.id).populate('items.productId');
+  const order = await Order.findById(req.params.id).populate('items.productId', ORDER_ITEM_PRODUCT_FIELDS);
   if (!order) throw appError('order_not_found');
   if (String(order.buyerTelegramId) !== telegramId && !['admin', 'warehouse'].includes(authUser.role)) {
     throw appError('order_view_forbidden');

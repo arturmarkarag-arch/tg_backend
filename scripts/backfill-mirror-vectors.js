@@ -39,9 +39,11 @@ async function main() {
   const total = await Product.countDocuments(filter);
   console.log(`[backfill] ${total} warehouse product(s) with a vector to propagate.`);
 
+  // geminiVector is schema select:false — the leading `+` forces it back into the
+  // projection so propagateGeminiVectorToMirrors actually has a vector to copy.
   const cursor = Product.find(
     filter,
-    'geminiVector geminiEmbeddingModel geminiEmbeddingDim geminiEmbeddedAt geminiFromLabeled',
+    '+geminiVector geminiEmbeddingModel geminiEmbeddingDim geminiEmbeddedAt geminiFromLabeled',
   ).cursor();
 
   let owners = 0, mirrors = 0;

@@ -43,7 +43,12 @@ const ProductSchema = new mongoose.Schema(
     // Lets "Прийомка" locate an arriving item already on the warehouse by photo.
     // Embedded from the CLEAN original; geminiFromLabeled flags fallbacks. Has its
     // own Atlas index (product_gemini_vector, path geminiVector).
-    geminiVector:         { type: [Number], default: undefined },
+    // select:false — the 3072-float vector is NEVER returned by find/findOne/populate
+    // unless a query explicitly asks for it (`.select('+geminiVector')`). This keeps
+    // it out of every list/catalog/order payload (it's ~24 KB/doc and the UI never
+    // shows it). Atlas $vectorSearch reads the index directly, so search is unaffected;
+    // embedding flows set it in-memory on a freshly-loaded doc, so they're unaffected too.
+    geminiVector:         { type: [Number], default: undefined, select: false },
     geminiEmbeddingModel: { type: String, default: '' },
     geminiEmbeddingDim:   { type: Number, default: 0 },
     geminiEmbeddedAt:     { type: Date, default: null },
