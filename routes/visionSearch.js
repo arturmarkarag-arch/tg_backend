@@ -4,14 +4,14 @@ const crypto      = require('crypto');
 const router      = require('express').Router();
 const { requireTelegramRoles } = require('../middleware/telegramAuth');
 const { asyncHandler }         = require('../utils/errors');
-const ShopProduct    = require('../models/ShopProduct');
 const Product        = require('../models/Product');
+const ProductVector  = require('../models/ProductVector');
 const Block          = require('../models/Block');
 const VisionTestLog  = require('../models/VisionTestLog');
 const AppSetting     = require('../models/AppSetting');
-const { getOpenAIStatus, describeProductImageUrl, explainProductImageUrl, embedText } = require('../openaiClient');
+const { getOpenAIStatus } = require('../openaiClient');
 const { getGeminiStatus, embedImageUrl: geminiEmbedImageUrl, embedText: geminiEmbedText } = require('../geminiClient');
-const { embedShopProduct } = require('../utils/shopProductEmbedding');
+const { embedProduct } = require('../utils/productEmbedding');
 const { describeImageUrl } = require('../utils/productDescribe');
 const { presignPutUrl, deleteObject, publicUrl } = require('../utils/r2');
 
@@ -21,31 +21,11 @@ function isVisionTmpKey(key) {
   return typeof key === 'string' && key.startsWith(`${VISION_TMP_FOLDER}/`) && !key.includes('..');
 }
 
-// Atlas Vector Search index names — must exist on the shopproducts collection
-// (no fallback; the query errors clearly if it's missing). The OpenAI index is
-// on `embedding` (1536); the Gemini index is on `geminiVector` (3072).
-const VECTOR_INDEX           = 'shopproduct_vector';
-const VECTOR_INDEX_GEMINI    = 'shopproduct_gemini_vector';
-const VECTOR_INDEX_WAREHOUSE = 'product_gemini_vector'; // Товари Складу (Прийомка locate)
-
-// Which embedding provider answers a search. Resolves a per-request override
-// (test page) first, then the admin setting, then the safe default (openai).
-// Flip the AppSetting to 'gemini' to cut the whole app over after validation.
-const SEARCH_PROVIDER_KEY     = 'vision.searchProvider';
-// Default provider when neither a per-request override nor the AppSetting is set.
-// Env-driven so the global cutover is just VISION_SEARCH_PROVIDER=gemini + restart
-// (the AppSetting, if present, still wins over this).
-const DEFAULT_SEARCH_PROVIDER =
-  ['gemini', 'openai'].includes(String(process.env.VISION_SEARCH_PROVIDER || '').toLowerCase())
-    ? process.env.VISION_SEARCH_PROVIDER.toLowerCase()
-    : 'openai';
-async function getSearchProvider(override) {
-  const o = String(override || '').toLowerCase();
-  if (o === 'gemini' || o === 'openai') return o;
-  const s = await AppSetting.findOne({ key: SEARCH_PROVIDER_KEY }).lean();
-  const v = String(s?.value || '').toLowerCase();
-  return v === 'gemini' || v === 'openai' ? v : DEFAULT_SEARCH_PROVIDER;
-}
+// Atlas Vector Search index — built on the geminiVector path of the productvectors
+// collection (see models/ProductVector.js). ONE index serves every search: a hit is
+// resolved back to its Product / ShopProduct afterwards. Gemini-only — OpenAI was
+// retired at the 2026-06-03 cutover (the vector now lives in its own collection).
+const VECTOR_INDEX = 'gemini_vector';
 
 // Confidence threshold is admin-configurable (vision.threshold setting).
 const VISION_THRESHOLD_KEY = 'vision.threshold';
@@ -77,95 +57,82 @@ function toResultItem(p, score) {
   };
 }
 
-// Ranks the catalog against a query embedding via Atlas $vectorSearch. Requires
-// the `shopproduct_vector` index to exist (no fallback). Atlas cosine score is
-// (1+cos)/2, converted back to raw cosine so the % matches the test-page meter.
-async function searchByVector(embedding, k = 5) {
-  const docs = await ShopProduct.aggregate([
-    {
-      $vectorSearch: {
-        index:         VECTOR_INDEX,
-        path:          'embedding',
-        queryVector:   embedding,
-        numCandidates: Math.max(100, k * 20),
-        limit:         k,
-      },
+// Resolve a vector hit (a ProductVector row) to its catalogue ShopProduct: a warehouse
+// MIRROR via linkedProductId == productId, or a SHOP-OWNED item via _id == shopProductId.
+// `proj` is the inner $project (light card fields vs the full doc, minus vectors).
+function shopResolveLookup(proj, as = 'sp') {
+  return {
+    $lookup: {
+      from: 'shopproducts',
+      let: { pid: '$productId', sid: '$shopProductId' },
+      pipeline: [
+        { $match: { $expr: { $or: [{ $eq: ['$linkedProductId', '$$pid'] }, { $eq: ['$_id', '$$sid'] }] } } },
+        { $project: proj },
+      ],
+      as,
     },
-    { $project: { name: 1, barcode: 1, price: 1, imageUrl: 1, score: { $meta: 'vectorSearchScore' } } },
-  ]);
-  return docs.map((p) => toResultItem(p, 2 * (p.score || 0) - 1));
+  };
 }
 
-// Same as searchByVector but against the Gemini index/field. gemini-embedding-2
-// auto-normalizes its output, so cosine in Atlas behaves the same — we reuse the
-// (1+cos)/2 → cos conversion so the % meter stays consistent across providers.
+// Ranks the catalogue against a query vector via Atlas $vectorSearch over productvectors,
+// then resolves each hit to its ShopProduct. Atlas cosine score is (1+cos)/2, converted
+// back to raw cosine so the % matches the test-page meter.
 async function searchByGeminiVector(embedding, k = 5) {
-  const docs = await ShopProduct.aggregate([
-    {
-      $vectorSearch: {
-        index:         VECTOR_INDEX_GEMINI,
-        path:          'geminiVector',
-        queryVector:   embedding,
-        numCandidates: Math.max(100, k * 20),
-        limit:         k,
-      },
-    },
-    { $project: { name: 1, barcode: 1, price: 1, imageUrl: 1, score: { $meta: 'vectorSearchScore' } } },
+  const rows = await ProductVector.aggregate([
+    { $vectorSearch: { index: VECTOR_INDEX, path: 'geminiVector', queryVector: embedding, numCandidates: Math.max(100, k * 20), limit: k } },
+    { $addFields: { score: { $meta: 'vectorSearchScore' } } },
+    shopResolveLookup({ name: 1, barcode: 1, price: 1, imageUrl: 1 }),
+    { $unwind: '$sp' },
+    { $project: { _id: '$sp._id', name: '$sp.name', barcode: '$sp.barcode', price: '$sp.price', imageUrl: '$sp.imageUrl', score: 1 } },
   ]);
-  return docs.map((p) => toResultItem(p, 2 * (p.score || 0) - 1));
+  return rows.map((p) => toResultItem(p, 2 * (p.score || 0) - 1));
 }
 
-// ─── POST /embed-all — backfill embeddings for the catalog ────────────────────
-// Admin-only. Body/query: { provider?: 'gemini'|'openai', force?, limit? }.
-// Processes a batch of products that have a photo but no vector yet for the
-// chosen provider (or all, when force=true). Returns counts so the client can
-// loop until `remaining` hits zero. Defaults to Gemini (the new primary). For
-// the full 2000-item backfill prefer server/scripts/reindexGemini.js — it paces
-// requests under the 60 req/min free-tier limit; this endpoint is for small,
-// incremental top-ups from the admin UI.
+// ─── POST /embed-all — backfill warehouse vectors into productvectors ─────────
+// Admin-only. Body/query: { force?, limit? }. Embeds a batch of WAREHOUSE products
+// that have a photo but no ProductVector row yet (mirrors reference the warehouse
+// row; shop-owned items embed on their own write). Returns counts so the client can
+// loop until `remaining` hits zero. For the full backfill prefer
+// server/scripts/reindexGemini.js — it paces requests under the free-tier limit.
 router.post('/embed-all', adminOnly, asyncHandler(async (req, res) => {
-  const provider = String(req.body?.provider || req.query.provider || 'gemini').toLowerCase() === 'openai'
-    ? 'openai' : 'gemini';
-
-  if (provider === 'openai' && !getOpenAIStatus().connected) {
-    return res.status(503).json({ error: 'openai_not_configured', message: getOpenAIStatus().error || 'OpenAI не підключено' });
-  }
-  if (provider === 'gemini' && !getGeminiStatus().connected) {
+  if (!getGeminiStatus().connected) {
     return res.status(503).json({ error: 'gemini_not_configured', message: getGeminiStatus().error || 'Gemini не підключено' });
   }
 
   const force = req.body?.force === true || req.query.force === 'true';
   const limit = Math.min(25, Math.max(1, parseInt(req.body?.limit ?? req.query.limit, 10) || 10));
-  const field = provider === 'gemini' ? 'geminiVector' : 'embedding';
 
-  const filter = { imageUrl: { $ne: '' } };
-  if (!force) filter[field] = { $exists: false };
+  const haveIds = new Set(
+    (await ProductVector.find({ productId: { $exists: true } }, 'productId').lean()).map((v) => String(v.productId)),
+  );
+  const candidates = await Product.find(
+    { status: { $ne: 'archived' }, $or: [{ originalImageUrl: { $ne: '' } }, { 'imageUrls.0': { $exists: true } }] },
+    '_id originalImageUrl imageUrls localImageUrl',
+  ).lean();
+  const todo = candidates.filter((p) => force || !haveIds.has(String(p._id))).slice(0, limit);
 
-  const docs = await ShopProduct.find(filter).limit(limit);
   let processed = 0, failed = 0;
-  for (const doc of docs) {
-    try {
-      if (await embedShopProduct(doc, { providers: [provider] })) processed++; else failed++;
-    } catch (err) {
-      console.error('[visionSearch] embed-all failed for', String(doc._id), err.message);
-      failed++;
-    }
+  for (const p of todo) {
+    try { if (await embedProduct(p, { force })) processed++; else failed++; }
+    catch (err) { console.error('[visionSearch] embed-all failed for', String(p._id), err.message); failed++; }
   }
-  const remaining = await ShopProduct.countDocuments({ imageUrl: { $ne: '' }, [field]: { $exists: false } });
-  const embedded  = await ShopProduct.countDocuments({ [field]: { $exists: true } });
-  res.json({ provider, processed, failed, remaining, embedded });
+  const embedded  = await ProductVector.countDocuments({ productId: { $exists: true } });
+  const remaining = Math.max(0, candidates.length - embedded);
+  res.json({ provider: 'gemini', processed, failed, remaining, embedded });
 }));
 
-// ─── POST /query-vector — embedding similarity search ─────────────────────────
+// ─── POST /query-vector — photo similarity search (Gemini) ────────────────────
 // Body: { key, threshold? }. The query photo was uploaded straight to R2 (vision-tmp/);
-// OpenAI reads it by URL (no bytes through us), then we delete it. Describes the
-// photo, embeds it, and ranks the catalog via Atlas $vectorSearch (no fallback).
-// Allowed for sellers too — the ShopProducts page surfaces this via PhotoSearchModal.
+// Gemini reads it by URL (no bytes through us), then we delete it. The photo's pixels
+// become a vector directly (native multimodal) and rank the catalogue via Atlas
+// $vectorSearch over productvectors. Allowed for sellers (PhotoSearchModal).
 router.post('/query-vector', anyRole, asyncHandler(async (req, res) => {
   const key = req.body?.key;
   if (!isVisionTmpKey(key)) return res.status(400).json({ error: 'photo_required', message: 'Не вказано фото' });
 
-  const provider = await getSearchProvider(req.body?.provider);
+  if (!getGeminiStatus().connected) {
+    return res.status(503).json({ error: 'gemini_not_configured', message: getGeminiStatus().error || 'Gemini не підключено' });
+  }
 
   // Client may override (test page slider); otherwise use the admin setting.
   const clientThreshold = req.body.threshold != null && req.body.threshold !== ''
@@ -174,59 +141,31 @@ router.post('/query-vector', anyRole, asyncHandler(async (req, res) => {
     ? Math.min(1, Math.max(0, clientThreshold))
     : await getVisionThreshold();
 
+  const reasoning = 'Google Gemini Embadded 2 API мультимодальний векторний пошук.';
+  const usage = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
   const imageUrl = publicUrl(key);
   try {
-    let reasoning = '', embedding = null, usage = { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
-
-    if (provider === 'gemini') {
-      if (!getGeminiStatus().connected) {
-        return res.status(503).json({ error: 'gemini_not_configured', message: getGeminiStatus().error || 'Gemini не підключено' });
-      }
-      try {
-        // Native multimodal: the query photo's pixels become a vector directly —
-        // no intermediate text description, hence no "reasoning" to show.
-        const g = await geminiEmbedImageUrl(imageUrl);
-        embedding = g.embedding;
-
-        reasoning = 'Google Gemini Embadded 2 API мультимодальний векторний пошук.';
-      } catch (err) {
-        console.error('[visionSearch] query-vector Gemini error:', err.message);
-        return res.status(502).json({ error: 'gemini_api_error', message: err.message });
-      }
-    } else {
-      if (!getOpenAIStatus().connected) {
-        return res.status(503).json({ error: 'openai_not_configured', message: getOpenAIStatus().error || 'OpenAI не підключено' });
-      }
-      try {
-        const d = await describeProductImageUrl(imageUrl);
-        reasoning = d.descriptor;
-        usage.inputTokens  += Number(d.usage?.inputTokens  || 0);
-        usage.outputTokens += Number(d.usage?.outputTokens || 0);
-        const e = await embedText(d.descriptor);
-        embedding = e.embedding;
-        usage.inputTokens += Number(e.usage?.inputTokens || 0);
-        usage.totalTokens  = usage.inputTokens + usage.outputTokens;
-      } catch (err) {
-        console.error('[visionSearch] query-vector OpenAI error:', err.message);
-        return res.status(502).json({ error: 'openai_api_error', message: err.message });
-      }
+    let embedding = null;
+    try {
+      const g = await geminiEmbedImageUrl(imageUrl);
+      embedding = g.embedding;
+    } catch (err) {
+      console.error('[visionSearch] query-vector Gemini error:', err.message);
+      return res.status(502).json({ error: 'gemini_api_error', message: err.message });
     }
 
     if (!embedding) {
-      return res.json({ provider, threshold, reasoning, results: [], usage });
+      return res.json({ provider: 'gemini', threshold, reasoning, results: [], usage });
     }
 
-    const indexName = provider === 'gemini' ? VECTOR_INDEX_GEMINI : VECTOR_INDEX;
     let resultItems;
     try {
-      resultItems = provider === 'gemini'
-        ? await searchByGeminiVector(embedding, 5)
-        : await searchByVector(embedding, 5);
+      resultItems = await searchByGeminiVector(embedding, 5);
     } catch (err) {
       console.error('[visionSearch] vector search error:', err.message);
       return res.status(502).json({
         error:   'vector_search_failed',
-        message: `Векторний пошук недоступний — перевір Atlas-індекс "${indexName}". (${err.message})`,
+        message: `Векторний пошук недоступний — перевір Atlas-індекс "${VECTOR_INDEX}". (${err.message})`,
       });
     }
 
@@ -237,7 +176,7 @@ router.post('/query-vector', anyRole, asyncHandler(async (req, res) => {
       createdBy: req.telegramUser?.username || req.telegramUser?.id || '',
     });
 
-    res.json({ logId: log._id, provider, threshold, reasoning, results: resultItems, usage });
+    res.json({ logId: log._id, provider: 'gemini', threshold, reasoning, results: resultItems, usage });
   } finally {
     deleteObject(key); // one-shot photo — remove from R2 regardless of outcome
   }
@@ -285,8 +224,6 @@ router.post('/query-text', anyRole, asyncHandler(async (req, res) => {
 
   // Which catalog to search: shopproducts (Товари Магазинів, default) | products (Товари Складу).
   const collection = String(req.body?.collection || 'shopproducts').toLowerCase() === 'products' ? 'products' : 'shopproducts';
-  const Model    = collection === 'products' ? Product : ShopProduct;
-  const idxName  = collection === 'products' ? VECTOR_INDEX_WAREHOUSE : VECTOR_INDEX_GEMINI;
 
   let embedding = null;
   try {
@@ -298,25 +235,25 @@ router.post('/query-text', anyRole, asyncHandler(async (req, res) => {
   }
   if (!embedding) return res.json({ items: [], total: 0, offset, limit });
 
+  // Rank productvectors, then resolve each hit to its FULL doc (so the catalog list
+  // can render + edit it). Hits that don't resolve (e.g. a deleted mirror) drop out.
+  const resolve = collection === 'products'
+    ? [
+        { $match: { productId: { $exists: true } } },
+        { $lookup: { from: 'products', localField: 'productId', foreignField: '_id', as: 'doc', pipeline: [{ $project: { geminiVector: 0 } }] } },
+      ]
+    : [shopResolveLookup({ geminiVector: 0, embedding: 0, descriptor: 0 }, 'doc')];
+
   let result;
   try {
-    result = await Model.aggregate([
-      {
-        $vectorSearch: {
-          index:         idxName,
-          path:          'geminiVector',
-          queryVector:   embedding,
-          numCandidates: Math.max(200, TOP_K_CAP * 10),
-          limit:         TOP_K_CAP,
-        },
-      },
+    result = await ProductVector.aggregate([
+      { $vectorSearch: { index: VECTOR_INDEX, path: 'geminiVector', queryVector: embedding, numCandidates: Math.max(200, TOP_K_CAP * 10), limit: TOP_K_CAP } },
       { $addFields: { _score: { $meta: 'vectorSearchScore' } } },
+      ...resolve,
+      { $unwind: '$doc' },
+      { $replaceRoot: { newRoot: { $mergeObjects: ['$doc', { _score: '$_score' }] } } },
       { $facet: {
-          items: [
-            { $skip: offset },
-            { $limit: limit },
-            { $project: { geminiVector: 0, embedding: 0 } },
-          ],
+          items:  [{ $skip: offset }, { $limit: limit }],
           counts: [{ $count: 'total' }],
       } },
     ]);
@@ -324,7 +261,7 @@ router.post('/query-text', anyRole, asyncHandler(async (req, res) => {
     console.error('[visionSearch] query-text vector search error:', err.message);
     return res.status(502).json({
       error:   'vector_search_failed',
-      message: `Векторний пошук недоступний — перевір Atlas-індекс "${idxName}". (${err.message})`,
+      message: `Векторний пошук недоступний — перевір Atlas-індекс "${VECTOR_INDEX}". (${err.message})`,
     });
   }
 
@@ -336,9 +273,9 @@ router.post('/query-text', anyRole, asyncHandler(async (req, res) => {
 }));
 
 // ─── POST /query-vector-warehouse — photo search over WAREHOUSE products ──────
-// Body: { key, limit? }. Photo → Gemini vector → $vectorSearch over the warehouse
-// index (product_gemini_vector). Returns full Product docs ranked by similarity
-// (rendered straight into the Товари Складу list). Gemini-only.
+// Body: { key, limit? }. Photo → Gemini vector → $vectorSearch over productvectors,
+// keeping only warehouse rows (productId) and resolving each back to its full Product
+// doc (rendered straight into the Товари Складу list). Gemini-only.
 router.post('/query-vector-warehouse', staffOnly, asyncHandler(async (req, res) => {
   const key = req.body?.key;
   if (!isVisionTmpKey(key)) return res.status(400).json({ error: 'photo_required', message: 'Не вказано фото' });
@@ -362,24 +299,19 @@ router.post('/query-vector-warehouse', staffOnly, asyncHandler(async (req, res) 
 
     let items;
     try {
-      items = await Product.aggregate([
-        {
-          $vectorSearch: {
-            index:         VECTOR_INDEX_WAREHOUSE,
-            path:          'geminiVector',
-            queryVector:   embedding,
-            numCandidates: Math.max(100, limit * 20),
-            limit,
-          },
-        },
+      items = await ProductVector.aggregate([
+        { $vectorSearch: { index: VECTOR_INDEX, path: 'geminiVector', queryVector: embedding, numCandidates: Math.max(100, limit * 20), limit } },
+        { $match: { productId: { $exists: true } } },
         { $addFields: { _score: { $meta: 'vectorSearchScore' } } },
-        { $project: { geminiVector: 0 } },
+        { $lookup: { from: 'products', localField: 'productId', foreignField: '_id', as: 'doc', pipeline: [{ $project: { geminiVector: 0 } }] } },
+        { $unwind: '$doc' },
+        { $replaceRoot: { newRoot: { $mergeObjects: ['$doc', { _score: '$_score' }] } } },
       ]);
     } catch (err) {
       console.error('[visionSearch] warehouse photo vector search error:', err.message);
       return res.status(502).json({
         error:   'vector_search_failed',
-        message: `Векторний пошук по складу недоступний — перевір Atlas-індекс "${VECTOR_INDEX_WAREHOUSE}". (${err.message})`,
+        message: `Векторний пошук по складу недоступний — перевір Atlas-індекс "${VECTOR_INDEX}". (${err.message})`,
       });
     }
     await attachWarehouseLocations(items);

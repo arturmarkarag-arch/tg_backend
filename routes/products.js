@@ -1181,7 +1181,7 @@ router.patch('/:id', staffOnly, asyncHandler(async (req, res) => {
     upsertShopProductFromProduct(product).catch((err) =>
       console.error('[products/patch] ShopProduct upsert failed:', err.message));
   } else {
-    pushSharedFieldsToMirror(product, { photoChanged: patchFilenames.length > 0 }).catch((err) =>
+    pushSharedFieldsToMirror(product).catch((err) =>
       console.error('[products/patch] ShopProduct mirror push failed:', err.message));
   }
 
@@ -1267,8 +1267,10 @@ router.patch('/:id', staffOnly, asyncHandler(async (req, res) => {
   }
 
   // Photo changed → its warehouse vector is stale; re-index in the background.
+  // force:true because the ProductVector row already exists — we must overwrite it
+  // (the mirror references this same row, so refreshing it updates the mirror too).
   if (patchFilenames.length > 0 && (product.originalImageUrl || product.imageUrls?.[0])) {
-    embedProductAsync(product, 'patch');
+    embedProductAsync(product, 'patch', { force: true });
   }
 
   res.json(product);

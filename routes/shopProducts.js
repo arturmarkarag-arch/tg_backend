@@ -70,7 +70,6 @@ router.get('/', anyRole, asyncHandler(async (req, res) => {
           { barcode:       new RegExp(t, 'i') },
           { notes:         new RegExp(t, 'i') },
           { aiDescription: new RegExp(t, 'i') },
-          { descriptor:    new RegExp(t, 'i') },
         ],
       }));
     }
@@ -78,10 +77,9 @@ router.get('/', anyRole, asyncHandler(async (req, res) => {
 
   const [total, items] = await Promise.all([
     ShopProduct.countDocuments(query),
-    // Vectors are select:false; `descriptor` is the GPT embedding text (search-only,
-    // never rendered) so drop it too — the card list stays tiny regardless of catalogue size.
+    // Vectors live in the ProductVector collection now — the card list is naturally
+    // tiny regardless of catalogue size.
     ShopProduct.find(query)
-      .select('-descriptor')
       .sort({ createdAt: -1 })
       .skip(offset)
       .limit(limit)
@@ -204,14 +202,15 @@ router.patch('/:id', staffOnly, asyncHandler(async (req, res) => {
   }
 
   res.json(item.toObject());
-  // New photo → the old embedding is stale; re-index in the background.
-  if (photoChanged && (item.imageUrl || item.originalImageUrl)) embedShopProductAsync(item, 'patch');
+  // New photo → the existing ProductVector row is stale; force a re-embed in the
+  // background (force:true overwrites it — plain calls skip when a row exists).
+  if (photoChanged && (item.imageUrl || item.originalImageUrl)) embedShopProductAsync(item, 'patch', { force: true });
 }));
 
 // ── POST /:id/describe — generate + cache the human-friendly card description ──
 // On-demand (staff presses the button). Uses the clean original photo and the
-// plain-language Ukrainian explainer — distinct from the terse embedding
-// `descriptor`. Result is cached in aiDescription; pressing again regenerates.
+// plain-language Ukrainian explainer. Result is cached in aiDescription; pressing
+// again regenerates.
 router.post('/:id/describe', staffOnly, asyncHandler(async (req, res) => {
   const item = await ShopProduct.findById(req.params.id);
   if (!item) throw appError('product_not_found');

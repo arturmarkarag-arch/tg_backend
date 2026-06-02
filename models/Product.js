@@ -39,20 +39,11 @@ const ProductSchema = new mongoose.Schema(
     // The warehouse is the single writer: it's pushed to the linked ShopProduct
     // mirror (same physical product → same description) by pushSharedFieldsToMirror.
     aiDescription: { type: String, default: '' },
-    // ── Gemini Embedding 2 (multimodal photo→vector) for warehouse search ──────
-    // Lets "Прийомка" locate an arriving item already on the warehouse by photo.
-    // Embedded from the CLEAN original; geminiFromLabeled flags fallbacks. Has its
-    // own Atlas index (product_gemini_vector, path geminiVector).
-    // select:false — the 3072-float vector is NEVER returned by find/findOne/populate
-    // unless a query explicitly asks for it (`.select('+geminiVector')`). This keeps
-    // it out of every list/catalog/order payload (it's ~24 KB/doc and the UI never
-    // shows it). Atlas $vectorSearch reads the index directly, so search is unaffected;
-    // embedding flows set it in-memory on a freshly-loaded doc, so they're unaffected too.
-    geminiVector:         { type: [Number], default: undefined, select: false },
-    geminiEmbeddingModel: { type: String, default: '' },
-    geminiEmbeddingDim:   { type: Number, default: 0 },
-    geminiEmbeddedAt:     { type: Date, default: null },
-    geminiFromLabeled:    { type: Boolean, default: false },
+    // ── Visual search (vector) ────────────────────────────────────────────────
+    // The Gemini image vector for "Прийомка" lives in the ProductVector collection
+    // (keyed by productId), NOT here (2026-06-03). It is write-once / read-by-Atlas-
+    // index-only, so co-locating it with hot read data only bloated every payload.
+    // See models/ProductVector.js + utils/productEmbedding.js.
     // Non-authoritative "recommended update" coming FROM a ShopProduct edit.
     // Never auto-applied — staff review and decide. Shape:
     // { price, name, quantityPerPackage, notes, imageUrl, by, at }.

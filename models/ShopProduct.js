@@ -13,35 +13,14 @@ const ShopProductSchema = new mongoose.Schema(
     imageUrl:           { type: String, default: '' },
     labelPositions:     { type: mongoose.Schema.Types.Mixed, default: {} },
     // ── Visual search (vector) ────────────────────────────────────────────────
-    // GPT-vision text description of the product photo, used as the embedding
-    // source. embedding is its vector; matching is cosine similarity against the
-    // query photo's embedding. embeddedAt/embeddingModel let us re-embed on model
-    // upgrades or stale photos.
-    descriptor:     { type: String, default: '' },
-    // select:false — heavy OpenAI vector, never sent to the UI. Excluded from every
-    // find/populate by default; offline/backfill code that needs it asks explicitly.
-    embedding:      { type: [Number], default: undefined, select: false },
-    embeddingModel: { type: String, default: '' },
-    embeddedAt:     { type: Date, default: null },
-    // ── Gemini Embedding 2 (multimodal, photo→vector) ─────────────────────────
-    // Parallel to the OpenAI `embedding` above so the live OpenAI search keeps
-    // working while the Gemini index is validated. geminiVector is the native
-    // image embedding (no intermediate descriptor). geminiFromLabeled flags the
-    // few legacy docs embedded from a labelled photo (no clean original existed);
-    // they should be re-embedded once re-photographed. Has its own Atlas index
-    // (shopproduct_gemini_vector, path geminiVector).
-    // select:false — same as the warehouse Product vector: ~24 KB/doc, never shown.
-    // Mirrors receive it via propagateGeminiVectorToMirrors ($set), not via a read here.
-    geminiVector:        { type: [Number], default: undefined, select: false },
-    geminiEmbeddingModel:{ type: String, default: '' },
-    geminiEmbeddingDim:  { type: Number, default: 0 },
-    geminiEmbeddedAt:    { type: Date, default: null },
-    geminiFromLabeled:   { type: Boolean, default: false },
-    // Human-friendly Ukrainian product description for the card UI. Generated
-    // on demand (staff presses "Згенерувати") from explainProductImage, NOT the
-    // terse embedding `descriptor`. For a shop-OWNED product (linkedProductId:
-    // null) it's editable here; for a warehouse MIRROR it's owned by the warehouse
-    // and pushed in via pushSharedFieldsToMirror — same product, same description.
+    // The image vector lives in the ProductVector collection, NOT here (2026-06-03).
+    // A MIRROR (linkedProductId set) references its warehouse owner's vector at search
+    // time; a SHOP-OWNED item gets its own ProductVector row keyed by shopProductId.
+    // OpenAI (descriptor/embedding) was retired at the same cutover.
+    // Human-friendly Ukrainian product description for the card UI. Generated on demand
+    // (staff presses "Згенерувати") from explainProductImage. For a shop-OWNED product
+    // (linkedProductId: null) it's editable here; for a warehouse MIRROR it's owned by
+    // the warehouse and pushed in via pushSharedFieldsToMirror — same product, same description.
     aiDescription:  { type: String, default: '' },
     // Where this record came from
     source: {

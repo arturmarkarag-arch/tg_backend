@@ -1006,20 +1006,13 @@ router.post('/:id/items/:itemId/confirm', staffOnly, asyncHandler(async (req, re
         // therefore leave the mirror's price/qtyPerPackage/photo/description stale —
         // so immediately push the warehouse's current shared values across.
         await upsertShopProductFromProduct(product, { session });
-        const mirror = await pushSharedFieldsToMirror(product, { session });
-        // Warehouse OWNS the Gemini vector: embed the warehouse product once (post-commit);
-        // it propagates the vector to this mirror. Skip if it already has one (re-receipt).
-        // Gate on the lightweight `geminiEmbeddedAt` timestamp, not the heavy
-        // `geminiVector` array — the vector is select:false now, so reading it here
-        // would always be undefined and re-embed an already-indexed product every confirm.
-        if (!product.geminiEmbeddedAt && (product.originalImageUrl || product.imageUrls?.[0])) {
+        await pushSharedFieldsToMirror(product, { session });
+        // Warehouse OWNS the Gemini vector (its ProductVector row); embed once
+        // post-commit. embedProduct is idempotent — it skips when the row already
+        // exists (re-receipt), so no gate is needed here. The mirror references this
+        // same row at search time, so there is nothing separate to embed for it.
+        if (product.originalImageUrl || product.imageUrls?.[0]) {
           embedTargets.push(['warehouse', product, 'receipt-confirm-warehouse']);
-        }
-        // The mirror still needs its OWN legacy OpenAI vector during the transition
-        // (the warehouse has none to copy); its Gemini vector arrives via propagation.
-        // Gate on `embeddedAt` (set in lockstep with `embedding`), not the select:false array.
-        if (mirror && !mirror.embeddedAt && (mirror.imageUrl || mirror.originalImageUrl)) {
-          embedTargets.push(['mirror-openai', mirror, 'upsert-from-product']);
         }
       } else if ((item.destination || 'shelf') === 'shops' && !item.existingProductId) {
         // brand-new shops item → shop-OWNED ShopProduct (no warehouse product).
@@ -1051,13 +1044,12 @@ router.post('/:id/items/:itemId/confirm', staffOnly, asyncHandler(async (req, re
       actor: getActor(req),
       changes: [{ field: 'status', label: 'Статус', from: 'draft', to: 'confirmed' }],
     }).catch((e) => console.error('[ReceiptItemLog] confirm error:', e));
-    // Docs are now durable — schedule background embedding. Warehouse products embed
-    // via Gemini (and propagate to their mirror); mirrors only refresh OpenAI; shop-owned
-    // products (no warehouse owner) embed both providers.
+    // Docs are now durable — schedule background Gemini embedding into ProductVector.
+    // Warehouse products embed by productId; shop-owned items by shopProductId. Mirrors
+    // are never embedded (they reference the warehouse row).
     for (const [kind, doc, reason] of embedTargets) {
-      if (kind === 'warehouse')           embedProductAsync(doc, reason);
-      else if (kind === 'mirror-openai')  embedShopProductAsync(doc, reason, { providers: ['openai'] });
-      else                                embedShopProductAsync(doc, reason);
+      if (kind === 'warehouse') embedProductAsync(doc, reason);
+      else                      embedShopProductAsync(doc, reason); // shop-owned
     }
     const io = getIO();
     if (io) {

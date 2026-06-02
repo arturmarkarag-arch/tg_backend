@@ -61,16 +61,8 @@ async function upsertShopProductFromProduct(product, { session = null } = {}) {
     aiDescription:      product.aiDescription || '',
     source:             'receive',
     barcode,
-    // Mirror shows the SAME photo as its warehouse owner → the Gemini vector is
-    // identical. Copy it on insert (no second Gemini call). If the owner isn't
-    // embedded yet, propagateGeminiVectorToMirrors fills it in once it is.
-    ...(Array.isArray(product.geminiVector) && product.geminiVector.length ? {
-      geminiVector:         product.geminiVector,
-      geminiEmbeddingModel: product.geminiEmbeddingModel || '',
-      geminiEmbeddingDim:   product.geminiEmbeddingDim || product.geminiVector.length,
-      geminiEmbeddedAt:     product.geminiEmbeddedAt || new Date(),
-      geminiFromLabeled:    product.geminiFromLabeled || false,
-    } : {}),
+    // A mirror holds NO vector of its own — it references its warehouse owner's
+    // ProductVector row at search time (same photo → same vector). Nothing to copy.
     // NOTE: linkedProductId lives ONLY in $set below. Having it in both $set and
     // $setOnInsert triggers MongoDB conflict code 40 and the whole upsert fails.
   };
@@ -85,17 +77,9 @@ async function upsertShopProductFromProduct(product, { session = null } = {}) {
   // Transactional caller: let errors abort the confirm; defer embedding to caller.
   if (session) return run();
   try {
-    const doc = await withMirrorRetry(run);
-    // The mirror's Gemini vector is copied from the warehouse owner (above / via
-    // propagateGeminiVectorToMirrors) — NEVER self-embedded. Only the legacy OpenAI
-    // vector is self-embedded here, and only during the transition (the warehouse has
-    // no OpenAI vector to copy). Inert once OPENAI_EMBED_ENABLED=false at cutover.
-    // Gate on `embeddedAt` (lightweight, always set with `embedding`) — the vector
-    // itself is select:false, so `doc.embedding` is undefined on a normal read.
-    if (doc && !doc.embeddedAt && (doc.imageUrl || doc.originalImageUrl)) {
-      embedShopProductAsync(doc, 'upsert-from-product', { providers: ['openai'] });
-    }
-    return doc;
+    // A mirror never embeds — its vector is its warehouse owner's ProductVector row,
+    // resolved at search time. So there is nothing to schedule here.
+    return await withMirrorRetry(run);
   } catch (err) {
     console.error('[shop-upsert] failed after retries:', err.code, err.message);
     return null;
@@ -107,9 +91,8 @@ async function upsertShopProductFromProduct(product, { session = null } = {}) {
 // $setOnInsert), this OVERWRITES the mirror's shared fields, because the
 // warehouse is the single writer for these. It targets ONLY the
 // linkedProductId-matched doc — shop-OWNED ShopProducts (linkedProductId: null)
-// are never touched. Local fields (embedding/descriptor/createdBy) are left
-// alone. Pure DB write — no image processing; the labeled photo URL is just
-// copied across.
+// are never touched. Local fields (createdBy) are left alone. Pure DB write — no
+// image processing; the labeled photo URL is just copied across.
 //
 // `name` is only overwritten when non-empty: a blank computed name is almost
 // never an intentional clear and would silently wipe a good mirror name. Same
@@ -121,7 +104,7 @@ async function upsertShopProductFromProduct(product, { session = null } = {}) {
 // In that mode errors PROPAGATE so the mirror can never desync from a committing
 // Product, and the embedding is NOT scheduled here — the caller schedules it
 // AFTER commit, using the returned doc.
-async function pushSharedFieldsToMirror(product, { photoChanged = false, session = null } = {}) {
+async function pushSharedFieldsToMirror(product, { session = null } = {}) {
   if (!product?._id) return null;
   const imageUrl = product.imageUrls?.[0] || '';
   const computedName = product.name || product.brand || product.model || product.category || '';
@@ -151,14 +134,10 @@ async function pushSharedFieldsToMirror(product, { photoChanged = false, session
   if (session) return run();
 
   try {
-    const doc = await withMirrorRetry(run);
-    // New photo → the mirror's vectors are stale. The Gemini one is refreshed by the
-    // warehouse owner's re-embed, which propagates the new vector here (single writer);
-    // we only re-index the mirror's legacy OpenAI vector. Inert after cutover.
-    if (doc && photoChanged && (doc.imageUrl || doc.originalImageUrl)) {
-      embedShopProductAsync(doc, 'mirror-push', { providers: ['openai'] });
-    }
-    return doc;
+    // A new photo makes the vector stale, but the mirror holds none — its warehouse
+    // owner's re-embed (embedProduct, force) refreshes the shared ProductVector row,
+    // which the mirror references at search time. Nothing to schedule here.
+    return await withMirrorRetry(run);
   } catch (err) {
     console.error('[shop-mirror-push] failed after retries:', err.code, err.message);
     return null;
