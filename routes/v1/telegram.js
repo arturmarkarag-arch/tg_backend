@@ -35,7 +35,7 @@ function normalizeMiniAppState(miniAppState) {
 }
 
 function normalizeCartState(cartState) {
-  const defaults = { orderItems: {}, orderItemIds: [], lastOrderPositions: 0, lastViewedProductId: '', lastViewedOrderNumber: 0, currentIndex: 0, currentPage: 0, updatedAt: null, lastModifiedByTelegramId: null, lastModifiedByName: null, activeSellerCount: 1, reservedForGroupId: null };
+  const defaults = { orderItems: {}, orderItemIds: [], lastOrderPositions: 0, lastViewedProductId: '', lastViewedOrderNumber: 0, currentIndex: 0, currentPage: 0, updatedAt: null, lastModifiedByTelegramId: null, lastModifiedByName: null, activeSellerCount: 1 };
   if (!cartState || typeof cartState !== 'object') return defaults;
   const result = { ...defaults, ...cartState };
   if (result.orderItems instanceof Map) {

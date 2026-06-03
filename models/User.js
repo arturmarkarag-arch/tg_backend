@@ -58,9 +58,6 @@ const UserSchema = new mongoose.Schema(
       currentIndex:           { type: Number, default: 0 },
       currentPage:            { type: Number, default: 0 },
       updatedAt:              { type: Date, default: null },
-      // Set when an order is cancelled+restored to cart during cross-group shop switch.
-      // Blocks submission to any other delivery group until cleared (order placed or cart cleared).
-      reservedForGroupId:  { type: String, default: null },
     },
     isOnline: { type: Boolean, default: false },
     lastActive: { type: Date, default: Date.now },

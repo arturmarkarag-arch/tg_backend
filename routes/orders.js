@@ -334,9 +334,7 @@ router.post('/conflicts/resolve', staffOnly, asyncHandler(async (req, res) => {
         newShopFull: toShop,
         actor,
         reason: 'conflict_resolution_move',
-        resetCartItems: false,
         resetCartNavigation: false,
-        clearCartReservation: true,
         pushHistory: true,
         updateLastSeller: true,
       });
@@ -638,24 +636,6 @@ async function placeOrderImpl(req, res) {
     const { isOpen, message } = isOrderingOpen(group.dayOfWeek, schedule);
     if (!isOpen) {
       return res.status(423).json({ error: 'ordering_closed', message });
-    }
-
-    // Guard: a cart restored from a stale order is pinned to its original delivery
-    // group via cartState.reservedForGroupId. Until that reservation is cleared
-    // (seller migration with clearCartReservation, or the order placed back into
-    // its own group), the items must NOT be submittable to a DIFFERENT group —
-    // otherwise the restored order silently lands in the wrong picking session.
-    // This invariant was previously enforced only on the client; a direct POST
-    // bypassed it. Now enforced server-side.
-    const reservedGroupId = buyer.cartState?.reservedForGroupId
-      ? String(buyer.cartState.reservedForGroupId)
-      : null;
-    if (reservedGroupId && reservedGroupId !== String(group._id)) {
-      return res.status(409).json({
-        error: 'cart_reserved_for_other_group',
-        message: 'Кошик зарезервовано для іншої групи доставки. Очистіть кошик або зверніться до адміністратора.',
-        reservedForGroupId: reservedGroupId,
-      });
     }
   }
 

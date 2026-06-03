@@ -674,7 +674,11 @@ router.delete('/:telegramId', asyncHandler(async (req, res) => {
   // Block deletion if user has active orders or picking tasks
   const [activeOrders, activePickingTasks] = await Promise.all([
     Order.countDocuments({ buyerTelegramId: user.telegramId, status: { $in: ['new', 'in_progress'] } }),
-    PickingTask.countDocuments({ assignedTo: user.telegramId, status: { $in: ['pending', 'locked'] } }),
+    // PickingTask виконавця тримає поле `lockedBy` (не `assignedTo` — такого поля
+    // в моделі немає; раніше гард тихо повертав 0 і працівника складу можна було
+    // видалити просто посеред збирання). pending-задачі виконавця не мають —
+    // тільки locked, тож фільтруємо саме по них.
+    PickingTask.countDocuments({ lockedBy: String(user.telegramId), status: 'locked' }),
   ]);
   if (activeOrders > 0 || activePickingTasks > 0) {
     throw appError('user_has_active_work', { activeOrders, activePickingTasks });

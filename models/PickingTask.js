@@ -39,9 +39,32 @@ const PickingTaskSchema = new mongoose.Schema(
     // re-triggering the sweep — otherwise the next next-task/start-session poll
     // re-archives the just-restored product. The sweep filters archiveReconciled:{$ne:true}.
     archiveReconciled: { type: Boolean, default: false },
+    // Who finalised this task (completed OR marked out-of-stock). `lockedBy` is
+    // nulled on completion, so without this the picker's identity is lost — and
+    // the shift-board ranking is forced to reconstruct it from Order.history,
+    // which credits only whoever packed the LAST item of an order and is not
+    // scoped to a session. Stamped once at finalisation in pickingService; the
+    // shift board aggregates completed tasks per session by completedBy.
+    // Stays null for system-archive completions (archiveProduct closes tasks
+    // without a human actor), which the ranking filters out.
+    completedBy:     { type: String, default: null },
+    completedByName: { type: String, default: '' },
+    // Retention: completed tasks are dead weight once their cycle is long over
+    // (the shift board reads only the current session, the orphan sweep only the
+    // most recent). Stamped = now + 90d at finalisation (real pick OR system
+    // archive) so a TTL index reaps them automatically. Stays null for pending/
+    // locked tasks, which the TTL ignores (null/missing is never expired).
+    completedExpireAt: { type: Date, default: null },
   },
   { timestamps: true }
 );
+
+// Shift-board ranking: "completed tasks of THIS session, grouped by picker".
+PickingTaskSchema.index({ orderingSessionId: 1, status: 1, completedBy: 1 });
+// TTL: auto-purge completed tasks 90 days after finalisation. expireAfterSeconds:0
+// means "delete once completedExpireAt is in the past"; the date already carries
+// the +90d offset. pending/locked tasks have completedExpireAt:null → never reaped.
+PickingTaskSchema.index({ completedExpireAt: 1 }, { expireAfterSeconds: 0 });
 
 PickingTaskSchema.index({ status: 1, blockId: 1, positionIndex: 1 });
 PickingTaskSchema.index({ productId: 1, blockId: 1 });

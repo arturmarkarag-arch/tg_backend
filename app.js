@@ -3,7 +3,6 @@ const cors = require('cors');
 const path = require('path');
 const productsRouter = require('./routes/products');
 const usersRouter = require('./routes/users');
-const activityRouter = require('./routes/activity');
 const warehouseRouter = require('./routes/warehouse');
 const ordersRouter = require('./routes/orders');
 const deliveryGroupsRouter = require('./routes/deliveryGroups');
@@ -138,7 +137,6 @@ app.get('/api/gemini-status', async (req, res) => {
 app.use('/api/products', productsRouter);
 app.use('/api/v1/products', productsRouter);
 app.use('/api/users', usersRouter);
-app.use('/api/activity', activityRouter);
 app.use('/api/warehouse', warehouseRouter);
 app.use('/api/v1/orders', ordersRouter);
 app.use('/api/delivery-groups', deliveryGroupsRouter);

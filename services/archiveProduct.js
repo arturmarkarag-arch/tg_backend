@@ -149,9 +149,11 @@ async function archiveProduct(productOrId, { notifyBuyers = false, bot = null } 
     }
 
     // ── 2. Close open PickingTasks ───────────────────────────────────────────
+    // completedExpireAt stamps the 90-day TTL so these system-closed tasks are
+    // reaped like normal completions (no completedBy — excluded from ranking).
     await PickingTask.updateMany(
       { productId: product._id, status: { $in: ['pending', 'locked'] } },
-      { $set: { status: 'completed', lockedBy: null, lockedAt: null } },
+      { $set: { status: 'completed', lockedBy: null, lockedAt: null, completedExpireAt: new Date(Date.now() + 90 * 24 * 60 * 60 * 1000) } },
       { session }
     );
 

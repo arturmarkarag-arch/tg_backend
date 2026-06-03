@@ -1021,13 +1021,16 @@ router.get('/shift-board', requireTelegramRoles(['admin']), async (req, res, nex
       ? completedTasks.reduce((max, t) => (t.updatedAt > max ? t.updatedAt : max), completedTasks[0].updatedAt)
       : null;
 
-    // Per-worker stats: aggregate from Order.history (who packed via picking)
-    // Scoped to orders in this delivery group fulfilled today.
-    const workerStats = await Order.aggregate([
-      { $match: { 'buyerSnapshot.deliveryGroupId': dgId, status: { $in: ['fulfilled', 'in_progress', 'new'] } } },
-      { $unwind: '$history' },
-      { $match: { 'history.action': 'status_changed', 'history.meta.via': 'picking', 'history.by': { $exists: true, $ne: '' } } },
-      { $group: { _id: '$history.by', name: { $first: '$history.byName' }, tasksCompleted: { $sum: 1 } } },
+    // Per-worker stats: count COMPLETED picking tasks of THIS session, grouped by
+    // who finalised each one (completedBy). Scoped exactly like totalCompleted
+    // (sessionScope) so the numbers agree and reset every cycle. The previous
+    // Order.history aggregation was wrong twice over: it had no session/date
+    // filter (so counts grew forever across weeks) and credited only whoever
+    // packed an order's LAST item. completedBy is null for system-archive
+    // completions, so those are excluded.
+    const workerStats = await PickingTask.aggregate([
+      { $match: { ...sessionScope, status: 'completed', completedBy: { $ne: null } } },
+      { $group: { _id: '$completedBy', name: { $first: '$completedByName' }, tasksCompleted: { $sum: 1 } } },
     ]);
 
     // Merge with User collection for name fallback

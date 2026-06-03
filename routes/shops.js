@@ -14,6 +14,9 @@ const { invalidateShop } = require('../utils/modelCache');
 const { migrateSellerShop } = require('../services/migrateSellerShop');
 const { unassignSellerAndPark } = require('../services/unassignSeller');
 const { activeOrderShopFilter } = require('../utils/orderShopFilter');
+const { isOrderingOpen } = require('../utils/orderingSchedule');
+const { getOrderingSchedule } = require('../utils/getOrderingSchedule');
+const { getOrCreateSessionId } = require('../utils/getOrCreateSession');
 
 const router = express.Router();
 
@@ -352,6 +355,39 @@ router.patch('/:id', telegramAuth, requireTelegramRole('admin'), asyncHandler(as
       const group = await DeliveryGroup.findById(deliveryGroupId).lean();
       if (!group) throw appError('shop_delivery_group_not_found');
     }
+
+    // Guard (mirrors the deliveryGroups day-change guard): moving the shop to a
+    // different group mid-cycle would strand its active orders — they keep the OLD
+    // group's orderingSessionId, fall out of both groups' current sessions, and the
+    // seller's next upsert-item opens a PARALLEL order in the new group. Refuse the
+    // move while the OLD group's window is open, the shop has active orders in the
+    // old current session, or those orders are already in picking. Allowed freely
+    // once the cycle is over (no active orders) → applies to the next session.
+    const newGroupIdRaw = deliveryGroupId ? String(deliveryGroupId) : '';
+    if (newGroupIdRaw !== prevDeliveryGroupId && prevDeliveryGroupId) {
+      const prevGroup = await DeliveryGroup.findById(prevDeliveryGroupId).lean();
+      if (prevGroup) {
+        const schedule = await getOrderingSchedule();
+        const { isOpen } = isOrderingOpen(prevGroup.dayOfWeek, schedule);
+        const prevSessionId = await getOrCreateSessionId(prevDeliveryGroupId, prevGroup.dayOfWeek, schedule);
+        const shopActiveOrderIds = (await Order.find(
+          { ...activeOrderShopFilter(shop._id), orderingSessionId: prevSessionId },
+          '_id',
+        ).lean()).map((o) => o._id);
+        const inPicking = shopActiveOrderIds.length > 0 && !!(await PickingTask.exists({
+          deliveryGroupId: prevDeliveryGroupId,
+          status: { $in: ['pending', 'locked'] },
+          'items.orderId': { $in: shopActiveOrderIds },
+        }));
+        if (isOpen || shopActiveOrderIds.length > 0) {
+          const reason = isOpen ? 'вікно замовлень відкрите'
+            : inPicking ? 'триває збирання'
+            : 'є активні замовлення в поточній сесії';
+          throw appError('shop_group_change_session_active', { reason });
+        }
+      }
+    }
+
     shop.deliveryGroupId = deliveryGroupId ? String(deliveryGroupId) : '';
   }
 
@@ -405,8 +441,12 @@ router.patch('/:id', telegramAuth, requireTelegramRole('admin'), asyncHandler(as
       const grp = await DeliveryGroup.findById(newDeliveryGroupId).lean();
       warehouseZone = grp?.name || '';
     }
+    // Cascade to sellers AND admins bound to this shop — an admin with a shopId
+    // also derives their ordering window / picking group from these denormalized
+    // fields, so leaving them stale would route the admin's next order to the OLD
+    // group. (warehouse users carry no shop, so they're untouched.)
     await User.updateMany(
-      { shopId: shop._id, role: 'seller' },
+      { shopId: shop._id, role: { $in: ['seller', 'admin'] } },
       { $set: { deliveryGroupId: newDeliveryGroupId, warehouseZone } },
     );
   }
@@ -518,9 +558,7 @@ router.patch('/:id/sellers', telegramAuth, requireTelegramRole('admin'), asyncHa
               newShopFull: shopFull,
               actor,
               reason: 'bulk_sellers_update',
-              resetCartItems: false,
               resetCartNavigation: false,
-              clearCartReservation: true,
               pushHistory: true,
               updateLastSeller: true,
             });

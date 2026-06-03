@@ -20,6 +20,7 @@ const { ensureShopProductIndexes } = require('./utils/ensureShopProductIndexes')
 const { isEnabled: redisEnabled } = require('./utils/redis');
 const Order = require('./models/Order');
 const PickingTask = require('./models/PickingTask');
+const { startRetentionScheduler } = require('./services/retention');
 
 let httpServer = null;
 let shuttingDown = false;
@@ -138,6 +139,20 @@ async function startServer() {
       console.error('[indexes] User/GoogleLinkToken/RegistrationToken.syncIndexes failed:', err.message);
     }
 
+    // Log-retention TTL indexes. syncIndexes() drops the old plain index on each
+    // field and rebuilds it WITH expireAfterSeconds, so MongoDB reaps stale audit
+    // rows on its own (ShopAuditLog 180d, ReceiptItemLog + VisionTestLog 365d).
+    // Non-fatal: a failed build just means the collection keeps growing until the
+    // next clean boot, not an outage.
+    try {
+      await require('./models/ShopAuditLog').syncIndexes();
+      await require('./models/ReceiptItemLog').syncIndexes();
+      await require('./models/VisionTestLog').syncIndexes();
+      console.log('[indexes] log-retention TTL indexes synced');
+    } catch (err) {
+      console.error('[indexes] log-retention TTL syncIndexes failed:', err.message);
+    }
+
 
     // Prefer key stored in DB (via admin settings), fall back to env
     const keyFromDb = await AppSetting.findOne({ key: 'openai.apiKey' }).lean();
@@ -154,6 +169,10 @@ async function startServer() {
     const server = http.createServer(app);
     httpServer = server;
     initSocket(server);
+
+    // Daily sweep of long-dead completed picking tasks (TTL can't filter by
+    // status, so this runs application-side). Logs reap themselves via TTL.
+    startRetentionScheduler();
 
     server.on('error', (err) => {
       if (err.code === 'EADDRINUSE') {

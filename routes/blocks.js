@@ -9,6 +9,14 @@ const { requireTelegramRoles } = require('../middleware/telegramAuth');
 const { appError, asyncHandler } = require('../utils/errors');
 const { refreshPickingTaskPositions } = require('../services/taskBuilder');
 
+// On the "Полки" board a product tile renders ONLY its photo (+ name as the
+// alt/placeholder letter). Everything else on the warehouse Product — price,
+// quantity, barcode, aiDescription, labelPositions, pendingShopUpdate,
+// storeLinks, … — is dead weight here, and a single block can hold 200+
+// products, so populating full docs ships hundreds of KB per board read for
+// nothing. Project just what ProductImage + the card need. (`_id` is implicit.)
+const BLOCK_PRODUCT_FIELDS = 'name imageUrls localImageUrl originalImageUrl';
+
 async function repairBlockMissingProducts(blockId, session = null) {
   const block = await Block.findOne({ blockId }).select('productIds').session(session).lean();
   if (!block || !(block.productIds || []).length) return;
@@ -57,7 +65,7 @@ router.get('/', asyncHandler(async (req, res) => {
   }
 
   const blocks = await query
-    .populate({ path: 'productIds', match: { status: { $in: ['active', 'pending'] } } })
+    .populate({ path: 'productIds', match: { status: { $in: ['active', 'pending'] } }, select: BLOCK_PRODUCT_FIELDS })
     .lean();
 
   if (limit !== undefined) {
@@ -185,7 +193,7 @@ router.get('/:number', asyncHandler(async (req, res) => {
   await repairBlockMissingProducts(num);
 
   const block = await Block.findOne({ blockId: num })
-    .populate({ path: 'productIds', match: { status: { $in: ['active', 'pending'] } } })
+    .populate({ path: 'productIds', match: { status: { $in: ['active', 'pending'] } }, select: BLOCK_PRODUCT_FIELDS })
     .lean();
   if (!block) throw appError('block_not_found');
   res.json(block);
@@ -264,12 +272,12 @@ router.post('/move', staffOnly, asyncHandler(async (req, res) => {
   }
 
   updatedSource = await Block.findById(sourceId)
-    .populate({ path: 'productIds', match: { status: { $in: ['active', 'pending'] } } })
+    .populate({ path: 'productIds', match: { status: { $in: ['active', 'pending'] } }, select: BLOCK_PRODUCT_FIELDS })
     .lean();
   updatedTarget = isSameBlock
     ? updatedSource
     : await Block.findById(targetId)
-        .populate({ path: 'productIds', match: { status: { $in: ['active', 'pending'] } } })
+        .populate({ path: 'productIds', match: { status: { $in: ['active', 'pending'] } }, select: BLOCK_PRODUCT_FIELDS })
         .lean();
 
   try {
@@ -341,7 +349,7 @@ router.delete('/:number/products/:productId', staffOnly, asyncHandler(async (req
   );
 
   const updated = await Block.findById(updatedRaw._id)
-    .populate({ path: 'productIds', match: { status: { $in: ['active', 'pending'] } } })
+    .populate({ path: 'productIds', match: { status: { $in: ['active', 'pending'] } }, select: BLOCK_PRODUCT_FIELDS })
     .lean();
 
   try {
@@ -480,7 +488,7 @@ router.post('/:number/add', staffOnly, asyncHandler(async (req, res) => {
   await Product.updateOne({ _id: productId }, { $set: { status: 'active' } });
 
   const updated = await Block.findById(updatedRaw._id)
-    .populate({ path: 'productIds', match: { status: { $in: ['active', 'pending'] } } })
+    .populate({ path: 'productIds', match: { status: { $in: ['active', 'pending'] } }, select: BLOCK_PRODUCT_FIELDS })
     .lean();
 
   // Broadcast to all clients so they see the update in real time.

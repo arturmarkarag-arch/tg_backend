@@ -5,7 +5,7 @@ const mongoose = require('mongoose');
 // seller's active order. Lets us reconstruct "where did the order go" without
 // dumping the DB. Written from the migration chokepoints.
 const ShopAuditLogSchema = new mongoose.Schema({
-  at:               { type: Date, default: Date.now, index: true },
+  at:               { type: Date, default: Date.now },
 
   actorTelegramId:  { type: String, default: '' },
   actorName:        { type: String, default: '' },
@@ -39,5 +39,11 @@ const ShopAuditLogSchema = new mongoose.Schema({
   conflictDetected: { type: Boolean, default: false },
   note:             { type: String, default: '' },
 }, { timestamps: true });
+
+// Retention: 180 days. This is the durable "where did the order go" audit, so it
+// is kept far longer than the 3-day BotInteractionLog, but it is NOT permanent —
+// the TTL (on the event time `at`) reaps entries older than half a year so the
+// collection cannot grow without bound. Doubles as the time-range/sort index.
+ShopAuditLogSchema.index({ at: 1 }, { expireAfterSeconds: 180 * 24 * 60 * 60 });
 
 module.exports = mongoose.model('ShopAuditLog', ShopAuditLogSchema);

@@ -18,8 +18,9 @@ const { transitionPickingStatus, maybeCompleteSession } = require('../utils/sess
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
-const LOCK_TIMEOUT_MS      = 15 * 60 * 1000; // 15 min — stale worker lock
-const FORCE_CLAIM_AFTER_MS =  3 * 60 * 1000; //  3 min — force-claim guard
+const LOCK_TIMEOUT_MS      = 15 * 60 * 1000;            // 15 min — stale worker lock
+const FORCE_CLAIM_AFTER_MS =  3 * 60 * 1000;            //  3 min — force-claim guard
+const COMPLETED_TTL_MS     = 90 * 24 * 60 * 60 * 1000;  // 90 days — completed-task retention (TTL)
 
 // ── Retry helpers ────────────────────────────────────────────────────────────
 
@@ -207,6 +208,11 @@ async function completePickingTask({ taskId, userTelegramId, userFirstName = '',
     task.status   = 'completed';
     task.lockedBy = null;
     task.lockedAt = null;
+    // Stamp the finaliser for session-scoped shift-board ranking (lockedBy is
+    // about to be cleared, so this is the only surviving record of who picked it).
+    task.completedBy     = String(userTelegramId);
+    task.completedByName  = actor.byName;
+    task.completedExpireAt = new Date(Date.now() + COMPLETED_TTL_MS); // TTL reap after 90d
 
     await task.save({ session });
     await markOrderItemsPacked(task.items, task.productId, actor, session);
@@ -291,6 +297,10 @@ async function outOfStockPickingTask({ taskId, userTelegramId, userFirstName = '
     fresh.status   = 'completed';
     fresh.lockedBy = null;
     fresh.lockedAt = null;
+    // Out-of-stock is still a picker action — credit it on the shift board.
+    fresh.completedBy     = String(userTelegramId);
+    fresh.completedByName  = actor.byName;
+    fresh.completedExpireAt = new Date(Date.now() + COMPLETED_TTL_MS); // TTL reap after 90d
     await fresh.save({ session });
     await markOrderItemsPacked(fresh.items, fresh.productId, actor, session);
     task = fresh; // keep downstream block/product lookups consistent

@@ -34,7 +34,6 @@ async function ensureOrderNotInPickingPipeline(orderId, session) {
  * @param {Object}  params.actor                                { telegramId, firstName, lastName, role }
  * @param {string}  params.reason                               history meta.reason
  * @param {boolean} [params.resetCartNavigation=false]          reset cartState navigation (lastViewedProductId, indices)
- * @param {boolean} [params.clearCartReservation=true]          clear cartState.reservedForGroupId
  * @param {boolean} [params.pushHistory=true]                   push history entry to user
  * @param {boolean} [params.updateLastSeller=true]              persist lastSeller snapshot on old shop
  */
@@ -45,7 +44,6 @@ async function migrateSellerShop({
   actor,
   reason,
   resetCartNavigation = false,
-  clearCartReservation = true,
   pushHistory = true,
   updateLastSeller = true,
 }) {
@@ -217,9 +215,6 @@ async function migrateSellerShop({
     userUpdate['cartState.currentPage'] = 0;
     userUpdate['cartState.updatedAt'] = new Date();
   }
-  if (clearCartReservation) {
-    userUpdate['cartState.reservedForGroupId'] = null;
-  }
 
   const updatedUser = await User.findOneAndUpdate(
     { telegramId: existingUser.telegramId },
@@ -232,19 +227,27 @@ async function migrateSellerShop({
     await User.updateOne(
       { telegramId: existingUser.telegramId },
       {
+        // Bounded timeline: keep only the most recent 20 entries. This is the
+        // ONLY writer of User.history, and the user doc is loaded on EVERY
+        // authed request (telegramAuth.findOne) — plus /ordering-status reads
+        // this array to surface the "вас переміщено" note — so it must never
+        // grow without limit. $slice trims from the front on each push.
         $push: {
           history: {
-            at: new Date(),
-            by: String(actor.telegramId),
-            byName: [actor.firstName, actor.lastName].filter(Boolean).join(' '),
-            byRole: actor.role,
-            action: 'shop_changed',
-            meta: {
-              fromShop: oldShopFull?.name || null,
-              toShop: newShopName || null,
-              reason,
-              orderMoved: !!movedOrder,
-            },
+            $each: [{
+              at: new Date(),
+              by: String(actor.telegramId),
+              byName: [actor.firstName, actor.lastName].filter(Boolean).join(' '),
+              byRole: actor.role,
+              action: 'shop_changed',
+              meta: {
+                fromShop: oldShopFull?.name || null,
+                toShop: newShopName || null,
+                reason,
+                orderMoved: !!movedOrder,
+              },
+            }],
+            $slice: -20,
           },
         },
       },

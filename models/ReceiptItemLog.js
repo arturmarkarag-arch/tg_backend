@@ -28,4 +28,10 @@ const receiptItemLogSchema = new mongoose.Schema(
   { timestamps: { createdAt: true, updatedAt: false } },
 );
 
+// Retention: 365 days. This per-receipt change log IS displayed (receipt detail
+// → GET /receipts/:id/logs), but a receipt's edit history stops being useful
+// long before a year passes, so the TTL bounds the collection without touching
+// anything operationally relevant.
+receiptItemLogSchema.index({ createdAt: 1 }, { expireAfterSeconds: 365 * 24 * 60 * 60 });
+
 module.exports = mongoose.model('ReceiptItemLog', receiptItemLogSchema);

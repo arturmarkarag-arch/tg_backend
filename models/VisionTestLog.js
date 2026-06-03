@@ -15,6 +15,10 @@ const VisionTestLogSchema = new mongoose.Schema({
   createdBy:     { type: String, default: '' },
 }, { timestamps: true });
 
-VisionTestLogSchema.index({ createdAt: -1 });
+// Retention: 365 days. Doubles as the newest-first list index for the vision
+// test page (which also has a manual "clear all"). TTL just guarantees the admin
+// tooling's results can't pile up forever. A single-field index drives both the
+// descending sort and the TTL reaping.
+VisionTestLogSchema.index({ createdAt: -1 }, { expireAfterSeconds: 365 * 24 * 60 * 60 });
 
 module.exports = mongoose.model('VisionTestLog', VisionTestLogSchema);
