@@ -17,6 +17,7 @@ const { appError, asyncHandler } = require('../utils/errors');
 const { withLock } = require('../utils/lock');
 const { transitionPickingStatus, maybeCompleteSession } = require('../utils/sessionStatus');
 const { getSessionVocab, deriveSessionPhase } = require('../utils/sessionVocab');
+const { reconcileLateOrdersForSession } = require('../services/lateOrderReconcile');
 
 const {
   findAndLockNext,
@@ -30,6 +31,16 @@ const {
 } = require('../services/pickingService');
 
 const router = express.Router();
+
+// A transient transaction conflict that survived the service's internal retries
+// (contention on the same task/product). Pass it through to the central handler,
+// which answers 409 "try again" — never a 500.
+function isTransientTx(err) {
+  const labels = Array.isArray(err?.errorLabels) ? err.errorLabels : [];
+  return !!err && (err.code === 112 || err.codeName === 'WriteConflict'
+    || labels.includes('TransientTransactionError')
+    || (typeof err.hasErrorLabel === 'function' && err.hasErrorLabel('TransientTransactionError')));
+}
 
 // ---------------------------------------------------------------------------
 // Local helpers (route-layer only — not business logic)
@@ -56,12 +67,12 @@ async function countOrderedPositions(deliveryGroupId) {
         status: { $in: ['new', 'in_progress'] },
         orderingSessionId: String(session._id),
       },
-      'items.productId items.packed items.cancelled',
+      'items.productId items.packed items.cancelled items.skipped',
     ).lean();
     const products = new Set();
     for (const o of orders) {
       for (const it of o.items || []) {
-        if (it.packed || it.cancelled || !it.productId) continue;
+        if (it.packed || it.cancelled || it.skipped || !it.productId) continue;
         products.add(String(it.productId));
       }
     }
@@ -193,7 +204,7 @@ router.get('/schedule', requireTelegramRoles(['warehouse', 'admin']), async (req
       closeMinute: Number(schedule.closeMinute),
     });
   } catch (err) {
-    if (err && err.name === 'AppError') return next(err);
+    if (err && (err.name === 'AppError' || err.name === 'CastError' || isTransientTx(err))) return next(err);
     next(appError('picking_session_failed'));
   }
 });
@@ -245,25 +256,16 @@ router.post('/start-session', requireTelegramRoles(['warehouse', 'admin']), asyn
     await archiveOrphanedOutOfStockProducts(deliveryGroupId);
     await reconcileActiveTasksForSession(deliveryGroupId, currentSessionId);
 
-    // 3. Late-order absorption. If picking already left `pending` and new
-    //    same-session orders arrived, materialise them as tasks and reopen the
-    //    session if needed. This is the structural fix for the "8 stranded
-    //    items" bug — detection is membership-based, not time-based.
+    // 3. STRICT late-order reconciliation. Picking is a frozen snapshot once
+    //    started — an order that arrived/changed afterwards can only RIDE ALONG on
+    //    a product that still has an open (pending) task; otherwise its items are
+    //    marked `skipped` (the warehouse never walks back). We never create a new
+    //    task here, so a completed session is NOT reopened — latecomers to a
+    //    finished session are simply skipped. See services/lateOrderReconcile.js.
     let session = await OrderingSession.findById(currentSessionId).lean();
     if (session && session.pickingStatus !== 'pending') {
-      await buildPickingTasksFromOrders(deliveryGroupId, { orderingSessionId: currentSessionId });
-      const newActiveCount = await PickingTask.countDocuments({
-        orderingSessionId: currentSessionId,
-        status: { $in: ['pending', 'locked'] },
-      });
-      if (newActiveCount > 0 && session.pickingStatus === 'completed') {
-        // allowReopen flips completed → in_progress so the UI shows work pending.
-        const reopened = await transitionPickingStatus(
-          currentSessionId, 'in_progress',
-          { actor, meta: { reason: 'late_order_absorbed' }, allowReopen: true },
-        );
-        if (reopened) session = reopened.toObject ? reopened.toObject() : reopened;
-      }
+      await reconcileLateOrdersForSession(deliveryGroupId, currentSessionId);
+      session = await OrderingSession.findById(currentSessionId).lean();
     }
 
     const sessionActiveCount = await PickingTask.countDocuments({
@@ -423,7 +425,7 @@ router.post('/start-session', requireTelegramRoles(['warehouse', 'admin']), asyn
       vocab: getSessionVocab(),
     });
   } catch (err) {
-    if (err && err.name === 'AppError') return next(err);
+    if (err && (err.name === 'AppError' || err.name === 'CastError' || isTransientTx(err))) return next(err);
     console.error('[picking/start-session]', err);
     next(appError('picking_session_failed'));
   }
@@ -492,7 +494,7 @@ router.get('/my-task', requireTelegramRoles(['warehouse', 'admin']), async (req,
 
     res.json({ task: taskData });
   } catch (err) {
-    if (err && err.name === 'AppError') return next(err);
+    if (err && (err.name === 'AppError' || err.name === 'CastError' || isTransientTx(err))) return next(err);
     next(appError('picking_next_failed'));
   }
 });
@@ -562,7 +564,7 @@ router.get('/next-task', requireTelegramRoles(['warehouse', 'admin']), async (re
 
     res.json({ task: taskData });
   } catch (err) {
-    if (err && err.name === 'AppError') return next(err);
+    if (err && (err.name === 'AppError' || err.name === 'CastError' || isTransientTx(err))) return next(err);
     console.error('[picking/next-task]', err);
     next(appError('picking_next_failed'));
   }
@@ -646,7 +648,7 @@ router.get('/block-tasks', requireTelegramRoles(['warehouse', 'admin']), async (
 
     res.json({ tasks: previewTasks });
   } catch (err) {
-    if (err && err.name === 'AppError') return next(err);
+    if (err && (err.name === 'AppError' || err.name === 'CastError' || isTransientTx(err))) return next(err);
     console.error('[picking/block-tasks]', err);
     next(appError('picking_block_tasks_failed'));
   }
@@ -689,7 +691,7 @@ router.get('/blocks-overview', requireTelegramRoles(['warehouse', 'admin']), asy
     const blocks = [...byBlock.values()].sort((a, b) => a.blockId - b.blockId);
     res.json({ blocks });
   } catch (err) {
-    if (err && err.name === 'AppError') return next(err);
+    if (err && (err.name === 'AppError' || err.name === 'CastError' || isTransientTx(err))) return next(err);
     console.error('[picking/blocks-overview]', err);
     next(appError('picking_next_failed'));
   }
@@ -768,7 +770,7 @@ router.get('/queue-stats', requireTelegramRoles(['warehouse', 'admin']), async (
       orderedPositions, pickingStatus, events, phase, sessionSummary, groupDayOfWeek,
     });
   } catch (err) {
-    if (err && err.name === 'AppError') return next(err);
+    if (err && (err.name === 'AppError' || err.name === 'CastError' || isTransientTx(err))) return next(err);
     console.error('[picking/queue-stats]', err);
     next(appError('picking_next_failed'));
   }
@@ -796,7 +798,7 @@ router.post('/tasks/:taskId/complete', requireTelegramRoles(['warehouse', 'admin
     const nextTaskData = nextRaw ? await buildTaskResponse(nextRaw, { wrappedAround: nwa }) : null;
     res.json({ message: 'Task completed', nextTask: nextTaskData });
   } catch (err) {
-    if (err && err.name === 'AppError') return next(err);
+    if (err && (err.name === 'AppError' || err.name === 'CastError' || isTransientTx(err))) return next(err);
     console.error('[picking/complete]', err);
     if (err.code === 'picking_task_not_found') return next(appError('picking_task_not_found'));
     if (err.code === 'expired_lock') return next(appError('expired_lock'));
@@ -844,7 +846,7 @@ router.patch('/tasks/:taskId/progress', requireTelegramRoles(['warehouse', 'admi
 
     res.json({ ok: true });
   } catch (err) {
-    if (err && err.name === 'AppError') return next(err);
+    if (err && (err.name === 'AppError' || err.name === 'CastError' || isTransientTx(err))) return next(err);
     console.error('[picking/progress]', err);
     next(appError('picking_progress_failed'));
   }
@@ -888,7 +890,7 @@ router.post('/tasks/:taskId/claim', requireTelegramRoles(['warehouse', 'admin'])
       res.json({ task: taskData });
     }, { ttlMs: 10_000, waitMs: 5_000 });
   } catch (err) {
-    if (err && err.name === 'AppError') return next(err);
+    if (err && (err.name === 'AppError' || err.name === 'CastError' || isTransientTx(err))) return next(err);
     console.error('[picking/claim]', err);
     next(appError('picking_claim_failed'));
   }
@@ -917,7 +919,12 @@ router.post('/tasks/:taskId/out-of-stock', requireTelegramRoles(['warehouse', 'a
 
     res.json({ message: 'Out-of-stock recorded', nextTask: nextTaskData });
   } catch (err) {
-    if (err && err.name === 'AppError') return next(err);
+    if (err && (err.name === 'AppError' || err.name === 'CastError' || isTransientTx(err))) return next(err);
+    // Map service-thrown codes to clean 4xx (mirrors /complete) — a stale / wrong /
+    // nonexistent taskId must answer 404/409, not crash to 500.
+    if (err && err.code === 'picking_task_not_found') return next(appError('picking_task_not_found'));
+    if (err && err.code === 'expired_lock') return next(appError('expired_lock'));
+    if (err && err.code === 'picking_claim_taken_by_other') return next(appError('picking_claim_taken_by_other'));
     console.error('[picking/out-of-stock]', err);
     next(appError('picking_oos_failed'));
   }
@@ -966,6 +973,7 @@ router.get('/locked-tasks', requireTelegramRoles(['warehouse', 'admin']), async 
 
     res.json({ tasks: result });
   } catch (err) {
+    if (err && (err.name === 'AppError' || err.name === 'CastError' || isTransientTx(err))) return next(err);
     console.error('[picking/locked-tasks]', err);
     next(appError('picking_next_failed'));
   }
@@ -1076,7 +1084,7 @@ router.get('/shift-board', requireTelegramRoles(['admin']), async (req, res, nex
         const { isOpen } = isOrderingOpen(group.dayOfWeek, schedule);
         const sessionMeta = await OrderingSession.findById(sessionId, 'seq openDate pickingStatus').lean();
 
-        const positionsLeft = (o) => (o.items || []).filter((i) => !i.cancelled && !i.packed).length;
+        const positionsLeft = (o) => (o.items || []).filter((i) => !i.cancelled && !i.packed && !i.skipped).length;
         const mapOrder = (o) => ({
           orderId: String(o._id),
           orderNumber: o.orderNumber,
@@ -1144,6 +1152,7 @@ router.get('/shift-board', requireTelegramRoles(['admin']), async (req, res, nex
 
     res.json({ groupName, sessionStart, lastActivity, workers, totalCompleted, totalPending, unfinished });
   } catch (err) {
+    if (err && (err.name === 'AppError' || err.name === 'CastError' || isTransientTx(err))) return next(err);
     console.error('[picking/shift-board]', err);
     next(appError('picking_next_failed'));
   }
@@ -1179,7 +1188,7 @@ router.post('/tasks/:taskId/force-claim', requireTelegramRoles(['warehouse', 'ad
         message: `Задача заблокована ${Math.round((err.lockedAgo || 0) / 1000)} с тому. Перехоплення доступне після 3 хвилин.`,
       });
     }
-    if (err && err.name === 'AppError') return next(err);
+    if (err && (err.name === 'AppError' || err.name === 'CastError' || isTransientTx(err))) return next(err);
     console.error('[picking/force-claim]', err);
     if (err.code === 'picking_task_not_found') return next(appError('picking_task_not_found'));
     if (err.code === 'picking_claim_unavailable') return next(appError('picking_claim_unavailable'));

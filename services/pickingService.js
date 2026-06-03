@@ -89,7 +89,9 @@ async function markOrderItemsPacked(taskItems, productId, actor = { by: 'system'
         {
           _id: orderId,
           status: { $in: ['new', 'in_progress'] },
-          items: { $not: { $elemMatch: { packed: false, cancelled: false } } },
+          // A `skipped` item (late, strict-missed) is terminal and must NOT keep an
+          // order from auto-fulfilling — treat it like packed/cancelled here.
+          items: { $not: { $elemMatch: { packed: false, cancelled: false, skipped: { $ne: true } } } },
         },
         {
           $set: { status: 'fulfilled' },

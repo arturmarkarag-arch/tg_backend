@@ -115,7 +115,7 @@ async function buildPickingTasksImpl(targetDeliveryGroupId = null, options = {})
       if (targetDeliveryGroupId !== null && dGroupId !== String(targetDeliveryGroupId)) continue;
 
       for (const item of order.items) {
-        if (item.packed || item.cancelled || !item.productId) continue;
+        if (item.packed || item.cancelled || item.skipped || !item.productId) continue;
         if (item.productId.status === 'archived') continue;
         const productId = String(item.productId._id);
         if (assignedOrderProducts.has(`${order._id}_${productId}`)) continue;

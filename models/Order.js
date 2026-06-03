@@ -7,6 +7,14 @@ const OrderItemSchema = new mongoose.Schema({
   quantity: { type: Number, required: true, min: 1 },
   packed: { type: Boolean, default: false },
   cancelled: { type: Boolean, default: false },
+  // STRICT late-order handling: set when an order reaches a session whose picking
+  // has already started and this product no longer has an OPEN (pending) picking
+  // task to ride along on — the warehouse walked past it / it was never in the
+  // pick plan, and in strict mode nobody goes back. Distinct from `cancelled`
+  // (out-of-stock / archived) and from `packed`. A skipped item is terminal for
+  // this session: excluded from picking, totals and "left to pick" counts, but
+  // NOT delivered. See services/lateOrderReconcile.js.
+  skipped: { type: Boolean, default: false },
 });
 
 const BuyerSnapshotSchema = new mongoose.Schema({
@@ -95,11 +103,13 @@ function normalizeOrderItems(items = []) {
         quantity: Number(item.quantity || 0),
         packed: Boolean(item.packed),
         cancelled: Boolean(item.cancelled),
+        skipped: Boolean(item.skipped),
       });
     } else {
       existing.quantity += Number(item.quantity || 0);
       existing.packed = existing.packed || Boolean(item.packed);
       existing.cancelled = existing.cancelled || Boolean(item.cancelled);
+      existing.skipped = existing.skipped || Boolean(item.skipped);
     }
   }
   return Array.from(grouped.values());

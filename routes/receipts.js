@@ -1337,11 +1337,21 @@ router.post('/:id/commit', staffOnly, asyncHandler(async (req, res) => {
 
     res.json({ receipt, createdProductsCount: createdProducts.length });
   } catch (err) {
-    await session.abortTransaction();
-    session.endSession();
+    // Guard both: after a FAILED commitTransaction (e.g. a concurrent-commit
+    // WriteConflict) the transaction is already terminal, so an unguarded
+    // abortTransaction() throws a SECONDARY error that masks the real one and
+    // crashes the handler to 500. Swallow teardown errors so the real cause below wins.
+    try { await session.abortTransaction(); } catch { /* already terminal */ }
+    try { session.endSession(); } catch { /* idempotent */ }
     // AppError instances are already user-facing; rethrow so the central handler
     // turns them into proper JSON. Anything else becomes a generic commit failure.
     if (err && err.name === 'AppError') throw err;
+    if (err && err.name === 'CastError') throw err; // bad :id → global 400, not 500
+    // Concurrent double-commit (двічі натиснули «Провести»): the other request won
+    // the draft→completed CAS and our transaction hit a transient WriteConflict.
+    // Surface a clean 409 (already completed), not a 500.
+    const fresh = await Receipt.findById(req.params.id).lean();
+    if (fresh && fresh.status === 'completed') throw appError('receipt_already_completed');
     console.error('[receipts.commit] Error:', err);
     throw appError('receipt_commit_failed');
   }

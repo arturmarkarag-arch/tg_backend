@@ -251,7 +251,7 @@ router.get('/:groupId/shop-status', telegramAuth, requireTelegramRoles(['admin',
       buyerTelegramId: order.buyerTelegramId,
       buyerName: buyerInfoById[String(order.buyerTelegramId)]?.name || order.buyerTelegramId,
       buyerRole: buyerInfoById[String(order.buyerTelegramId)]?.role || 'seller',
-      itemCount: (order.items || []).filter((i) => !i.cancelled).length,
+      itemCount: (order.items || []).filter((i) => !i.cancelled && !i.skipped).length,
       createdAt: order.createdAt,
       wasReassigned,
       fromShopName: wasReassigned ? (reassignEntry?.meta?.from?.shopName || null) : null,
@@ -262,7 +262,7 @@ router.get('/:groupId/shop-status', telegramAuth, requireTelegramRoles(['admin',
     });
     if (!orderedByShop[shopId]) orderedByShop[shopId] = new Set();
     for (const item of order.items || []) {
-      if (item.productId && !item.cancelled) orderedByShop[shopId].add(String(item.productId));
+      if (item.productId && !item.cancelled && !item.skipped) orderedByShop[shopId].add(String(item.productId));
     }
   }
 
@@ -375,7 +375,7 @@ router.get('/:groupId/shop-status', telegramAuth, requireTelegramRoles(['admin',
       buyerName: buyerInfoById[String(order.buyerTelegramId)]?.name || order.buyerTelegramId,
       shopName: order.buyerSnapshot?.shopName || '—',
       shopCity: order.buyerSnapshot?.shopCity || '',
-      itemCount: (order.items || []).filter((i) => !i.cancelled).length,
+      itemCount: (order.items || []).filter((i) => !i.cancelled && !i.skipped).length,
       orderingSessionId: order.orderingSessionId || '',
       createdAt: order.createdAt,
     })),

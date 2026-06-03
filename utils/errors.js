@@ -478,6 +478,32 @@ function errorHandler(err, req, res, next) {
     });
   }
 
+  // Transient transaction conflict (two requests raced on the SAME documents and the
+  // optimistic-retry budget was exhausted). It is a "try again", NOT a server fault —
+  // answer 409 so the client can retry, instead of a scary 500.
+  const txLabels = Array.isArray(err?.errorLabels) ? err.errorLabels : [];
+  if (err && (err.code === 112 || err.codeName === 'WriteConflict'
+      || txLabels.includes('TransientTransactionError')
+      || (typeof err.hasErrorLabel === 'function' && err.hasErrorLabel('TransientTransactionError')))) {
+    return res.status(409).json({
+      error: 'conflict_retry',
+      message: 'Конфлікт одночасних змін. Спробуйте ще раз.',
+    });
+  }
+
+  // Upstream client errors that already carry a 4xx HTTP status must NOT be masked
+  // as 500. Most important: a malformed percent-encoded URL path (e.g. "%%%") makes
+  // Express throw a URIError with status 400; a bad JSON body makes body-parser throw
+  // an entity.parse.failed error with status 400. A "random button / garbage link"
+  // must answer 400, not crash to 500.
+  const upstreamStatus = err && (err.status || err.statusCode);
+  if (Number.isInteger(upstreamStatus) && upstreamStatus >= 400 && upstreamStatus < 500) {
+    return res.status(upstreamStatus).json({
+      error: err.type || 'bad_request',
+      message: t('validation_failed'),
+    });
+  }
+
   console.error('[errorHandler] unhandled:', err);
   return res.status(500).json({
     error: 'internal_error',

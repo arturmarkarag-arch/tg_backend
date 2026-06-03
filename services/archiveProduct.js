@@ -120,7 +120,7 @@ async function archiveProduct(productOrId, { notifyBuyers = false, bot = null } 
 
     for (const order of activeOrders) {
       const matchingItems = order.items.filter(
-        (i) => String(i.productId) === String(product._id) && !i.packed && !i.cancelled
+        (i) => String(i.productId) === String(product._id) && !i.packed && !i.cancelled && !i.skipped
       );
       if (!matchingItems.length) continue;
 
@@ -132,10 +132,11 @@ async function archiveProduct(productOrId, { notifyBuyers = false, bot = null } 
 
       const orderingOpenNow = await isGroupOrderingOpen(order.buyerSnapshot?.deliveryGroupId);
       if (!orderingOpenNow) {
-        const isFullyProcessed = order.items.every((i) => i.packed || i.cancelled);
+        const isFullyProcessed = order.items.every((i) => i.packed || i.cancelled || i.skipped);
         if (isFullyProcessed) {
-          const allCancelled = order.items.every((i) => i.cancelled);
-          order.status = allCancelled ? 'cancelled' : 'confirmed';
+          // "Nothing delivered" = every item is cancelled or skipped (none packed).
+          const allUndelivered = order.items.every((i) => i.cancelled || i.skipped);
+          order.status = allUndelivered ? 'cancelled' : 'confirmed';
         } else {
           order.status = 'in_progress';
         }
@@ -185,7 +186,12 @@ async function archiveProduct(productOrId, { notifyBuyers = false, bot = null } 
       affectedBlockIds   = attemptBlockIds;
       break;
     } catch (err) {
-      await session.abortTransaction();
+      // Guard the abort: if commitTransaction() itself threw (a WriteConflict at
+      // commit time under contention), the transaction is already terminal and an
+      // unguarded abortTransaction() throws a SECONDARY MongoTransactionError that
+      // MASKS the original transient error — so the retry below never fires and the
+      // caller crashes to 500. Swallow the teardown error so the REAL err is judged.
+      try { await session.abortTransaction(); } catch { /* already terminal after a failed commit */ }
       // finally runs on both throw and continue, so endSession happens once there.
       if (!isTransientTxError(err) || attempt >= ARCHIVE_MAX_RETRIES) throw err;
       await new Promise((r) => setTimeout(r, 50 * (attempt + 1)));

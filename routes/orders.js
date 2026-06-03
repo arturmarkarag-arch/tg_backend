@@ -56,6 +56,7 @@ const { migrateSellerShop } = require('../services/migrateSellerShop');
 const { computeTargetShopState } = require('../utils/shopConflict');
 const { unassignSellerAndPark } = require('../services/unassignSeller');
 const { activeOrderShopFilter } = require('../utils/orderShopFilter');
+const { reconcileLateOrderStrict } = require('../services/lateOrderReconcile');
 
 async function getAllDeliveryGroups() {
   let groups = await cache.get(cache.KEYS.DELIVERY_GROUPS);
@@ -268,7 +269,7 @@ router.get('/conflicts', staffOnly, async (req, res) => {
       orderNumber: o.orderNumber,
       buyerTelegramId: o.buyerTelegramId,
       buyerName: buyerNameById[String(o.buyerTelegramId)] || o.buyerTelegramId,
-      itemCount: (o.items || []).filter((i) => !i.cancelled).length,
+      itemCount: (o.items || []).filter((i) => !i.cancelled && !i.skipped).length,
       createdAt: o.createdAt,
     }));
     return {
@@ -876,6 +877,24 @@ async function placeOrderImpl(req, res) {
   // The idempotency-collision branch already sent a 200 inside the lock —
   // stop here so we don't fall through to the socket-emit / response code.
   if (placement && placement.sentResponse) return;
+
+  // STRICT late-order handling: if this order landed in a session whose picking
+  // already started (an admin insertion during the closed window), reconcile it
+  // now — ride-along on still-open tasks, otherwise mark items `skipped`. Cheap
+  // pre-check avoids opening a transaction on the normal open-window path (session
+  // still 'pending'). start-session also sweeps on re-open as the safety net.
+  if (currentSessionId && order?._id) {
+    try {
+      const sess = await OrderingSession.findById(currentSessionId, 'pickingStatus').lean();
+      if (sess && sess.pickingStatus && sess.pickingStatus !== 'pending') {
+        await reconcileLateOrderStrict(order._id);
+        const fresh = await Order.findById(order._id);
+        if (fresh) order = fresh;
+      }
+    } catch (e) {
+      console.warn('[orders] strict late reconcile failed:', e?.message || e);
+    }
+  }
 
   // "Оновлена" on the session timeline (only if picking already started).
   pushOrderAddedEventIfStarted(currentSessionId, order, {
