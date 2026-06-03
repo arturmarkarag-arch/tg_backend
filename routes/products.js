@@ -411,37 +411,19 @@ router.get('/', async (req, res) => {
     const [countResult] = await Product.aggregate([...basePipeline, { $count: 'total' }]);
     const total = countResult?.total ?? 0;
 
-    // Heavy fields that aggregate loads despite the schema's select:false — never
-    // shown on a catalogue card, and the geminiVector alone is ~36 KB/doc.
-    const HEAVY_FIELDS = { _block: 0, geminiVector: 0, geminiEmbeddingModel: 0, geminiEmbeddingDim: 0, geminiEmbeddedAt: 0, geminiFromLabeled: 0, pendingShopUpdate: 0 };
-
-    // Sort on a sort-keys-ONLY projection, then hydrate the 20-item page.
-    // WHY the two-step: aggregate ignores select:false, so every doc still carries
-    // the ~36 KB geminiVector. MongoDB's optimizer floats $sort above a plain
-    // *exclusion* $project, so the blocking in-memory sort ends up running over the
-    // full vector-laden docs and trips the 32 MB sort limit once offset+limit grows
-    // past ~900 — a hard 500 on deep pages (error 292; this cluster has no
-    // allowDiskUse). Projecting to just the sort keys before $sort keeps the sort
-    // tiny; the self-$lookup then pulls back the full docs (minus heavy fields) for
-    // only the current page, preserving the page order.
+    // Vectors now live in the productvectors collection, so a catalogue doc is ~0.8 KB.
+    // A plain sort/skip/limit is safe: the old sort-keys→self-$lookup "hydrate dance"
+    // existed only to keep the blocking in-memory sort under Mongo's 32 MB limit when
+    // every doc still carried the ~36 KB geminiVector (error 292 on deep pages — this
+    // cluster has no allowDiskUse). That weight is gone. `_block` is just the join
+    // marker from the shelf filter above — drop it. `_id` is the final sort tiebreak so
+    // the /:id/position endpoint can compute an offset that matches this list.
     const products = await Product.aggregate([
       ...basePipeline,
-      { $project: { orderNumber: 1, createdAt: 1 } },
-      // _id as final tiebreak keeps the order deterministic so the
-      // /:id/position endpoint can compute an offset that matches this list.
+      { $project: { _block: 0 } },
       { $sort: { orderNumber: 1, createdAt: -1, _id: 1 } },
       { $skip: offset },
       { $limit: limit },
-      {
-        $lookup: {
-          from: 'products',
-          localField: '_id',
-          foreignField: '_id',
-          as: '_full',
-          pipeline: [{ $project: HEAVY_FIELDS }],
-        },
-      },
-      { $replaceRoot: { newRoot: { $arrayElemAt: ['$_full', 0] } } },
     ]);
 
     // Shelf location ({ blockId, position, total }) is opt-in via ?withLocation=1

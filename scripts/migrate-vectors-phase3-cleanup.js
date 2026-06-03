@@ -36,8 +36,23 @@ const SHOP_VEC_FIELDS = {
 };
 
 async function avgSize(Model, filter = {}) {
-  const [s] = await Model.aggregate([{ $match: filter }, { $group: { _id: null, avg: { $avg: { $bsonSize: '$$ROOT' } }, n: { $sum: 1 } } }]);
+  // read('primary') so a freshly-written change isn't masked by a lagging secondary.
+  const [s] = await Model.aggregate([{ $match: filter }, { $group: { _id: null, avg: { $avg: { $bsonSize: '$$ROOT' } }, n: { $sum: 1 } } }]).read('primary');
   return s ? { avgKB: Math.round((s.avg / 1024) * 10) / 10, n: s.n } : { avgKB: 0, n: 0 };
+}
+
+// $unset MUST go through the native driver (.collection), NOT the Mongoose model.
+// These vector fields were dropped from the schema, so Mongoose strict-mode silently
+// strips them out of the $unset operator before it reaches Mongo — the update then
+// reports modifiedCount>0 while removing NOTHING. The native collection bypasses the
+// schema and actually deletes the paths. Filter to docs that still carry a field so
+// modifiedCount is truthful.
+async function unsetFields(Model, fields) {
+  const keys = Object.keys(fields);
+  return Model.collection.updateMany(
+    { $or: keys.map((k) => ({ [k]: { $exists: true } })) },
+    { $unset: fields },
+  );
 }
 
 async function dropIndex(Model, name) {
@@ -76,9 +91,9 @@ async function main() {
   }
 
   console.log('\n--confirm → unsetting fields + dropping old indexes');
-  const rP = await Product.updateMany({}, { $unset: PRODUCT_VEC_FIELDS });
+  const rP = await unsetFields(Product, PRODUCT_VEC_FIELDS);
   console.log(`[unset] Product: matched=${rP.matchedCount}, modified=${rP.modifiedCount}`);
-  const rS = await ShopProduct.updateMany({}, { $unset: SHOP_VEC_FIELDS });
+  const rS = await unsetFields(ShopProduct, SHOP_VEC_FIELDS);
   console.log(`[unset] ShopProduct: matched=${rS.matchedCount}, modified=${rS.modifiedCount}`);
 
   await dropIndex(Product, 'product_gemini_vector');
