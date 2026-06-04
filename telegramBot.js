@@ -6,7 +6,6 @@ const SearchProduct = require('./models/SearchProduct');
 const DeliveryGroup = require('./models/DeliveryGroup');
 const Shop = require('./models/Shop');
 const GroupMember = require('./models/GroupMember');
-const GoogleLinkToken = require('./models/GoogleLinkToken');
 const { redeemTransferHash } = require('./services/redeemTransferHash');
 const { trackMemberFromMessage, handleChatMemberUpdate, setMemberPhoto } = require('./services/groupMemberSync');
 const { issueRegistrationToken, peekRegistrationToken } = require('./services/registrationToken');
@@ -637,48 +636,11 @@ async function initBot(token) {
           return;
         }
 
-        // ── Google→Telegram link ────────────────────────────────────────────
-        // A browser user proved a Google identity (sub) and opened this deep link
-        // to bind it to their Telegram account. The token carries googleSub; the
-        // telegramId here (chatId) is Telegram-authenticated (ctx.from.id). We
-        // bind only an EXISTING, in-group user; a sub already on someone else is
-        // refused. Re-linking your own account overwrites (change Google).
-        if (startPayload) {
-          const glDoc = await GoogleLinkToken.findOne({
-            token: startPayload, usedAt: null, expiresAt: { $gt: new Date() },
-          }).lean();
-          if (glDoc) {
-            if (!user) {
-              await bot.sendMessage(chatId, 'Щоб привʼязати Google, спершу зареєструйтесь у системі через бота.');
-              return;
-            }
-            if (!(await isUserInAllowedGroup(chatId))) {
-              await bot.sendMessage(chatId, 'Привʼязка Google доступна лише учасникам робочої групи.');
-              return;
-            }
-            const subOwner = await User.findOne({ googleSub: glDoc.googleSub }).select('telegramId').lean();
-            if (subOwner && String(subOwner.telegramId) !== String(chatId)) {
-              await bot.sendMessage(chatId, 'Цей Google-акаунт уже привʼязано до іншого користувача.');
-              return;
-            }
-            // Atomically consume so the link can't be replayed, and stamp the
-            // telegramId so the waiting browser can auto-login via the poll.
-            const consumed = await GoogleLinkToken.findOneAndUpdate(
-              { _id: glDoc._id, usedAt: null },
-              { $set: { usedAt: new Date(), linkedTelegramId: String(chatId) } },
-            );
-            if (!consumed) {
-              await bot.sendMessage(chatId, 'Це посилання для привʼязки вже використано або прострочене.');
-              return;
-            }
-            await User.updateOne(
-              { telegramId: chatId },
-              { $set: { googleSub: glDoc.googleSub, googleEmail: glDoc.googleEmail } },
-            );
-            await bot.sendMessage(chatId, `✅ Google${glDoc.googleEmail ? ` (${glDoc.googleEmail})` : ''} привʼязано до вашого акаунта.\nПоверніться на сайт і увійдіть через Google ще раз.`);
-            return;
-          }
-        }
+        // NOTE: Google linking is NO LONGER done here. It moved to the secure
+        // reverse-direction flow (mini-app initData mints a telegramId-bound
+        // token → system browser does Google → /v1/auth/google/link/complete),
+        // which closes the old confused-deputy hole where a t.me deep link could
+        // glue a stranger's Google onto whoever opened it. See models/GoogleLinkToken.js.
 
         if (!user) {
           // Registration handshake. The invite is PER-PERSON. The Telegram id here

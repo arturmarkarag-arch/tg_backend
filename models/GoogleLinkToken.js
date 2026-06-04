@@ -1,22 +1,27 @@
 'use strict';
 const mongoose = require('mongoose');
 
-// One-time token for the Google→Telegram linking flow. Minted by /auth/google
-// when a browser user proves a Google identity (sub) that isn't linked to any
-// account yet. It carries the proven googleSub (+ email for display) and travels
-// in a bot deep link (t.me/<bot>?start=<token>). The bot's /start handler binds
-// it: there the telegramId is Telegram-authenticated (ctx.from.id), so the final
-// binding is googleSub(proven in browser) ↔ telegramId(proven in bot).
-// Minimal by design: short TTL + single use.
+// One-time token for the SECURE Google-link flow (reverse direction).
+//
+// Minted INSIDE the mini-app where the telegramId is already proven by initData
+// (POST /v1/telegram/google/link/start). The token therefore carries the PROVEN
+// account identity — `telegramId` — and NOT the Google identity. The open half
+// (the Google credential) is supplied later, in the system browser opened via
+// Telegram.WebApp.openLink, by POST /v1/auth/google/link/complete.
+//
+// Why this direction is safe: the account being modified is fixed to whoever
+// minted the token (you can only mint from your own initData). The worst an
+// attacker can achieve by tricking someone into the browser step is attaching a
+// Google account to the attacker's OWN account — no takeover. This is the inverse
+// of the old, vulnerable scheme where the token carried googleSub and got glued
+// to whatever Telegram opened a t.me deep link (confused-deputy / login-CSRF).
+//
+// Minimal by design: short TTL + single use (usedAt flipped atomically).
 const schema = new mongoose.Schema({
-  token:       { type: String, required: true, unique: true }, // crypto random, base64url
-  googleSub:   { type: String, required: true },               // proven via browser OAuth
-  googleEmail: { type: String, default: '' },                  // for display / notification
-  usedAt:      { type: Date, default: null },                  // set once on consume (in bot)
-  // Set by the bot once it binds the account. The browser polls and, when this
-  // is present, gets auto-logged-in (no second Google sign-in needed).
-  linkedTelegramId: { type: String, default: null },
-  expiresAt:   { type: Date, required: true },                 // now + 10 min
+  token:      { type: String, required: true, unique: true }, // crypto random, base64url
+  telegramId: { type: String, required: true },               // proven via initData at mint time
+  usedAt:     { type: Date, default: null },                  // set once on consume (in /complete)
+  expiresAt:  { type: Date, required: true },                 // now + 10 min
 }, { timestamps: true });
 
 // TTL index — MongoDB reaps expired/spent tokens automatically.

@@ -8,6 +8,7 @@ const Shop = require('../../models/Shop');
 const { sendAdminNotification, sendRegistrationApprovedMessage, isUserInAllowedGroup, deleteWelcomeFor } = require('../../telegramBot');
 const { resolveAndCreateUser } = require('../../services/createUserFromRequest');
 const { consumeRegistrationToken } = require('../../services/registrationToken');
+const { issueGoogleLinkToken } = require('../../services/googleLinkToken');
 const { getOrderingWindowOpenAt } = require('../../utils/orderingSchedule');
 const { normalizeDeliveryGroup } = require('../../utils/deliveryGroupHelpers');
 const { getOrderingSchedule } = require('../../utils/getOrderingSchedule');
@@ -289,6 +290,27 @@ router.patch('/me/profile', asyncHandler(async (req, res) => {
     phoneNumber: fresh?.phoneNumber || '',
     googleEmail: fresh?.googleEmail || '',
   });
+}));
+
+// POST /api/v1/telegram/google/link/start — крок 1 безпечної прив'язки Google.
+// Захищено telegramAuth → req.telegramId уже доведений initData (mini-app). Мінтимо
+// одноразовий токен, що несе САМЕ цей telegramId (а не Google). Клієнт відкриє
+// /link-google?t=<token> у системному браузері (Telegram.WebApp.openLink), де
+// Google-вхід працює; завершення — на публічному /v1/auth/google/link/complete.
+// Деталі безпеки (reverse-напрямок) — у models/GoogleLinkToken.js.
+router.post('/google/link/start', asyncHandler(async (req, res) => {
+  const telegramId = req.telegramId;
+  if (!telegramId) throw appError('auth_required');
+  const token = await issueGoogleLinkToken(telegramId);
+  res.json({ token });
+}));
+
+// POST /api/v1/telegram/google/unlink — прибрати прив'язку Google від свого акаунта.
+router.post('/google/unlink', asyncHandler(async (req, res) => {
+  const telegramId = req.telegramId;
+  if (!telegramId) throw appError('auth_required');
+  await User.updateOne({ telegramId }, { $set: { googleSub: '', googleEmail: '' } });
+  res.json({ ok: true });
 }));
 
 // POST /api/v1/telegram/mini-app/state — зберегти навігаційний стан (User) і кошик (Shop)

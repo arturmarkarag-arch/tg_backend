@@ -124,7 +124,7 @@ const ERRORS = {
   google_invalid_token:     { status: 401, message: 'Не вдалося перевірити вхід Google. Спробуйте ще раз.' },
   google_email_unverified:  { status: 403, message: 'Ваша Google-пошта не підтверджена. Підтвердьте її в акаунті Google і повторіть.' },
   google_email_not_linked:  { status: 403, message: ({ email } = {}) =>
-                                `Пошту${email ? ` ${email}` : ''} не привʼязано до жодного акаунту. Привʼяжіть Google через кнопку «Привʼязати Google» у профілі Telegram-бота.` },
+                                `Пошту${email ? ` ${email}` : ''} не привʼязано до жодного акаунту. Відкрийте застосунок у Telegram → Профіль → «Привʼязати Google», а тоді увійдіть через Google ще раз.` },
   google_sub_taken:         { status: 409, message: 'Цей Google-акаунт уже привʼязано до іншого користувача.' },
   google_already_linked:    { status: 409, message: 'До вашого акаунта вже привʼязано інший Google. Спершу відвʼяжіть його.' },
   google_link_invalid:      { status: 400, message: 'Посилання для привʼязки недійсне або прострочене. Почніть привʼязку знову.' },
