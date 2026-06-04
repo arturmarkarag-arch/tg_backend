@@ -356,7 +356,7 @@ router.delete('/:number/products/:productId', staffOnly, asyncHandler(async (req
     const io = getIO();
     io.emit('block_updated', slimBlock(updated));
     io.emit('incoming_updated');
-    io.emit('catalogue_updated');
+    io.emit('catalogue_updated', { action: 'add' });
   } catch (_) {}
 
   emitPositionUpdates();
@@ -496,7 +496,7 @@ router.post('/:number/add', staffOnly, asyncHandler(async (req, res) => {
   try {
     const io = getIO();
     io.emit('block_updated', slimBlock(updated));
-    io.emit('catalogue_updated');
+    io.emit('catalogue_updated', { action: 'add' });
   } catch (_) { /* socket not initialized yet */ }
 
   emitPositionUpdates();

@@ -893,8 +893,10 @@ router.post('/block-upload-photos', staffOnly, asyncHandler(async (req, res) => 
         version: savedBlock.version,
         productIds: savedBlock.productIds.map(String),
       });
-      // New products added to a block → notify sellers their catalogue changed
-      io.emit('catalogue_updated');
+      // New products added to a block → notify sellers their catalogue changed.
+      // action:'add' lets the mini-app silently revalidate its window (no blink)
+      // instead of a full catalogue reset.
+      io.emit('catalogue_updated', { action: 'add' });
     }
   } catch (e) {
     console.warn('[products/upload] socket block_updated failed:', e.message);
@@ -1242,7 +1244,9 @@ router.patch('/:id', staffOnly, asyncHandler(async (req, res) => {
       // that stays mounted and only refreshes its window on 'catalogue_updated' —
       // a bare 'incoming_updated' is just for the Надходження lists. Without this
       // the edited photo stays stale on every open catalogue until a full reload.
-      if (patchFilenames.length > 0) io.emit('catalogue_updated');
+      // action:'update' + productId → the mini-app refreshes its window only if
+      // THIS product is currently in view; otherwise it ignores the event.
+      if (patchFilenames.length > 0) io.emit('catalogue_updated', { action: 'update', productId: String(product._id) });
     }
   } catch (e) {
     console.warn('[products/patch] socket incoming_updated failed:', e.message);
