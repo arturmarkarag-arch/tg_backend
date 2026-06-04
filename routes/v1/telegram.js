@@ -306,10 +306,17 @@ router.post('/google/link/start', asyncHandler(async (req, res) => {
 }));
 
 // POST /api/v1/telegram/google/unlink — прибрати прив'язку Google від свого акаунта.
+// Removing a sign-in credential ALSO evicts existing browser sessions (bump
+// sessionsValidFrom): otherwise a session bootstrapped via the now-removed Google
+// would linger. The mini-app (initData) is unaffected — the revocation check runs
+// only on the browser/JWT path, so the user keeps managing from Telegram.
 router.post('/google/unlink', asyncHandler(async (req, res) => {
   const telegramId = req.telegramId;
   if (!telegramId) throw appError('auth_required');
-  await User.updateOne({ telegramId }, { $set: { googleSub: '', googleEmail: '' } });
+  await User.updateOne(
+    { telegramId },
+    { $set: { googleSub: '', googleEmail: '', sessionsValidFrom: new Date() } },
+  );
   res.json({ ok: true });
 }));
 

@@ -96,10 +96,16 @@ router.post('/google/link/complete', asyncHandler(async (req, res) => {
   if (!user) await throwRegistrationState(telegramId);
   if (user.botBlocked) throw appError('registration_blocked');
 
-  await User.updateOne(
-    { telegramId },
-    { $set: { googleSub: result.sub, googleEmail: result.email } },
-  );
+  // Changing the linked Google to a DIFFERENT account is a credential rotation →
+  // evict existing browser sessions (bump sessionsValidFrom) so a session that
+  // was bootstrapped via the OLD Google can't linger. We bump BEFORE issuing the
+  // new token below, and the 1s grace in isSessionNotRevoked keeps THIS fresh
+  // token valid. Re-linking the same sub is a no-op and skips the bump.
+  const subChanged = String(user.googleSub || '') !== String(result.sub);
+  const patch = { googleSub: result.sub, googleEmail: result.email };
+  if (subChanged) patch.sessionsValidFrom = new Date();
+
+  await User.updateOne({ telegramId }, { $set: patch });
   const fresh = await User.findOne({ telegramId }).lean();
   res.json({ token: signSession(telegramId), profile: await buildUserProfile(fresh) });
 }));
