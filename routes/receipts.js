@@ -17,7 +17,7 @@ const DeliveryGroup = require('../models/DeliveryGroup');
 const Shop = require('../models/Shop');
 const Counter = require('../models/Counter');
 const { getIO } = require('../socket');
-const { upsertShopProductFromProduct, upsertShopOwnedFromReceiptItem, pushSharedFieldsToMirror } = require('../utils/upsertShopProduct');
+const { upsertShopOwnedFromReceiptItem, syncMirror } = require('../utils/upsertShopProduct');
 const { embedShopProductAsync } = require('../utils/shopProductEmbedding');
 const { embedProductAsync } = require('../utils/productEmbedding');
 const { explainProductImageUrl, getOpenAIStatus } = require('../openaiClient');
@@ -1001,12 +1001,11 @@ router.post('/:id/items/:itemId/confirm', staffOnly, asyncHandler(async (req, re
       // blocked once confirmed). Embeddings are deferred to after commit.
       if (product) {
         // shelf item → ShopProduct MIRROR of the warehouse product (linkedProductId set).
-        // upsert only $setOnInsert, so it can CREATE a mirror but never refresh an
-        // existing one. A re-receipt into a product that already has a mirror would
-        // therefore leave the mirror's price/qtyPerPackage/photo/description stale —
-        // so immediately push the warehouse's current shared values across.
-        await upsertShopProductFromProduct(product, { session });
-        await pushSharedFieldsToMirror(product, { session });
+        // syncMirror CREATES the mirror if missing then PUSHES the warehouse's current
+        // shared values, so a re-receipt into a product that already has a mirror can't
+        // leave its price/qtyPerPackage/photo/description stale. In-transaction (session)
+        // so a warehouse Product can never commit without its mirror.
+        await syncMirror(product, { session });
         // Warehouse OWNS the Gemini vector (its ProductVector row); embed once
         // post-commit. embedProduct is idempotent — it skips when the row already
         // exists (re-receipt), so no gate is needed here. The mirror references this

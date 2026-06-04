@@ -153,6 +153,7 @@ const ERRORS = {
   product_only_archived_can_delete:{ status: 400, message: 'Видаляти можна лише товари зі статусом «архів»' },
   archive_delete_disabled:{ status: 403, message: 'Остаточне видалення з архіву вимкнено. Дозволено лише відновлення товару.' },
   product_not_archived:     { status: 400, message: 'Товар не знаходиться в архіві' },
+  product_converted_to_shop:{ status: 409, message: 'Товар уже передано в «Товари Магазинів» (понад 30 днів в архіві). Складу він більше не належить — знайдіть його в каталозі магазинів.' },
   product_photo_required:   { status: 400, message: 'Фото є обов\u02bcязковим' },
   product_quantity_invalid: { status: 400, message: 'Кількість має бути цілим числом >= 0' },
   product_required_fields:  { status: 400, message: 'Порядковий номер, ціна та кількість є обов\u02bcязковими' },

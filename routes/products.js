@@ -9,7 +9,8 @@ const Block = require('../models/Block');
 const { getIO } = require('../socket');
 const Product = require('../models/Product');
 const ShopProduct = require('../models/ShopProduct');
-const { upsertShopProductFromProduct, pushSharedFieldsToMirror } = require('../utils/upsertShopProduct');
+const { pushSharedFieldsToMirror, syncMirror } = require('../utils/upsertShopProduct');
+const { repriceActiveOrders } = require('../utils/repriceActiveOrders');
 const Order = require('../models/Order');
 const User = require('../models/User');
 const Shop = require('../models/Shop');
@@ -879,8 +880,8 @@ router.post('/block-upload-photos', staffOnly, asyncHandler(async (req, res) => 
   // (the mirror is a projection, never blocks this request); $setOnInsert means a
   // later label edit's pushSharedFieldsToMirror fills in price/name/photo.
   for (const product of createdProducts) {
-    upsertShopProductFromProduct(product).catch((err) =>
-      console.error('[products/block-upload] ShopProduct upsert failed:', err.message));
+    syncMirror(product).catch((err) =>
+      console.error('[products/block-upload] mirror sync failed:', err.message));
     // Index the shelf photo for the Прийомка warehouse-locate search.
     embedProductAsync(product, 'block-upload');
   }
@@ -962,8 +963,8 @@ router.post('/receive', staffOnly, asyncHandler(async (req, res) => {
   }
 
   if (product.status === 'active') {
-    upsertShopProductFromProduct(product).catch((err) =>
-      console.error('[products/receive] ShopProduct upsert failed:', err.message));
+    syncMirror(product).catch((err) =>
+      console.error('[products/receive] mirror sync failed:', err.message));
   }
 
   // Index the warehouse photo for the Прийомка "is it already on the warehouse?" search.
@@ -1156,67 +1157,20 @@ router.patch('/:id', staffOnly, asyncHandler(async (req, res) => {
     }
   }
 
-  // Keep the linked ShopProduct mirror in sync with the warehouse owner.
-  // First activation CREATES the mirror ($setOnInsert with the just-updated
-  // values); any later edit PUSHES the shared fields onto the existing mirror.
-  // Both are fire-and-forget — the mirror is a projection, not part of this
-  // request's contract. Shop-OWNED products (linkedProductId: null) are untouched.
-  if (status === 'active' && previousStatus !== 'active') {
-    upsertShopProductFromProduct(product).catch((err) =>
-      console.error('[products/patch] ShopProduct upsert failed:', err.message));
-  } else {
-    pushSharedFieldsToMirror(product).catch((err) =>
-      console.error('[products/patch] ShopProduct mirror push failed:', err.message));
-  }
+  // Keep the linked ShopProduct mirror in sync with the warehouse owner: create it
+  // if missing then push the shared fields (syncMirror does both, idempotently — no
+  // need to branch on first-activation vs later-edit). Fire-and-forget — the mirror
+  // is a projection, not part of this request's contract. Shop-OWNED products
+  // (linkedProductId: null) are untouched. A photo change additionally re-embeds the
+  // warehouse vector, CHAINED after the mirror push so the displayed photo and the
+  // search vector refresh in a deterministic order (see below).
+  const mirrorSynced = syncMirror(product).catch((err) =>
+    console.error('[products/patch] mirror sync failed:', err.message));
 
-  // Re-price ACTIVE orders (new/in_progress) that contain this product so the
-  // whole order stays in ONE price epoch. Without this, an existing order keeps
-  // the old per-item price while a newly merged line gets the new price → the
-  // invoice/total mixes price epochs and diverges from the catalogue.
-  // confirmed/fulfilled orders are finalized and intentionally NOT touched.
-  // Two atomic pipeline updates → no read-modify-write race with set-item-qty.
+  // Re-price ACTIVE orders so the whole order stays in one price epoch (shared with
+  // the write-through shop edit). confirmed/fulfilled orders are intentionally untouched.
   if (price !== undefined && Number(price) !== previousPrice) {
-    const newPrice = Number(price);
-    const activeFilter = {
-      status: { $in: ['new', 'in_progress'] },
-      'items.productId': product._id,
-    };
-    await Order.updateMany(
-      activeFilter,
-      { $set: { 'items.$[elem].price': newPrice } },
-      { arrayFilters: [{ 'elem.productId': product._id, 'elem.cancelled': { $ne: true } }] },
-    );
-    await Order.updateMany(activeFilter, [
-      {
-        $set: {
-          totalPrice: {
-            $round: [
-              {
-                $sum: {
-                  $map: {
-                    input: {
-                      $filter: {
-                        input: '$items',
-                        as: 'i',
-                        cond: { $ne: ['$$i.cancelled', true] },
-                      },
-                    },
-                    as: 'i',
-                    in: {
-                      $multiply: [
-                        { $ifNull: ['$$i.price', 0] },
-                        { $ifNull: ['$$i.quantity', 0] },
-                      ],
-                    },
-                  },
-                },
-              },
-              2,
-            ],
-          },
-        },
-      },
-    ]);
+    await repriceActiveOrders(product._id, Number(price));
   }
 
   // Delete replaced R2 images after successful DB save — orphaned objects are
@@ -1255,8 +1209,11 @@ router.patch('/:id', staffOnly, asyncHandler(async (req, res) => {
   // Photo changed → its warehouse vector is stale; re-index in the background.
   // force:true because the ProductVector row already exists — we must overwrite it
   // (the mirror references this same row, so refreshing it updates the mirror too).
+  // CHAINED after the mirror push so the card's displayed photo (mirror.imageUrl) and
+  // the search vector are refreshed in a deterministic order rather than racing as two
+  // independent fire-and-forget tasks (one failing left card ≠ search-result photo).
   if (patchFilenames.length > 0 && (product.originalImageUrl || product.imageUrls?.[0])) {
-    embedProductAsync(product, 'patch', { force: true });
+    mirrorSynced.then(() => embedProductAsync(product, 'patch', { force: true }));
   }
 
   res.json(product);

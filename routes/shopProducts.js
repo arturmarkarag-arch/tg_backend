@@ -6,6 +6,10 @@ const { appError, asyncHandler } = require('../utils/errors');
 const ShopProduct = require('../models/ShopProduct');
 const Product     = require('../models/Product');
 const { embedShopProductAsync } = require('../utils/shopProductEmbedding');
+const { embedProductAsync } = require('../utils/productEmbedding');
+const { syncMirror } = require('../utils/upsertShopProduct');
+const { repriceActiveOrders } = require('../utils/repriceActiveOrders');
+const { getIO } = require('../socket');
 const { explainProductImageUrl, getOpenAIStatus } = require('../openaiClient');
 const { getGeminiStatus } = require('../geminiClient');
 const { describeImageUrl } = require('../utils/productDescribe');
@@ -148,19 +152,85 @@ router.post('/', staffOnly, asyncHandler(async (req, res) => {
   }
 }));
 
+// WRITE-THROUGH: editing a warehouse MIRROR from the shop side writes the shared
+// fields onto the warehouse Product (the single source of truth) and re-syncs the
+// mirror. "Товари Магазинів" and "Склад" are two editable views of the SAME live
+// product, so a price/name/photo change from either side ends up identical on both —
+// with no two-master conflicts or sync loops (every write funnels to the Product).
+async function editMirrorThroughToWarehouse(product, fields, res) {
+  const previousPrice = Number(product.price || 0);
+
+  if (fields.name               !== undefined) product.name               = String(fields.name).trim();
+  if (fields.barcode            !== undefined) product.barcode            = String(fields.barcode).trim();
+  if (fields.price              !== undefined) { const p = Number(fields.price); if (Number.isFinite(p)) product.price = p; }
+  if (fields.quantityPerPackage !== undefined) product.quantityPerPackage = Number(fields.quantityPerPackage) || 0;
+  if (fields.notes              !== undefined) product.notes              = String(fields.notes).trim();
+  if (fields.labelPositions     !== undefined) {
+    const lp = fields.labelPositions;
+    product.labelPositions = typeof lp === 'string' ? JSON.parse(lp) : lp;
+  }
+
+  // Photo: annotated canvas (products/) + raw original (originals/) → onto the product.
+  if (fields.filename) {
+    const safe = safeFilename(fields.filename);
+    if (safe) { product.imageUrls = [r2PublicUrl('products', safe)]; product.imageNames = [safe]; }
+  }
+  if (fields.originalFilename) {
+    const safe = safeFilename(fields.originalFilename);
+    if (safe) product.originalImageUrl = r2PublicUrl('originals', safe);
+  } else if (!product.originalImageUrl && product.imageUrls?.[0]) {
+    product.originalImageUrl = product.imageUrls[0];
+  }
+  const photoChanged = Boolean(fields.filename || fields.originalFilename);
+
+  try {
+    await product.save();
+  } catch (err) {
+    if (err.code === 11000 && err.keyPattern?.barcode) return res.status(409).json({ error: 'barcode_exists', message: 'Товар з таким штрихкодом вже існує' });
+    throw err;
+  }
+
+  if (fields.price !== undefined && Number(product.price) !== previousPrice) {
+    await repriceActiveOrders(product._id, Number(product.price));
+  }
+
+  // Refresh the mirror from the now-updated owner; return the ShopProduct shape the
+  // shop page expects.
+  const mirror = await syncMirror(product);
+
+  // Photo changed → the warehouse vector (which the mirror references) is stale.
+  // Re-embed AFTER the mirror push so card photo + search vector refresh in order.
+  if (photoChanged && (product.originalImageUrl || product.imageUrls?.[0])) {
+    embedProductAsync(product, 'shop-writethrough', { force: true });
+  }
+
+  try {
+    const io = getIO();
+    if (io) {
+      io.emit('incoming_updated'); // refresh open warehouse boards
+      if (photoChanged) io.emit('catalogue_updated', { action: 'update', productId: String(product._id) });
+    }
+  } catch (e) { console.warn('[shopProducts/write-through] socket emit failed:', e.message); }
+
+  return res.json(mirror ? (mirror.toObject ? mirror.toObject() : mirror) : await ShopProduct.findOne({ linkedProductId: product._id }).lean());
+}
+
 // ── PATCH /:id — update ───────────────────────────────────────────────────────
-// Shop Products is fully decoupled from the warehouse: edits here NEVER mutate
-// the linked warehouse Product. (Any "recommendation" channel back to the
-// warehouse will be a separate, explicit, non-authoritative mechanism.)
+// Shop-OWNED products (linkedProductId: null) are edited in place here. A linked
+// MIRROR is edited WRITE-THROUGH to its warehouse owner (see above) so both views
+// stay identical. An ORPHAN mirror (owner archived/missing — e.g. within the 30-day
+// pre-handover window) is edited in place: it's on its way to becoming shop-owned.
 router.patch('/:id', staffOnly, asyncHandler(async (req, res) => {
   const item = await ShopProduct.findById(req.params.id);
   if (!item) throw appError('product_not_found');
 
-  // A ShopProduct with a linkedProductId is a READ-ONLY MIRROR of a warehouse
-  // Product. Its shared fields (name/price/qty/photo/notes) are owned by the
-  // warehouse and pushed in via pushSharedFieldsToMirror — editing them here
-  // would desync. Only shop-OWNED products (linkedProductId: null) are editable.
-  if (item.linkedProductId) throw appError('shopproduct_edit_on_warehouse');
+  if (item.linkedProductId) {
+    const owner = await Product.findById(item.linkedProductId);
+    if (owner && owner.status !== 'archived') {
+      return editMirrorThroughToWarehouse(owner, req.body, res);
+    }
+    // else: orphan mirror → fall through and edit this doc directly.
+  }
 
   const fields = req.body;
 
@@ -215,12 +285,17 @@ router.post('/:id/describe', staffOnly, asyncHandler(async (req, res) => {
   const item = await ShopProduct.findById(req.params.id);
   if (!item) throw appError('product_not_found');
 
-  // A linked mirror's description is owned by the warehouse (pushed in via
-  // pushSharedFieldsToMirror — same physical product, same description). Regenerate
-  // it from the warehouse card; doing it here would diverge until the next push.
-  if (item.linkedProductId) throw appError('shopproduct_edit_on_warehouse');
+  // Write-through: for a LIVE mirror the description belongs to the warehouse Product
+  // (same physical product, same description) — generate it there and re-sync, so both
+  // views match. An orphan mirror / shop-owned product is described in place.
+  let target = item;
+  let owner = null;
+  if (item.linkedProductId) {
+    owner = await Product.findById(item.linkedProductId);
+    if (owner && owner.status !== 'archived') target = owner;
+  }
 
-  const url = item.originalImageUrl || item.imageUrl;
+  const url = target.originalImageUrl || (target === item ? item.imageUrl : target.imageUrls?.[0]);
   if (!url) return res.status(400).json({ error: 'photo_required', message: 'У товару немає фото' });
 
   if (!getGeminiStatus().connected && !getOpenAIStatus().connected) {
@@ -230,10 +305,12 @@ router.post('/:id/describe', staffOnly, asyncHandler(async (req, res) => {
   try {
     const { text, name: aiName } = await describeImageUrl(url);
     if (!text) return res.status(502).json({ error: 'empty_description', message: 'Не вдалося згенерувати опис' });
-    item.aiDescription = text;
-    if (aiName && !item.name) item.name = aiName;
-    await item.save();
-    res.json({ _id: item._id, aiDescription: item.aiDescription, aiName: aiName || null });
+    target.aiDescription = text;
+    if (aiName && !target.name) target.name = aiName;
+    await target.save();
+    // Live mirror → push the warehouse-owned description back onto the mirror.
+    if (target === owner) await syncMirror(owner);
+    res.json({ _id: item._id, aiDescription: target.aiDescription, aiName: aiName || null });
   } catch (err) {
     console.error('[shopProducts] describe error:', err.message);
     return res.status(502).json({ error: 'describe_api_error', message: err.message });
@@ -301,3 +378,5 @@ router.post('/migrate-from-products', adminOnly, asyncHandler(async (req, res) =
 }));
 
 module.exports = router;
+// Exported for unit tests (the route wires it behind staff auth).
+module.exports._editMirrorThroughToWarehouse = editMirrorThroughToWarehouse;

@@ -8,6 +8,7 @@ const { getIO } = require('../socket');
 const { requireTelegramRoles } = require('../middleware/telegramAuth');
 const { appError, asyncHandler } = require('../utils/errors');
 const { refreshPickingTaskPositions } = require('../services/taskBuilder');
+const { syncMirror } = require('../utils/upsertShopProduct');
 
 // On the "Полки" board a product tile renders ONLY its photo (+ name as the
 // alt/placeholder letter). Everything else on the warehouse Product — price,
@@ -486,6 +487,17 @@ router.post('/:number/add', staffOnly, asyncHandler(async (req, res) => {
 
   // In-block ⟹ active (invariant). Idempotent; the product just entered a block.
   await Product.updateOne({ _id: productId }, { $set: { status: 'active' } });
+
+  // This is THE normal activation path (receive/restore → Надходження → block), so
+  // the ShopProduct mirror must be created/refreshed HERE — previously only the
+  // products.js PATCH did it, leaving block-added (incl. restored) products active on
+  // the warehouse but absent/stale in "Товари Магазинів". Fire-and-forget — the mirror
+  // is a projection, never part of this request's contract.
+  const activatedProduct = await Product.findById(productId);
+  if (activatedProduct) {
+    syncMirror(activatedProduct).catch((err) =>
+      console.error('[blocks/add] mirror sync failed:', err.message));
+  }
 
   const updated = await Block.findById(updatedRaw._id)
     .populate({ path: 'productIds', match: { status: { $in: ['active', 'pending'] } }, select: BLOCK_PRODUCT_FIELDS })

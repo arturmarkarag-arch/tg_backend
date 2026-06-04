@@ -27,6 +27,13 @@ const ProductSchema = new mongoose.Schema(
     originalImageUrl: { type: String, default: '' },
     labelPositions: { type: mongoose.Schema.Types.Mixed, default: {} },
     archivedAt: { type: Date, default: null },
+    // Set once when a product that stayed archived for 30+ days is "handed over" to
+    // the shop catalogue: its ShopProduct mirror is detached into a standalone
+    // shop-OWNED product (or one is created) so the item remains findable in "Товари
+    // Магазинів" even though the warehouse no longer needs it. The retention sweep
+    // (services/retention.js) filters on this so each product converts exactly once.
+    // We never delete data — the archived Product and its vector are kept forever.
+    shopConvertedAt: { type: Date, default: null },
     // Timestamp of the first time this product was shelved (status flipped to
     // 'active' during a receipt commit). Drives the "Новий товар" tag and the
     // "Товари" nav badge — a product counts as new for 7 days after shelving.

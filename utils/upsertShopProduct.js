@@ -1,6 +1,7 @@
 'use strict';
 
 const ShopProduct = require('../models/ShopProduct');
+const Product = require('../models/Product');
 const { embedShopProductAsync } = require('./shopProductEmbedding');
 
 const MIRROR_MAX_RETRIES = 3;
@@ -49,24 +50,37 @@ async function withMirrorRetry(fn) {
 async function upsertShopProductFromProduct(product, { session = null } = {}) {
   if (!product?._id) { console.warn('[shop-upsert] skipped: no product'); return null; }
   const barcode = String(product.barcode || '').trim();
-  const filter = barcode ? { barcode } : { linkedProductId: product._id };
-  const insertData = {
-    name:               product.name || product.brand || product.model || product.category || '',
-    price:              product.price || 0,
-    quantityPerPackage: product.quantityPerPackage || 0,
-    notes:              product.notes || '',
-    originalImageUrl:   product.originalImageUrl || product.imageUrls?.[0] || '',
-    imageUrl:           product.imageUrls?.[0] || '',
-    labelPositions:     product.labelPositions || {},
-    aiDescription:      product.aiDescription || '',
-    source:             'receive',
-    barcode,
-    // A mirror holds NO vector of its own — it references its warehouse owner's
-    // ProductVector row at search time (same photo → same vector). Nothing to copy.
-    // NOTE: linkedProductId lives ONLY in $set below. Having it in both $set and
-    // $setOnInsert triggers MongoDB conflict code 40 and the whole upsert fails.
-  };
-  const run = () => {
+  // Identify the mirror ONLY by its warehouse owner. Matching by barcode used to let
+  // this upsert "adopt" a pre-existing shop-OWNED product that merely SHARED the
+  // barcode — it set linkedProductId on it (silently turning a hand-edited shop
+  // product into a read-only mirror, then pushSharedFieldsToMirror overwrote its
+  // fields with warehouse values → lost edits). One warehouse product ⟺ exactly one
+  // mirror, keyed by linkedProductId. Symmetric to upsertShopOwnedFromReceiptItem,
+  // which likewise never hijacks across the ownership boundary.
+  const filter = { linkedProductId: product._id };
+  // Drop the barcode on INSERT if another ShopProduct already holds it (a shop-OWNED
+  // item sharing the code, or a stray). The barcode on a mirror is only a copy of the
+  // warehouse owner's for shop-side search; the unique partial index forbids two
+  // ShopProducts with the same code, and we must NOT let that block the mirror from
+  // existing at all (the product would then be invisible in "Товари Магазинів"). The
+  // authoritative barcode always lives on the warehouse Product regardless.
+  const makeRun = (insertBarcode) => () => {
+    const insertData = {
+      name:               product.name || product.brand || product.model || product.category || '',
+      price:              product.price || 0,
+      quantityPerPackage: product.quantityPerPackage || 0,
+      notes:              product.notes || '',
+      originalImageUrl:   product.originalImageUrl || product.imageUrls?.[0] || '',
+      imageUrl:           product.imageUrls?.[0] || '',
+      labelPositions:     product.labelPositions || {},
+      aiDescription:      product.aiDescription || '',
+      source:             'receive',
+      barcode:            insertBarcode,
+      // A mirror holds NO vector of its own — it references its warehouse owner's
+      // ProductVector row at search time (same photo → same vector). Nothing to copy.
+      // NOTE: linkedProductId lives ONLY in $set below. Having it in both $set and
+      // $setOnInsert triggers MongoDB conflict code 40 and the whole upsert fails.
+    };
     const q = ShopProduct.findOneAndUpdate(
       filter,
       { $set: { linkedProductId: product._id }, $setOnInsert: insertData },
@@ -74,6 +88,15 @@ async function upsertShopProductFromProduct(product, { session = null } = {}) {
     );
     return session ? q.session(session) : q;
   };
+  // Resolve a collision-free insert barcode up front (cheap, reuses the same read in
+  // both tx and fire-and-forget modes). Only matters on insert; an existing mirror
+  // ignores $setOnInsert entirely.
+  let insertBarcode = barcode;
+  if (barcode) {
+    const taken = ShopProduct.exists({ barcode, linkedProductId: { $ne: product._id } });
+    if (await (session ? taken.session(session) : taken)) insertBarcode = '';
+  }
+  const run = makeRun(insertBarcode);
   // Transactional caller: let errors abort the confirm; defer embedding to caller.
   if (session) return run();
   try {
@@ -106,9 +129,24 @@ async function upsertShopProductFromProduct(product, { session = null } = {}) {
 // AFTER commit, using the returned doc.
 async function pushSharedFieldsToMirror(product, { session = null } = {}) {
   if (!product?._id) return null;
+  // Fire-and-forget (non-transactional) calls can execute OUT OF ORDER under rapid
+  // edits — a retried older call could land AFTER a newer one and overwrite it with
+  // stale values. Re-read the CURRENT product so the mirror always converges on the
+  // latest warehouse state ("last-state-wins", not "last-writer-wins"). Transactional
+  // callers pass the authoritative in-session doc, so that path is kept as-is.
+  if (!session) {
+    const fresh = await Product.findById(product._id).lean();
+    if (!fresh) return null;
+    product = fresh;
+  }
   const imageUrl = product.imageUrls?.[0] || '';
   const computedName = product.name || product.brand || product.model || product.category || '';
 
+  // barcode is intentionally NOT pushed here. It has its own targeted, transactional
+  // path on the warehouse PATCH (routes/products.js) that surfaces a duplicate-barcode
+  // collision to the user. Folding it into this bulk $set meant an unrelated barcode
+  // collision (a shop-owned doc holding the same code) threw 11000 — NOT retryable —
+  // and silently aborted the WHOLE push, leaving price/name/photo stale forever.
   const $set = {
     price:              product.price || 0,
     quantityPerPackage: product.quantityPerPackage || 0,
@@ -116,7 +154,6 @@ async function pushSharedFieldsToMirror(product, { session = null } = {}) {
     imageUrl,
     originalImageUrl:   product.originalImageUrl || imageUrl || '',
     labelPositions:     product.labelPositions || {},
-    barcode:            String(product.barcode || '').trim(),
   };
   if (computedName) $set.name = computedName;
   if (product.aiDescription) $set.aiDescription = product.aiDescription;
@@ -241,8 +278,20 @@ async function upsertShopOwnedFromReceiptItem(item, { session = null } = {}) {
   }
 }
 
+// Single entry point for keeping a warehouse Product's mirror faithful: create it if
+// missing (idempotent $setOnInsert) THEN push the owner-authoritative shared fields.
+// Use this EVERYWHERE a product becomes active or its shared fields change, so no code
+// path can leave a Product without an up-to-date mirror (the block-add active-flip and
+// /receive used to call only the create half → stale/missing mirrors). Both halves are
+// idempotent. Pass `{ session }` to run inside a caller's transaction.
+async function syncMirror(product, { session = null } = {}) {
+  await upsertShopProductFromProduct(product, { session });
+  return pushSharedFieldsToMirror(product, { session });
+}
+
 module.exports = {
   upsertShopProductFromProduct,
   pushSharedFieldsToMirror,
   upsertShopOwnedFromReceiptItem,
+  syncMirror,
 };
