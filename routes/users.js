@@ -104,15 +104,39 @@ router.get('/', asyncHandler(async (req, res) => {
     filter.shopId = { $in: cityShops.map((s) => s._id) };
   }
 
-  // Text search across name, phone, telegramId
+  // Text search across name, phone, telegramId and the seller's shop (name /
+  // address / number). Tokenised: every word must match SOME field (AND across
+  // tokens, OR across fields) so a full "Ім'я Прізвище" query resolves — the old
+  // single-field-per-clause $or returned nothing for any two-word input. Shop is
+  // matched by resolving Shop docs → their _ids → User.shopId.
   if (searchQuery) {
-    const re = new RegExp(searchQuery.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
-    filter['$or'] = [
-      { firstName: re },
-      { lastName: re },
-      { phoneNumber: re },
-      { telegramId: searchQuery },
-    ];
+    const escape = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const tokens = searchQuery.split(/\s+/).filter(Boolean);
+
+    // Shops matching any token (by name or address), fetched once.
+    const shopOr = tokens.flatMap((t) => {
+      const re = new RegExp(escape(t), 'i');
+      return [{ name: re }, { address: re }];
+    });
+    const matchedShops = await Shop.find({ $or: shopOr }, 'name address').lean();
+
+    const andClauses = tokens.map((t) => {
+      const re = new RegExp(escape(t), 'i');
+      const or = [
+        { firstName: re },
+        { lastName: re },
+        { phoneNumber: re },
+        { telegramId: re },
+        { shopNumber: re },
+      ];
+      const shopIds = matchedShops
+        .filter((s) => re.test(s.name || '') || re.test(s.address || ''))
+        .map((s) => s._id);
+      if (shopIds.length) or.push({ shopId: { $in: shopIds } });
+      return { $or: or };
+    });
+
+    filter['$and'] = andClauses;
   }
 
   // Window info — only when filtering sellers in a specific group
