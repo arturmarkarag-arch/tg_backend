@@ -12,7 +12,7 @@ const AppSetting     = require('../models/AppSetting');
 const { getOpenAIStatus } = require('../openaiClient');
 const { getGeminiStatus, embedImageUrl: geminiEmbedImageUrl, embedText: geminiEmbedText } = require('../geminiClient');
 const { embedProduct } = require('../utils/productEmbedding');
-const { describeImageUrl } = require('../utils/productDescribe');
+const { describeImageUrl, translateLabelImageUrl } = require('../utils/productDescribe');
 const { presignPutUrl, deleteObject, publicUrl } = require('../utils/r2');
 
 // One-shot query photos live here; deleted right after OpenAI reads them.
@@ -337,6 +337,29 @@ router.post('/describe', anyRole, asyncHandler(async (req, res) => {
     res.json({ description: text, usage });
   } catch (err) {
     console.error('[visionSearch] describe error:', err.message);
+    return res.status(502).json({ error: 'openai_api_error', message: err.message });
+  } finally {
+    deleteObject(key); // one-shot photo
+  }
+}));
+
+// ─── POST /translate-label — faithful Ukrainian translation of a product label ─
+// User photographs the back / label of a product; we translate ONLY what is
+// printed (product info, usage, warnings) without inventing anything. Sections
+// absent on the label come back empty. No search, no embedding.
+router.post('/translate-label', anyRole, asyncHandler(async (req, res) => {
+  const key = req.body?.key;
+  if (!isVisionTmpKey(key)) return res.status(400).json({ error: 'photo_required', message: 'Не вказано фото' });
+
+  if (!getGeminiStatus().connected && !getOpenAIStatus().connected) {
+    return res.status(503).json({ error: 'translate_not_configured', message: 'Переклад недоступний: не підключено ні Gemini, ні OpenAI' });
+  }
+
+  try {
+    const { product, usage, warnings, readable, tokenUsage } = await translateLabelImageUrl(publicUrl(key));
+    res.json({ product, usage, warnings, readable, tokenUsage });
+  } catch (err) {
+    console.error('[visionSearch] translate-label error:', err.message);
     return res.status(502).json({ error: 'openai_api_error', message: err.message });
   } finally {
     deleteObject(key); // one-shot photo

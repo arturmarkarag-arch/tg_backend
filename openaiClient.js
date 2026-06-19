@@ -417,6 +417,25 @@ async function explainProductImageUrl(imageUrl, { model = null } = {}) {
   return { text: extractOutputText(response), usage: buildUsageInfo(response) };
 }
 
+// Generic image → text with a CUSTOM prompt (URL variant; OpenAI fetches the
+// image). Used by tasks that need their own instruction set — e.g. label
+// translation — without hard-coding the prompt like explainProductImageUrl does.
+async function generateTextFromImageUrl(imageUrl, prompt, { model = null } = {}) {
+  if (!openai || !imageUrl) return { text: '', usage: {} };
+  const selectedModel = model || (await getSelectedOpenAIModel());
+  const response = await openai.responses.create({
+    model: selectedModel,
+    input: [{
+      role: 'user',
+      content: [
+        { type: 'input_text', text: prompt },
+        { type: 'input_image', image_url: imageUrl, detail: 'high' },
+      ],
+    }],
+  });
+  return { text: extractOutputText(response), usage: buildUsageInfo(response) };
+}
+
 async function embedText(text) {
   if (!openai) throw new Error(openaiStatus.error || 'OPENAI_API_KEY not configured');
   const clean = String(text || '').trim();
@@ -443,5 +462,6 @@ module.exports = {
   describeProductImageUrl,
   explainProductImage,
   explainProductImageUrl,
+  generateTextFromImageUrl,
   embedText,
 };
