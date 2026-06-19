@@ -12,7 +12,7 @@ const AppSetting     = require('../models/AppSetting');
 const { getOpenAIStatus } = require('../openaiClient');
 const { getGeminiStatus, embedImageUrl: geminiEmbedImageUrl, embedText: geminiEmbedText } = require('../geminiClient');
 const { embedProduct } = require('../utils/productEmbedding');
-const { describeImageUrl, translateLabelImageUrl } = require('../utils/productDescribe');
+const { describeImageUrl, translateLabelImageUrl, answerPhotoQuestionImageUrl } = require('../utils/productDescribe');
 const { presignPutUrl, deleteObject, publicUrl } = require('../utils/r2');
 
 // One-shot query photos live here; deleted right after OpenAI reads them.
@@ -360,6 +360,31 @@ router.post('/translate-label', anyRole, asyncHandler(async (req, res) => {
     res.json({ product, usage, warnings, readable, tokenUsage });
   } catch (err) {
     console.error('[visionSearch] translate-label error:', err.message);
+    return res.status(502).json({ error: 'openai_api_error', message: err.message });
+  } finally {
+    deleteObject(key); // one-shot photo
+  }
+}));
+
+// ─── POST /ask — clarifying question about a product photo ────────────────────
+// Follow-up Q&A on the SAME photo (re-uploaded by the client each turn). Answers
+// strictly from what's visible; prior turns passed as `history` for context.
+router.post('/ask', anyRole, asyncHandler(async (req, res) => {
+  const key      = req.body?.key;
+  const question = String(req.body?.question || '').trim();
+  const history  = Array.isArray(req.body?.history) ? req.body.history.slice(-10) : [];
+  if (!isVisionTmpKey(key)) return res.status(400).json({ error: 'photo_required', message: 'Не вказано фото' });
+  if (!question) return res.status(400).json({ error: 'question_required', message: 'Не вказано запитання' });
+
+  if (!getGeminiStatus().connected && !getOpenAIStatus().connected) {
+    return res.status(503).json({ error: 'ask_not_configured', message: 'Запитання недоступні: не підключено ні Gemini, ні OpenAI' });
+  }
+
+  try {
+    const { answer, tokenUsage } = await answerPhotoQuestionImageUrl(publicUrl(key), question, history);
+    res.json({ answer, tokenUsage });
+  } catch (err) {
+    console.error('[visionSearch] ask error:', err.message);
     return res.status(502).json({ error: 'openai_api_error', message: err.message });
   } finally {
     deleteObject(key); // one-shot photo

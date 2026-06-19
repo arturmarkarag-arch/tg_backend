@@ -132,4 +132,59 @@ async function translateLabelImageUrl(url) {
   return { ...parseTranslateResponse(raw || ''), tokenUsage: {} };
 }
 
-module.exports = { describeImageUrl, translateLabelImageUrl };
+// ── Follow-up questions about the photo ──────────────────────────────────────
+// After the description / translation the user may ask clarifying questions about
+// the SAME photo ("чи є тут цукор?", "скільки штук в упаковці?"). We re-send the
+// photo plus the prior Q&A so the answer stays grounded in what is actually
+// visible — the model must NOT invent anything beyond the image.
+
+const ASK_PHOTO_PROMPT =
+  'Ти відповідаєш на запитання працівника магазину про товар на ФОТО (етикетка / упаковка). ' +
+  'Відповідай УКРАЇНСЬКОЮ мовою, стисло і по суті. ' +
+  'Відповідай ВИКЛЮЧНО на основі того, що РЕАЛЬНО видно на фото. ' +
+  'Якщо відповіді немає на фото або текст не видно — чесно напиши "Цього не видно на фото", НЕ вигадуй і не здогадуйся. ' +
+  'Не додавай зайвих пояснень, припущень чи рекламних фраз. ' +
+  'Власні назви та бренди можеш лишати мовою оригіналу.';
+
+// history: [{ question, answer }] — prior turns about the same photo.
+function buildAskPrompt(question, history = []) {
+  let prompt = ASK_PHOTO_PROMPT;
+  const turns = Array.isArray(history) ? history.filter((h) => h && h.question) : [];
+  if (turns.length) {
+    prompt += '\n\nПопередні запитання та відповіді про це фото:';
+    for (const t of turns) {
+      prompt += `\nПитання: ${String(t.question).trim()}`;
+      prompt += `\nВідповідь: ${String(t.answer || '').trim()}`;
+    }
+  }
+  prompt += `\n\nНове запитання: ${String(question).trim()}`;
+  return prompt;
+}
+
+// Returns { answer, tokenUsage }.
+async function answerPhotoQuestionImageUrl(url, question, history = []) {
+  if (!url || !String(question || '').trim()) return { answer: '', tokenUsage: {} };
+  const prompt = buildAskPrompt(question, history);
+
+  const preferGemini = DESCRIBE_PROVIDER !== 'openai' && getGeminiStatus().connected;
+
+  if (preferGemini) {
+    try {
+      const { text } = await generateTextFromImageUrl(url, prompt);
+      if (text) return { answer: text.trim(), tokenUsage: {} };
+    } catch (err) {
+      console.error('[askPhoto:gemini]', err.message);
+      if (!getOpenAIStatus().connected) throw err;
+    }
+  }
+
+  if (getOpenAIStatus().connected) {
+    const { text, usage } = await openaiTextFromImageUrl(url, prompt);
+    return { answer: (text || '').trim(), tokenUsage: usage };
+  }
+
+  const { text } = await generateTextFromImageUrl(url, prompt);
+  return { answer: (text || '').trim(), tokenUsage: {} };
+}
+
+module.exports = { describeImageUrl, translateLabelImageUrl, answerPhotoQuestionImageUrl };
