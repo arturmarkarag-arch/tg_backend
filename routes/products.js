@@ -263,13 +263,12 @@ router.get('/drafts', staffOnly, asyncHandler(async (req, res) => {
 
 // GET /api/v1/products/:id/position — absolute index of a product in the
 // unfiltered seller catalogue (used for deep-links). Matches the GET / filter
-// (not archived + in a block + older than NEW_DAYS or unshelved) and sort
-// (orderNumber asc, createdAt desc, _id asc) exactly, so the returned
-// `position` lines up with the `offset` clients use to page in.
+// (not archived + in a block) and sort (orderNumber asc, createdAt desc,
+// _id asc) exactly, so the returned `position` lines up with the `offset`
+// clients use to page in.
 //
 // Returns:
 //   200 { position, total }     — found in the catalogue
-//   404 { error: 'in_new_products' } — product is "new" (<14 days), lives on the New Products tab
 //   404 { error: 'not_in_catalog' }  — archived / not in any block / otherwise hidden
 //   400 { error: 'invalid_id' }      — malformed id
 router.get('/:id/position', asyncHandler(async (req, res) => {
@@ -284,14 +283,8 @@ router.get('/:id/position', asyncHandler(async (req, res) => {
   const target = await Product.findById(id).lean();
   if (!target) return res.status(404).json({ error: 'not_in_catalog' });
 
-  const NEW_DAYS_CUTOFF = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000);
   const catalogMatch = {
     status: { $ne: 'archived' },
-    $or: [
-      { shelvedAt: null },
-      { shelvedAt: { $exists: false } },
-      { shelvedAt: { $lt: NEW_DAYS_CUTOFF } },
-    ],
   };
   const basePipeline = [
     { $match: catalogMatch },
@@ -316,9 +309,7 @@ router.get('/:id/position', asyncHandler(async (req, res) => {
     { $count: 'count' },
   ]);
   if (!selfRes?.count) {
-    const isNew = target.shelvedAt && new Date(target.shelvedAt) >= NEW_DAYS_CUTOFF
-      && target.status !== 'archived';
-    return res.status(404).json({ error: isNew ? 'in_new_products' : 'not_in_catalog' });
+    return res.status(404).json({ error: 'not_in_catalog' });
   }
 
   // Count catalogue products that sort strictly before the target. Mirrors the
@@ -384,17 +375,12 @@ router.get('/', async (req, res) => {
 
   const isV1 = String(req.baseUrl || '').includes('/api/v1') || String(req.originalUrl || '').startsWith('/api/v1');
 
-  // For the seller-facing catalogue (v1), show only products placed in blocks
-  // AND older than NEW_DAYS — newer products live on the "Нові товари" page.
-  // Products with shelvedAt=null pre-date the Прийомка flow and go straight to the catalogue.
+  // For the seller-facing catalogue (v1), show every product placed in a block
+  // (not archived), regardless of age. The old NEW_DAYS split is gone — new
+  // products now appear here too; the "Нові товари" page is a separate view-only
+  // gallery of the last 14 days, not a slice carved out of this list.
   // Use $lookup aggregation to do the join server-side — avoids loading all productIds into Node.js memory.
-  const NEW_DAYS_CUTOFF = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000);
   if (isV1) {
-    query.$or = [
-      { shelvedAt: null },
-      { shelvedAt: { $exists: false } },
-      { shelvedAt: { $lt: NEW_DAYS_CUTOFF } },
-    ];
     const basePipeline = [
       { $match: query },
       {
@@ -538,12 +524,17 @@ router.get('/new-count', asyncHandler(async (req, res) => {
   res.json({ count: result?.count ?? 0 });
 }));
 
-// List of products shelved within the last `days` (default 14) that are visible
-// in the seller catalogue (placed in a block). Powers the "Нові товари" page.
+// Paged list of products shelved within the last `days` (default 14) that are
+// visible in the seller catalogue (placed in a block). Powers the "Нові товари"
+// view-only gallery (50 per page, server-side pagination).
 router.get('/new-list', asyncHandler(async (req, res) => {
   const days = Math.min(90, Math.max(1, Number(req.query.days) || 14));
   const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
-  const products = await Product.aggregate([
+  const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 50));
+  const page = Math.max(0, Number(req.query.page) || 0);
+  const offset = page * limit;
+
+  const basePipeline = [
     { $match: { status: { $ne: 'archived' }, shelvedAt: { $gte: cutoff } } },
     {
       $lookup: {
@@ -555,7 +546,16 @@ router.get('/new-list', asyncHandler(async (req, res) => {
       },
     },
     { $match: { '_block.0': { $exists: true } } },
-    { $sort: { shelvedAt: -1 } },
+  ];
+
+  const [countResult] = await Product.aggregate([...basePipeline, { $count: 'total' }]);
+  const total = countResult?.total ?? 0;
+
+  const products = await Product.aggregate([
+    ...basePipeline,
+    { $sort: { shelvedAt: -1, _id: 1 } },
+    { $skip: offset },
+    { $limit: limit },
     {
       $project: {
         name: 1,
@@ -568,7 +568,14 @@ router.get('/new-list', asyncHandler(async (req, res) => {
       },
     },
   ]);
-  res.json({ products });
+
+  res.json({
+    products,
+    page,
+    limit,
+    total,
+    hasMore: offset + products.length < total,
+  });
 }));
 
 router.patch('/reorder', staffOnly, asyncHandler(async (req, res) => {
