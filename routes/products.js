@@ -501,12 +501,18 @@ router.get('/pending', asyncHandler(async (req, res) => {
   res.json(products);
 }));
 
-// Count of products shelved within the last `days` (default 14) that are visible
-// in the seller catalogue (placed in a block). Drives the "Нові товари" nav badge.
-router.get('/new-count', asyncHandler(async (req, res) => {
-  const days = Math.min(90, Math.max(1, Number(req.query.days) || 14));
-  const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
-  const [result] = await Product.aggregate([
+// Shared source for the "Нові товари" gallery + nav badge. Two kinds of "new":
+//   1. a warehouse Product shelved into a block within `days` (status != archived);
+//   2. a shop-OWNED ShopProduct received straight to shops (linkedProductId: null,
+//      source 'receive') created within `days`. These never touch the warehouse, so
+//      branch 1 would never surface them — but they still need to show up as new
+//      arrivals. They ONLY appear here (view-only); nothing else references them.
+// Both branches are normalized to a common shape (name/price/photo + _sortDate) so
+// the union can be sorted and paged as one list. Warehouse MIRRORS (linkedProductId
+// set) are deliberately excluded from branch 2 — their warehouse owner already
+// represents them in branch 1, so including them would double-count.
+function newProductsPipeline(cutoff) {
+  return [
     { $match: { status: { $ne: 'archived' }, shelvedAt: { $gte: cutoff } } },
     {
       $lookup: {
@@ -518,14 +524,56 @@ router.get('/new-count', asyncHandler(async (req, res) => {
       },
     },
     { $match: { '_block.0': { $exists: true } } },
+    {
+      $project: {
+        name: 1,
+        price: 1,
+        imageUrls: 1,
+        image_url: 1,
+        _sortDate: '$shelvedAt',
+      },
+    },
+    {
+      $unionWith: {
+        coll: 'shopproducts',
+        pipeline: [
+          {
+            $match: {
+              linkedProductId: null,
+              source: 'receive',
+              createdAt: { $gte: cutoff },
+            },
+          },
+          {
+            $project: {
+              name: 1,
+              price: 1,
+              imageUrl: 1,
+              originalImageUrl: 1,
+              _sortDate: '$createdAt',
+            },
+          },
+        ],
+      },
+    },
+  ];
+}
+
+// Count of new arrivals within the last `days` (default 14). Drives the "Нові
+// товари" nav badge. See newProductsPipeline for what counts as "new".
+router.get('/new-count', asyncHandler(async (req, res) => {
+  const days = Math.min(90, Math.max(1, Number(req.query.days) || 14));
+  const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+  const [result] = await Product.aggregate([
+    ...newProductsPipeline(cutoff),
     { $count: 'count' },
   ]);
   res.json({ count: result?.count ?? 0 });
 }));
 
-// Paged list of products shelved within the last `days` (default 14) that are
-// visible in the seller catalogue (placed in a block). Powers the "Нові товари"
-// view-only gallery (50 per page, server-side pagination).
+// Paged list of new arrivals within the last `days` (default 14). Powers the
+// "Нові товари" view-only gallery (50 per page, server-side pagination). See
+// newProductsPipeline for what counts as "new".
 router.get('/new-list', asyncHandler(async (req, res) => {
   const days = Math.min(90, Math.max(1, Number(req.query.days) || 14));
   const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
@@ -533,37 +581,24 @@ router.get('/new-list', asyncHandler(async (req, res) => {
   const page = Math.max(0, Number(req.query.page) || 0);
   const offset = page * limit;
 
-  const basePipeline = [
-    { $match: { status: { $ne: 'archived' }, shelvedAt: { $gte: cutoff } } },
-    {
-      $lookup: {
-        from: 'blocks',
-        localField: '_id',
-        foreignField: 'productIds',
-        as: '_block',
-        pipeline: [{ $project: { _id: 1 } }],
-      },
-    },
-    { $match: { '_block.0': { $exists: true } } },
-  ];
+  const basePipeline = newProductsPipeline(cutoff);
 
   const [countResult] = await Product.aggregate([...basePipeline, { $count: 'total' }]);
   const total = countResult?.total ?? 0;
 
   const products = await Product.aggregate([
     ...basePipeline,
-    { $sort: { shelvedAt: -1, _id: 1 } },
+    { $sort: { _sortDate: -1, _id: 1 } },
     { $skip: offset },
     { $limit: limit },
     {
       $project: {
         name: 1,
-        brand: 1,
         price: 1,
-        quantity: 1,
-        shelvedAt: 1,
         imageUrls: 1,
         image_url: 1,
+        imageUrl: 1,
+        originalImageUrl: 1,
       },
     },
   ]);
