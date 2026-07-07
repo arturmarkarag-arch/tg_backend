@@ -1,8 +1,6 @@
 const express = require('express');
 const mongoose = require('mongoose');
-const { S3Client, DeleteObjectCommand } = require('@aws-sdk/client-s3');
 const Product = require('../models/Product');
-const Block = require('../models/Block');
 const PickingTask = require('../models/PickingTask');
 const { getIO } = require('../socket');
 const { telegramAuth, requireTelegramRoles } = require('../middleware/telegramAuth');
@@ -12,43 +10,6 @@ const router = express.Router();
 
 router.use(telegramAuth);
 router.use(requireTelegramRoles(['admin', 'warehouse']));
-
-let _r2Client = null;
-function getR2Client() {
-  if (_r2Client) return _r2Client;
-  const { R2_REGION, R2_ENDPOINT, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY } = process.env;
-  if (!R2_ENDPOINT || !R2_ACCESS_KEY_ID || !R2_SECRET_ACCESS_KEY) {
-    throw new Error('R2 credentials are not configured (R2_ENDPOINT, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY required)');
-  }
-  _r2Client = new S3Client({
-    region: R2_REGION || 'auto',
-    endpoint: R2_ENDPOINT,
-    credentials: { accessKeyId: R2_ACCESS_KEY_ID, secretAccessKey: R2_SECRET_ACCESS_KEY },
-    forcePathStyle: true,
-  });
-  return _r2Client;
-}
-
-async function deleteFromR2(imageNames = []) {
-  if (!imageNames.length) return;
-  let client;
-  try {
-    client = getR2Client();
-  } catch (err) {
-    console.error('[deleteFromR2] R2 not configured:', err.message);
-    return;
-  }
-  for (const name of imageNames) {
-    try {
-      await client.send(new DeleteObjectCommand({
-        Bucket: process.env.R2_BUCKET_NAME,
-        Key: `products/${name}`,
-      }));
-    } catch (err) {
-      console.error(`Failed to delete R2 object products/${name}:`, err.message);
-    }
-  }
-}
 
 /**
  * GET /api/archive?page=1&pageSize=10
@@ -185,15 +146,6 @@ router.post('/:id/restore', asyncHandler(async (req, res) => {
   try { getIO().emit('incoming_updated'); } catch (e) { console.warn('[archive/restore] socket incoming_updated failed:', e.message); }
 
   res.json(product);
-}));
-
-/**
- * DELETE /api/archive/:id — DISABLED.
- * Permanent deletion from the archive is intentionally not allowed to prevent
- * irreversible silent data loss. Archived products may only be RESTORED.
- */
-router.delete('/:id', asyncHandler(async (req, res) => { // eslint-disable-line no-unused-vars
-  throw appError('archive_delete_disabled');
 }));
 
 module.exports = { router };

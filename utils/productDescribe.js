@@ -2,17 +2,12 @@
 
 // Plain-language "what is this product?" description from a photo. This is a
 // GENERATIVE task (image → text), so it uses a generative model — NOT the
-// embedding model (embeddings can't produce text). Default provider is the free
-// Gemini Flash; OpenAI is used only as a fallback, or when DESCRIBE_PROVIDER=openai.
+// embedding model (embeddings can't produce text). Gemini-only: OpenAI was
+// retired project-wide, so there is no fallback — a Gemini failure surfaces as
+// itself (a transient 503/429 from Gemini) instead of being masked by a stale
+// OpenAI 429.
 
-const {
-  explainProductImageUrl,
-  getOpenAIStatus,
-  generateTextFromImageUrl: openaiTextFromImageUrl,
-} = require('../openaiClient');
 const { generateTextFromImageUrl, getGeminiStatus } = require('../geminiClient');
-
-const DESCRIBE_PROVIDER = String(process.env.DESCRIBE_PROVIDER || 'gemini').toLowerCase();
 
 const PRODUCT_EXPLAIN_PROMPT =
   'Ти аналізуєш фото товару для працівника магазину, який не знає цей продукт і не розуміє написів на упаковці. ' +
@@ -40,31 +35,10 @@ function parseDescribeResponse(raw) {
 // Returns { text, name, usage }.
 // text   — human-readable description (saved to aiDescription)
 // name   — short product name extracted by the model (empty string if unavailable)
-// usage  — token usage or {} for Gemini
+// usage  — always {} (kept for call-site compatibility)
 async function describeImageUrl(url) {
   if (!url) return { text: '', name: '', usage: {} };
-
-  const preferGemini = DESCRIBE_PROVIDER !== 'openai' && getGeminiStatus().connected;
-
-  if (preferGemini) {
-    try {
-      const { text: raw } = await generateTextFromImageUrl(url, PRODUCT_EXPLAIN_PROMPT);
-      if (raw) {
-        const { name, description } = parseDescribeResponse(raw);
-        return { text: description || raw, name, usage: {} };
-      }
-    } catch (err) {
-      console.error('[describe:gemini]', err.message);
-      if (!getOpenAIStatus().connected) throw err;
-    }
-  }
-
-  if (getOpenAIStatus().connected) {
-    const { text: raw, usage } = await explainProductImageUrl(url);
-    const { name, description } = parseDescribeResponse(raw || '');
-    return { text: description || raw, name, usage };
-  }
-
+  if (!getGeminiStatus().connected) throw new Error('gemini_not_configured');
   const { text: raw } = await generateTextFromImageUrl(url, PRODUCT_EXPLAIN_PROMPT);
   const { name, description } = parseDescribeResponse(raw || '');
   return { text: description || raw, name, usage: {} };
@@ -107,27 +81,10 @@ function parseTranslateResponse(raw) {
   }
 }
 
-// Returns { product, usage, warnings, readable, usage: tokenUsage }.
+// Returns { product, usage, warnings, readable, tokenUsage }.
 async function translateLabelImageUrl(url) {
   if (!url) return { product: '', usage: '', warnings: '', readable: false, tokenUsage: {} };
-
-  const preferGemini = DESCRIBE_PROVIDER !== 'openai' && getGeminiStatus().connected;
-
-  if (preferGemini) {
-    try {
-      const { text: raw } = await generateTextFromImageUrl(url, LABEL_TRANSLATE_PROMPT);
-      if (raw) return { ...parseTranslateResponse(raw), tokenUsage: {} };
-    } catch (err) {
-      console.error('[translateLabel:gemini]', err.message);
-      if (!getOpenAIStatus().connected) throw err;
-    }
-  }
-
-  if (getOpenAIStatus().connected) {
-    const { text: raw, usage } = await openaiTextFromImageUrl(url, LABEL_TRANSLATE_PROMPT);
-    return { ...parseTranslateResponse(raw || ''), tokenUsage: usage };
-  }
-
+  if (!getGeminiStatus().connected) throw new Error('gemini_not_configured');
   const { text: raw } = await generateTextFromImageUrl(url, LABEL_TRANSLATE_PROMPT);
   return { ...parseTranslateResponse(raw || ''), tokenUsage: {} };
 }
@@ -165,25 +122,8 @@ function buildAskPrompt(question, history = []) {
 // Returns { answer, tokenUsage }.
 async function answerPhotoQuestionImageUrl(url, question, history = []) {
   if (!url || !String(question || '').trim()) return { answer: '', tokenUsage: {} };
+  if (!getGeminiStatus().connected) throw new Error('gemini_not_configured');
   const prompt = buildAskPrompt(question, history);
-
-  const preferGemini = DESCRIBE_PROVIDER !== 'openai' && getGeminiStatus().connected;
-
-  if (preferGemini) {
-    try {
-      const { text } = await generateTextFromImageUrl(url, prompt);
-      if (text) return { answer: text.trim(), tokenUsage: {} };
-    } catch (err) {
-      console.error('[askPhoto:gemini]', err.message);
-      if (!getOpenAIStatus().connected) throw err;
-    }
-  }
-
-  if (getOpenAIStatus().connected) {
-    const { text, usage } = await openaiTextFromImageUrl(url, prompt);
-    return { answer: (text || '').trim(), tokenUsage: usage };
-  }
-
   const { text } = await generateTextFromImageUrl(url, prompt);
   return { answer: (text || '').trim(), tokenUsage: {} };
 }

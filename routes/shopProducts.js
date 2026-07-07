@@ -10,7 +10,6 @@ const { embedProductAsync } = require('../utils/productEmbedding');
 const { syncMirror } = require('../utils/upsertShopProduct');
 const { repriceActiveOrders } = require('../utils/repriceActiveOrders');
 const { getIO } = require('../socket');
-const { explainProductImageUrl, getOpenAIStatus } = require('../openaiClient');
 const { getGeminiStatus } = require('../geminiClient');
 const { describeImageUrl } = require('../utils/productDescribe');
 
@@ -298,8 +297,8 @@ router.post('/:id/describe', staffOnly, asyncHandler(async (req, res) => {
   const url = target.originalImageUrl || (target === item ? item.imageUrl : target.imageUrls?.[0]);
   if (!url) return res.status(400).json({ error: 'photo_required', message: 'У товару немає фото' });
 
-  if (!getGeminiStatus().connected && !getOpenAIStatus().connected) {
-    return res.status(503).json({ error: 'describe_not_configured', message: 'Опис недоступний: не підключено ні Gemini, ні OpenAI' });
+  if (!getGeminiStatus().connected) {
+    return res.status(503).json({ error: 'describe_not_configured', message: 'Опис недоступний: не підключено Gemini' });
   }
 
   try {

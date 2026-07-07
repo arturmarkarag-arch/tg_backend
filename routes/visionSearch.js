@@ -9,7 +9,6 @@ const ProductVector  = require('../models/ProductVector');
 const Block          = require('../models/Block');
 const VisionTestLog  = require('../models/VisionTestLog');
 const AppSetting     = require('../models/AppSetting');
-const { getOpenAIStatus } = require('../openaiClient');
 const { getGeminiStatus, embedImageUrl: geminiEmbedImageUrl, embedText: geminiEmbedText } = require('../geminiClient');
 const { embedProduct } = require('../utils/productEmbedding');
 const { describeImageUrl, translateLabelImageUrl, answerPhotoQuestionImageUrl } = require('../utils/productDescribe');
@@ -328,8 +327,8 @@ router.post('/describe', anyRole, asyncHandler(async (req, res) => {
   const key = req.body?.key;
   if (!isVisionTmpKey(key)) return res.status(400).json({ error: 'photo_required', message: 'Не вказано фото' });
 
-  if (!getGeminiStatus().connected && !getOpenAIStatus().connected) {
-    return res.status(503).json({ error: 'describe_not_configured', message: 'Опис недоступний: не підключено ні Gemini, ні OpenAI' });
+  if (!getGeminiStatus().connected) {
+    return res.status(503).json({ error: 'describe_not_configured', message: 'Опис недоступний: не підключено Gemini' });
   }
 
   try {
@@ -337,7 +336,7 @@ router.post('/describe', anyRole, asyncHandler(async (req, res) => {
     res.json({ description: text, usage });
   } catch (err) {
     console.error('[visionSearch] describe error:', err.message);
-    return res.status(502).json({ error: 'openai_api_error', message: err.message });
+    return res.status(502).json({ error: 'gemini_api_error', message: err.message });
   } finally {
     deleteObject(key); // one-shot photo
   }
@@ -351,8 +350,8 @@ router.post('/translate-label', anyRole, asyncHandler(async (req, res) => {
   const key = req.body?.key;
   if (!isVisionTmpKey(key)) return res.status(400).json({ error: 'photo_required', message: 'Не вказано фото' });
 
-  if (!getGeminiStatus().connected && !getOpenAIStatus().connected) {
-    return res.status(503).json({ error: 'translate_not_configured', message: 'Переклад недоступний: не підключено ні Gemini, ні OpenAI' });
+  if (!getGeminiStatus().connected) {
+    return res.status(503).json({ error: 'translate_not_configured', message: 'Переклад недоступний: не підключено Gemini' });
   }
 
   try {
@@ -360,7 +359,7 @@ router.post('/translate-label', anyRole, asyncHandler(async (req, res) => {
     res.json({ product, usage, warnings, readable, tokenUsage });
   } catch (err) {
     console.error('[visionSearch] translate-label error:', err.message);
-    return res.status(502).json({ error: 'openai_api_error', message: err.message });
+    return res.status(502).json({ error: 'gemini_api_error', message: err.message });
   } finally {
     deleteObject(key); // one-shot photo
   }
@@ -376,8 +375,8 @@ router.post('/ask', anyRole, asyncHandler(async (req, res) => {
   if (!isVisionTmpKey(key)) return res.status(400).json({ error: 'photo_required', message: 'Не вказано фото' });
   if (!question) return res.status(400).json({ error: 'question_required', message: 'Не вказано запитання' });
 
-  if (!getGeminiStatus().connected && !getOpenAIStatus().connected) {
-    return res.status(503).json({ error: 'ask_not_configured', message: 'Запитання недоступні: не підключено ні Gemini, ні OpenAI' });
+  if (!getGeminiStatus().connected) {
+    return res.status(503).json({ error: 'ask_not_configured', message: 'Запитання недоступні: не підключено Gemini' });
   }
 
   try {
@@ -385,7 +384,7 @@ router.post('/ask', anyRole, asyncHandler(async (req, res) => {
     res.json({ answer, tokenUsage });
   } catch (err) {
     console.error('[visionSearch] ask error:', err.message);
-    return res.status(502).json({ error: 'openai_api_error', message: err.message });
+    return res.status(502).json({ error: 'gemini_api_error', message: err.message });
   } finally {
     deleteObject(key); // one-shot photo
   }

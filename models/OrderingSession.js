@@ -51,6 +51,22 @@ const OrderingSessionSchema = new mongoose.Schema(
     pickingCompletedAt: { type: Date, default: null },
 
     events: { type: [SessionEventSchema], default: [] },
+
+    // Box numbers for packing. Each SHOP (by shopId) in this session gets one
+    // stable sequential number so warehouse staff can label boxes with a digit
+    // instead of a shop name. Numbered alphabetically by shop name and FROZEN
+    // once at picking start (the set of shops is fixed by then — ordering window
+    // ⊕ picking are mutually exclusive in time). Two sellers of the same shop
+    // share one number. Scoped to this session only (restarts at 1 each session,
+    // independent per group). See utils/shopNumbering.js. Empty until frozen.
+    shopNumbers: {
+      type: [new mongoose.Schema({
+        shopId:   { type: String, required: true },
+        shopName: { type: String, default: '' },
+        number:   { type: Number, required: true },
+      }, { _id: false })],
+      default: undefined,
+    },
   },
   { timestamps: true },
 );

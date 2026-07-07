@@ -18,6 +18,7 @@ const { withLock } = require('../utils/lock');
 const { transitionPickingStatus, maybeCompleteSession } = require('../utils/sessionStatus');
 const { getSessionVocab, deriveSessionPhase } = require('../utils/sessionVocab');
 const { reconcileLateOrdersForSession } = require('../services/lateOrderReconcile');
+const { ensureSessionShopNumbers, buildShopNumberLookup } = require('../utils/shopNumbering');
 
 const {
   findAndLockNext,
@@ -140,6 +141,19 @@ async function buildTaskResponse(task, { wrappedAround = false, isSecondChance =
     product.localImageUrl ||
     null;
 
+  // Resolve this session's frozen box numbers so each shop shows the SAME number
+  // across every product (staff label boxes by digit). By shopId, falling back to
+  // shopName for older tasks that predate the item.shopId field.
+  let shopLookup = { byId: new Map(), byName: new Map() };
+  if (task.orderingSessionId) {
+    const sess = await OrderingSession.findById(task.orderingSessionId, 'shopNumbers').lean();
+    shopLookup = buildShopNumberLookup(sess?.shopNumbers);
+  }
+  const boxNumberFor = (item) =>
+    (item.shopId != null ? shopLookup.byId.get(String(item.shopId)) : undefined) ??
+    shopLookup.byName.get(String(item.shopName || '')) ??
+    null;
+
   return {
     taskId: String(task._id),
     productId: String(product._id),
@@ -155,15 +169,19 @@ async function buildTaskResponse(task, { wrappedAround = false, isSecondChance =
       .map((item) => ({
         orderId: String(item.orderId),
         shopName: item.shopName || '',
+        shopNumber: boxNumberFor(item),
         sellerName: item.sellerName || '',
         orderCreatedAt: item.orderCreatedAt || null,
         quantity: item.quantity,
         packedQuantity: item.packedQuantity ?? null,
         packed: item.packed,
       }))
-      // Oldest order first: position depends only on when the order was created,
-      // not on when this product happened to be added to it.
-      .sort((a, b) => new Date(a.orderCreatedAt || 0) - new Date(b.orderCreatedAt || 0)),
+      // Sort by the stable box number so the packing list order matches the digits
+      // on the boxes. Items without a resolved number (edge/fallback) sink to the
+      // bottom, then by creation time as a tiebreaker.
+      .sort((a, b) =>
+        (a.shopNumber ?? Infinity) - (b.shopNumber ?? Infinity)
+        || new Date(a.orderCreatedAt || 0) - new Date(b.orderCreatedAt || 0)),
   };
 }
 
@@ -373,7 +391,12 @@ router.post('/start-session', requireTelegramRoles(['warehouse', 'admin']), asyn
       buyerTelegramId: String(o.buyerTelegramId),
     }));
 
-    // 7. Build tasks, then move pending → confirmed.
+    // 7. Freeze the per-shop box numbers for this session (alphabetical by shop
+    //    name, one number per shopId) so packing boxes can be labelled with digits.
+    //    Uses the already-loaded session orders; idempotent and best-effort.
+    await ensureSessionShopNumbers(currentSessionId, sessionActiveOrders);
+
+    // 8. Build tasks, then move pending → confirmed.
     await buildPickingTasksFromOrders(deliveryGroupId, { orderingSessionId: currentSessionId });
     const builtCount = await PickingTask.countDocuments({
       orderingSessionId: currentSessionId,

@@ -18,7 +18,6 @@ const DeliveryGroup = require('../models/DeliveryGroup');
 const SearchProduct = require('../models/SearchProduct');
 const { requireTelegramRoles } = require('../middleware/telegramAuth');
 const { appError, asyncHandler } = require('../utils/errors');
-const { explainProductImageUrl, getOpenAIStatus } = require('../openaiClient');
 const { getGeminiStatus } = require('../geminiClient');
 const { describeImageUrl } = require('../utils/productDescribe');
 const { embedProductAsync } = require('../utils/productEmbedding');
@@ -1248,8 +1247,8 @@ router.post('/:id/describe', staffOnly, asyncHandler(async (req, res) => {
   const url = product.originalImageUrl || product.imageUrls?.[0] || '';
   if (!url) return res.status(400).json({ error: 'photo_required', message: 'У товару немає фото' });
 
-  if (!getGeminiStatus().connected && !getOpenAIStatus().connected) {
-    return res.status(503).json({ error: 'describe_not_configured', message: 'Опис недоступний: не підключено ні Gemini, ні OpenAI' });
+  if (!getGeminiStatus().connected) {
+    return res.status(503).json({ error: 'describe_not_configured', message: 'Опис недоступний: не підключено Gemini' });
   }
 
   try {

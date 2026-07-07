@@ -18,6 +18,11 @@ const PickingTaskSchema = new mongoose.Schema(
     items: [
       {
         orderId: { type: mongoose.Schema.Types.ObjectId, ref: 'Order' },
+        // Stable shop identity — used to resolve the session's box number for this
+        // shop (see utils/shopNumbering.js). Two sellers of one shop share a shopId,
+        // hence one box number. Older in-flight tasks may lack it → box-number
+        // lookup falls back to shopName.
+        shopId: { type: mongoose.Schema.Types.ObjectId, ref: 'Shop', default: null },
         shopName: { type: String, default: '' },
         // First+last name of the buyer (seller) who created this order — shown as a
         // faint subtitle under the shop name in the packing card.
