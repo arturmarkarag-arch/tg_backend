@@ -501,25 +501,23 @@ router.get('/pending', asyncHandler(async (req, res) => {
   res.json(products);
 }));
 
-// Shared source for the "Нові товари" gallery + nav badge. Two kinds of "new":
-//   1. a warehouse Product in a block, "arrived" within `days` (status != archived);
+// Shared source for the "Нові товари" gallery + nav badge. This is strictly a view
+// of goods that ARRIVED VIA A RECEIPT (накладна) within `days` — NOT the whole
+// warehouse catalogue. Two kinds:
+//   1. a warehouse Product received onto a shelf: shelvedAt is set. shelvedAt is
+//      written ONLY by the receipt flow (shelfQty>0), so this excludes seeded /
+//      manually-added / migrated products by construction — exactly what we want.
+//      Must also be in a block (visible in the catalogue, not stuck in Надходження).
 //   2. a shop-OWNED ShopProduct received straight to shops (linkedProductId: null,
-//      source 'receive') created within `days`. These never touch the warehouse, so
-//      branch 1 would never surface them — but they still need to show up as new
-//      arrivals. They ONLY appear here (view-only); nothing else references them.
-// The warehouse "arrival" date is shelvedAt (the receipt-confirm moment) when it
-// exists, else createdAt. shelvedAt is ONLY written by the receipt flow (shelfQty>0),
-// so products created any other way (seed / manual add / migration) have it null and
-// would otherwise never count as new — the createdAt fallback keeps them visible.
+//      source 'receive') created within `days`. These never touch the warehouse.
 // Both branches are normalized to a common shape (name/price/photo + _sortDate) so
 // the union can be sorted and paged as one list. Warehouse MIRRORS (linkedProductId
 // set) are deliberately excluded from branch 2 — their warehouse owner already
-// represents them in branch 1, so including them would double-count.
+// represents them in branch 1, so including them would double-count. They ONLY
+// appear here (view-only); nothing else references them.
 function newProductsPipeline(cutoff) {
   return [
-    { $match: { status: { $ne: 'archived' } } },
-    { $addFields: { _sortDate: { $ifNull: ['$shelvedAt', '$createdAt'] } } },
-    { $match: { _sortDate: { $gte: cutoff } } },
+    { $match: { status: { $ne: 'archived' }, shelvedAt: { $gte: cutoff } } },
     {
       $lookup: {
         from: 'blocks',
@@ -536,7 +534,7 @@ function newProductsPipeline(cutoff) {
         price: 1,
         imageUrls: 1,
         image_url: 1,
-        _sortDate: 1,
+        _sortDate: '$shelvedAt',
       },
     },
     {
