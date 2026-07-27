@@ -53,6 +53,7 @@ const UserSchema = new mongoose.Schema(
       orderItems:          { type: Map, of: Number, default: {} },
       orderItemIds:        { type: [String], default: [] },
       lastOrderPositions:  { type: Number, default: 0 },
+      navigationSessionId: { type: String, default: '' },
       lastViewedProductId:    { type: String, default: '' },
       lastViewedOrderNumber:  { type: Number, default: 0 },
       currentIndex:           { type: Number, default: 0 },

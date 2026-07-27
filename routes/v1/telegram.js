@@ -11,6 +11,7 @@ const { consumeRegistrationToken } = require('../../services/registrationToken')
 const { issueGoogleLinkToken } = require('../../services/googleLinkToken');
 const { getOrderingWindowOpenAt } = require('../../utils/orderingSchedule');
 const { normalizeDeliveryGroup } = require('../../utils/deliveryGroupHelpers');
+const { getOrCreateSessionId } = require('../../utils/getOrCreateSession');
 const { getOrderingSchedule } = require('../../utils/getOrderingSchedule');
 const Order = require('../../models/Order');
 const { getIO } = require('../../socket');
@@ -36,17 +37,84 @@ function normalizeMiniAppState(miniAppState) {
 }
 
 function normalizeCartState(cartState) {
-  const defaults = { orderItems: {}, orderItemIds: [], lastOrderPositions: 0, lastViewedProductId: '', lastViewedOrderNumber: 0, currentIndex: 0, currentPage: 0, updatedAt: null, lastModifiedByTelegramId: null, lastModifiedByName: null, activeSellerCount: 1 };
+  const defaults = {
+    orderItems: {},
+    orderItemIds: [],
+    lastOrderPositions: 0,
+
+    navigationSessionId: '',
+
+    lastViewedProductId: '',
+    lastViewedOrderNumber: 0,
+    currentIndex: 0,
+    currentPage: 0,
+    updatedAt: null,
+    lastModifiedByTelegramId: null,
+    lastModifiedByName: null,
+    activeSellerCount: 1,
+  };
+
   if (!cartState || typeof cartState !== 'object') return defaults;
+
   const result = { ...defaults, ...cartState };
+
   if (result.orderItems instanceof Map) {
     result.orderItems = Object.fromEntries(result.orderItems);
-  } else if (result.orderItems && typeof result.orderItems === 'object' && !Array.isArray(result.orderItems)) {
-    result.orderItems = Object.fromEntries(Object.entries(result.orderItems));
+  } else if (
+    result.orderItems &&
+    typeof result.orderItems === 'object' &&
+    !Array.isArray(result.orderItems)
+  ) {
+    result.orderItems = Object.fromEntries(
+      Object.entries(result.orderItems)
+    );
   } else {
     result.orderItems = {};
   }
+
   return result;
+}
+
+async function resolveOrderingSessionContext(user, userShop = null) {
+  const resolvedShop = userShop || (user?.shopId ? await getShop(user.shopId) : null);
+  const resolvedGroupId = resolvedShop?.deliveryGroupId || user?.deliveryGroupId || '';
+
+  if (!['seller', 'admin'].includes(user?.role) || !resolvedGroupId) {
+    return {
+      resolvedGroupId,
+      sessionOpenAt: null,
+      orderingSessionId: '',
+    };
+  }
+
+  const group = normalizeDeliveryGroup(
+    await getDeliveryGroup(resolvedGroupId)
+  );
+
+  if (!group) {
+    return {
+      resolvedGroupId,
+      sessionOpenAt: null,
+      orderingSessionId: '',
+    };
+  }
+
+  const schedule = await getOrderingSchedule();
+  const sessionOpenAt = getOrderingWindowOpenAt(
+    group.dayOfWeek,
+    schedule
+  ).toISOString();
+  const orderingSessionId = await getOrCreateSessionId(
+    String(resolvedGroupId),
+    group.dayOfWeek,
+    schedule
+  );
+
+  return {
+    resolvedGroupId,
+    sessionOpenAt,
+    orderingSessionId,
+  };
 }
 
 async function resolveWarehouseZone(user) {
@@ -69,17 +137,22 @@ async function resolveWarehouseZone(user) {
 // (GET /api/v1/auth/me, JWT) so both return an identical shape.
 async function buildUserProfile(user) {
   const userShop = user.shopId ? await getShop(user.shopId) : null;
-  const resolvedGroupId = userShop?.deliveryGroupId || user.deliveryGroupId || '';
+  const fallbackGroupId = userShop?.deliveryGroupId || user.deliveryGroupId || '';
 
+  let resolvedGroupId = fallbackGroupId;
   let sessionOpenAt = null;
-  if ((user.role === 'seller' || user.role === 'admin') && resolvedGroupId) {
-    try {
-      const group = normalizeDeliveryGroup(await DeliveryGroup.findById(resolvedGroupId).lean());
-      if (group) {
-        const schedule = await getOrderingSchedule();
-        sessionOpenAt = getOrderingWindowOpenAt(group.dayOfWeek, schedule).toISOString();
-      }
-    } catch { /* non-critical */ }
+  let currentOrderingSessionId = '';
+
+  try {
+    const sessionContext = await resolveOrderingSessionContext(user, userShop);
+    resolvedGroupId = sessionContext.resolvedGroupId || fallbackGroupId;
+    sessionOpenAt = sessionContext.sessionOpenAt;
+    currentOrderingSessionId = sessionContext.orderingSessionId;
+  } catch (error) {
+    console.error(
+      '[buildUserProfile] Не вдалося визначити ordering session:',
+      error
+    );
   }
 
   let activeSellerCount = 1;
@@ -92,7 +165,58 @@ async function buildUserProfile(user) {
     if (activeSellerCount < 1) activeSellerCount = 1;
   }
 
-  const normalizedCartState = { ...normalizeCartState(user.cartState), activeSellerCount };
+  let catalogState = normalizeCartState(user.cartState);
+
+  const navigationSessionChanged =
+    user.role === 'seller' &&
+    currentOrderingSessionId &&
+    String(catalogState.navigationSessionId || '') !== currentOrderingSessionId;
+
+  if (navigationSessionChanged) {
+    const now = new Date();
+
+    catalogState = {
+      ...catalogState,
+      navigationSessionId: currentOrderingSessionId,
+      lastViewedProductId: '',
+      lastViewedOrderNumber: 0,
+      currentIndex: 0,
+      currentPage: 0,
+      updatedAt: now,
+    };
+
+    const resetUser = await User.findOneAndUpdate(
+      {
+        _id: user._id,
+        'cartState.navigationSessionId': { $ne: currentOrderingSessionId },
+      },
+      {
+        $set: {
+          'cartState.navigationSessionId': currentOrderingSessionId,
+          'cartState.lastViewedProductId': '',
+          'cartState.lastViewedOrderNumber': 0,
+          'cartState.currentIndex': 0,
+          'cartState.currentPage': 0,
+          'cartState.updatedAt': now,
+        },
+      },
+      { new: true }
+    ).lean();
+
+    if (resetUser) {
+      catalogState = normalizeCartState(resetUser.cartState);
+    } else {
+      // Another concurrent profile request may already have reset the session and
+      // the seller may even have progressed. Never overwrite that fresher state.
+      const freshUser = await User.findById(user._id).lean();
+      catalogState = normalizeCartState(freshUser?.cartState);
+    }
+  }
+
+  const normalizedCartState = {
+    ...catalogState,
+    activeSellerCount,
+  };
 
   return {
     telegramId: user.telegramId,
@@ -105,7 +229,8 @@ async function buildUserProfile(user) {
     shop: userShop ? { _id: userShop._id, name: userShop.name, city: userShop.cityId?.name || '', deliveryGroupId: userShop.deliveryGroupId, cartState: normalizedCartState } : null,
     // catalogState is always present regardless of role — lets admin/warehouse
     // restore their last catalog position across sessions and devices.
-    catalogState: normalizeCartState(user.cartState),
+    orderingSessionId: currentOrderingSessionId,
+    catalogState,
     shopName: userShop?.name || '',
     shopNumber: user.shopNumber,
     shopCity: userShop?.cityId?.name || '',
@@ -323,7 +448,17 @@ router.post('/google/unlink', asyncHandler(async (req, res) => {
 // POST /api/v1/telegram/mini-app/state — зберегти навігаційний стан (User) і кошик (Shop)
 // Захищено telegramAuth middleware — telegramId береться ТІЛЬКИ з req.telegramId
 router.post('/mini-app/state', asyncHandler(async (req, res) => {
-  const { currentIndex, currentPage, productId, orderNumber, orderItems, orderItemIds, viewMode } = req.body;
+  const {
+    currentIndex,
+    currentPage,
+    productId,
+    orderNumber,
+    orderItems,
+    orderItemIds,
+    viewMode,
+    orderingSessionId,
+    clientCartUpdatedAt,
+  } = req.body || {};
   const telegramId = req.telegramId;
 
   if (!Number.isInteger(currentIndex) || currentIndex < 0) {
@@ -333,8 +468,7 @@ router.post('/mini-app/state', asyncHandler(async (req, res) => {
     throw appError('me_state_invalid_index', { field: 'currentPage' });
   }
 
-  const MAX_CART_ITEMS = 200; // reasonable upper bound per user cart
-
+  const MAX_CART_ITEMS = 200;
   const sanitizedOrderItems = typeof orderItems === 'object' && orderItems !== null
     ? Object.fromEntries(
         Object.entries(orderItems)
@@ -345,98 +479,152 @@ router.post('/mini-app/state', asyncHandler(async (req, res) => {
   const sanitizedOrderItemIds = Array.isArray(orderItemIds)
     ? orderItemIds.slice(0, MAX_CART_ITEMS).map((id) => String(id))
     : [];
-
   const validViewMode = viewMode === 'grid' ? 'grid' : 'carousel';
 
-  const user = await User.findOneAndUpdate(
-    { telegramId },
-    {
-      $set: {
-        'miniAppState.viewMode': validViewMode,
-        'miniAppState.updatedAt': new Date(),
-      },
-    },
-    { new: true }
-  ).lean();
-
+  const user = await User.findOne({ telegramId }).lean();
   if (!user) {
-    const pendingRequest = await RegistrationRequest.findOne({ telegramId, status: 'pending' }).lean();
+    const pendingRequest = await RegistrationRequest.findOne({
+      telegramId,
+      status: 'pending',
+    }).lean();
     if (pendingRequest) throw appError('registration_pending');
     throw appError('user_not_found');
   }
 
-  // Кошик зберігається на продавці (User), а не на магазині — кожен має ізольований кошик
-  let cartState = normalizeCartState(null);
-  if (user) {
-    // Optimistic concurrency control for cart writes.
-    // Two browser tabs can race: each holds its own snapshot, both POST a "full"
-    // orderItems object, and the later one silently overwrites the earlier one's
-    // additions. To prevent that, the client SHOULD send `clientCartUpdatedAt`
-    // (the value it last received from the server). If it is older than what's
-    // currently stored, we reject the write with 409 and return the latest cart
-    // so the client can merge and retry.
-    //
-    // Backwards compatible: if `clientCartUpdatedAt` is omitted, the request
-    // proceeds as before (last-write-wins). New client always sends it.
-    const clientCartUpdatedAtRaw = req.body?.clientCartUpdatedAt;
-    const clientCartUpdatedAt = clientCartUpdatedAtRaw ? new Date(clientCartUpdatedAtRaw) : null;
-    const enforceLock = clientCartUpdatedAt && !Number.isNaN(clientCartUpdatedAt.getTime());
-
-    const filter = { telegramId };
-    if (enforceLock) {
-      // Match if server's stored timestamp is null OR <= the client's snapshot.
-      // (A future bigger timestamp means another writer won the race.)
-      filter.$or = [
-        { 'cartState.updatedAt': null },
-        { 'cartState.updatedAt': { $lte: clientCartUpdatedAt } },
-      ];
-    }
-
-    const updatedUser = await User.findOneAndUpdate(
-      filter,
-      {
-        $set: {
-          'cartState.orderItems': sanitizedOrderItems,
-          'cartState.orderItemIds': sanitizedOrderItemIds,
-          'cartState.lastViewedProductId': String(productId || ''),
-          'cartState.lastViewedOrderNumber': Number.isFinite(Number(orderNumber)) ? Number(orderNumber) : 0,
-          'cartState.currentIndex': currentIndex,
-          'cartState.currentPage': currentPage,
-          'cartState.updatedAt': new Date(),
-        },
-      },
-      { new: true }
-    ).lean();
-
-    if (!updatedUser && enforceLock) {
-      // Either the user vanished (extremely unlikely — they passed auth) or the
-      // optimistic lock failed. Re-read and decide.
-      const current = await User.findOne({ telegramId }).lean();
-      if (current) {
-        return res.status(409).json({
-          error: 'cart_stale',
-          message: 'Кошик було оновлено в іншій вкладці. Стан синхронізовано — повторіть дію.',
-          cartState: normalizeCartState(current.cartState),
-          miniAppState: normalizeMiniAppState(current.miniAppState),
-        });
-      }
-    }
-
-    if (updatedUser) {
-      cartState = normalizeCartState(updatedUser.cartState);
-      const io = getIO();
-      if (io && user.shopId) {
-        // Notify picking-group watchers of cart change
-        const shopDoc = await Shop.findById(user.shopId).select('deliveryGroupId').lean();
-        const groupId = shopDoc?.deliveryGroupId;
-        try {
-          if (groupId) io.to(`picking_group_${groupId}`).emit('shop_status_changed', { groupId: String(groupId) });
-        } catch (_) { /* non-critical */ }
-      }
+  let currentOrderingSessionId = '';
+  if (user.role === 'seller') {
+    try {
+      const sessionContext = await resolveOrderingSessionContext(user);
+      currentOrderingSessionId = sessionContext.orderingSessionId;
+    } catch (error) {
+      console.error(
+        '[POST /mini-app/state] Не вдалося визначити ordering session:',
+        error
+      );
     }
   }
 
-  res.json({ miniAppState: normalizeMiniAppState(user.miniAppState), cartState });
+  // A tab opened in the previous ordering session must never overwrite the
+  // navigation state of the new session. The client session id is mandatory for
+  // sellers; old/stale tabs receive 409 and must reload/reset to the first item.
+  if (user.role === 'seller' && currentOrderingSessionId) {
+    const clientOrderingSessionId = String(orderingSessionId || '');
+    if (clientOrderingSessionId !== currentOrderingSessionId) {
+      let latestUser = user;
+      const storedSessionId = String(user.cartState?.navigationSessionId || '');
+
+      // Reset only when the server itself still carries the previous session. If a
+      // fresh tab already progressed in the new session, an old tab must not erase it.
+      if (storedSessionId !== currentOrderingSessionId) {
+        const now = new Date();
+        latestUser = await User.findOneAndUpdate(
+          {
+            telegramId,
+            'cartState.navigationSessionId': { $ne: currentOrderingSessionId },
+          },
+          {
+            $set: {
+              'cartState.navigationSessionId': currentOrderingSessionId,
+              'cartState.lastViewedProductId': '',
+              'cartState.lastViewedOrderNumber': 0,
+              'cartState.currentIndex': 0,
+              'cartState.currentPage': 0,
+              'cartState.updatedAt': now,
+            },
+          },
+          { new: true }
+        ).lean();
+
+        if (!latestUser) {
+          latestUser = await User.findOne({ telegramId }).lean();
+        }
+      }
+
+      return res.status(409).json({
+        error: 'ordering_session_changed',
+        message: 'Почалася нова сесія замовлень. Каталог відкрито з першого товару.',
+        orderingSessionId: currentOrderingSessionId,
+        cartState: normalizeCartState(latestUser?.cartState),
+        miniAppState: normalizeMiniAppState(latestUser?.miniAppState),
+      });
+    }
+  }
+
+  const clientCartUpdatedAtDate = clientCartUpdatedAt
+    ? new Date(clientCartUpdatedAt)
+    : null;
+  const enforceLock = clientCartUpdatedAtDate
+    && !Number.isNaN(clientCartUpdatedAtDate.getTime());
+
+  const filter = { telegramId };
+  if (enforceLock) {
+    filter.$or = [
+      { 'cartState.updatedAt': null },
+      { 'cartState.updatedAt': { $exists: false } },
+      { 'cartState.updatedAt': { $lte: clientCartUpdatedAtDate } },
+    ];
+  }
+
+  const now = new Date();
+  const statePatch = {
+    'miniAppState.viewMode': validViewMode,
+    'miniAppState.updatedAt': now,
+    'cartState.orderItems': sanitizedOrderItems,
+    'cartState.orderItemIds': sanitizedOrderItemIds,
+    'cartState.lastViewedProductId': String(productId || ''),
+    'cartState.lastViewedOrderNumber': Number.isFinite(Number(orderNumber))
+      ? Number(orderNumber)
+      : 0,
+    'cartState.currentIndex': currentIndex,
+    'cartState.currentPage': currentPage,
+    'cartState.updatedAt': now,
+  };
+
+  if (user.role === 'seller' && currentOrderingSessionId) {
+    statePatch['cartState.navigationSessionId'] = currentOrderingSessionId;
+  }
+
+  const updatedUser = await User.findOneAndUpdate(
+    filter,
+    { $set: statePatch },
+    { new: true }
+  ).lean();
+
+  if (!updatedUser && enforceLock) {
+    const current = await User.findOne({ telegramId }).lean();
+    if (current) {
+      return res.status(409).json({
+        error: 'cart_stale',
+        message: 'Стан було оновлено в іншій вкладці. Отримано актуальні дані.',
+        orderingSessionId: currentOrderingSessionId,
+        cartState: normalizeCartState(current.cartState),
+        miniAppState: normalizeMiniAppState(current.miniAppState),
+      });
+    }
+    throw appError('user_not_found');
+  }
+
+  const cartState = normalizeCartState(updatedUser?.cartState);
+  const io = getIO();
+  if (io && updatedUser?.shopId) {
+    const shopDoc = await Shop.findById(updatedUser.shopId)
+      .select('deliveryGroupId')
+      .lean();
+    const groupId = shopDoc?.deliveryGroupId;
+    try {
+      if (groupId) {
+        io.to(`picking_group_${groupId}`).emit('shop_status_changed', {
+          groupId: String(groupId),
+        });
+      }
+    } catch (_) { /* non-critical */ }
+  }
+
+  res.json({
+    orderingSessionId: currentOrderingSessionId,
+    miniAppState: normalizeMiniAppState(updatedUser?.miniAppState),
+    cartState,
+  });
 }));
 
 // POST /api/v1/telegram/mini-app/reset-state — очистити кошик магазину і навігаційний стан продавця
