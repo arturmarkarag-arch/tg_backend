@@ -732,14 +732,24 @@ router.post('/registration-invite', asyncHandler(async (req, res) => {
   if (heldToken) {
     const owned = await peekRegistrationToken(heldToken, telegramId);
     if (owned) {
-      let shop = null;
       if (owned.shopId) {
         const doc = await Shop.findById(owned.shopId).populate('cityId', 'name').lean();
-        if (doc?.isActive && doc.deliveryGroupId) {
-          shop = { shopId: String(doc._id), shopName: doc.name || '', shopCity: doc.cityId?.name || '' };
+        // A shop token whose shop is gone/inactive/group-less is a DEAD END, not a
+        // free-choice invite: /register-request forces the token's shop and then
+        // refuses it. Reporting `eligible: true, shop: null` showed the newcomer a
+        // normal shop picker whose every option was ignored on submit — so say the
+        // real reason instead. Falling back to a personal token is wrong too: it
+        // would silently let them register onto some other shop.
+        if (!doc?.isActive || !doc.deliveryGroupId) {
+          return res.json({ eligible: false, reason: 'shop_inactive' });
         }
+        return res.json({
+          eligible: true,
+          regToken: owned.token,
+          shop: { shopId: String(doc._id), shopName: doc.name || '', shopCity: doc.cityId?.name || '' },
+        });
       }
-      return res.json({ eligible: true, regToken: owned.token, shop });
+      return res.json({ eligible: true, regToken: owned.token, shop: null });
     }
     // Held token is dead (used/expired/foreign) — fall through and mint a fresh
     // personal one so the user is not stuck on a stale link.

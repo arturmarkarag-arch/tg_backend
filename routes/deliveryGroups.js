@@ -401,30 +401,77 @@ router.get('/:groupId/shop-status', telegramAuth, requireTelegramRoles(['admin',
     orderedBuyersByShop[sid].add(String(order.buyerTelegramId));
   }
 
-  // "Переглянув усі товари" marks of THIS session. Keyed by (seller, SHOP AS
-  // RECORDED) — not by seller alone: the mark states "this person walked the
-  // catalogue while working THAT shop". Keying on the seller would drag the tick
-  // along if they are moved mid-cycle, so a shop nobody reviewed for would show
-  // a green tick it never earned.
+  // "Переглянув усі товари" marks of THIS session, keyed by SELLER — one press
+  // per person per session (see the model's docblock). Keying on `telegramId|shopId`
+  // instead dropped the tick the moment a seller was moved mid-cycle: the row is
+  // rendered against their CURRENT shop, so the historical pair never matched again
+  // and a seller who did press it showed up as if they had not.
+  //
+  // WHERE the ticked row is rendered is a different question from WHOSE the tick is.
+  // The tick belongs to the person, but staff asked to see "хто на якому магазині
+  // натиснув", so a MARKED seller is listed under the SNAPSHOT shop (mark.shopId) —
+  // frozen at the press — and NOT under wherever they were moved afterwards. An
+  // UNMARKED seller has no snapshot and is listed under their current shop. Exactly
+  // one row per person either way: never marked on the old shop AND unmarked on the
+  // new one (that would freeze the counter at "1 / 2" for one human).
   const reviewMarks = await CatalogReview.find(
-    { groupId: String(group._id), sessionId: currentSessionId }, 'telegramId shopId at',
+    { groupId: String(group._id), sessionId: currentSessionId }, 'telegramId userName shopId shopName at',
   ).lean();
-  const reviewedAtByKey = new Map(
-    reviewMarks.map((r) => [`${String(r.telegramId)}|${String(r.shopId || '')}`, r.at]),
-  );
+  const markBySeller = new Map(reviewMarks.map((r) => [String(r.telegramId), r]));
+  // Marked sellers who must be RE-HOMED onto their snapshot shop: grouped by that
+  // shop, so a person moved away from it (or unassigned entirely) still appears there.
+  const markedSellersBySnapshotShop = {};
+  const sellerByTelegramId = new Map(sellers.map((s) => [String(s.telegramId), s]));
+  // Only shops rendered on this page can host a re-homed row. If the snapshot shop
+  // has since left the group or been deactivated there is no row to attach to, so
+  // such a mark stays on the seller's current shop — visible beats forensically pure.
+  const renderedShopIds = new Set(shopIdStrs);
+  for (const mark of reviewMarks) {
+    const snapshotShopId = String(mark.shopId || '');
+    if (!renderedShopIds.has(snapshotShopId)) continue;   // incl. pre-snapshot marks ('')
+    const tgId = String(mark.telegramId);
+    const live = sellerByTelegramId.get(tgId);
+    if (live && String(live.shopId) === snapshotShopId) continue;  // already in that shop's list
+    const items = live?.cartState?.orderItems;
+    const itemObj = items instanceof Map ? Object.fromEntries(items) : (items || {});
+    if (!markedSellersBySnapshotShop[snapshotShopId]) markedSellersBySnapshotShop[snapshotShopId] = [];
+    markedSellersBySnapshotShop[snapshotShopId].push({
+      name: live
+        ? ([live.firstName, live.lastName].filter(Boolean).join(' ') || tgId)
+        : (mark.userName || tgId),
+      telegramId: tgId,
+      role: live?.role || 'seller',
+      hasCart: Object.keys(itemObj).length > 0,
+      // The person no longer sits on this shop — the row is here because the press was.
+      movedAway: true,
+    });
+  }
 
   const shopStatuses = shops.map((shop) => {
     const shopId = String(shop._id);
     const cartItemCount = cartItemsByShop[shopId] || 0;
     const shopOrders = ordersByShop[shopId] || [];
     const uniqueBuyers = new Set(shopOrders.map((o) => o.buyerTelegramId));
+    // shopSellerObjs = who is ACTUALLY assigned here right now. The conflict flags
+    // below are about assignment, so they keep reading this list, not the display one.
     const shopSellerObjs = sellersByShop[shopId] || [];
     const assignedStaff = shopSellerObjs.filter((s) => s.role === 'seller' || s.role === 'admin');
     const orderedBuyers = orderedBuyersByShop[shopId] || new Set();
-    const sellersWithStatus = shopSellerObjs.map((s) => ({
+    // Display roster: whoever pressed «переглянув усі товари» is listed on the shop
+    // they pressed it ON — so drop the ones who pressed on some other shop, and adopt
+    // the ones who pressed here and were moved away since. Never both: one row per person.
+    const displaySellers = [
+      ...shopSellerObjs.filter((s) => {
+        const mark = markBySeller.get(String(s.telegramId));
+        if (!mark || !renderedShopIds.has(String(mark.shopId || ''))) return true;  // no usable snapshot → stay put
+        return String(mark.shopId) === shopId;
+      }),
+      ...(markedSellersBySnapshotShop[shopId] || []),
+    ];
+    const sellersWithStatus = displaySellers.map((s) => ({
       ...s,
       hasOrder: orderedBuyers.has(s.telegramId),
-      catalogReviewedAt: reviewedAtByKey.get(`${s.telegramId}|${shopId}`) || null,
+      catalogReviewedAt: markBySeller.get(String(s.telegramId))?.at || null,
     }));
     // hasConflict: 2+ separate buyers placed orders in this shop this session
     // hasMultipleSellers: 2+ seller/admin users are assigned to this shop.

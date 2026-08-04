@@ -6,14 +6,24 @@ const mongoose = require('mongoose');
 // sellers actually walked the whole catalogue to the end and which merely dropped
 // a few items in the cart. No business rule reads it — it gates nothing.
 //
-// One row per (session, seller). The mark is ONE-WAY: it can be set, never
-// cleared, and it disappears on its own next cycle because the next session has a
-// different sessionId. That keeps the board unambiguous — what staff saw a minute
-// ago cannot vanish under them.
+// One row per (session, seller) — the mark belongs to the PERSON, not to the
+// shop they happened to be on. The seller walks ONE catalogue (the warehouse's),
+// so moving them to another shop mid-cycle must not make them owe a second press:
+// the unique index below physically prevents one anyway. Every reader therefore
+// keys on telegramId alone (routes/picking.js shift-board, routes/deliveryGroups.js
+// shop-status) — keying on `telegramId|shopId` listed a moved seller twice, once
+// marked and once not, with a counter stuck at "1 / 2" for a single human.
 //
-// shopId/shopName are snapshotted so the board still reads correctly if the seller
-// is later moved to another shop mid-cycle (see [[parked-order-deliverygroup-invariant]]
-// for why we never trust a live join for session-scoped facts).
+// The mark is ONE-WAY: it can be set, never cleared, and it disappears on its own
+// next cycle because the next session has a different sessionId. That keeps the
+// board unambiguous — what staff saw a minute ago cannot vanish under them.
+//
+// shopId/shopName are a SNAPSHOT of where the seller stood when they pressed it.
+// They are NOT part of the identity of the mark (that is sessionId+telegramId), but
+// they ARE what the boards display: the whole point of the feature is "хто на якому
+// магазині натиснув", so a marked seller is always rendered against the SNAPSHOT
+// shop — never against wherever they were moved afterwards, which would silently
+// rewrite history. Only an UNMARKED seller is rendered against their current shop.
 const CatalogReviewSchema = new mongoose.Schema({
   // OrderingSession _id as a string — same convention as Order.orderingSessionId.
   sessionId:  { type: String, required: true },

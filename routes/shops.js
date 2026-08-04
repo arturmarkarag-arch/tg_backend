@@ -1,5 +1,4 @@
 const express = require('express');
-const crypto = require('crypto');
 const mongoose = require('mongoose');
 const { appError, asyncHandler } = require('../utils/errors');
 const Shop = require('../models/Shop');
@@ -589,75 +588,36 @@ router.patch('/:id/sellers', telegramAuth, requireTelegramRole('admin'), asyncHa
   res.json({ sellers: updatedSellers });
 }));
 
-// ─── POST /api/shops/:id/transfer-hash ────────────────────────────────────────
-// Generate (or regenerate) a one-time seller-transfer hash for this shop.
-// The admin hands the returned code to a seller, who pastes it into the bot and
-// is moved to THIS shop with no further confirmation. Single-use semantics:
-//   • Generating a new code OVERWRITES any previous one (old value invalidated).
-//   • The bot CLEARS the field the moment it is consumed (see telegramBot.js).
-// We retry on the rare unique-index collision so a code is always distinct.
-router.post('/:id/transfer-hash', telegramAuth, requireTelegramRole('admin'), asyncHandler(async (req, res) => {
-  const shop = await Shop.findById(req.params.id);
-  if (!shop) throw appError('shop_not_found');
-
-  // Format: ZP-XXXXXXXXXXXX (upper hex). Prefix makes it self-evidently a
-  // transfer code in chat and lets the bot match it without false positives.
-  const makeHash = () => `ZP-${crypto.randomBytes(6).toString('hex').toUpperCase()}`;
-
-  let saved = null;
-  for (let attempt = 0; attempt < 5 && !saved; attempt += 1) {
-    const candidate = makeHash();
-    try {
-      shop.transferHash = candidate;
-      shop.transferHashCreatedAt = new Date();
-      await shop.save();
-      saved = candidate;
-    } catch (err) {
-      // 11000 → another shop already holds this (extremely unlikely) code; retry.
-      if (err?.code === 11000) continue;
-      throw err;
-    }
-  }
-  if (!saved) throw appError('shop_transfer_hash_failed');
-
-  await invalidateShop(shop._id);
-
-  // Deep link the admin can forward directly: the seller taps it, hits one
-  // "Start" button, and is moved with no further steps. The ZP-<hex> format is
-  // already Telegram start-param safe ([A-Za-z0-9_-], ≤64 chars) — no encoding.
-  const botUsername = (process.env.TELEGRAM_BOT_USERNAME || '').replace(/^@/, '').trim();
-  const deepLink = botUsername ? `https://t.me/${botUsername}?start=${saved}` : null;
-
-  res.json({ transferHash: saved, transferHashCreatedAt: shop.transferHashCreatedAt, deepLink });
-}));
-
-// ─── POST /api/shops/:id/registration-link ────────────────────────────────────
-// One-time invite that registers a NEWCOMER straight onto THIS shop. Unlike the
-// transfer hash above (which moves an existing seller), this is for someone who
-// has no account yet: they tap the link, the bot checks they are in the work
-// group, and the registration form opens with the shop already fixed — no picker,
-// so they cannot land on the wrong one.
+// ─── POST /api/shops/:id/invite-link ──────────────────────────────────────────
+// THE link for seating a seller on this shop. One button, one link — the server
+// decides what it does when it is opened (see telegramBot.js `handleShopInvite`):
+//   • recipient already has an account → they are MOVED onto this shop;
+//   • recipient has none yet           → registration opens with this shop fixed
+//                                        (no picker, so no wrong shop).
+// Single-use, 24h, and minting a new one retires the previous unused link for
+// this shop, so exactly one code per shop is live at a time.
 //
 // The token carries the shop, not an identity: the admin does not know the
-// newcomer's telegramId in advance. That is safe because (a) live group
-// membership is re-checked both in the bot and again on submit, and (b) the
-// token is single-use — it opens the door exactly once. A group member who
-// intercepted it could at worst claim a shop they could already have picked
-// from the list by hand.
-router.post('/:id/registration-link', telegramAuth, requireTelegramRole('admin'), asyncHandler(async (req, res) => {
+// recipient's telegramId in advance. That is safe because (a) an unregistered
+// redeemer is gated by LIVE group membership (re-checked in the bot and again on
+// submit), (b) a registered one must be a seller, and (c) it opens the door
+// exactly once.
+router.post('/:id/invite-link', telegramAuth, requireTelegramRole('admin'), asyncHandler(async (req, res) => {
   const shop = await Shop.findById(req.params.id).populate('cityId', 'name').lean();
   if (!shop) throw appError('shop_not_found');
   if (!shop.isActive) throw appError('registration_shop_inactive');
   if (!shop.deliveryGroupId) throw appError('registration_shop_no_group');
 
-  const { issueShopRegistrationToken } = require('../services/registrationToken');
-  const token = await issueShopRegistrationToken(String(shop._id));
+  const { issueShopInvite } = require('../services/registrationToken');
+  const code = await issueShopInvite(String(shop._id));
 
+  // ZP-<hex> is already Telegram start-param safe ([A-Za-z0-9_-], ≤64) — no
+  // encoding needed. Also pasteable by hand into the bot as a bare code.
   const botUsername = (process.env.TELEGRAM_BOT_USERNAME || '').replace(/^@/, '').trim();
-  const deepLink = botUsername ? `https://t.me/${botUsername}?start=${token}` : null;
+  const deepLink = botUsername ? `https://t.me/${botUsername}?start=${code}` : null;
 
   res.json({
-    token,
+    code,
     deepLink,
     shopName: shop.name || '',
     shopCity: shop.cityId?.name || '',

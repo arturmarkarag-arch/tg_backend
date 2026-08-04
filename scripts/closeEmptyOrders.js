@@ -48,7 +48,15 @@ const EXECUTE = process.argv.includes('--execute');
   let closed = 0;
   for (const o of ghosts) {
     const res = await Order.updateOne(
-      { _id: o._id, status: { $in: ['new', 'in_progress'] } },
+      {
+        _id: o._id,
+        status: { $in: ['new', 'in_progress'] },
+        // Re-assert emptiness at WRITE time, not just at scan time: between the
+        // find() above and this update the seller may have added a position back
+        // (the ordering window can be open while this runs). Without the guard the
+        // script would cancel a live order behind their back.
+        items: { $not: { $elemMatch: { cancelled: { $ne: true }, skipped: { $ne: true } } } },
+      },
       {
         $set: { status: 'cancelled' },
         $push: {
@@ -66,6 +74,9 @@ const EXECUTE = process.argv.includes('--execute');
     closed += res.modifiedCount || 0;
   }
   console.log(`[closeEmptyOrders] closed ${closed} order(s)`);
+  if (closed !== ghosts.length) {
+    console.log(`[closeEmptyOrders] ${ghosts.length - closed} skipped — no longer empty or already closed`);
+  }
 
   await mongoose.disconnect();
 })().catch(async (e) => {

@@ -1202,14 +1202,28 @@ router.get('/shift-board', requireTelegramRoles(['admin']), async (req, res, nex
         //     snapshot (who, which shop, when). These survive the seller being
         //     moved to another shop, or unassigned entirely, mid-cycle.
         //   • currently assigned staff — needed only to list who has NOT marked.
-        // Keying purely off today's staff (the first version) meant a moved
-        // seller's mark jumped to their new shop, and an unassigned one vanished.
-        const markedKeys = new Set();
+        // Keying purely off today's staff (the first version) meant an unassigned
+        // seller's mark vanished from the board.
+        //
+        // ONE ROW PER PERSON: the key is telegramId alone, never telegramId|shopId.
+        // A mark belongs to the seller (see models/CatalogReview.js), so somebody
+        // moved mid-cycle must not show up twice — marked on the old shop, unmarked
+        // on the new one — freezing the counter at "1 / 2" for one human who cannot
+        // press the button a second time anyway (unique {sessionId, telegramId}).
+        //
+        // WHICH SHOP IS SHOWN: for a MARKED seller it is the SNAPSHOT shop — the
+        // one they stood on when they pressed the button. That is the fact staff
+        // asked to see ("хто на якому магазині натиснув"), and it must not drift
+        // when the person is moved afterwards. Showing their CURRENT shop (the
+        // first version) turned the row into a lie: press on A, move to B, board
+        // says B. Unmarked sellers have no snapshot, so they show their current shop.
+        const markedIds = new Set();
         const sellers = marks.map((m) => {
-          markedKeys.add(`${String(m.telegramId)}|${String(m.shopId || '')}`);
+          const tgId = String(m.telegramId);
+          markedIds.add(tgId);
           const shop = shopById.get(String(m.shopId));
           return {
-            telegramId: String(m.telegramId),
+            telegramId: tgId,
             name: m.userName || String(m.telegramId),
             // Prefer the live shop name (renames), fall back to the snapshot —
             // which is all we have if the shop left the group since.
@@ -1220,7 +1234,7 @@ router.get('/shift-board', requireTelegramRoles(['admin']), async (req, res, nex
         });
 
         for (const u of staff) {
-          if (markedKeys.has(`${String(u.telegramId)}|${String(u.shopId || '')}`)) continue;
+          if (markedIds.has(String(u.telegramId))) continue;
           const shop = shopById.get(String(u.shopId));
           sellers.push({
             telegramId: String(u.telegramId),

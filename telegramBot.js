@@ -6,9 +6,14 @@ const SearchProduct = require('./models/SearchProduct');
 const DeliveryGroup = require('./models/DeliveryGroup');
 const Shop = require('./models/Shop');
 const GroupMember = require('./models/GroupMember');
-const { redeemTransferHash } = require('./services/redeemTransferHash');
+const { redeemShopInvite } = require('./services/redeemShopInvite');
 const { trackMemberFromMessage, handleChatMemberUpdate, setMemberPhoto } = require('./services/groupMemberSync');
-const { issueRegistrationToken, peekRegistrationToken } = require('./services/registrationToken');
+const {
+  issueRegistrationToken,
+  peekRegistrationToken,
+  peekShopInvite,
+  looksLikeShopCode,
+} = require('./services/registrationToken');
 
 async function updateUserBotActivity(chatId) {
   try {
@@ -469,12 +474,50 @@ async function handleBotBlocked(telegramId) {
   }
 }
 
-// Shared seller-transfer redemption: used by BOTH entry points — a pasted code
-// and a `/start ZP-...` deep link. Moves the seller (no admin confirmation),
-// replies, and live-refreshes any open admin/picking views.
-async function handleTransferHashRedeem(chatId, hash) {
+// ── THE shop link ────────────────────────────────────────────────────────────
+// One code per shop, one meaning per PERSON — decided here, on the server, not
+// by which button the admin happened to press:
+//   • already registered → move them onto the shop (sellers only);
+//   • no account yet     → open registration with that shop pre-fixed.
+// Used by BOTH entry points: a `/start ZP-...` deep link and a pasted code.
+async function handleShopInvite(chatId, code, user) {
+  const invite = await peekShopInvite(code);
+  if (!invite) {
+    await bot.sendMessage(chatId, 'Це посилання недійсне або вже використане. Попросіть адміністратора надіслати нове.');
+    return;
+  }
+
+  if (user) {
+    await handleShopInviteTransfer(chatId, code);
+    return;
+  }
+
+  // Newcomer branch: same gate as any other registration — live group membership
+  // decides, the invite only fixes WHICH shop. Nothing is consumed here; the
+  // token is burnt in the transaction that creates the user.
+  if (!(await isUserInAllowedGroup(chatId))) {
+    await bot.sendMessage(chatId, 'Реєстрація доступна лише учасникам робочої групи. Зверніться до адміністратора.');
+    return;
+  }
+
+  // The shop must still be registerable — /register-request refuses an inactive
+  // or group-less shop (registration_shop_inactive / _shop_no_group) and the token
+  // DICTATES that shop, so handing out the form here only walks the newcomer into
+  // a form they cannot submit. Say it now instead.
+  const inviteShop = await Shop.findById(invite.shopId).select('isActive deliveryGroupId').lean();
+  if (!inviteShop || !inviteShop.isActive || !inviteShop.deliveryGroupId) {
+    await bot.sendMessage(chatId, 'Магазин для цього посилання зараз недоступний. Зверніться до адміністратора.');
+    return;
+  }
+
+  await sendRegistrationButton(chatId, invite.token);
+}
+
+// Registered-user half of a shop link: a straight transfer, no admin
+// confirmation. Replies and live-refreshes any open admin/picking views.
+async function handleShopInviteTransfer(chatId, code) {
   try {
-    const result = await redeemTransferHash({ hash, sellerTelegramId: chatId });
+    const result = await redeemShopInvite({ code, sellerTelegramId: chatId });
     if (result.ok) {
       const shopLabel = [result.shop?.name, result.shop?.cityId?.name].filter(Boolean).join(', ');
       await bot.sendMessage(chatId, `✅ Вас переведено на магазин: ${shopLabel || result.shop?.name || ''}.`);
@@ -488,21 +531,36 @@ async function handleTransferHashRedeem(chatId, hash) {
           }
           io.emit('user_order_updated', { buyerTelegramId: chatId });
         }
-      } catch (e) { console.warn('[Bot] transfer-hash socket emit failed:', e?.message); }
+      } catch (e) { console.warn('[Bot] shop-invite socket emit failed:', e?.message); }
     } else {
       const msgByReason = {
-        not_found:     'Код переведення недійсний або вже використаний.',
-        hash_consumed: 'Код переведення недійсний або вже використаний.',
-        not_seller:    'Цей код може активувати лише продавець.',
+        not_found:     'Це посилання недійсне або вже використане.',
+        code_consumed: 'Це посилання недійсне або вже використане.',
+        not_seller:    'Переводити можна лише продавця. Зверніться до адміністратора.',
         same_shop:     'Ви вже привʼязані до цього магазину.',
-        shop_inactive: 'Магазин для цього коду неактивний. Зверніться до адміністратора.',
+        shop_inactive: 'Магазин для цього посилання неактивний. Зверніться до адміністратора.',
       };
-      await bot.sendMessage(chatId, msgByReason[result.reason] || 'Не вдалося активувати код переведення.');
+      await bot.sendMessage(chatId, msgByReason[result.reason] || 'Не вдалося активувати посилання.');
     }
   } catch (e) {
-    console.error('[Bot] redeemTransferHash failed:', e);
+    console.error('[Bot] redeemShopInvite failed:', e);
     await bot.sendMessage(chatId, 'Сталася помилка під час переведення. Спробуйте ще раз або зверніться до адміністратора.');
   }
+}
+
+// Sends the mini-app registration button for an already-minted token. Shared by
+// the plain /start path and the shop-link path so both open the same form.
+async function sendRegistrationButton(chatId, regToken) {
+  const regUrl = `${WEB_APP_URL}${WEB_APP_URL.includes('?') ? '&' : '?'}regToken=${encodeURIComponent(regToken)}`;
+  if (WEB_APP_URL.startsWith('https://')) {
+    await bot.sendMessage(chatId, 'Натисніть кнопку, щоб зареєструватися через Mini App.', {
+      reply_markup: {
+        inline_keyboard: [[{ text: 'Реєстрація в Mini App', web_app: { url: regUrl } }]],
+      },
+    });
+    return;
+  }
+  await bot.sendMessage(chatId, `Відкрийте Mini App: ${regUrl}`);
 }
 
 async function sendAdminNotification(text) {
@@ -621,18 +679,13 @@ async function initBot(token) {
           return;
         }
 
-        // Deep-link payload: `/start ZP-...` — a seller opened the transfer
-        // link an admin sent them. Telegram only allows [A-Za-z0-9_-] here,
-        // which our ZP-<hex> format already satisfies (no decoding needed).
-        // We redeem through the SAME path as a pasted code.
+        // Deep-link payload: `/start ZP-...` — someone opened the admin's shop
+        // link. ONE link for both cases: the branch (transfer vs. registration)
+        // is decided by whether this telegramId already has an account, not by
+        // which link was sent. Same path as a pasted code.
         const startPayload = rawText.split(/\s+/)[1] || '';
-        const startHashMatch = startPayload.toUpperCase().match(/^ZP-[0-9A-F]{12}$/);
-        if (startHashMatch) {
-          if (!user) {
-            await bot.sendMessage(chatId, getUnknownUserMessage());
-            return;
-          }
-          await handleTransferHashRedeem(chatId, startHashMatch[0]);
+        if (looksLikeShopCode(startPayload)) {
+          await handleShopInvite(chatId, startPayload, user);
           return;
         }
 
@@ -643,27 +696,20 @@ async function initBot(token) {
         // glue a stranger's Google onto whoever opened it. See models/GoogleLinkToken.js.
 
         if (!user) {
-          // Registration handshake. The invite is PER-PERSON. The Telegram id here
-          // (chatId / ctx.from.id) is authenticated by Telegram — not spoofable.
+          // Registration handshake. Shop links were already handled above, so a
+          // token here is the PER-PERSON kind from the group welcome message.
+          // The Telegram id (chatId / ctx.from.id) is authenticated by Telegram
+          // — not spoofable.
           let regToken = null;
           const hasTokenInLink = startPayload && startPayload.toLowerCase() !== 'register';
 
           if (hasTokenInLink) {
-            // A token was passed in the link. Two shapes:
-            //   • personal (telegramId set) → MUST belong to THIS user;
-            //   • shop invite (telegramId null) → minted by an admin for a shop
-            //     before the newcomer's id was known, so identity cannot gate it;
-            //     live group membership does instead.
             // Foreign / expired / used → REJECT. We never re-issue from a link
             // that carried a token, so one person's link can't open the door for
             // anyone else.
             const owned = await peekRegistrationToken(startPayload, chatId);
-            if (!owned) {
+            if (!owned || !owned.telegramId) {
               await bot.sendMessage(chatId, 'Це посилання для реєстрації недійсне або призначене не для вас. Відкрийте персональне посилання, яке бот надіслав саме вам у робочій групі.');
-              return;
-            }
-            if (!owned.telegramId && !(await isUserInAllowedGroup(chatId))) {
-              await bot.sendMessage(chatId, 'Реєстрація доступна лише учасникам робочої групи. Зверніться до адміністратора.');
               return;
             }
             regToken = owned.token;
@@ -679,16 +725,7 @@ async function initBot(token) {
             return;
           }
 
-          const regUrl = `${WEB_APP_URL}${WEB_APP_URL.includes('?') ? '&' : '?'}regToken=${encodeURIComponent(regToken)}`;
-          if (WEB_APP_URL.startsWith('https://')) {
-            await bot.sendMessage(chatId, 'Натисніть кнопку, щоб зареєструватися через Mini App.', {
-              reply_markup: {
-                inline_keyboard: [[{ text: 'Реєстрація в Mini App', web_app: { url: regUrl } }]],
-              },
-            });
-          } else {
-            await bot.sendMessage(chatId, `Відкрийте Mini App: ${regUrl}`);
-          }
+          await sendRegistrationButton(chatId, regToken);
           return;
         }
 
@@ -724,18 +761,14 @@ async function initBot(token) {
         return;
       }
 
-      // ── Shop transfer hash redemption (private chat only) ──
-      // A seller pastes the one-time code an admin gave them; we move them to
-      // the hash's shop with no admin confirmation. We scan the message for a
-      // code anywhere in the text (admins often paste it with a note).
+      // ── Shop code pasted into the chat (private chat only) ──
+      // Same link, typed instead of tapped. We scan the message for a code
+      // anywhere in the text (admins often paste it with a note) and hand it to
+      // the same server-side branch as the deep link.
       if (!isGroupChat && rawText) {
-        const hashMatch = rawText.toUpperCase().match(/ZP-[0-9A-F]{12}/);
-        if (hashMatch) {
-          if (!user) {
-            await bot.sendMessage(chatId, getUnknownUserMessage());
-            return;
-          }
-          await handleTransferHashRedeem(chatId, hashMatch[0]);
+        const codeMatch = rawText.toUpperCase().match(/ZP-[0-9A-F]{12}/);
+        if (codeMatch) {
+          await handleShopInvite(chatId, codeMatch[0], user);
           return;
         }
       }

@@ -1,8 +1,16 @@
+require('dotenv').config({ path: require('path').join(__dirname, '..', '.env') });
 const mongoose = require('mongoose');
 
-const URI = 'mongodb+srv://arturmarkarag_db_user:7VKbO5R8Se4zrNo5@cluster0.yvgxmyl.mongodb.net/?appName=Cluster0';
+// NEVER hardcode the connection string here — this file used to carry the live
+// Atlas user + password in plain text and travelled that way inside a handed-over
+// archive. It reads .env like every other script now.
+const URI = process.env.MONGODB_URI;
 
 async function main() {
+  if (!URI) {
+    console.error('MONGODB_URI is not set (expected in NEW_VERSION/.env)');
+    process.exit(1);
+  }
   await mongoose.connect(URI);
   const db = mongoose.connection.db;
 

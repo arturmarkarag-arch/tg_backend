@@ -799,7 +799,11 @@ async function placeOrderImpl(req, res) {
         if (sameItem) {
           sameItem.quantity = newItem.quantity;
           sameItem.packed = false;
+          // Revive the row completely — a `skipped` left standing would keep the
+          // position dead on every board that reads live items (same rule as the
+          // stale-row revival in /upsert-item).
           sameItem.cancelled = false;
+          sameItem.skipped = false;
         } else {
           txExisting.items.push(newItem);
         }
@@ -1470,7 +1474,25 @@ router.post('/upsert-item', telegramAuth, requireOrderingWindowOpen, asyncHandle
         if (!inBlock) throw appError('product_not_in_block');
 
         const price = Number(product.price || 0);
-        order.items.push({ productId: product._id, name: buildProductLabel(product), price, quantity: newQty, packed: false, cancelled: false });
+        // There may still be a DEAD row for this product — `cancelled` (склад:
+        // «закінчився», e.g. archiveProduct while the window was open) or
+        // `skipped`. Pushing a second row next to it and letting
+        // Order.normalizeItems() merge them on save is a trap: the merge ORs the
+        // flags and SUMS the quantities, so the freshly added position would come
+        // back cancelled, with the dead quantity added on top. Revive the row
+        // in place instead.
+        const staleIndex = order.items.findIndex((i) => String(i.productId) === productId);
+        if (staleIndex >= 0) {
+          const stale = order.items[staleIndex];
+          stale.name = buildProductLabel(product);
+          stale.price = price;
+          stale.quantity = newQty;
+          stale.packed = false;
+          stale.cancelled = false;
+          stale.skipped = false;
+        } else {
+          order.items.push({ productId: product._id, name: buildProductLabel(product), price, quantity: newQty, packed: false, cancelled: false });
+        }
         order.history.push({ ...actor, action: 'item_added', meta: { productId, newQty } });
       } else {
         const oldQty = activeItem.quantity;
