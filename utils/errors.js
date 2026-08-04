@@ -194,6 +194,8 @@ const ERRORS = {
   picking_claim_taken_by_other:   { status: 409, message: 'Завдання забрав інший складник' },
   picking_claim_failed:           { status: 500, message: 'Помилка призначення задачі' },
   picking_oos_failed:             { status: 500, message: 'Помилка запису «немає на складі»' },
+  picking_oos_already_packed:     { status: 409, message: 'Задачу вже зібрано повністю — архівувати товар через неї не можна' },
+  picking_task_items_changed:     { status: 409, message: 'Список магазинів у завданні змінився — оновіть завдання' },
   expired_lock:                   { status: 403, message: 'Завдання вже взяв інший складник або час блокування минув' },
   // ── Orders ─────────────────────────────────────────────────────────────────
   order_query_forbidden:          { status: 403, message: 'Ви можете запитувати лише власні замовлення' },

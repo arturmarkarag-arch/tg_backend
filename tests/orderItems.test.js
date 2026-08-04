@@ -35,6 +35,43 @@ describe('Order.normalizeItems — the merge that makes a duplicate row a trap',
     expect(merged[0].quantity).toBe(5);
   });
 
+  // The normaliser REPLACES `items` wholesale, so any fulfilment field it forgets
+  // to copy is erased from a merged order — silently destroying the
+  // ordered-vs-delivered record the warehouse wrote.
+  it('carries the delivered-quantity record through a merge', () => {
+    const merged = Order.normalizeItems([
+      {
+        productId: 'p1', name: 'Товар', price: 10, quantity: 10,
+        packed: true, packedQuantity: 7, shortfallReason: 'short_pick',
+        packedBy: '42', packedByName: 'Іван', packedAt: new Date('2026-08-04T10:00:00Z'),
+      },
+      { productId: 'p2', name: 'Інший', price: 5, quantity: 1 },
+    ]);
+
+    const p1 = merged.find((i) => i.productId === 'p1');
+    expect(p1.packedQuantity).toBe(7);
+    expect(p1.shortfallReason).toBe('short_pick');
+    expect(p1.packedBy).toBe('42');
+    expect(p1.packedByName).toBe('Іван');
+    expect(p1.packedAt).toBeInstanceOf(Date);
+  });
+
+  it('sums delivered quantities but keeps an untouched pair null', () => {
+    const summed = Order.normalizeItems([
+      { productId: 'p1', name: 'Товар', price: 10, quantity: 4, packedQuantity: 3 },
+      { productId: 'p1', name: 'Товар', price: 10, quantity: 2, packedQuantity: 2 },
+    ]);
+    expect(summed[0].quantity).toBe(6);
+    expect(summed[0].packedQuantity).toBe(5);
+
+    const untouched = Order.normalizeItems([
+      { productId: 'p1', name: 'Товар', price: 10, quantity: 4 },
+      { productId: 'p1', name: 'Товар', price: 10, quantity: 2 },
+    ]);
+    // null, NOT 0 — "nobody has picked this yet" must not read as "delivered zero".
+    expect(untouched[0].packedQuantity).toBe(null);
+  });
+
   it('leaves distinct products alone', () => {
     const merged = Order.normalizeItems([
       { productId: 'p1', name: 'A', price: 1, quantity: 1 },

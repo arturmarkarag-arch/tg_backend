@@ -109,7 +109,7 @@ async function transitionPickingStatus(sessionId, toStatus, { actor = {}, meta =
  * fires from confirmed/in_progress, so an empty/never-built session is left for
  * start-session to finalise.
  */
-async function maybeCompleteSession(orderingSessionId, { actor = {}, meta = {} } = {}, mongoSession = null) {
+async function maybeCompleteSession(orderingSessionId, { actor = {}, meta = {}, skipCoverageAudit = false } = {}, mongoSession = null) {
   if (!orderingSessionId) return null;
   const query = PickingTask.countDocuments({
     orderingSessionId: String(orderingSessionId),
@@ -118,6 +118,30 @@ async function maybeCompleteSession(orderingSessionId, { actor = {}, meta = {} }
   if (mongoSession) query.session(mongoSession);
   const remaining = await query;
   if (remaining > 0) return null;
+
+  // "No tasks left" is NOT the same as "everything was collected". An order item
+  // that never received a task (product pulled from its block, archived, deleted,
+  // or a build that failed) leaves zero trace here — so completing on the task
+  // count alone is exactly how a product goes missing while the session reports
+  // success. Re-run the coverage audit before declaring the session done.
+  //
+  // Required lazily: sessionCoverage → taskBuilder/archiveProduct → back to this
+  // module, so a top-level require would be circular.
+  if (!skipCoverageAudit) {
+    const session = await OrderingSession.findById(orderingSessionId, 'groupId').lean();
+    if (session?.groupId) {
+      const { auditSessionCoverage } = require('../services/sessionCoverage');
+      const coverage = await auditSessionCoverage({
+        deliveryGroupId: session.groupId,
+        orderingSessionId,
+      });
+      // Leave the session in_progress: the operator still has to resolve the gap
+      // (return the product to a block, or cancel the positions). Completing here
+      // would bury it.
+      if (!coverage.ok) return null;
+    }
+  }
+
   return transitionPickingStatus(orderingSessionId, 'completed', { actor, meta }, mongoSession);
 }
 

@@ -219,7 +219,18 @@ async function buildPickingTasksImpl(targetDeliveryGroupId = null, options = {})
     try {
       await PickingTask.insertMany(tasks, { ordered: false });
     } catch (err) {
-      if (err?.code !== 11000 && err?.name !== 'BulkWriteError') {
+      // Duplicate key (11000) is EXPECTED: the unique partial index on
+      // (productId, deliveryGroupId) is what makes concurrent builds idempotent.
+      // Anything else is a task that was NOT created — previously the whole
+      // BulkWriteError was swallowed by name, so an unrelated write failure
+      // vanished without a line in the log and the start proceeded regardless.
+      // The caller's coverage audit is what actually blocks the start; this only
+      // makes the cause diagnosable.
+      const writeErrors = err?.writeErrors || err?.result?.result?.writeErrors || [];
+      const unexpected = writeErrors.filter((e) => (e?.err?.code ?? e?.code) !== 11000);
+      if (unexpected.length) {
+        console.error('[taskBuilder] PickingTask insert failed for', unexpected.length, 'task(s):', unexpected);
+      } else if (!writeErrors.length && err?.code !== 11000) {
         console.error('[taskBuilder] PickingTask insert error:', err);
       }
     }

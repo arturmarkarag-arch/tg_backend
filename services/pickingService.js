@@ -74,13 +74,36 @@ async function runOperationWithRetry(work, maxRetries = 3) {
  */
 async function markOrderItemsPacked(taskItems, productId, actor = { by: 'system', byName: '', byRole: 'system' }, session = null) {
   const opts    = session ? { session } : {};
-  const orderIds = [...new Set(taskItems.filter((i) => i.packed).map((i) => String(i.orderId)))];
+
+  // Keep one entry PER ORDER (not just the id set): the delivered quantity has to
+  // travel with it. A boolean `packed` cannot say "7 of the 10 ordered", so
+  // without this the shortfall was lost the moment the task closed.
+  const packedByOrder = new Map();
+  for (const item of taskItems) {
+    if (!item.packed) continue;
+    packedByOrder.set(String(item.orderId), item);
+  }
+  const packedAt = new Date();
 
   await Promise.all(
-    orderIds.map(async (orderId) => {
+    [...packedByOrder.entries()].map(async ([orderId, taskItem]) => {
+      const ordered  = Number(taskItem.quantity) || 0;
+      // packedQuantity is null only on legacy/system paths that never set it;
+      // there "packed" still means the full ordered amount went out.
+      const delivered = taskItem.packedQuantity == null ? ordered : Number(taskItem.packedQuantity) || 0;
+
       const result = await Order.updateOne(
         { _id: orderId, 'items.productId': productId },
-        { $set: { 'items.$.packed': true } },
+        {
+          $set: {
+            'items.$.packed': true,
+            'items.$.packedQuantity': delivered,
+            'items.$.shortfallReason': delivered < ordered ? 'short_pick' : null,
+            'items.$.packedBy': String(actor.by || ''),
+            'items.$.packedByName': String(actor.byName || ''),
+            'items.$.packedAt': packedAt,
+          },
+        },
         opts,
       );
       if (result.matchedCount === 0) return;
@@ -120,7 +143,7 @@ async function markOrderItemsPacked(taskItems, productId, actor = { by: 'system'
  * work. Callers that derive the group from a task (complete / out-of-stock) pass
  * the task's own group; a groupless task simply yields no next task here.
  */
-async function findAndLockNext(userTelegramId, fromBlock, deliveryGroupId = null) {
+async function findAndLockNext(userTelegramId, fromBlock, deliveryGroupId = null, { actor = {} } = {}) {
   const groupId = deliveryGroupId ? String(deliveryGroupId) : '';
   if (!groupId) return { task: null, wrappedAround: false };
 
@@ -129,16 +152,38 @@ async function findAndLockNext(userTelegramId, fromBlock, deliveryGroupId = null
   const fresh = { status: 'pending', deliveryGroupId: groupId };
 
   let task = await PickingTask.findOneAndUpdate({ ...fresh, blockId: { $gte: fromBlock } }, lock, opts);
-  if (task) return { task, wrappedAround: false };
+  if (task) {
+    await markSessionInProgress(task.orderingSessionId, actor);
+    return { task, wrappedAround: false };
+  }
 
   if (fromBlock > 1) {
     task = await PickingTask.findOneAndUpdate(
       { ...fresh, blockId: { $gte: 1, $lt: fromBlock } }, lock, opts,
     );
-    if (task) return { task, wrappedAround: true };
+    if (task) {
+      await markSessionInProgress(task.orderingSessionId, actor);
+      return { task, wrappedAround: true };
+    }
   }
 
   return { task: null, wrappedAround: false };
+}
+
+/**
+ * Flip the session confirmed → in_progress the moment the FIRST task is locked.
+ *
+ * Picking starts when someone takes a product off the shelf, not when they
+ * finish it. Until this existed the session sat at 'confirmed' while ten people
+ * walked the warehouse, and `cancel-start` — which is gated on 'confirmed' —
+ * would happily delete the work they were holding.
+ *
+ * Idempotent: transitionPickingStatus pins fromStatus='confirmed', so every
+ * later lock matches nothing and pushes no duplicate event.
+ */
+async function markSessionInProgress(orderingSessionId, actor = {}) {
+  if (!orderingSessionId) return null;
+  return transitionPickingStatus(orderingSessionId, 'in_progress', { actor });
 }
 
 /**
@@ -158,6 +203,38 @@ async function releaseWorkerAndStaleLocks(userTelegramId, deliveryGroupId = null
     },
     { $set: { status: 'pending', lockedBy: null, lockedAt: null } },
   );
+}
+
+/**
+ * Enforce the one-task-per-worker invariant: release every OTHER task this
+ * worker still holds, keeping `keepTaskId`.
+ *
+ * Deliberately NOT scoped by deliveryGroupId — a picker physically holds one
+ * product at a time, so a lock left behind in another group is exactly the
+ * orphan we are cleaning up. `items[].packed` is untouched, so the released
+ * task returns to the queue with its partial progress intact.
+ *
+ * MUST be called only AFTER the new lock is secured. Releasing first and then
+ * losing the claim race would leave the worker with nothing while their old
+ * task goes back into the queue.
+ *
+ * @returns {Promise<string[]>} ids of the tasks that were released
+ */
+async function releaseOtherLocksOfWorker(userTelegramId, keepTaskId) {
+  const uid = String(userTelegramId || '');
+  if (!uid) return [];
+
+  const filter = {
+    status: 'locked',
+    lockedBy: uid,
+    ...(keepTaskId ? { _id: { $ne: keepTaskId } } : {}),
+  };
+
+  const stray = await PickingTask.find(filter, '_id').lean();
+  if (!stray.length) return [];
+
+  await PickingTask.updateMany(filter, { $set: { status: 'pending', lockedBy: null, lockedAt: null } });
+  return stray.map((t) => String(t._id));
 }
 
 /**
@@ -191,6 +268,24 @@ async function completePickingTask({ taskId, userTelegramId, userFirstName = '',
     if (!task) throw Object.assign(new Error('Task not found'), { code: 'picking_task_not_found' });
     if (String(task.lockedBy || '') !== String(userTelegramId)) throw Object.assign(new Error('Lock expired'), { code: 'expired_lock' });
 
+    // The payload must describe EVERY shop of the task and nothing else.
+    // Previously a missing orderId silently defaulted to "full quantity delivered",
+    // so a truncated / stale request marked shops as fully served without anyone
+    // having touched their box. A mismatch means the client's copy of the task is
+    // stale (e.g. a late order was appended to it mid-pick) — refuse and let it
+    // refetch rather than guess.
+    const taskOrderIds  = new Set(task.items.map((i) => String(i.orderId)));
+    const inputOrderIds = new Set(items.map((i) => String(i.orderId)));
+    const sameCoverage =
+      taskOrderIds.size === inputOrderIds.size &&
+      [...taskOrderIds].every((id) => inputOrderIds.has(id));
+    if (!sameCoverage) {
+      throw Object.assign(
+        new Error('Submitted shops do not match the task'),
+        { code: 'picking_task_items_changed' },
+      );
+    }
+
     // Apply actual packed quantities
     for (const taskItem of task.items) {
       const input = items.find((i) => String(i.orderId) === String(taskItem.orderId));
@@ -210,6 +305,7 @@ async function completePickingTask({ taskId, userTelegramId, userFirstName = '',
     task.status   = 'completed';
     task.lockedBy = null;
     task.lockedAt = null;
+    task.completionReason = 'packed';
     // Stamp the finaliser for session-scoped shift-board ranking (lockedBy is
     // about to be cleared, so this is the only surviving record of who picked it).
     task.completedBy     = String(userTelegramId);
@@ -249,12 +345,27 @@ async function outOfStockPickingTask({ taskId, userTelegramId, userFirstName = '
   let task = await PickingTask.findById(taskId);
   if (!task) throw Object.assign(new Error('Task not found'), { code: 'picking_task_not_found' });
 
-  // Idempotency: task already completed (crashed after phase 1) — just retry archive
+  // Built up front: the crash-retry branch below archives too, and it must stamp
+  // the same picker on the affected orders' history as the normal path does.
+  const actor = { by: String(userTelegramId), byName: [userFirstName, userLastName].filter(Boolean).join(' '), byRole: userRole };
+
+  // Idempotency: task already completed (crashed after phase 1) — just retry archive.
+  //
+  // Gated on the RECORDED reason, never on status alone. 'completed' says the task
+  // is finished, not why: replaying this request on a normally-packed task (stale
+  // tab, duplicate submit, manual retry after a network blip) used to archive an
+  // in-stock product. A retry is only a retry when the original was an OOS.
   if (task.status === 'completed') {
+    if (task.completionReason !== 'out_of_stock') {
+      throw Object.assign(
+        new Error('Task was already completed as a normal pick'),
+        { code: 'picking_oos_already_packed' },
+      );
+    }
     const productForRetry = await Product.findById(task.productId);
     if (productForRetry && productForRetry.status !== 'archived') {
       // archiveProduct now retries transient tx errors internally.
-      await archiveProduct(productForRetry, { notifyBuyers: false, bot: null });
+      await archiveProduct(productForRetry, { notifyBuyers: false, bot: null, reason: 'out_of_stock', actor });
     }
     const fromBlockRetry = typeof nextBlock === 'number' ? nextBlock : task.blockId;
     const { task: nextRaw, wrappedAround } = await findAndLockNext(userTelegramId, fromBlockRetry, task.deliveryGroupId || null);
@@ -277,7 +388,6 @@ async function outOfStockPickingTask({ taskId, userTelegramId, userFirstName = '
   await task.populate('productId');
 
   const packedSet = new Set(packedOrderIds.map(String));
-  const actor = { by: String(userTelegramId), byName: [userFirstName, userLastName].filter(Boolean).join(' '), byRole: userRole };
 
   // Phase 1: atomic task + order update.
   // Re-read + re-verify the task INSIDE the transaction (mirrors the hardening
@@ -287,7 +397,18 @@ async function outOfStockPickingTask({ taskId, userTelegramId, userFirstName = '
   await runTransactionWithRetry(async (session) => {
     const fresh = await PickingTask.findById(task._id).session(session);
     if (!fresh) throw Object.assign(new Error('Task not found'), { code: 'picking_task_not_found' });
-    if (fresh.status === 'completed') return; // finalized by a retry / other path
+    // Finalised by a retry / other path between the findById above and here.
+    // Same rule as the pre-check: only a prior OOS may fall through to phase 2,
+    // otherwise this would archive a product someone just packed normally.
+    if (fresh.status === 'completed') {
+      if (fresh.completionReason !== 'out_of_stock') {
+        throw Object.assign(
+          new Error('Task was already completed as a normal pick'),
+          { code: 'picking_oos_already_packed' },
+        );
+      }
+      return;
+    }
     if (String(fresh.lockedBy || '') !== String(userTelegramId)) {
       throw Object.assign(new Error('Lock expired'), { code: 'expired_lock' });
     }
@@ -299,6 +420,7 @@ async function outOfStockPickingTask({ taskId, userTelegramId, userFirstName = '
     fresh.status   = 'completed';
     fresh.lockedBy = null;
     fresh.lockedAt = null;
+    fresh.completionReason = 'out_of_stock';
     // Out-of-stock is still a picker action — credit it on the shift board.
     fresh.completedBy     = String(userTelegramId);
     fresh.completedByName  = actor.byName;
@@ -318,7 +440,7 @@ async function outOfStockPickingTask({ taskId, userTelegramId, userFirstName = '
   const productDoc = await Product.findById(task.productId._id || task.productId);
   if (productDoc && productDoc.status !== 'archived') {
     // archiveProduct now retries transient tx errors internally.
-    await archiveProduct(productDoc, { notifyBuyers: false, bot: null });
+    await archiveProduct(productDoc, { notifyBuyers: false, bot: null, reason: 'out_of_stock', actor });
   }
 
   if (task.orderingSessionId) {
@@ -346,6 +468,8 @@ async function forceClaimPickingTask({ taskId, userTelegramId }) {
       { new: true },
     );
     if (!claimed) throw Object.assign(new Error('Task unavailable'), { code: 'picking_claim_unavailable' });
+    await releaseOtherLocksOfWorker(userTelegramId, claimed._id);
+    await markSessionInProgress(claimed.orderingSessionId, { by: String(userTelegramId) });
     return { task: claimed.toObject() };
   }
 
@@ -372,6 +496,8 @@ async function forceClaimPickingTask({ taskId, userTelegramId }) {
     { new: true },
   );
   if (!claimed) throw Object.assign(new Error('Task unavailable'), { code: 'picking_claim_unavailable' });
+  await releaseOtherLocksOfWorker(userTelegramId, claimed._id);
+  await markSessionInProgress(claimed.orderingSessionId, { by: String(userTelegramId) });
   return { task: claimed.toObject() };
 }
 
@@ -493,7 +619,7 @@ async function archiveOrphanedOutOfStockProductsImpl(groupId) {
       if (!orphanTask) continue;
       // archiveProduct retries transient tx errors internally; the per-group
       // lock + sequential loop already prevent concurrent shiftDown conflicts.
-      await archiveProduct(product, { notifyBuyers: false, bot: null });
+      await archiveProduct(product, { notifyBuyers: false, bot: null, reason: 'system_archive' });
       fixedCount += 1;
     } catch (err) {
       console.warn(`[pickingService] orphan archive failed for ${pid}:`, err.message);
@@ -509,6 +635,8 @@ module.exports = {
   markOrderItemsPacked,
   findAndLockNext,
   releaseWorkerAndStaleLocks,
+  releaseOtherLocksOfWorker,
+  markSessionInProgress,
   completePickingTask,
   outOfStockPickingTask,
   forceClaimPickingTask,

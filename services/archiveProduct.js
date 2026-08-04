@@ -11,6 +11,11 @@
  * @param {object}  [opts]
  * @param {boolean} [opts.notifyBuyers=false]  Send Telegram message to affected buyers
  * @param {object}  [opts.bot=null]            node-telegram-bot-api instance (required when notifyBuyers=true)
+ * @param {string}  [opts.reason='manual_archive']  Why the product is being archived —
+ *        'out_of_stock' (picker hit an empty shelf) | 'manual_archive' (staff deleted it)
+ *        | 'system_archive' (orphan sweep / coverage repair). Recorded in every
+ *        affected order's history so the cancellation is explainable after the fact.
+ * @param {object}  [opts.actor=null]          { by, byName, byRole } — who triggered it
  * @returns {Promise<{ cancelledCount: number }>}
  */
 
@@ -21,6 +26,7 @@ const PickingTask = require('../models/PickingTask');
 const Block = require('../models/Block');
 const DeliveryGroup = require('../models/DeliveryGroup');
 const { isOrderingOpen } = require('../utils/orderingSchedule');
+const { resolveOrderStatusAfterCancel } = require('../utils/orderStatus');
 const { getOrderingSchedule } = require('../utils/getOrderingSchedule');
 const { getIO } = require('../socket');
 
@@ -49,7 +55,7 @@ function isTransientTxError(err) {
  * orphan sweep) is protected automatically — no external runOperationWithRetry
  * wrapper needed, and no risk of a stale in-memory doc leaking across attempts.
  */
-async function archiveProduct(productOrId, { notifyBuyers = false, bot = null } = {}) {
+async function archiveProduct(productOrId, { notifyBuyers = false, bot = null, reason = 'manual_archive', actor = null } = {}) {
   const productId = (productOrId && productOrId._id) ? productOrId._id : productOrId;
 
   // Captured from the committed attempt; emitted AFTER commit (once).
@@ -130,17 +136,27 @@ async function archiveProduct(productOrId, { notifyBuyers = false, bot = null } 
         attemptCancelled += 1;
       }
 
+      // The ONLY record the seller's side ever gets: nothing is sent over Telegram
+      // (notifyBuyers stays false on every live caller — decided with the operator),
+      // and the socket badge only lands if their mini-app happens to be open. Without
+      // this entry a cancelled position has no explanation anywhere.
+      order.history.push({
+        at: new Date(),
+        by: actor?.by || 'system',
+        byName: actor?.byName || '',
+        byRole: actor?.byRole || 'system',
+        action: reason === 'out_of_stock' ? 'items_out_of_stock' : 'items_cancelled_archive',
+        meta: {
+          reason,
+          productId: String(product._id),
+          productTitle: getProductTitle(product),
+          cancelled: matchingItems.length,
+          quantity: matchingItems.reduce((s, i) => s + (Number(i.quantity) || 0), 0),
+        },
+      });
+
       const orderingOpenNow = await isGroupOrderingOpen(order.buyerSnapshot?.deliveryGroupId);
-      if (!orderingOpenNow) {
-        const isFullyProcessed = order.items.every((i) => i.packed || i.cancelled || i.skipped);
-        if (isFullyProcessed) {
-          // "Nothing delivered" = every item is cancelled or skipped (none packed).
-          const allUndelivered = order.items.every((i) => i.cancelled || i.skipped);
-          order.status = allUndelivered ? 'cancelled' : 'confirmed';
-        } else {
-          order.status = 'in_progress';
-        }
-      }
+      order.status = resolveOrderStatusAfterCancel(order, orderingOpenNow);
 
       await order.save({ session });
       attemptNotifications.push({ orderId: String(order._id), buyerTelegramId: order.buyerTelegramId });
@@ -154,7 +170,7 @@ async function archiveProduct(productOrId, { notifyBuyers = false, bot = null } 
     // reaped like normal completions (no completedBy — excluded from ranking).
     await PickingTask.updateMany(
       { productId: product._id, status: { $in: ['pending', 'locked'] } },
-      { $set: { status: 'completed', lockedBy: null, lockedAt: null, completedExpireAt: new Date(Date.now() + 90 * 24 * 60 * 60 * 1000) } },
+      { $set: { status: 'completed', completionReason: 'system_archive', lockedBy: null, lockedAt: null, completedExpireAt: new Date(Date.now() + 90 * 24 * 60 * 60 * 1000) } },
       { session }
     );
 

@@ -563,18 +563,6 @@ function newProductsPipeline(cutoff) {
   ];
 }
 
-// Count of new arrivals within the last `days` (default 14). Drives the "Нові
-// товари" nav badge. See newProductsPipeline for what counts as "new".
-router.get('/new-count', asyncHandler(async (req, res) => {
-  const days = Math.min(90, Math.max(1, Number(req.query.days) || 14));
-  const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
-  const [result] = await Product.aggregate([
-    ...newProductsPipeline(cutoff),
-    { $count: 'count' },
-  ]);
-  res.json({ count: result?.count ?? 0 });
-}));
-
 // Paged list of new arrivals within the last `days` (default 14). Powers the
 // "Нові товари" view-only gallery (50 per page, server-side pagination). See
 // newProductsPipeline for what counts as "new".
@@ -1311,3 +1299,6 @@ router.post('/:id/describe', staffOnly, asyncHandler(async (req, res) => {
 }));
 
 module.exports = router;
+// Shared with routes/navBadges.js so the aggregated badge endpoint counts
+// "new products" by exactly the same definition as /new-list.
+module.exports.newProductsPipeline = newProductsPipeline;

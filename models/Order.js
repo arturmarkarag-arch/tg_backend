@@ -6,6 +6,20 @@ const OrderItemSchema = new mongoose.Schema({
   price: { type: Number, default: 0 },
   quantity: { type: Number, required: true, min: 1 },
   packed: { type: Boolean, default: false },
+  // How many units were ACTUALLY put in the box. `packed` alone is a boolean and
+  // cannot carry "7 of the 10 you ordered" — the warehouse is allowed to hand over
+  // less than ordered, but the difference must survive into the order, otherwise
+  // the seller is billed and shown a full delivery that never happened.
+  // null = not processed yet. Equal to `quantity` on a normal full pick.
+  packedQuantity: { type: Number, default: null },
+  // Why less was delivered than ordered. Distinct from `cancelled` (nothing at
+  // all arrives) — here part of the position did arrive.
+  //   short_pick — the picker found fewer units on the shelf than ordered
+  shortfallReason: { type: String, enum: ['short_pick', null], default: null },
+  // Who closed this position and when — the shortfall has to be attributable.
+  packedBy:     { type: String, default: '' },
+  packedByName: { type: String, default: '' },
+  packedAt:     { type: Date,   default: null },
   // WAREHOUSE-ONLY: the product ran out / was archived mid-picking, so this
   // position will not be delivered (services/archiveProduct.js). The seller's
   // app renders it as the rose «Закінчився» badge + the «Є товари, що не
@@ -112,12 +126,30 @@ function normalizeOrderItems(items = []) {
         packed: Boolean(item.packed),
         cancelled: Boolean(item.cancelled),
         skipped: Boolean(item.skipped),
+        // Fulfilment fields must be carried through: this normaliser REPLACES
+        // `items` wholesale, so anything omitted here is silently erased from a
+        // merged order — which would quietly destroy the ordered-vs-delivered
+        // record the warehouse just wrote.
+        packedQuantity: item.packedQuantity ?? null,
+        shortfallReason: item.shortfallReason || null,
+        packedBy: item.packedBy || '',
+        packedByName: item.packedByName || '',
+        packedAt: item.packedAt || null,
       });
     } else {
       existing.quantity += Number(item.quantity || 0);
       existing.packed = existing.packed || Boolean(item.packed);
       existing.cancelled = existing.cancelled || Boolean(item.cancelled);
       existing.skipped = existing.skipped || Boolean(item.skipped);
+      // Delivered units add up the same way ordered units do; null + null stays
+      // null so an untouched merge is not turned into a "0 delivered" record.
+      if (item.packedQuantity != null || existing.packedQuantity != null) {
+        existing.packedQuantity = Number(existing.packedQuantity || 0) + Number(item.packedQuantity || 0);
+      }
+      existing.shortfallReason = existing.shortfallReason || item.shortfallReason || null;
+      existing.packedBy     = existing.packedBy     || item.packedBy     || '';
+      existing.packedByName = existing.packedByName || item.packedByName || '';
+      existing.packedAt     = existing.packedAt     || item.packedAt     || null;
     }
   }
   return Array.from(grouped.values());

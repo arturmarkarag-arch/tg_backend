@@ -11,6 +11,7 @@ const CatalogReview = require('../models/CatalogReview');
 const { requireTelegramRoles } = require('../middleware/telegramAuth');
 const { getProductTitle } = require('../services/archiveProduct');
 const { buildPickingTasksFromOrders } = require('../services/taskBuilder');
+const { auditSessionCoverage, resolveCoverageGap } = require('../services/sessionCoverage');
 const { isOrderingOpen, getOrderingWindowCloseAt, getOrderingWindowOpenAt, getOpenDateWarsaw } = require('../utils/orderingSchedule');
 const { getOrCreateSessionId } = require('../utils/getOrCreateSession');
 const { normalizeDeliveryGroup } = require('../utils/deliveryGroupHelpers');
@@ -30,8 +31,18 @@ const {
   forceClaimPickingTask,
   reconcileActiveTasksForSession,
   archiveOrphanedOutOfStockProducts,
+  releaseOtherLocksOfWorker,
+  markSessionInProgress,
   FORCE_CLAIM_AFTER_MS,
 } = require('../services/pickingService');
+
+/** Session-timeline actor built from the authenticated Telegram user. */
+function actorOf(user) {
+  return {
+    by: String(user?.telegramId || ''),
+    byName: [user?.firstName, user?.lastName].filter(Boolean).join(' '),
+  };
+}
 
 const router = express.Router();
 
@@ -400,6 +411,20 @@ router.post('/start-session', requireTelegramRoles(['warehouse', 'admin']), asyn
 
     // 8. Build tasks, then move pending → confirmed.
     await buildPickingTasksFromOrders(deliveryGroupId, { orderingSessionId: currentSessionId });
+
+    // 8a. Coverage audit — every live order item must now be represented by a
+    // task. taskBuilder skips silently (no block position, archived product,
+    // swallowed insertMany error), so without this check the session would start
+    // missing goods that nobody would ever see again. Blocks the start exactly
+    // like an unresolved seller conflict does.
+    const coverage = await auditSessionCoverage({
+      deliveryGroupId,
+      orderingSessionId: currentSessionId,
+    });
+    if (!coverage.ok) {
+      return res.json({ coverageGaps: true, gaps: coverage.gaps, ...baseEnvelope });
+    }
+
     const builtCount = await PickingTask.countDocuments({
       orderingSessionId: currentSessionId,
       status: 'pending',
@@ -477,23 +502,90 @@ router.post('/cancel-start', requireTelegramRoles(['warehouse', 'admin']), async
     return res.status(409).json({ error: 'Скасування можливе лише поки жоден товар ще не зібраний.' });
   }
 
-  const completedCount = await PickingTask.countDocuments({
-    orderingSessionId: String(sessionId),
-    status: 'completed',
-  });
+  // Cancelling deletes the session's tasks, so it is only ever safe while NO
+  // physical work exists to lose. Three independent signals of "someone already
+  // started", each fatal on its own:
+  //   completed — a product is finished;
+  //   locked    — a worker is walking the warehouse with it right now;
+  //   packed    — shops were ticked off, even if the task was later released.
+  // A task's partial `items[].packed` never reaches the Order documents (only
+  // completion does that), so deleting it silently erases work already done.
+  const [completedCount, lockedCount, packedCount] = await Promise.all([
+    PickingTask.countDocuments({ orderingSessionId: String(sessionId), status: 'completed' }),
+    PickingTask.countDocuments({ orderingSessionId: String(sessionId), status: 'locked' }),
+    PickingTask.countDocuments({
+      orderingSessionId: String(sessionId),
+      status: { $in: ['pending', 'locked'] },
+      items: { $elemMatch: { packed: true } },
+    }),
+  ]);
+
   if (completedCount > 0) {
     return res.status(409).json({ error: 'Збирання вже розпочалось — є виконані завдання.' });
   }
+  if (lockedCount > 0 || packedCount > 0) {
+    return res.status(409).json({
+      error: 'Збирання вже розпочалось — товари вже на руках у працівників.',
+      code: 'picking_cancel_in_progress',
+      lockedCount,
+      packedCount,
+    });
+  }
 
-  await PickingTask.deleteMany({ orderingSessionId: String(sessionId), status: { $in: ['pending', 'locked'] } });
+  const actor = actorOf(req.telegramUser);
 
-  const actor = {
-    by: String(req.telegramUser.telegramId || ''),
-    byName: [req.telegramUser.firstName, req.telegramUser.lastName].filter(Boolean).join(' '),
-  };
-  await transitionPickingStatus(sessionId, 'pending', { actor, allowReopen: true });
+  // The status transition is the GATE, not a postscript: it is a single guarded
+  // findOneAndUpdate pinned to fromStatus='confirmed'. If a worker claimed a task
+  // between the counts above and here, their claim already moved the session to
+  // in_progress, this matches nothing, and we abort having deleted nothing.
+  const rolledBack = await transitionPickingStatus(sessionId, 'pending', { actor });
+  if (!rolledBack) {
+    return res.status(409).json({
+      error: 'Збирання вже розпочалось — товари вже на руках у працівників.',
+      code: 'picking_cancel_in_progress',
+    });
+  }
 
-  res.json({ ok: true, pickingStatus: 'pending' });
+  // Belt-and-braces on the delete filter itself: only untouched pending tasks
+  // are removable, so even a claim that landed inside the last microsecond keeps
+  // its task instead of having it deleted out from under the worker.
+  const { deletedCount } = await PickingTask.deleteMany({
+    orderingSessionId: String(sessionId),
+    status: 'pending',
+    items: { $not: { $elemMatch: { packed: true } } },
+  });
+
+  res.json({ ok: true, pickingStatus: 'pending', deletedCount });
+}));
+
+// ---------------------------------------------------------------------------
+// POST /api/picking/resolve-coverage-gap
+// Body: { deliveryGroupId, productId }
+// Operator's answer to a coverage gap: mark the product missing and cancel the
+// positions waiting on it (sellers are notified). Re-audits afterwards so the
+// caller learns immediately whether the start is now unblocked.
+// ---------------------------------------------------------------------------
+router.post('/resolve-coverage-gap', requireTelegramRoles(['warehouse', 'admin']), asyncHandler(async (req, res) => {
+  const { deliveryGroupId, productId = null } = req.body;
+  if (!deliveryGroupId) throw appError('picking_delivery_group_required');
+
+  const group = await DeliveryGroup.findById(deliveryGroupId, 'dayOfWeek name').lean();
+  if (!group) throw appError('group_not_found');
+
+  const schedule  = await getOrderingSchedule();
+  const sessionId = await getOrCreateSessionId(String(deliveryGroupId), group.dayOfWeek, schedule);
+
+  const { getBot } = require('../telegramBot');
+  const { cancelledCount, archived } = await resolveCoverageGap({
+    deliveryGroupId,
+    orderingSessionId: sessionId,
+    productId,
+    bot: getBot(),
+  });
+
+  const coverage = await auditSessionCoverage({ deliveryGroupId, orderingSessionId: sessionId });
+
+  res.json({ ok: true, cancelledCount, archived, gaps: coverage.gaps, resolved: coverage.ok });
 }));
 
 // ---------------------------------------------------------------------------
@@ -506,11 +598,27 @@ router.get('/my-task', requireTelegramRoles(['warehouse', 'admin']), async (req,
     const user = req.telegramUser;
     const deliveryGroupId = req.query.deliveryGroupId || null;
 
-    const task = await PickingTask.findOne({
+    // Sorted by lockedAt DESC: with the one-task invariant there is at most one
+    // match, but a doc left over from before the invariant existed must resolve
+    // DETERMINISTICALLY to the most recently claimed task — an unsorted findOne
+    // could resume the worker onto a task they are not physically holding.
+    const [task, ...stale] = await PickingTask.find({
       status: 'locked',
       lockedBy: String(user.telegramId),
       ...(deliveryGroupId ? { deliveryGroupId: String(deliveryGroupId) } : {}),
-    }).lean();
+    })
+      .sort({ lockedAt: -1 })
+      .lean();
+
+    // Self-heal legacy duplicates: release the older ones (progress preserved).
+    // Scoped to this group only — a page load must not silently abandon a task
+    // the worker holds in another group; that is /claim's job.
+    if (stale.length) {
+      await PickingTask.updateMany(
+        { _id: { $in: stale.map((t) => t._id) }, status: 'locked', lockedBy: String(user.telegramId) },
+        { $set: { status: 'pending', lockedBy: null, lockedAt: null } },
+      );
+    }
 
     if (!task) return res.json({ task: null });
 
@@ -559,7 +667,7 @@ router.get('/next-task', requireTelegramRoles(['warehouse', 'admin']), async (re
       );
     }
 
-    const { task, wrappedAround } = await findAndLockNext(user.telegramId, currentBlock, deliveryGroupId);
+    const { task, wrappedAround } = await findAndLockNext(user.telegramId, currentBlock, deliveryGroupId, { actor: actorOf(user) });
     if (!task) {
       const pendingFilter = { status: 'pending' };
       if (deliveryGroupId) pendingFilter.deliveryGroupId = String(deliveryGroupId);
@@ -824,6 +932,7 @@ router.post('/tasks/:taskId/complete', requireTelegramRoles(['warehouse', 'admin
     res.json({ message: 'Task completed', nextTask: nextTaskData });
   } catch (err) {
     if (err && (err.name === 'AppError' || err.name === 'CastError' || isTransientTx(err))) return next(err);
+    if (err.code === 'picking_task_items_changed') return next(appError('picking_task_items_changed'));
     console.error('[picking/complete]', err);
     if (err.code === 'picking_task_not_found') return next(appError('picking_task_not_found'));
     if (err.code === 'expired_lock') return next(appError('expired_lock'));
@@ -878,6 +987,30 @@ router.patch('/tasks/:taskId/progress', requireTelegramRoles(['warehouse', 'admi
 });
 
 // ---------------------------------------------------------------------------
+// POST /api/picking/tasks/:taskId/heartbeat
+// "I still have this product in my hands." Refreshes lockedAt only.
+//
+// Separate from /progress on purpose: progress says WHICH shops are done and
+// rewrites the items array, a heartbeat says the worker is still alive and must
+// keep flowing even when nothing changed. Without it a picker who spends four
+// minutes on one bulky product looks abandoned and gets force-claimed (the guard
+// is 3 min) — previously only a checkbox tap refreshed the lock.
+// ---------------------------------------------------------------------------
+router.post('/tasks/:taskId/heartbeat', requireTelegramRoles(['warehouse', 'admin']), asyncHandler(async (req, res) => {
+  const user = req.telegramUser;
+
+  const result = await PickingTask.updateOne(
+    { _id: req.params.taskId, status: 'locked', lockedBy: String(user.telegramId || '') },
+    { $set: { lockedAt: new Date() } },
+  );
+
+  // matchedCount 0 = the lock is no longer ours (force-claimed, released, or the
+  // task was completed elsewhere). Reported as data, not an error: the client
+  // uses it to warn the worker rather than to retry.
+  res.json({ ok: true, held: result.matchedCount > 0 });
+}));
+
+// ---------------------------------------------------------------------------
 // POST /api/picking/tasks/:taskId/claim  — atomically lock a task from the review list
 // ---------------------------------------------------------------------------
 router.post('/tasks/:taskId/claim', requireTelegramRoles(['warehouse', 'admin']), async (req, res, next) => {
@@ -900,7 +1033,13 @@ router.post('/tasks/:taskId/claim', requireTelegramRoles(['warehouse', 'admin'])
 
         if (existing.status === 'locked' && String(existing.lockedBy || '') === String(user.telegramId || '')) {
           const mine = await buildTaskResponse(existing);
-          if (mine) return res.json({ task: mine });
+          if (mine) {
+            // Switching BACK to a task we already hold is still a switch — drop
+            // whatever else we were holding so the invariant survives it.
+            await releaseOtherLocksOfWorker(user.telegramId, existing._id);
+            await markSessionInProgress(existing.orderingSessionId, actorOf(user));
+            return res.json({ task: mine });
+          }
         }
 
         if (existing.status === 'locked') return next(appError('picking_claim_taken_by_other'));
@@ -912,6 +1051,15 @@ router.post('/tasks/:taskId/claim', requireTelegramRoles(['warehouse', 'admin'])
         await PickingTask.findByIdAndUpdate(claimed._id, { $set: { status: 'pending', lockedBy: null, lockedAt: null } });
         return next(appError('picking_product_not_found'));
       }
+
+      // Invariant: one worker = at most one locked task. Released only now that
+      // the new lock is secured and the response is guaranteed — an earlier
+      // release would strand the worker if the claim above had lost the race.
+      await releaseOtherLocksOfWorker(user.telegramId, claimed._id);
+
+      // Picking has physically begun → close the cancel-start window.
+      await markSessionInProgress(claimed.orderingSessionId, actorOf(user));
+
       res.json({ task: taskData });
     }, { ttlMs: 10_000, waitMs: 5_000 });
   } catch (err) {
@@ -950,6 +1098,7 @@ router.post('/tasks/:taskId/out-of-stock', requireTelegramRoles(['warehouse', 'a
     if (err && err.code === 'picking_task_not_found') return next(appError('picking_task_not_found'));
     if (err && err.code === 'expired_lock') return next(appError('expired_lock'));
     if (err && err.code === 'picking_claim_taken_by_other') return next(appError('picking_claim_taken_by_other'));
+    if (err && err.code === 'picking_oos_already_packed') return next(appError('picking_oos_already_packed'));
     console.error('[picking/out-of-stock]', err);
     next(appError('picking_oos_failed'));
   }

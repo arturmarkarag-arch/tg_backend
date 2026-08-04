@@ -28,6 +28,7 @@ const User = require('../models/User');
 const PickingTask = require('../models/PickingTask');
 const OrderingSession = require('../models/OrderingSession');
 const { roundMoney } = require('../utils/money');
+const { assignLateShopNumber } = require('../utils/shopNumbering');
 const { getIO } = require('../socket');
 
 function isTransientTxError(err) {
@@ -95,6 +96,11 @@ async function reconcileLateOrderStrict(orderId, { maxRetries = 3 } = {}) {
               $addToSet: {
                 items: {
                   orderId: order._id,
+                  // MUST be stamped: the box-number lookup keys on shopId and only
+                  // falls back to shopName for pre-shopId tasks. Leaving it null sent
+                  // every late position through that fallback, so a renamed shop lost
+                  // its number and two shops sharing a name collided onto one box.
+                  shopId: order.buyerSnapshot?.shopId || order.shopId || null,
                   shopName: order.buyerSnapshot?.shopName || 'невідомий магазин',
                   sellerName,
                   orderCreatedAt: order.createdAt || null,
@@ -137,7 +143,19 @@ async function reconcileLateOrderStrict(orderId, { maxRetries = 3 } = {}) {
         }
 
         await order.save({ session });
-        out = { appended, skipped, statusChanged, buyerTelegramId: String(order.buyerTelegramId || '') };
+        out = {
+          appended,
+          skipped,
+          statusChanged,
+          buyerTelegramId: String(order.buyerTelegramId || ''),
+          lateShop: appended > 0
+            ? {
+              sessionId,
+              shopId: String(order.buyerSnapshot?.shopId || order.shopId || ''),
+              shopName: order.buyerSnapshot?.shopName || '',
+            }
+            : null,
+        };
       });
       break;
     } catch (err) {
@@ -146,6 +164,14 @@ async function reconcileLateOrderStrict(orderId, { maxRetries = 3 } = {}) {
     } finally {
       await session.endSession();
     }
+  }
+
+  // A shop that only reached the session now is missing from the frozen box
+  // numbers, so it gets the next free one (tail, not alphabetical — the 1..N boxes
+  // are already labelled). Runs OUTSIDE the transaction: it touches a different
+  // document and must not be able to roll the reconcile back. Idempotent.
+  if (out.lateShop?.shopId) {
+    await assignLateShopNumber(out.lateShop.sessionId, out.lateShop.shopId, out.lateShop.shopName);
   }
 
   // Surface the change to the seller's order view (badge) — best-effort.

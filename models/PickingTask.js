@@ -13,6 +13,20 @@ const PickingTaskSchema = new mongoose.Schema(
     blockId: { type: Number, required: true },
     positionIndex: { type: Number, required: true },
     status: { type: String, enum: ['pending', 'locked', 'completed'], default: 'pending' },
+    // WHY a task reached 'completed'. The status alone cannot say it, and the two
+    // outcomes are not interchangeable: a normal pick must leave the product on
+    // the shelf, an out-of-stock pick archives it. Without this the OOS endpoint's
+    // idempotent-retry branch (crash between the task tx and archiveProduct) had
+    // to treat EVERY completed task as a retryable OOS, so replaying that request
+    // on a normally-packed task — stale tab, second tab, retried request — archived
+    // a perfectly in-stock product.
+    //   packed         — every shop served; product stays active
+    //   out_of_stock   — full or partial shortage; product gets archived
+    //   system_archive — closed by archiveProduct itself, no picker involved
+    // null on tasks completed before this field existed; treated as "not an OOS
+    // task" (refuse to archive). Safe by construction: a genuinely interrupted
+    // legacy archive is still repaired by archiveOrphanedOutOfStockProducts.
+    completionReason: { type: String, enum: ['packed', 'out_of_stock', 'system_archive', null], default: null },
     lockedBy: { type: String, default: null },
     lockedAt: { type: Date, default: null },
     items: [

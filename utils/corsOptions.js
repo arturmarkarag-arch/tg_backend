@@ -40,6 +40,12 @@ function corsOrigin(origin, callback) {
   return callback(new Error('Not allowed by CORS'));
 }
 
-const expressCorsOptions = { origin: corsOrigin, credentials: true };
+// `maxAge` lets the browser cache the preflight result instead of sending an
+// OPTIONS before (almost) every request. The front-end is on app.zlotoweczka
+// and the API on api.zlotoweczka — same-site but cross-ORIGIN, and every call
+// carries Authorization or x-telegram-initdata, so none of them is a "simple"
+// request. 7200s is Chrome's hard cap; Safari/WKWebView (i.e. the Telegram
+// mini-app on iOS) silently clamps this to ~600s, so expect a smaller win there.
+const expressCorsOptions = { origin: corsOrigin, credentials: true, maxAge: 7200 };
 
 module.exports = { getAllowedOrigins, corsOrigin, expressCorsOptions };
