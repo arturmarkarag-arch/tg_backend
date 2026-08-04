@@ -70,6 +70,11 @@ const publicApiPaths = [
   /^\/api\/v1\/products\/report-missing$/,
   /^\/api\/v1\/telegram\/validate$/,
   /^\/api\/v1\/telegram\/register-request$/,
+  // Self-service invite for a group member who opened the mini-app without a
+  // ?regToken. Necessarily pre-registration (the caller has no User row yet),
+  // so it cannot sit behind telegramAuth. It authenticates the caller itself
+  // via signed initData and re-checks group membership live before minting.
+  /^\/api\/v1\/telegram\/registration-invite$/,
   /^\/api\/v1\/telegram\/me$/,
   /^\/api\/delivery-groups\/summary$/,
   /^\/api\/shops\/cities$/,

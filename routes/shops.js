@@ -631,4 +631,38 @@ router.post('/:id/transfer-hash', telegramAuth, requireTelegramRole('admin'), as
   res.json({ transferHash: saved, transferHashCreatedAt: shop.transferHashCreatedAt, deepLink });
 }));
 
+// ─── POST /api/shops/:id/registration-link ────────────────────────────────────
+// One-time invite that registers a NEWCOMER straight onto THIS shop. Unlike the
+// transfer hash above (which moves an existing seller), this is for someone who
+// has no account yet: they tap the link, the bot checks they are in the work
+// group, and the registration form opens with the shop already fixed — no picker,
+// so they cannot land on the wrong one.
+//
+// The token carries the shop, not an identity: the admin does not know the
+// newcomer's telegramId in advance. That is safe because (a) live group
+// membership is re-checked both in the bot and again on submit, and (b) the
+// token is single-use — it opens the door exactly once. A group member who
+// intercepted it could at worst claim a shop they could already have picked
+// from the list by hand.
+router.post('/:id/registration-link', telegramAuth, requireTelegramRole('admin'), asyncHandler(async (req, res) => {
+  const shop = await Shop.findById(req.params.id).populate('cityId', 'name').lean();
+  if (!shop) throw appError('shop_not_found');
+  if (!shop.isActive) throw appError('registration_shop_inactive');
+  if (!shop.deliveryGroupId) throw appError('registration_shop_no_group');
+
+  const { issueShopRegistrationToken } = require('../services/registrationToken');
+  const token = await issueShopRegistrationToken(String(shop._id));
+
+  const botUsername = (process.env.TELEGRAM_BOT_USERNAME || '').replace(/^@/, '').trim();
+  const deepLink = botUsername ? `https://t.me/${botUsername}?start=${token}` : null;
+
+  res.json({
+    token,
+    deepLink,
+    shopName: shop.name || '',
+    shopCity: shop.cityId?.name || '',
+    expiresInHours: 24,
+  });
+}));
+
 module.exports = router;

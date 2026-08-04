@@ -7,7 +7,8 @@ const DeliveryGroup = require('../../models/DeliveryGroup');
 const Shop = require('../../models/Shop');
 const { sendAdminNotification, sendRegistrationApprovedMessage, isUserInAllowedGroup, deleteWelcomeFor } = require('../../telegramBot');
 const { resolveAndCreateUser } = require('../../services/createUserFromRequest');
-const { consumeRegistrationToken } = require('../../services/registrationToken');
+const { consumeRegistrationToken, issueRegistrationToken, peekRegistrationToken } = require('../../services/registrationToken');
+const RegistrationToken = require('../../models/RegistrationToken');
 const { issueGoogleLinkToken } = require('../../services/googleLinkToken');
 const { getOrderingWindowOpenAt } = require('../../utils/orderingSchedule');
 const { normalizeDeliveryGroup } = require('../../utils/deliveryGroupHelpers');
@@ -685,6 +686,73 @@ router.post('/mini-app/reset-state', asyncHandler(async (req, res) => {
   res.json({ miniAppState: normalizeMiniAppState(user.miniAppState), cartState });
 }));
 
+/**
+ * POST /api/v1/telegram/registration-invite
+ *
+ * Self-service invite for someone who opened the mini-app WITHOUT a `?regToken=`
+ * in the URL — the Menu button, a saved mini-app, an old message. Until this
+ * existed, only the bot's «Реєстрація в Mini App» button carried a token, so any
+ * other way in dead-ended on the "не зареєстрований" banner with no form, even
+ * for a legitimate member of the work group.
+ *
+ * Security is unchanged from the /start path — same gate, different doorway:
+ *   • the id comes from validated initData (Telegram signs it; the URL is never
+ *     trusted for identity),
+ *   • membership is re-checked LIVE via getChatMember (fail-closed),
+ *   • the minted token is bound to that same id, single-use, 24h,
+ *   • /register-request still re-runs BOTH checks before creating anything.
+ *
+ * Idempotent-ish: an unspent token for this id is reused instead of minting a
+ * new row on every mini-app open.
+ */
+router.post('/registration-invite', asyncHandler(async (req, res) => {
+  const { valid, telegramId, error } = getTelegramAuth(req, process.env.TELEGRAM_BOT_TOKEN);
+  if (!valid) throw appError('auth_invalid_init_data', { reason: error });
+  if (!telegramId) throw appError('auth_telegram_id_missing');
+
+  // Already in the system → nothing to invite; the client should just re-auth.
+  const existingUser = await User.findOne({ telegramId }, '_id').lean();
+  if (existingUser) return res.json({ eligible: false, reason: 'already_registered' });
+
+  // Blocked applicants must not be handed a fresh token to retry with.
+  const request = await RegistrationRequest.findOne(
+    { telegramId, status: { $in: ['pending', 'blocked'] } }, 'status',
+  ).lean();
+  if (request) return res.json({ eligible: false, reason: request.status });
+
+  if (!(await isUserInAllowedGroup(telegramId))) {
+    return res.json({ eligible: false, reason: 'not_in_group' });
+  }
+
+  // The client passes back the token it already holds (from ?regToken=). If it is
+  // a SHOP invite, the form must know which shop, so it can lock the picker and
+  // show the name instead. Never trust the client for the shop itself — it is
+  // read from the token here and enforced again on submit.
+  const heldToken = String(req.body?.token || '').trim();
+  if (heldToken) {
+    const owned = await peekRegistrationToken(heldToken, telegramId);
+    if (owned) {
+      let shop = null;
+      if (owned.shopId) {
+        const doc = await Shop.findById(owned.shopId).populate('cityId', 'name').lean();
+        if (doc?.isActive && doc.deliveryGroupId) {
+          shop = { shopId: String(doc._id), shopName: doc.name || '', shopCity: doc.cityId?.name || '' };
+        }
+      }
+      return res.json({ eligible: true, regToken: owned.token, shop });
+    }
+    // Held token is dead (used/expired/foreign) — fall through and mint a fresh
+    // personal one so the user is not stuck on a stale link.
+  }
+
+  const existingToken = await RegistrationToken.findOne({
+    telegramId: String(telegramId), usedAt: null, expiresAt: { $gt: new Date() },
+  }, 'token').lean();
+  const regToken = existingToken?.token || await issueRegistrationToken(telegramId);
+
+  res.json({ eligible: true, regToken, shop: null });
+}));
+
 router.post('/register-request', asyncHandler(async (req, res) => {
   const { firstName, lastName, phoneNumber, shopId, role, regToken } = req.body;
 
@@ -694,7 +762,6 @@ router.post('/register-request', asyncHandler(async (req, res) => {
 
   if (!firstName || !lastName || !role) throw appError('registration_required_fields');
   if (!['seller', 'warehouse'].includes(role)) throw appError('registration_invalid_role');
-  if (role === 'seller' && !shopId) throw appError('registration_seller_shop_required');
 
   // ── Registration gate (defense in depth) ────────────────────────────────────
   // 1. LIVE membership: only current members of an allowed group (fail-closed —
@@ -702,11 +769,26 @@ router.post('/register-request', asyncHandler(async (req, res) => {
   if (!(await isUserInAllowedGroup(telegramId))) {
     throw appError('registration_not_in_group');
   }
-  // 2. Personal one-time invite token, minted server-side for THIS telegramId
-  //    (rides in from the group link / bot button). Consumed atomically; only
-  //    valid for the authenticated identity — the URL is never trusted for id.
-  const consumedInvite = await consumeRegistrationToken(regToken, telegramId);
-  if (!consumedInvite) throw appError('registration_token_invalid');
+  // 2. One-time invite token, minted server-side either for THIS telegramId
+  //    (personal, from the group link / bot button) or for a SHOP (an admin's
+  //    "посилання для реєстрації на магазин"). A personal token is only valid
+  //    for the authenticated identity — the URL is never trusted for id — and a
+  //    shop token is gated by the live check above.
+  //
+  //    Only PEEKED here. The actual burn happens inside the transaction that
+  //    writes the User / RegistrationRequest, so a failure anywhere below leaves
+  //    the link usable instead of stranding the person with a dead invite.
+  const invite = await peekRegistrationToken(regToken, telegramId);
+  if (!invite) throw appError('registration_token_invalid');
+
+  // A shop invite DICTATES the shop: whatever the form sent is ignored, so a
+  // newcomer physically cannot end up on the wrong shop (the client hides the
+  // picker, but the enforcement has to live here, not in the UI). It also
+  // implies the seller role — shop invites are not for warehouse staff.
+  const forcedShopId = invite.shopId ? String(invite.shopId) : null;
+  const effectiveRole = forcedShopId ? 'seller' : role;
+  const effectiveShopId = forcedShopId || shopId;
+  if (effectiveRole === 'seller' && !effectiveShopId) throw appError('registration_seller_shop_required');
 
   const existingUser = await User.findOne({ telegramId }).lean();
   if (existingUser) throw appError('registration_user_exists');
@@ -715,22 +797,21 @@ router.post('/register-request', asyncHandler(async (req, res) => {
     telegramId,
     status: { $in: ['pending', 'blocked', 'rejected'] },
   }).lean();
+  // A rejected application may be re-submitted — the old row is deleted inside
+  // the transaction below, so a later failure doesn't lose it for nothing.
+  let staleRejectedId = null;
   if (existingRequest) {
     if (existingRequest.status === 'blocked')  throw appError('registration_blocked');
-    if (existingRequest.status === 'rejected') {
-      // Allow re-submission: delete old rejected request first
-      await RegistrationRequest.findByIdAndDelete(existingRequest._id);
-    } else {
-      throw appError('registration_request_exists');
-    }
+    if (existingRequest.status === 'rejected') staleRejectedId = existingRequest._id;
+    else throw appError('registration_request_exists');
   }
 
   const cleanPhone = normalizePhoneNumber(phoneNumber);
 
   let shop = null;
   let group = null;
-  if (role === 'seller') {
-    shop = await Shop.findById(shopId).populate('cityId', 'name').lean();
+  if (effectiveRole === 'seller') {
+    shop = await Shop.findById(effectiveShopId).populate('cityId', 'name').lean();
     if (!shop || !shop.isActive) throw appError('registration_shop_inactive');
     if (!shop.deliveryGroupId)   throw appError('registration_shop_no_group');
     group = await DeliveryGroup.findById(shop.deliveryGroupId).lean();
@@ -740,12 +821,20 @@ router.post('/register-request', asyncHandler(async (req, res) => {
   // ── Seller: auto-register. Group membership IS the authorization — no admin
   // step, no RegistrationRequest. (Role grants no access beyond the seller's own
   // shop; a wrong shop is later fixed via shop-transfer.) ──────────────────────
-  if (role === 'seller') {
+  if (effectiveRole === 'seller') {
     const mongoose = require('mongoose');
     const session = await mongoose.connection.startSession();
     let createdUser = null;
     try {
       await session.withTransaction(async () => {
+        // Burn the invite in the SAME transaction as the User write: either both
+        // land or neither does. Losing the race here (another tab consumed it
+        // first) aborts instead of creating a second account.
+        const consumed = await consumeRegistrationToken(regToken, telegramId, session);
+        if (!consumed) throw appError('registration_token_invalid');
+        if (staleRejectedId) {
+          await RegistrationRequest.deleteOne({ _id: staleRejectedId }, { session });
+        }
         const existing = await User.findOne({ telegramId }).session(session).lean();
         if (existing) throw appError('registration_user_exists');
         createdUser = await resolveAndCreateUser({
@@ -776,17 +865,34 @@ router.post('/register-request', asyncHandler(async (req, res) => {
   }
 
   // ── Warehouse: still requires an admin approve ──────────────────────────────
-  const request = await RegistrationRequest.create({
-    telegramId,
-    firstName,
-    lastName,
-    phoneNumber: cleanPhone,
-    shopId: null,
-    deliveryGroupId: '',
-    role,
-    status: 'pending',
-    meta: { submittedAt: new Date() },
-  });
+  // Same atomicity rule as the seller branch: the invite is burnt together with
+  // the RegistrationRequest, so a failed insert doesn't eat the one-time link.
+  const mongooseLib = require('mongoose');
+  const reqSession = await mongooseLib.connection.startSession();
+  let request = null;
+  try {
+    await reqSession.withTransaction(async () => {
+      const consumed = await consumeRegistrationToken(regToken, telegramId, reqSession);
+      if (!consumed) throw appError('registration_token_invalid');
+      if (staleRejectedId) {
+        await RegistrationRequest.deleteOne({ _id: staleRejectedId }, { session: reqSession });
+      }
+      const created = await RegistrationRequest.create([{
+        telegramId,
+        firstName,
+        lastName,
+        phoneNumber: cleanPhone,
+        shopId: null,
+        deliveryGroupId: '',
+        role: effectiveRole,
+        status: 'pending',
+        meta: { submittedAt: new Date() },
+      }], { session: reqSession });
+      request = created[0];
+    });
+  } finally {
+    reqSession.endSession();
+  }
 
   const message = `📥 Нова заявка на реєстрацію (Склад):\n` +
     `Telegram ID: ${telegramId}\n` +

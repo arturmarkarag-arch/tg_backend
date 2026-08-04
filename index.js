@@ -148,6 +148,9 @@ async function startServer() {
       await require('./models/ShopAuditLog').syncIndexes();
       await require('./models/ReceiptItemLog').syncIndexes();
       await require('./models/VisionTestLog').syncIndexes();
+      // CatalogReview: TTL (180d) + the {sessionId, telegramId} unique index that
+      // makes "переглянув усі товари" idempotent on a double tap.
+      await require('./models/CatalogReview').syncIndexes();
       console.log('[indexes] log-retention TTL indexes synced');
     } catch (err) {
       console.error('[indexes] log-retention TTL syncIndexes failed:', err.message);

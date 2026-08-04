@@ -203,6 +203,30 @@ function buildProductLabel(product) {
 }
 
 /**
+ * Close an order that has no live positions left (every item cancelled or skipped).
+ *
+ * Such an order is a ghost: nothing to pick, nothing to deliver — yet its `new`
+ * status keeps it "active" for every guard that reads the status alone. That is
+ * exactly how a Четвер-group order whose only item the seller removed 13 seconds
+ * after placing it went on to block the delivery-day change for a week: the boards
+ * (which count live positions) showed «Замовлень немає», the guard (which counted
+ * statuses) saw an active order, and nothing could ever clear it.
+ *
+ * `cancelled` is the existing terminal status for "all items cancelled" — the same
+ * one the out-of-stock path writes — so no new vocabulary is introduced. Mutates
+ * `order` in place; the caller saves. Returns true when it closed the order.
+ */
+function closeOrderIfNoLiveItems(order, actor) {
+  if (!order || !['new', 'in_progress'].includes(order.status)) return false;
+  const liveItems = (order.items || []).filter((i) => !i.cancelled && !i.skipped).length;
+  if (liveItems > 0) return false;
+
+  order.status = 'cancelled';
+  order.history.push({ ...actor, action: 'auto_closed_empty', meta: { reason: 'no_live_items' } });
+  return true;
+}
+
+/**
  * GET /conflicts — returns shops with 2+ orders from different sellers in active sessions.
  * Admin and warehouse only.
  */
@@ -1425,31 +1449,28 @@ router.post('/upsert-item', telegramAuth, requireOrderingWindowOpen, asyncHandle
         return;
       }
 
-      // Order exists — find item (including cancelled for re-add)
-      const item = order.items.find((i) => String(i.productId) === productId);
-      const activeItem = item && !item.cancelled ? item : null;
+      // Order exists — find the live position for this product.
+      const itemIndex = order.items.findIndex((i) => String(i.productId) === productId && !i.cancelled && !i.skipped);
+      const activeItem = itemIndex >= 0 ? order.items[itemIndex] : null;
 
       if (newQty === 0) {
         if (!activeItem) { result = { ok: true, productId, newQty: 0, action: 'noop' }; return; }
-        activeItem.cancelled = true;
-        order.history.push({ ...actor, action: 'item_removed', meta: { productId, qty: activeItem.quantity } });
+        // The buyer changed their mind — the position leaves the order entirely.
+        // NOT a soft `cancelled` flag: that one means "склад: товар закінчився"
+        // and drives the rose «Закінчився» badge + «Є товари, що не приїдуть»
+        // chip in the seller's app. Marking a self-removal with it told the
+        // seller the warehouse had run out of a product they simply un-picked.
+        const removedQty = activeItem.quantity;
+        order.items.splice(itemIndex, 1);
+        order.history.push({ ...actor, action: 'item_removed', meta: { productId, qty: removedQty } });
       } else if (!activeItem) {
-        // Add new item (or re-add cancelled)
         const product = await Product.findById(productId).session(mongoSession).lean();
         if (!product || !isProductAvailable(product)) throw appError('product_not_found');
         const inBlock = await Block.findOne({ productIds: product._id }).session(mongoSession).lean();
         if (!inBlock) throw appError('product_not_in_block');
 
         const price = Number(product.price || 0);
-        if (item) {
-          // Re-activate cancelled item
-          item.cancelled = false;
-          item.quantity = newQty;
-          item.price = price;
-          item.packed = false;
-        } else {
-          order.items.push({ productId: product._id, name: buildProductLabel(product), price, quantity: newQty, packed: false, cancelled: false });
-        }
+        order.items.push({ productId: product._id, name: buildProductLabel(product), price, quantity: newQty, packed: false, cancelled: false });
         order.history.push({ ...actor, action: 'item_added', meta: { productId, newQty } });
       } else {
         const oldQty = activeItem.quantity;
@@ -1460,6 +1481,12 @@ router.post('/upsert-item', telegramAuth, requireOrderingWindowOpen, asyncHandle
       order.totalPrice = roundMoney(order.items
         .filter((i) => !i.cancelled)
         .reduce((sum, i) => sum + Number(i.price || 0) * Number(i.quantity || 0), 0));
+
+      // Removing the LAST position closes the order instead of leaving an empty
+      // `new` shell behind (see closeOrderIfNoLiveItems). A later re-add simply
+      // creates a fresh order — the unique active-order index only covers
+      // new/in_progress, so a closed one never blocks it.
+      closeOrderIfNoLiveItems(order, actor);
 
       await order.save({ session: mongoSession });
 
@@ -1576,26 +1603,32 @@ router.post('/remove-item', telegramAuth, requireOrderingWindowOpen, asyncHandle
       }).session(session);
       if (!order) throw appError('order_not_found');
 
-      const item = order.items.find((i) => String(i.productId) === productId && !i.cancelled);
-      if (!item) {
+      const itemIndex = order.items.findIndex((i) => String(i.productId) === productId && !i.cancelled && !i.skipped);
+      if (itemIndex < 0) {
         // Already gone — idempotent success, nothing to write.
         return;
       }
 
-      const removedQty = item.quantity;
-      item.cancelled = true;
+      // Hard removal, not a `cancelled` flag — see the same rule in /upsert-item:
+      // `cancelled` is the warehouse's "закінчився", and the seller's app renders
+      // it as such. A position the buyer un-picked simply stops existing; the
+      // audit trail lives in order.history (`item_removed`).
+      const removedQty = order.items[itemIndex].quantity;
+      order.items.splice(itemIndex, 1);
       order.totalPrice = roundMoney(order.items
         .filter((i) => !i.cancelled)
         .reduce((sum, i) => sum + Number(i.price || 0) * Number(i.quantity || 0), 0));
 
-      order.history.push({
+      const actor = {
         at: new Date(),
         by: String(user.telegramId),
         byName: [user.firstName, user.lastName].filter(Boolean).join(' '),
         byRole: user.role,
-        action: 'item_removed',
-        meta: { productId, qty: removedQty },
-      });
+      };
+      order.history.push({ ...actor, action: 'item_removed', meta: { productId, qty: removedQty } });
+
+      // Same rule as /upsert-item: the last position leaving closes the order.
+      closeOrderIfNoLiveItems(order, actor);
 
       await order.save({ session });
     });

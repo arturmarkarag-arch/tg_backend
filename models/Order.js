@@ -6,6 +6,14 @@ const OrderItemSchema = new mongoose.Schema({
   price: { type: Number, default: 0 },
   quantity: { type: Number, required: true, min: 1 },
   packed: { type: Boolean, default: false },
+  // WAREHOUSE-ONLY: the product ran out / was archived mid-picking, so this
+  // position will not be delivered (services/archiveProduct.js). The seller's
+  // app renders it as the rose «Закінчився» badge + the «Є товари, що не
+  // приїдуть» chip on the order. A buyer who un-picks a product does NOT set
+  // this — that position is spliced out of `items` entirely (routes/orders.js
+  // /remove-item and /upsert-item qty=0), with the audit trail left in
+  // `history.item_removed`. Do not reuse this flag for buyer-side removal:
+  // it tells the seller the warehouse ran out of something they never ordered.
   cancelled: { type: Boolean, default: false },
   // STRICT late-order handling: set when an order reaches a session whose picking
   // has already started and this product no longer has an OPEN (pending) picking

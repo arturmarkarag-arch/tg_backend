@@ -649,13 +649,21 @@ async function initBot(token) {
           const hasTokenInLink = startPayload && startPayload.toLowerCase() !== 'register';
 
           if (hasTokenInLink) {
-            // A personal token was passed in the link → it MUST belong to THIS
-            // user, be unused and unexpired. Foreign / expired / used → REJECT.
-            // We never re-issue from a link that carried a token, so one person's
-            // link can't open the door for anyone else.
+            // A token was passed in the link. Two shapes:
+            //   • personal (telegramId set) → MUST belong to THIS user;
+            //   • shop invite (telegramId null) → minted by an admin for a shop
+            //     before the newcomer's id was known, so identity cannot gate it;
+            //     live group membership does instead.
+            // Foreign / expired / used → REJECT. We never re-issue from a link
+            // that carried a token, so one person's link can't open the door for
+            // anyone else.
             const owned = await peekRegistrationToken(startPayload, chatId);
             if (!owned) {
               await bot.sendMessage(chatId, 'Це посилання для реєстрації недійсне або призначене не для вас. Відкрийте персональне посилання, яке бот надіслав саме вам у робочій групі.');
+              return;
+            }
+            if (!owned.telegramId && !(await isUserInAllowedGroup(chatId))) {
+              await bot.sendMessage(chatId, 'Реєстрація доступна лише учасникам робочої групи. Зверніться до адміністратора.');
               return;
             }
             regToken = owned.token;

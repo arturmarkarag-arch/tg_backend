@@ -6,6 +6,7 @@ const User = require('../models/User');
 const Order = require('../models/Order');
 const Shop = require('../models/Shop');
 const PickingTask = require('../models/PickingTask');
+const CatalogReview = require('../models/CatalogReview');
 const { telegramAuth, requireTelegramRole, requireTelegramRoles } = require('../middleware/telegramAuth');
 const {
   isOrderingOpen,
@@ -15,6 +16,7 @@ const {
 const { getOrCreateSessionId } = require('../utils/getOrCreateSession');
 const { pushSessionEvent } = require('../utils/sessionStatus');
 const { normalizeDeliveryGroup } = require('../utils/deliveryGroupHelpers');
+const { getIO } = require('../socket');
 
 const { getOrderingSchedule } = require('../utils/getOrderingSchedule');
 const cache = require('../utils/cache');
@@ -92,9 +94,16 @@ router.get('/ordering-status', telegramAuth, async (req, res) => {
     return res.json({ isOpen: true, ...transferPayload });
   }
 
+  // `reason` distinguishes a SETUP problem from a closed ordering window. Both
+  // come back as isOpen:false, but they mean completely different things to the
+  // user: a closed window opens by itself on schedule, a missing shop never will
+  // until an admin acts. Without this the mini-app rendered "Замовлення для
+  // групи «» зараз закрито … вас повідомлять, коли вікно відкриється" over an
+  // empty group name — a promise nothing would ever keep.
   if (!user.shopId) {
     return res.json({
       isOpen: false,
+      reason: 'no_shop',
       message: 'Вас не призначено до жодного магазину. Зверніться до адміністратора.',
       ...transferPayload,
     });
@@ -104,6 +113,7 @@ router.get('/ordering-status', telegramAuth, async (req, res) => {
   if (!shop || !shop.deliveryGroupId) {
     return res.json({
       isOpen: false,
+      reason: 'shop_no_group',
       message: 'Ваш магазин не прив\'язано до групи доставки. Зверніться до адміністратора.',
       ...transferPayload,
     });
@@ -113,6 +123,7 @@ router.get('/ordering-status', telegramAuth, async (req, res) => {
   if (!group) {
     return res.json({
       isOpen: false,
+      reason: 'group_missing',
       message: 'Групу доставки не знайдено. Зверніться до адміністратора.',
       ...transferPayload,
     });
@@ -122,8 +133,84 @@ router.get('/ordering-status', telegramAuth, async (req, res) => {
   const status = isOrderingOpen(group.dayOfWeek, schedule);
   const window = getWindowDescription(group.dayOfWeek, schedule);
   const sessionOpenAt = getOrderingWindowOpenAt(group.dayOfWeek, schedule).toISOString();
-  return res.json({ ...status, groupName: group.name, window, sessionOpenAt, ...transferPayload });
+
+  // "Я переглянув усі товари" — seed the button's state so a seller who already
+  // pressed it (possibly on another device) sees the done state, not the button.
+  // Best-effort: this is a cosmetic flag, it must never break the ordering window.
+  let catalogReviewedAt = null;
+  try {
+    const sessionId = await getOrCreateSessionId(String(group._id), group.dayOfWeek, schedule);
+    const mark = await CatalogReview.findOne(
+      { sessionId, telegramId: String(user.telegramId) }, 'at',
+    ).lean();
+    catalogReviewedAt = mark?.at || null;
+  } catch (e) {
+    console.warn('[ordering-status] catalog review lookup failed:', e?.message || e);
+  }
+
+  return res.json({
+    ...status,
+    groupName: group.name,
+    window,
+    sessionOpenAt,
+    catalogReviewedAt,
+    ...transferPayload,
+  });
 });
+
+/**
+ * POST /api/delivery-groups/catalog-reviewed
+ * The seller declares they walked the whole catalogue to the end in the CURRENT
+ * ordering session. Informational only — nothing downstream gates on it; the
+ * warehouse just wants to see who did and who didn't before picking starts.
+ *
+ * One-way and idempotent: the {sessionId, telegramId} unique index turns a second
+ * press into a plain re-read, and there is no endpoint to clear the mark. It ages
+ * out by itself when the next session starts (different sessionId).
+ */
+router.post('/catalog-reviewed', telegramAuth, asyncHandler(async (req, res) => {
+  const user = req.telegramUser;
+  if (!user.shopId) throw appError('no_shop');
+
+  const shop = await Shop.findById(user.shopId).select('name deliveryGroupId').lean();
+  if (!shop || !shop.deliveryGroupId) throw appError('group_not_found');
+
+  const group = normalizeDeliveryGroup(await DeliveryGroup.findById(shop.deliveryGroupId).lean());
+  if (!group) throw appError('group_not_found');
+
+  const schedule = await getOrderingSchedule();
+  const sessionId = await getOrCreateSessionId(String(group._id), group.dayOfWeek, schedule);
+
+  const productCount = Number(req.body?.productCount) || 0;
+  const doc = {
+    sessionId,
+    groupId: String(group._id),
+    telegramId: String(user.telegramId),
+    userName: [user.firstName, user.lastName].filter(Boolean).join(' ') || String(user.telegramId),
+    shopId: String(user.shopId),
+    shopName: shop.name || '',
+    at: new Date(),
+    productCount,
+  };
+
+  // $setOnInsert only: re-pressing must NOT move the timestamp the warehouse
+  // already saw on the board.
+  const saved = await CatalogReview.findOneAndUpdate(
+    { sessionId, telegramId: doc.telegramId },
+    { $setOnInsert: doc },
+    { upsert: true, new: true, setDefaultsOnInsert: true },
+  ).lean();
+
+  // Nudge the picking board so the tick appears without waiting for a poll.
+  try {
+    const io = getIO();
+    if (io) io.to(`picking_group_${String(group._id)}`).emit('shop_status_changed', { groupId: String(group._id) });
+  } catch (e) {
+    console.warn('[catalog-reviewed] socket emit failed:', e?.message || e);
+  }
+
+  res.json({ catalogReviewedAt: saved?.at || doc.at });
+}));
 
 router.get('/summary', async (req, res) => {
   const groups = await getAllDeliveryGroups();
@@ -314,6 +401,18 @@ router.get('/:groupId/shop-status', telegramAuth, requireTelegramRoles(['admin',
     orderedBuyersByShop[sid].add(String(order.buyerTelegramId));
   }
 
+  // "Переглянув усі товари" marks of THIS session. Keyed by (seller, SHOP AS
+  // RECORDED) — not by seller alone: the mark states "this person walked the
+  // catalogue while working THAT shop". Keying on the seller would drag the tick
+  // along if they are moved mid-cycle, so a shop nobody reviewed for would show
+  // a green tick it never earned.
+  const reviewMarks = await CatalogReview.find(
+    { groupId: String(group._id), sessionId: currentSessionId }, 'telegramId shopId at',
+  ).lean();
+  const reviewedAtByKey = new Map(
+    reviewMarks.map((r) => [`${String(r.telegramId)}|${String(r.shopId || '')}`, r.at]),
+  );
+
   const shopStatuses = shops.map((shop) => {
     const shopId = String(shop._id);
     const cartItemCount = cartItemsByShop[shopId] || 0;
@@ -322,7 +421,11 @@ router.get('/:groupId/shop-status', telegramAuth, requireTelegramRoles(['admin',
     const shopSellerObjs = sellersByShop[shopId] || [];
     const assignedStaff = shopSellerObjs.filter((s) => s.role === 'seller' || s.role === 'admin');
     const orderedBuyers = orderedBuyersByShop[shopId] || new Set();
-    const sellersWithStatus = shopSellerObjs.map((s) => ({ ...s, hasOrder: orderedBuyers.has(s.telegramId) }));
+    const sellersWithStatus = shopSellerObjs.map((s) => ({
+      ...s,
+      hasOrder: orderedBuyers.has(s.telegramId),
+      catalogReviewedAt: reviewedAtByKey.get(`${s.telegramId}|${shopId}`) || null,
+    }));
     // hasConflict: 2+ separate buyers placed orders in this shop this session
     // hasMultipleSellers: 2+ seller/admin users are assigned to this shop.
     // hasSellerOrderMismatch: multiple assigned users but only some placed orders.
@@ -592,12 +695,20 @@ router.patch('/:id', telegramAuth, requireTelegramRole('admin'), asyncHandler(as
     const { isOpen } = isOrderingOpen(group.dayOfWeek, schedule);
 
     // 2) active orders in the CURRENT session, or 3) active picking tasks?
+    // "Active" must mean "has something left to strand": an order whose every
+    // position was cancelled/skipped carries nothing into the next session, so it
+    // must NOT veto the change. Status alone was the wrong test — an order the
+    // seller emptied right after placing it stayed `new` forever and blocked the
+    // day change permanently, while every board (which counts live positions)
+    // reported «Замовлень немає». /upsert-item + /remove-item now close such
+    // orders on the spot; this $elemMatch is the guard's own safety net.
     const currentSessionId = await getOrCreateSessionId(groupIdStr, group.dayOfWeek, schedule);
     const [activeOrder, activeTask] = await Promise.all([
       Order.exists({
         'buyerSnapshot.deliveryGroupId': groupIdStr,
         orderingSessionId: currentSessionId,
         status: { $in: ['new', 'in_progress'] },
+        items: { $elemMatch: { cancelled: { $ne: true }, skipped: { $ne: true } } },
       }),
       PickingTask.exists({ deliveryGroupId: groupIdStr, status: { $in: ['pending', 'locked'] } }),
     ]);

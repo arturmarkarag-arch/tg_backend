@@ -6,6 +6,8 @@ const Block = require('../models/Block');
 const DeliveryGroup = require('../models/DeliveryGroup');
 const OrderingSession = require('../models/OrderingSession');
 const User = require('../models/User');
+const Shop = require('../models/Shop');
+const CatalogReview = require('../models/CatalogReview');
 const { requireTelegramRoles } = require('../middleware/telegramAuth');
 const { getProductTitle } = require('../services/archiveProduct');
 const { buildPickingTasksFromOrders } = require('../services/taskBuilder');
@@ -1173,7 +1175,80 @@ router.get('/shift-board', requireTelegramRoles(['admin']), async (req, res, nex
       console.warn('[picking/shift-board] unfinished aggregation failed:', e.message);
     }
 
-    res.json({ groupName, sessionStart, lastActivity, workers, totalCompleted, totalPending, unfinished });
+    // ── "Переглянули каталог" — who pressed «Я переглянув усі товари» this session ──
+    // Roster of every seller/admin assigned to a shop of this group, each with the
+    // timestamp of their mark (or null). Purely informational, so it is built
+    // best-effort and a failure here must never break the board.
+    let catalogReview = null;
+    try {
+      if (sessionId) {
+        const shops = await Shop.find({ deliveryGroupId: dgId, isActive: true }, 'name cityId')
+          .populate('cityId', 'name').lean();
+        const shopById = new Map(shops.map((s) => [String(s._id), s]));
+
+        const staff = shops.length
+          ? await User.find(
+            { role: { $in: ['seller', 'admin'] }, shopId: { $in: shops.map((s) => s._id) } },
+            'telegramId firstName lastName shopId',
+          ).lean()
+          : [];
+
+        const marks = await CatalogReview.find(
+          { groupId: dgId, sessionId }, 'telegramId userName shopId shopName at',
+        ).lean();
+
+        // The roster is a UNION of two sources, not a lookup on one:
+        //   • the marks themselves — historical facts, read from their own
+        //     snapshot (who, which shop, when). These survive the seller being
+        //     moved to another shop, or unassigned entirely, mid-cycle.
+        //   • currently assigned staff — needed only to list who has NOT marked.
+        // Keying purely off today's staff (the first version) meant a moved
+        // seller's mark jumped to their new shop, and an unassigned one vanished.
+        const markedKeys = new Set();
+        const sellers = marks.map((m) => {
+          markedKeys.add(`${String(m.telegramId)}|${String(m.shopId || '')}`);
+          const shop = shopById.get(String(m.shopId));
+          return {
+            telegramId: String(m.telegramId),
+            name: m.userName || String(m.telegramId),
+            // Prefer the live shop name (renames), fall back to the snapshot —
+            // which is all we have if the shop left the group since.
+            shopName: shop?.name || m.shopName || '—',
+            shopCity: shop?.cityId?.name || '',
+            at: m.at,
+          };
+        });
+
+        for (const u of staff) {
+          if (markedKeys.has(`${String(u.telegramId)}|${String(u.shopId || '')}`)) continue;
+          const shop = shopById.get(String(u.shopId));
+          sellers.push({
+            telegramId: String(u.telegramId),
+            name: [u.firstName, u.lastName].filter(Boolean).join(' ') || String(u.telegramId),
+            shopName: shop?.name || '—',
+            shopCity: shop?.cityId?.name || '',
+            at: null,
+          });
+        }
+
+        sellers.sort((a, b) => {
+          // Marked first (newest mark on top), then the rest alphabetically by shop.
+          if (!!a.at !== !!b.at) return a.at ? -1 : 1;
+          if (a.at && b.at) return new Date(b.at) - new Date(a.at);
+          return String(a.shopName).localeCompare(String(b.shopName), 'uk');
+        });
+
+        catalogReview = {
+          reviewedCount: sellers.filter((s) => s.at).length,
+          totalCount: sellers.length,
+          sellers,
+        };
+      }
+    } catch (e) {
+      console.warn('[picking/shift-board] catalog review aggregation failed:', e.message);
+    }
+
+    res.json({ groupName, sessionStart, lastActivity, workers, totalCompleted, totalPending, unfinished, catalogReview });
   } catch (err) {
     if (err && (err.name === 'AppError' || err.name === 'CastError' || isTransientTx(err))) return next(err);
     console.error('[picking/shift-board]', err);

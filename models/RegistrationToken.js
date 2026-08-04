@@ -9,7 +9,15 @@ const mongoose = require('mongoose');
 // matches when the caller's authenticated telegramId equals token.telegramId.
 const schema = new mongoose.Schema({
   token:      { type: String, required: true, unique: true }, // crypto random, base64url
-  telegramId: { type: String, required: true },               // the only id this token can register
+  // The only id this token can register. NULL means "shop invite": an admin
+  // minted it for a specific SHOP before knowing who would use it, so identity
+  // cannot be pinned in advance. Such a token is gated by live group membership
+  // instead (checked in the bot AND again on submit) and is still single-use, so
+  // it opens the door exactly once for one member of the work group.
+  telegramId: { type: String, default: null },
+  // Set only on shop invites. When present it OVERRIDES whatever shop the form
+  // sends: the whole point is that the newcomer cannot land on the wrong shop.
+  shopId:     { type: String, default: null },
   usedAt:     { type: Date, default: null },                  // set once on consume
   expiresAt:  { type: Date, required: true },                 // now + 24h (a join→register window)
 }, { timestamps: true });
