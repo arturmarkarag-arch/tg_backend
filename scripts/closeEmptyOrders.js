@@ -11,6 +11,10 @@
  * routes/orders.js now closes such orders as the last position leaves, so this
  * script is for the rows created before that fix.
  *
+ * NOTE: an order that never lived (zero items, no picking, buyer-only history) is
+ * now DELETED rather than closed — see orderNeverLived in routes/orders.js. Husks
+ * this script already closed are cleared by scripts/purgeGhostOrders.js.
+ *
  * Usage:
  *   node scripts/closeEmptyOrders.js            # dry-run, lists what it would close
  *   node scripts/closeEmptyOrders.js --execute  # actually closes them

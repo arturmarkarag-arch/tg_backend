@@ -217,14 +217,51 @@ function buildProductLabel(product) {
  * one the out-of-stock path writes — so no new vocabulary is introduced. Mutates
  * `order` in place; the caller saves. Returns true when it closed the order.
  */
-function closeOrderIfNoLiveItems(order, actor) {
+async function closeOrderIfNoLiveItems(order, actor, session) {
   if (!order || !['new', 'in_progress'].includes(order.status)) return false;
   const liveItems = (order.items || []).filter((i) => !i.cancelled && !i.skipped).length;
   if (liveItems > 0) return false;
 
+  if (await orderNeverLived(order, session)) {
+    await Order.deleteOne({ _id: order._id }, { session });
+    return 'deleted';
+  }
+
   order.status = 'cancelled';
   order.history.push({ ...actor, action: 'auto_closed_empty', meta: { reason: 'no_live_items' } });
-  return true;
+  return 'cancelled';
+}
+
+/**
+ * True when the order carries nothing worth keeping: the seller filled a cart and
+ * emptied it again, and nobody else ever touched it.
+ *
+ * Such a document is a log of cart edits, not an audit trail — no picking, no
+ * warehouse decision, no money. Deleting it beats leaving a `cancelled` husk that
+ * shows up in every list that does not filter the status (and that the seller then
+ * has to ask about).
+ *
+ * The three guards below are what separates it from a REAL cancellation:
+ *   - `in_progress` means picking already started;
+ *   - any item row at all (even a dead one) means the warehouse flagged
+ *     `cancelled`/`skipped` on it — that verdict is the audit, keep it;
+ *   - a PickingTask referencing the order means it reached the floor.
+ * Staff history entries catch whatever the first two miss (reassignment, parking).
+ */
+async function orderNeverLived(order, session) {
+  if (order.status !== 'new') return false;
+  if ((order.items || []).length > 0) return false;
+
+  const touchedByOthers = (order.history || []).some(
+    (h) => String(h.by) !== String(order.buyerTelegramId),
+  );
+  if (touchedByOthers) return false;
+
+  const task = await PickingTask.findOne({ 'items.orderId': order._id })
+    .select('_id')
+    .session(session || null)
+    .lean();
+  return !task;
 }
 
 /**
@@ -1563,13 +1600,15 @@ router.post('/upsert-item', telegramAuth, requireOrderingWindowOpen, asyncHandle
         .filter((i) => !i.cancelled)
         .reduce((sum, i) => sum + Number(i.price || 0) * Number(i.quantity || 0), 0));
 
-      // Removing the LAST position closes the order instead of leaving an empty
-      // `new` shell behind (see closeOrderIfNoLiveItems). A later re-add simply
-      // creates a fresh order — the unique active-order index only covers
-      // new/in_progress, so a closed one never blocks it.
-      closeOrderIfNoLiveItems(order, actor);
+      // Removing the LAST position retires the order instead of leaving an empty
+      // `new` shell behind: deleted if it never lived, `cancelled` otherwise (see
+      // closeOrderIfNoLiveItems). A later re-add simply creates a fresh order —
+      // the unique active-order index only covers new/in_progress, so neither a
+      // closed nor a deleted one blocks it.
+      const closed = await closeOrderIfNoLiveItems(order, actor, mongoSession);
 
-      await order.save({ session: mongoSession });
+      // A deleted order must NOT be saved — save() on a removed doc re-inserts it.
+      if (closed !== 'deleted') await order.save({ session: mongoSession });
 
       const activePositions = order.items.filter((i) => !i.cancelled).length;
       await User.updateOne(
@@ -1708,10 +1747,11 @@ router.post('/remove-item', telegramAuth, requireOrderingWindowOpen, asyncHandle
       };
       order.history.push({ ...actor, action: 'item_removed', meta: { productId, qty: removedQty } });
 
-      // Same rule as /upsert-item: the last position leaving closes the order.
-      closeOrderIfNoLiveItems(order, actor);
+      // Same rule as /upsert-item: the last position leaving retires the order —
+      // deleted when it never lived, `cancelled` when it carries a real verdict.
+      const closed = await closeOrderIfNoLiveItems(order, actor, session);
 
-      await order.save({ session });
+      if (closed !== 'deleted') await order.save({ session });
     });
   } finally {
     session.endSession();
