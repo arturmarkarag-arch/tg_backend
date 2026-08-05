@@ -60,6 +60,26 @@ async function getOrCreateSessionId(groupId, dayOfWeek, schedule = {}) {
 }
 
 /**
+ * Same lookup as getOrCreateSessionId, but NEVER creates the document.
+ *
+ * Exists for readers that legitimately have no business bringing a session into
+ * being: дозамовлення (routes/supplement.js) прив'язане лише до групи і читає
+ * сесію ВИКЛЮЧНО щоб показати номер коробки, якщо він уже є. Виклик
+ * getOrCreateSessionId у такому місці створював сесію майбутньої доставки як
+ * побічний ефект приймання товару — і ця сесія потім виглядала як справжня.
+ *
+ * @returns {Promise<string|null>} ObjectId as string, or null when absent.
+ */
+async function findCurrentSessionId(groupId, dayOfWeek, schedule = {}) {
+  const openDate = getOpenDateWarsaw(dayOfWeek, schedule);
+  const doc = await OrderingSession.findOne(
+    { groupId: String(groupId), openDate },
+    '_id',
+  ).lean();
+  return doc ? String(doc._id) : null;
+}
+
+/**
  * Adds whole days to a "YYYY-MM-DD" string using pure calendar math (Date.UTC as
  * a calendar, no timezone semantics). Immune to DST.
  */
@@ -148,4 +168,9 @@ async function migrateOrdersToSessionIds() {
   }
 }
 
-module.exports = { getOrCreateSessionId, getOrCreateNextSessionId, migrateOrdersToSessionIds };
+module.exports = {
+  getOrCreateSessionId,
+  getOrCreateNextSessionId,
+  findCurrentSessionId,
+  migrateOrdersToSessionIds,
+};

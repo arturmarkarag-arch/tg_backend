@@ -15,7 +15,6 @@
 
 const OrderingSession   = require('../models/OrderingSession');
 const PickingTask       = require('../models/PickingTask');
-const SupplementOffer   = require('../models/SupplementOffer');
 const { LIFECYCLE_EVENT } = require('./sessionVocab');
 
 const MAX_EVENTS = 200; // keep the timeline bounded (order_added can fire often)
@@ -120,19 +119,14 @@ async function maybeCompleteSession(orderingSessionId, { actor = {}, meta = {}, 
   const remaining = await query;
   if (remaining > 0) return null;
 
-  // Дозамовлення — повноцінний блокер завершення сесії (§17 специфікації).
-  // Звичайні задачі можуть бути зібрані всі до одної, але поки пропозиція
-  // дозамовлення відкрита (магазини ще замовляють) або заморожена й не
-  // спакована — доставка ще не готова. Закрити сесію тут означало б, що
-  // віртуальний блок зникне разом із роботою, яку ніхто не зробив.
-  // ACTIVE_STATUSES живе на моделі, тому цей гард не тягне весь сервіс і не
-  // створює циклу require (services/supplementOffers сам кличе сюди).
-  const supplementQuery = SupplementOffer.countDocuments({
-    orderingSessionId: String(orderingSessionId),
-    status: { $in: SupplementOffer.ACTIVE_STATUSES },
-  });
-  if (mongoSession) supplementQuery.session(mongoSession);
-  if ((await supplementQuery) > 0) return null;
+  // ДОЗАМОВЛЕННЯ ТУТ СВІДОМО НЕ ПЕРЕВІРЯЄТЬСЯ (рішення власника 05.08.2026,
+  // друга ітерація). Колишній гард §17 тримав сесію відкритою, поки жива хоч
+  // одна пропозиція — і саме він робив дві речі неможливими: відкрити хвилю
+  // групі, чиєї сесії ще немає, і закрити доставку, яка насправді поїхала.
+  // Тепер звичайна сесія завершується за своїми звичайними задачами, а хвиля
+  // дозамовлення живе власним циклом open → frozen → completed і закривається
+  // сама (або складом). Якщо колись знову захочеться зв'язати їх — спершу
+  // перечитайте коментар у models/SupplementOffer.js.
 
   // "No tasks left" is NOT the same as "everything was collected". An order item
   // that never received a task (product pulled from its block, archived, deleted,

@@ -1,14 +1,17 @@
 'use strict';
 
 /**
- * Правило допуску груп до дозамовлення і час, від якого воно залежить.
+ * Час, на якому тримаються ПІДКАЗКИ у модалці вибору групи.
  *
- * Саме тут раніше жили дві помилки, які неможливо побачити оком: накладна,
- * проведена наступного дня, відкривала хвилю для доставки, що вже поїхала, а
- * повністю зібрана (але не закрита) сесія навпаки не отримувала нічого.
+ * Правила допуску тут більше немає: усі групи з активними магазинами клікабельні,
+ * а стан вікна замовлень — виключно текст для очей працівника (рішення власника
+ * 05.08.2026, друга ітерація). Тому й тестувати лишилось саме те, з чого цей
+ * текст складається — арифметику розкладу і формат тривалості. Колишній набір
+ * тестів на isEligibleState/ELIGIBLE_STATES знято РАЗОМ із самим правилом; якщо
+ * захочеться повернути гейт, повертати треба і його тести.
  */
 
-const { isEligibleState, humanDuration, ELIGIBLE_STATES } = require('../services/supplementTargets');
+const { humanDuration } = require('../services/supplementTargets');
 const {
   getPreviousOrderingCloseAt,
   getOrderingWindowCloseAt,
@@ -23,35 +26,22 @@ const DAY = 24 * HOUR;
 // в день доставки о 07:30.
 const SCHEDULE = { openHour: 16, openMinute: 30, closeHour: 7, closeMinute: 30 };
 
-describe('допуск груп — дозамовлення лише для доставки, що ще не поїхала', () => {
-  it('вікно закрите і доставка сьогодні — головний сценарій, дозволено', () => {
-    expect(isEligibleState('closed_today')).toBe(true);
+describe('TRIPWIRE: сервер не вирішує за працівника', () => {
+  // Двічі вже було так, що «розумне» правило допуску відбирало в людини вибір і
+  // ламало сценарії, яких воно не передбачало. Якщо цей тест упав — хтось
+  // повертає гейт. Це може бути свідомим рішенням, але тоді разом із ним треба
+  // повертати й тести на кожен стан, а не тільки саму умову.
+  const mod = require('../services/supplementTargets');
+
+  it('модуль не експортує правило допуску', () => {
+    expect(mod.isEligibleState).toBeUndefined();
+    expect(mod.ELIGIBLE_STATES).toBeUndefined();
   });
 
-  it('вікно ще відкрите — дозволено (магазини побачать товар окремою секцією)', () => {
-    expect(isEligibleState('ordering_open')).toBe(true);
-  });
-
-  it('день доставки минув — заборонено, навіть якщо сесія ще жива', () => {
-    // Збирання в цьому проєкті дозволене весь тиждень, тому незакрита сесія
-    // сама по собі НЕ означає, що в доставку ще можна щось докласти.
-    expect(isEligibleState('delivery_passed')).toBe(false);
-  });
-
-  it('сесію завершено — заборонено', () => {
-    expect(isEligibleState('session_completed')).toBe(false);
-  });
-
-  it('вікно ще не відкрилося — заборонено (товар доїде звичайним шляхом)', () => {
-    expect(isEligibleState('window_not_open')).toBe(false);
-  });
-
-  it('група без магазинів — заборонено', () => {
-    expect(isEligibleState('no_shops')).toBe(false);
-  });
-
-  it('дозволених станів рівно два — новий стан не стає дозволеним випадково', () => {
-    expect([...ELIGIBLE_STATES].sort()).toEqual(['closed_today', 'ordering_open']);
+  it('ціль хвилі — лише група, без сесії', () => {
+    // resolveSupplementTarget повертає {deliveryGroupId, state}. Поява
+    // orderingSessionId означала б, що хвилю знову прив'язали до доставки.
+    expect(String(mod.resolveSupplementTarget)).not.toMatch(/orderingSessionId/);
   });
 });
 

@@ -1205,8 +1205,11 @@ router.post('/:id/items/:itemId/unconfirm', staffOnly, asyncHandler(async (req, 
  *
  * Живе на накладній, а не в /api/supplement, бо це крок ПРИЙМАННЯ: його бачить
  * склад, а не продавець, і питання тут одне — «кому відкрити цю хвилю».
- * Список читається щоразу заново: між відкриттям модалки і натисканням кнопки
- * вікно замовлень може закритися, тому фінальне слово все одно за commit.
+ *
+ * Стан кожної групи тут — ІНФОРМАЦІЯ для працівника, а не правило допуску:
+ * вибрати можна будь-яку групу, у якої є активні магазини. Тому список не
+ * «застаріває» — те, що вікно замовлень закриється через хвилину після
+ * відкриття модалки, на можливість проведення більше не впливає.
  */
 router.get('/:id/supplement-targets', staffOnly, asyncHandler(async (req, res) => {
   const receipt = await Receipt.findById(req.params.id, 'type status').lean();
@@ -1224,11 +1227,10 @@ router.post('/:id/commit', staffOnly, asyncHandler(async (req, res) => {
   if (receiptCheck.status === 'completed') throw appError('receipt_already_completed');
 
   // ── Ціль хвилі дозамовлення ───────────────────────────────────────────────
-  // Резолвимо ДО транзакції: перевірка допуску читає розклад, сесію і
-  // замовлення, а тримати все це всередині транзакції проведення немає причин.
-  // Якщо група вже не підходить (вікно закрилося, сесію завершили, настав
-  // наступний день) — падаємо ТУТ, поки накладна ще draft і її можна провести
-  // повторно з іншою групою.
+  // Резолвимо ДО транзакції: перевірка читає групу й магазини, а тримати це
+  // всередині транзакції проведення немає причин. Перевіряється лише те, що не
+  // може змінити рішення працівника (група існує, у ній є магазини) — стан вікна
+  // замовлень і збирання проведення НЕ блокує.
   let supplementTarget = null;
   if (receiptCheck.type === 'supplement') {
     const { resolveSupplementTarget } = require('../services/supplementTargets');
@@ -1262,11 +1264,10 @@ router.post('/:id/commit', staffOnly, asyncHandler(async (req, res) => {
           // апдейтом після коміту означало б вікно, у якому накладна вже
           // completed, а кому вона адресована — невідомо.
           ...(supplementTarget ? {
-            targetDeliveryGroupId:   supplementTarget.deliveryGroupId,
-            targetOrderingSessionId: supplementTarget.orderingSessionId,
-            supplementOpenedAt:      supplementTarget.openedAt,
-            supplementClosesAt:      supplementTarget.closesAt,
-            supplementStatus:        'pending',
+            targetDeliveryGroupId: supplementTarget.deliveryGroupId,
+            supplementOpenedAt:    supplementTarget.openedAt,
+            supplementClosesAt:    supplementTarget.closesAt,
+            supplementStatus:      'pending',
           } : {}),
         },
       },
@@ -1467,7 +1468,6 @@ router.post('/:id/commit', staffOnly, asyncHandler(async (req, res) => {
             getIO()?.emit('supplement_opened', {
               offerId: String(offer._id),
               deliveryGroupId: String(offer.deliveryGroupId),
-              orderingSessionId: String(offer.orderingSessionId),
               closesAt: offer.closesAt,
             });
           } catch (_) { /* сокет не критичний */ }

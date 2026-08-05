@@ -11,8 +11,13 @@
  *   • фізичне місце товару для картки (§9).
  *
  * ЦІЛЬОВА ГРУПА СЮДИ НЕ НАЛЕЖИТЬ. Її обирає людина в модалці проведення, і вона
- * зафіксована на самій накладній (Receipt.targetDeliveryGroupId / targetOrderingSessionId).
- * Правила допуску груп живуть у services/supplementTargets.js.
+ * зафіксована на самій накладній (Receipt.targetDeliveryGroupId). Перевірка
+ * вибору живе у services/supplementTargets.js.
+ *
+ * ХВИЛЯ НЕ ЗНАЄ ПРО OrderingSession (рішення власника 05.08.2026, друга ітерація).
+ * Ні тут, ні деінде дозамовлення не створює, не оживляє і не блокує звичайну
+ * сесію збирання: у нього власний цикл open → frozen → completed, прив'язаний
+ * лише до групи. Див. довгий коментар у models/SupplementOffer.js.
  *
  * Свідомо ВІДСУТНЄ у першій версії (рішення власника 05.08.2026):
  *   • адміністративне скасування пропозиції (§16) і cleanup спакованих коробок;
@@ -22,7 +27,6 @@
 
 const mongoose = require('mongoose');
 
-const OrderingSession   = require('../models/OrderingSession');
 const Block             = require('../models/Block');
 const Product           = require('../models/Product');
 const ReceiptItem       = require('../models/ReceiptItem');
@@ -31,7 +35,6 @@ const SupplementRequest = require('../models/SupplementRequest');
 
 const Receipt = require('../models/Receipt');
 
-const { transitionPickingStatus, maybeCompleteSession } = require('../utils/sessionStatus');
 const { withLock } = require('../utils/lock');
 const { getProductTitle } = require('./archiveProduct');
 const { getIO } = require('../socket');
@@ -68,9 +71,9 @@ const ACTIVE_STATUSES = SupplementOffer.ACTIVE_STATUSES;
 /**
  * Створює пропозиції для ВСІХ позицій накладної типу 'supplement'.
  *
- * Ціль хвилі більше не вгадується: група і сесія зафіксовані на самій накладній
- * у момент проведення (див. services/supplementTargets.resolveSupplementTarget).
- * Тому тут немає жодної евристики — лише «взяти те, що обрала людина».
+ * Ціль хвилі не вгадується: група зафіксована на самій накладній у момент
+ * проведення (див. services/supplementTargets.resolveSupplementTarget). Тому тут
+ * немає жодної евристики — лише «взяти те, що обрала людина».
  *
  * ІДЕМПОТЕНТНО (§21, §22 тест 2): унікальний індекс {receiptItemId, deliveryGroupId}
  * означає, що повторний виклик (ретрай звірятеля, друге натискання «Провести»)
@@ -87,7 +90,7 @@ const ACTIVE_STATUSES = SupplementOffer.ACTIVE_STATUSES;
 async function createOffersForReceipt(receiptId) {
   const receipt = await Receipt.findById(
     receiptId,
-    'type targetDeliveryGroupId targetOrderingSessionId supplementOpenedAt supplementClosesAt receiptNumber',
+    'type targetDeliveryGroupId supplementOpenedAt supplementClosesAt receiptNumber',
   ).lean();
   if (!receipt) return { created: [], complete: true };
 
@@ -101,7 +104,7 @@ async function createOffersForReceipt(receiptId) {
   // Ціль мусить бути зафіксована проведенням. Якщо її немає — це не «нічого не
   // сталося», а зламана накладна: мовчки лишити її 'pending' означало б, що
   // звірятель довіку ходитиме по ній щотіка.
-  if (!receipt.targetDeliveryGroupId || !receipt.targetOrderingSessionId) {
+  if (!receipt.targetDeliveryGroupId) {
     console.error('[supplement] накладна', receipt.receiptNumber, '— тип supplement без цільової групи; пропозиції не створюються');
     await Receipt.updateOne({ _id: receiptId }, { $set: { supplementStatus: 'ready' } });
     return { created: [], complete: true };
@@ -137,10 +140,7 @@ async function createOffersForReceipt(receiptId) {
   const openedAt = receipt.supplementOpenedAt ? new Date(receipt.supplementOpenedAt) : new Date();
   const closesAt = new Date(receipt.supplementClosesAt);
 
-  const target = {
-    deliveryGroupId: String(receipt.targetDeliveryGroupId),
-    orderingSessionId: String(receipt.targetOrderingSessionId),
-  };
+  const deliveryGroupId = String(receipt.targetDeliveryGroupId);
 
   const docs = [];
   for (const [productId, item] of byProduct) {
@@ -148,8 +148,7 @@ async function createOffersForReceipt(receiptId) {
       receiptId,
       receiptItemId: item._id,
       productId,
-      deliveryGroupId: target.deliveryGroupId,
-      orderingSessionId: target.orderingSessionId,
+      deliveryGroupId,
       openedAt,
       closesAt,
       status: 'open',
@@ -181,26 +180,10 @@ async function createOffersForReceipt(receiptId) {
     console.log(`[supplement] накладна ${String(receiptId)}: ${duplicates} пропозицій уже існували — пропущено`);
   }
 
-  // Гонка з завершенням сесії: між вибором цільової групи і вставкою остання
-  // звичайна PickingTask могла завершитися, і maybeCompleteSession поставив би
-  // сесію в completed — а ми щойно поклали в неї живу пропозицію. Сесія
-  // «завершена», робота в ній є, і гард §17 уже не спрацює (він відпрацював ДО
-  // появи пропозиції). Тому звіряємось після вставки і повертаємо таку сесію в
-  // роботу — allowReopen для цього й існує (тим самим механізмом оживають
-  // запізнілі замовлення).
-  const touchedSessions = [...new Set(created.map((o) => String(o.orderingSessionId)))];
-  for (const sessionId of touchedSessions) {
-    const session = await OrderingSession.findById(sessionId, 'pickingStatus').lean();
-    if (session?.pickingStatus !== 'completed') continue;
-    const revived = await transitionPickingStatus(sessionId, 'in_progress', {
-      allowReopen: true,
-      meta: { reason: 'supplement_opened_after_completion' },
-    });
-    if (revived) {
-      console.warn('[supplement] сесія', sessionId, 'завершилась під час відкриття дозамовлення — повернуто в роботу');
-    }
-  }
-
+  // Раніше тут був цілий блок «оживити сесію, яка завершилась під час відкриття
+  // хвилі» (transitionPickingStatus з allowReopen). Він більше не потрібен: хвиля
+  // до сесії не прив'язана, тому завершена сесія їй не заважає, а її власний
+  // цикл open → frozen → completed доводить роботу до кінця сам.
   const complete = failed === 0;
   await Receipt.updateOne(
     { _id: receiptId },
@@ -248,7 +231,6 @@ async function reconcilePendingReceipts() {
           emit('supplement_opened', {
             offerId: String(offer._id),
             deliveryGroupId: String(offer.deliveryGroupId),
-            orderingSessionId: String(offer.orderingSessionId),
             closesAt: offer.closesAt,
           });
         }
@@ -340,7 +322,6 @@ function offerViewForWarehouse(offer, { product, requests = [], location = null,
     openedAt: offer.openedAt,
     closesAt: offer.closesAt,
     deliveryGroupId: String(offer.deliveryGroupId),
-    orderingSessionId: String(offer.orderingSessionId),
     product: productView(product),
     location: location ? { ...location, label: formatLocation(location) } : { blockId: null, positionIndex: null, label: formatLocation(null) },
     shops: rows,
@@ -362,22 +343,6 @@ function emit(event, payload) {
     const io = getIO();
     if (io) io.emit(event, payload);
   } catch { /* сокет може бути вимкнений у тестах */ }
-}
-
-/**
- * Дозамовлення блокує завершення сесії (§17), тому закриття ОСТАННЬОЇ пропозиції
- * саме по собі може бути тим, чого сесії бракувало. Без цього поштовху сесія, у
- * якої всі звичайні задачі вже зібрані, лишалась би in_progress назавжди:
- * maybeCompleteSession викликається лише після завершення PickingTask, а їх
- * більше не буде.
- */
-async function nudgeSessionCompletion(orderingSessionId) {
-  if (!orderingSessionId) return;
-  try {
-    await maybeCompleteSession(orderingSessionId, { meta: { reason: 'supplement_closed' } });
-  } catch (err) {
-    console.warn('[supplement] спроба завершити сесію не вдалась:', err?.message);
-  }
 }
 
 // ─── Серіалізація операцій над однією пропозицією ────────────────────────────
@@ -463,7 +428,7 @@ async function releaseOffer(offerId, telegramId) {
 async function freezeDueOffers(now = new Date()) {
   const due = await SupplementOffer.find(
     { status: 'open', closesAt: { $lte: now } },
-    '_id deliveryGroupId orderingSessionId productId closesAt notifiedTypes',
+    '_id deliveryGroupId productId closesAt notifiedTypes',
   ).lean();
 
   const frozen = [];
@@ -483,7 +448,6 @@ async function freezeDueOffers(now = new Date()) {
     emit('supplement_frozen', {
       offerId: String(o._id),
       deliveryGroupId: String(o.deliveryGroupId),
-      orderingSessionId: String(o.orderingSessionId),
     });
   }
   return frozen;
@@ -497,7 +461,7 @@ async function freezeDueOffers(now = new Date()) {
 async function autoCompleteEmptyOffers(now = new Date()) {
   const frozen = await SupplementOffer.find(
     { status: 'frozen' },
-    '_id deliveryGroupId orderingSessionId',
+    '_id deliveryGroupId',
   ).lean();
 
   let closed = 0;
@@ -519,10 +483,8 @@ async function autoCompleteEmptyOffers(now = new Date()) {
     emit('supplement_completed', {
       offerId: String(o._id),
       deliveryGroupId: String(o.deliveryGroupId),
-      orderingSessionId: String(o.orderingSessionId),
       reason: 'empty',
     });
-    await nudgeSessionCompletion(o.orderingSessionId);
   }
   return closed;
 }
@@ -581,44 +543,43 @@ async function completeOffer(offerId, actor = {}, now = new Date()) {
   emit('supplement_completed', {
     offerId: String(offer._id),
     deliveryGroupId: String(offer.deliveryGroupId),
-    orderingSessionId: String(offer.orderingSessionId),
     reason: 'packed',
   });
-  await nudgeSessionCompletion(offer.orderingSessionId);
 
   return offer;
 }
 
-// ─── Гарди / лічильники ──────────────────────────────────────────────────────
+// ─── Лічильники / вибірки ────────────────────────────────────────────────────
 
 /**
- * Чи є в сесії пропозиції, які ще не доведені до кінця (§17)?
- * Використовується гардом завершення сесії — сесію не можна закрити, поки
- * дозамовлення відкрите або заморожене й неспаковане.
+ * Скільки хвиль групи ще в роботі — лічильник плитки віртуального блока
+ * (routes/picking.js). Best-effort: підрахунок не має ламати екран збирання.
  */
-async function countActiveOffersForSession(orderingSessionId, mongoSession = null) {
-  if (!orderingSessionId) return 0;
-  const query = SupplementOffer.countDocuments({
-    orderingSessionId: String(orderingSessionId),
-    status: { $in: ACTIVE_STATUSES },
-  });
-  if (mongoSession) query.session(mongoSession);
-  return query;
+async function countActiveOffersForGroup(deliveryGroupId) {
+  if (!deliveryGroupId) return 0;
+  try {
+    return await SupplementOffer.countDocuments({
+      deliveryGroupId: String(deliveryGroupId),
+      status: { $in: ACTIVE_STATUSES },
+    });
+  } catch (err) {
+    console.warn('[supplement] підрахунок дозамовлень не вдався:', err?.message);
+    return 0;
+  }
 }
 
 /**
- * Активні пропозиції ПОТОЧНОЇ сесії групи — вміст віртуального блока (§8).
+ * Активні пропозиції групи — вміст віртуального блока (§8).
  *
- * Фільтр по сесії обов'язковий, а не косметичний: лічильник плитки (routes/picking.js)
- * рахується саме по orderingSessionId, тож без нього список показував би інше,
- * ніж плитка. Зависла frozen-пропозиція минулого циклу домішувалась би до
- * сьогоднішніх і склад пакував би її в коробки цієї доставки.
+ * Раніше вибірка додатково фільтрувалась по orderingSessionId, «щоб зависла
+ * frozen-пропозиція минулого циклу не домішалась до сьогоднішніх». Тепер такого
+ * стану не буває в принципі: заморожена хвиля без заявок закривається сама, а з
+ * заявками — після того, як склад їх спакував. Отже все, що тут є, і є роботою.
  */
-async function findActiveOffersForSession(deliveryGroupId, orderingSessionId) {
-  if (!orderingSessionId) return [];
+async function findActiveOffersForGroup(deliveryGroupId) {
+  if (!deliveryGroupId) return [];
   return SupplementOffer.find({
     deliveryGroupId: String(deliveryGroupId),
-    orderingSessionId: String(orderingSessionId),
     status: { $in: ACTIVE_STATUSES },
   }).sort({ closesAt: 1, createdAt: 1 }).lean();
 }
@@ -651,7 +612,7 @@ module.exports = {
   freezeDueOffers,
   autoCompleteEmptyOffers,
   completeOffer,
-  countActiveOffersForSession,
-  findActiveOffersForSession,
+  countActiveOffersForGroup,
+  findActiveOffersForGroup,
   loadProductsFor,
 };

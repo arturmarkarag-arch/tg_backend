@@ -43,10 +43,10 @@ const SupplementRequestSchema = new mongoose.Schema(
     // Знімок назви магазину — щоб картка складу і «Мої замовлення» не робили
     // populate на кожен рядок. Живе ім'я все одно перекриває його при показі.
     shopName: { type: String, default: '' },
-    // Денормалізовані ключі пропозиції: дозволяють вибрати «усі заявки моєї
-    // сесії/групи» одним запитом, без $lookup.
-    deliveryGroupId:   { type: String, default: '' },
-    orderingSessionId: { type: String, default: '' },
+    // Денормалізований ключ пропозиції: дозволяє вибрати «усі заявки моєї групи»
+    // одним запитом, без $lookup. Сесії тут немає — хвиля до неї не прив'язана
+    // (див. models/SupplementOffer.js).
+    deliveryGroupId: { type: String, default: '' },
 
     // 1..6 — та сама межа, що й у звичайному каталозі (§10).
     quantity: { type: Number, required: true, min: 1, max: 6 },
@@ -71,8 +71,9 @@ const SupplementRequestSchema = new mongoose.Schema(
 
 // ОДНА заявка на (пропозиція, магазин) — інваріант §21.
 SupplementRequestSchema.index({ offerId: 1, shopId: 1 }, { unique: true });
-// «Мої замовлення» продавця + нумерація коробок сесії.
-SupplementRequestSchema.index({ orderingSessionId: 1, shopId: 1 });
+// Нумерація коробок на старті збирання: «які магазини групи вже дозамовили».
+SupplementRequestSchema.index({ deliveryGroupId: 1, shopId: 1 });
+// «Мої замовлення» продавця.
 SupplementRequestSchema.index({ shopId: 1, createdAt: -1 });
 
 module.exports = mongoose.model('SupplementRequest', SupplementRequestSchema);

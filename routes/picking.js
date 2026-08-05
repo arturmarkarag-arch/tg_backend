@@ -24,19 +24,9 @@ const { reconcileLateOrdersForSession } = require('../services/lateOrderReconcil
 const { ensureSessionShopNumbers, buildShopNumberLookup } = require('../utils/shopNumbering');
 const SupplementOffer   = require('../models/SupplementOffer');
 const SupplementRequest = require('../models/SupplementRequest');
-
-/** Скільки дозамовлень цієї сесії ще в роботі (open/frozen). Best-effort. */
-async function countActiveSupplements(orderingSessionId) {
-  try {
-    return await SupplementOffer.countDocuments({
-      orderingSessionId: String(orderingSessionId),
-      status: { $in: SupplementOffer.ACTIVE_STATUSES },
-    });
-  } catch (err) {
-    console.warn('[picking] підрахунок дозамовлень не вдався:', err?.message);
-    return 0;
-  }
-}
+// Лічильник рахується ЗА ГРУПОЮ, не за сесією: хвиля дозамовлення до
+// OrderingSession не прив'язана (див. models/SupplementOffer.js).
+const { countActiveOffersForGroup } = require('../services/supplementOffers');
 
 const {
   findAndLockNext,
@@ -343,7 +333,7 @@ router.post('/start-session', requireTelegramRoles(['warehouse', 'admin']), asyn
     // знати про них навіть коли звичайних задач нуль, інакше віртуальний блок
     // «Дозамовлення» стане недосяжним (кнопка «Показати замовлення» ховається
     // на екрані «все зібрано»).
-    const supplementCount = await countActiveSupplements(currentSessionId);
+    const supplementCount = await countActiveOffersForGroup(deliveryGroupId);
 
     const baseEnvelope = {
       pickingStatus: session?.pickingStatus || 'pending',
@@ -435,10 +425,20 @@ router.post('/start-session', requireTelegramRoles(['warehouse', 'admin']), asyn
     //    коробки ще не підписані — збирання тільки стартує. Ті, хто дозамовить
     //    ПІСЛЯ старту, отримають номер у хвіст через assignLateShopNumber, щоб
     //    уже наклеєні цифри не почали брехати.
-    const supplementShops = await SupplementRequest.find(
-      { orderingSessionId: String(currentSessionId) },
-      'shopId shopName',
+    //
+    //    Беремо заявки з ЖИВИХ хвиль групи, а не «заявки цієї сесії»: хвиля до
+    //    сесії не прив'язана. Заявки закритих хвиль тут не потрібні — ті магазини
+    //    склад уже спакував.
+    const activeOffers = await SupplementOffer.find(
+      { deliveryGroupId: String(deliveryGroupId), status: { $in: SupplementOffer.ACTIVE_STATUSES } },
+      '_id',
     ).lean();
+    const supplementShops = activeOffers.length
+      ? await SupplementRequest.find(
+        { offerId: { $in: activeOffers.map((o) => o._id) } },
+        'shopId shopName',
+      ).lean()
+      : [];
     await ensureSessionShopNumbers(currentSessionId, [...sessionActiveOrders, ...supplementShops]);
 
     // 8. Build tasks, then move pending → confirmed.
@@ -914,14 +914,17 @@ router.get('/queue-stats', requireTelegramRoles(['warehouse', 'admin']), async (
     // Дозамовлення живуть поза чергою PickingTask, тому їхній лічильник їде тим
     // самим 5-секундним опитуванням: інакше віртуальний блок з'явився б у складу
     // лише після перезавантаження сторінки, а спека вимагає real-time (§8).
-    let supplementCount = 0;
+    //
+    // Рахується ПОЗА блоком нижче і без жодного стосунку до сесії: віртуальний
+    // блок мусить бути видимий навіть коли сесії ще немає (хвилю відкрили
+    // майбутній групі) або вона вже завершена.
+    const supplementCount = await countActiveOffersForGroup(deliveryGroupId);
     try {
       const groupDoc = await DeliveryGroup.findById(deliveryGroupId, 'dayOfWeek').lean();
       if (groupDoc) {
         groupDayOfWeek = groupDoc.dayOfWeek;
         const schedule = await getOrderingSchedule();
         const sessionId = await getOrCreateSessionId(String(deliveryGroupId), groupDoc.dayOfWeek, schedule);
-        supplementCount = await countActiveSupplements(sessionId);
         const sessionDoc = await OrderingSession.findById(sessionId, 'pickingStatus events seq openDate').lean();
         if (sessionDoc) {
           pickingStatus = sessionDoc.pickingStatus || 'pending';

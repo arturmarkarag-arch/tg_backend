@@ -4,7 +4,7 @@ const mongoose = require('mongoose');
 
 /**
  * «Дозамовлення» — a supplementary-order OFFER of ONE product to ONE delivery
- * group whose normal ordering window has already closed.
+ * group, chosen by hand when the receipt is posted.
  *
  * Спека (Zlotoweczka_Dozamovlennia, §19) називає цю сутність `LateOrderOffer`.
  * Тут вона `SupplementOffer` СВІДОМО: у проєкті вже є services/lateOrderReconcile.js,
@@ -12,10 +12,21 @@ const mongoose = require('mongoose');
  * старту збирання і чіпляється до відкритої PickingTask. Дві різні речі з одним
  * іменем гарантовано переплутали б. Сокет-події теж `supplement_*`.
  *
- * Життєвий цикл (§7), СПРОЩЕНИЙ проти спеки за рішенням власника (05.08.2026):
+ * Життєвий цикл (§7) СПРОЩЕНИЙ проти спеки за рішенням власника (05.08.2026).
+ *
+ * ПРИВ'ЯЗКА — ТІЛЬКИ ГРУПА ДОСТАВКИ (рішення власника 05.08.2026, друга ітерація).
+ * Раніше поруч лежав ще й `orderingSessionId`: хвиля належала конкретній доставці,
+ * бо так працюють звичайні замовлення. Для дозамовлення це виявилось чистою
+ * шкодою — хвилю неможливо було відкрити групі, чиєї сесії ще немає (майбутня
+ * доставка) або чия сесія вже закрита, а сама сесія не могла завершитись, поки
+ * жива хвиля. Тепер хвиля — самостійна сутність із власним циклом:
  *
  *   open ──(closesAt минув)──► frozen ──(усі заявки спаковані)──► completed
  *                                  └──(заявок немає)────────────► completed
+ *
+ * Звичайна OrderingSession завершується за своїми звичайними задачами і про
+ * дозамовлення нічого не знає. Номер коробки (якщо він у сесії вже є) показується
+ * картці складу ЛИШЕ як підказка — див. routes/supplement.js.
  *
  * `cancelled` НЕ реалізовано: адміністративного скасування (§16) у першій версії
  * немає — склад просто відмічає магазини і закриває пропозицію. Так само немає
@@ -39,10 +50,9 @@ const SupplementOfferSchema = new mongoose.Schema(
     // звичайним життям (Надходження → полиця) незалежно від цієї пропозиції (§9).
     productId:     { type: mongoose.Schema.Types.ObjectId, ref: 'Product', required: true },
 
-    // Пропозиція ЗАВЖДИ прив'язана і до групи, і до конкретної сесії доставки:
-    // в один день можуть збиратися кілька груп, тому дати/дня тижня замало (§5).
-    deliveryGroupId:   { type: String, required: true },
-    orderingSessionId: { type: String, required: true },
+    // ЄДИНА прив'язка хвилі — група, яку працівник обрав при проведенні.
+    // Жодного orderingSessionId: див. довгий коментар вище.
+    deliveryGroupId: { type: String, required: true },
 
     openedAt: { type: Date, default: Date.now },
     // Дедлайн ФІКСУЄТЬСЯ тут при створенні. Зміна глобального налаштування
@@ -79,9 +89,10 @@ const SupplementOfferSchema = new mongoose.Schema(
   { timestamps: true },
 );
 
-// «Ще не доведена до кінця» — те, що бачить склад у віртуальному блоці (§8) і
-// що блокує завершення сесії (§17). Живе на моделі, щоб гард у
-// utils/sessionStatus.js не мусив тягнути весь сервіс і плодити цикл require.
+// «Ще не доведена до кінця» — те, що бачить склад у віртуальному блоці (§8).
+// Живе на моделі, щоб роути й лічильники не мусили тягнути весь сервіс і плодити
+// цикли require. Завершення OrderingSession це БІЛЬШЕ НЕ блокує — хвиля має
+// власний цикл (див. коментар до схеми).
 SupplementOfferSchema.statics.ACTIVE_STATUSES = ['open', 'frozen'];
 
 // Ідемпотентне створення (§21): одна позиція накладної → максимум одна пропозиція
@@ -99,10 +110,9 @@ SupplementOfferSchema.index(
   { productId: 1, deliveryGroupId: 1 },
   { unique: true, partialFilterExpression: { status: { $in: ['open', 'frozen'] } } },
 );
-// Віртуальний блок складу: «активні пропозиції цієї групи».
+// Віртуальний блок складу, список продавця і лічильник плитки — усі три читають
+// «активні пропозиції цієї групи». Єдиний потрібний складений індекс.
 SupplementOfferSchema.index({ deliveryGroupId: 1, status: 1 });
-// Гард завершення сесії (§17): «чи лишились активні пропозиції цієї сесії».
-SupplementOfferSchema.index({ orderingSessionId: 1, status: 1 });
 // Планувальник заморозки: «відкриті, дедлайн яких минув».
 SupplementOfferSchema.index({ status: 1, closesAt: 1 });
 

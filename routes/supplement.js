@@ -30,7 +30,7 @@ const SupplementRequest = require('../models/SupplementRequest');
 const { requireTelegramRoles } = require('../middleware/telegramAuth');
 const { appError, asyncHandler } = require('../utils/errors');
 const { getOrderingSchedule } = require('../utils/getOrderingSchedule');
-const { getOrCreateSessionId } = require('../utils/getOrCreateSession');
+const { findCurrentSessionId } = require('../utils/getOrCreateSession');
 const { assignLateShopNumber, buildShopNumberLookup } = require('../utils/shopNumbering');
 const { getIO } = require('../socket');
 const {
@@ -45,7 +45,7 @@ const {
   claimOffer,
   releaseOffer,
   completeOffer,
-  findActiveOffersForSession,
+  findActiveOffersForGroup,
   loadProductsFor,
 } = require('../services/supplementOffers');
 
@@ -74,10 +74,13 @@ function emit(event, payload) {
 }
 
 /**
- * Контекст продавця: його магазин, група і ПОТОЧНА сесія цієї групи.
- * Саме проти цієї пари (група + сесія) звіряються всі пропозиції — цього
- * достатньо, щоб продавець не міг дотягнутися до чужої групи навіть прямим
- * запитом з підставленим offerId (§21).
+ * Контекст продавця: його магазин і його група доставки.
+ *
+ * Саме проти групи звіряються всі пропозиції — цього достатньо, щоб продавець не
+ * дотягнувся до чужої групи навіть прямим запитом з підставленим offerId (§21).
+ * СЕСІЇ ТУТ НЕМА свідомо: хвиля дозамовлення до OrderingSession не прив'язана,
+ * тому продавець бачить її незалежно від того, чи існує сесія збирання, чи вона
+ * вже завершена — у цьому й був сенс переробки.
  *
  * ПРО АДМІНІСТРАТОРА: дозамовлення завжди прив'язане до магазину, тому адмін
  * бачить його ЛИШЕ як продавець свого магазину. Глобальний адмін без shopId
@@ -91,15 +94,12 @@ async function sellerContext(user) {
   const group = await DeliveryGroup.findById(shop.deliveryGroupId, 'name dayOfWeek').lean();
   if (!group) throw appError('delivery_group_not_found');
 
-  const schedule = await getOrderingSchedule();
-  const orderingSessionId = await getOrCreateSessionId(String(group._id), group.dayOfWeek, schedule);
-
   return {
     shopId: String(shop._id),
     shopName: shop.name || '',
     deliveryGroupId: String(group._id),
+    groupDayOfWeek: group.dayOfWeek,
     groupName: group.name || '',
-    orderingSessionId,
   };
 }
 
@@ -108,11 +108,29 @@ async function loadOfferForSeller(offerId, ctx) {
   if (!mongoose.Types.ObjectId.isValid(offerId)) throw appError('supplement_offer_not_found');
   const offer = await SupplementOffer.findById(offerId);
   if (!offer) throw appError('supplement_offer_not_found');
-  if (String(offer.deliveryGroupId) !== ctx.deliveryGroupId
-      || String(offer.orderingSessionId) !== String(ctx.orderingSessionId)) {
+  if (String(offer.deliveryGroupId) !== ctx.deliveryGroupId) {
     throw appError('supplement_wrong_group');
   }
   return offer;
+}
+
+/**
+ * Поточна сесія групи, ЯКЩО вона вже існує — потрібна виключно для номерів
+ * коробок. findCurrentSessionId, а не getOrCreateSessionId: приймання товару не
+ * має створювати сесію доставки як побічний ефект, а відсутність сесії — цілком
+ * нормальний стан для дозамовлення (наприклад, хвиля відкрита майбутній групі).
+ *
+ * @returns {Promise<string|null>}
+ */
+async function boxNumberSessionId(deliveryGroupId, dayOfWeek) {
+  if (!Number.isInteger(dayOfWeek)) return null;
+  try {
+    const schedule = await getOrderingSchedule();
+    return await findCurrentSessionId(deliveryGroupId, dayOfWeek, schedule);
+  } catch (err) {
+    console.warn('[supplement] пошук сесії для номера коробки не вдався:', err?.message);
+    return null;
+  }
 }
 
 // ─── ПРОДАВЕЦЬ ───────────────────────────────────────────────────────────────
@@ -121,16 +139,16 @@ async function loadOfferForSeller(offerId, ctx) {
  * GET /api/supplement/available
  * Активні пропозиції для магазину продавця + його поточна заявка на кожну.
  *
- * Показується НЕЗАЛЕЖНО від того, відкрите звичайне вікно замовлень чи ні:
- * увесь сенс дозамовлення в тому, що воно живе після закриття вікна (§10).
- * Старий каталог при цьому НЕ відкривається — це окремий список.
+ * Показується НЕЗАЛЕЖНО від того, відкрите звичайне вікно замовлень чи ні, і
+ * незалежно від стану сесії збирання: увесь сенс дозамовлення в тому, що воно
+ * живе своїм життям (§10). Старий каталог при цьому НЕ відкривається — це
+ * окремий список.
  */
 router.get('/available', sellerRoles, asyncHandler(async (req, res) => {
   const ctx = await sellerContext(req.telegramUser);
 
   const offers = await SupplementOffer.find({
     deliveryGroupId: ctx.deliveryGroupId,
-    orderingSessionId: ctx.orderingSessionId,
     status: { $in: ACTIVE_STATUSES },
   }).sort({ closesAt: 1, createdAt: 1 }).lean();
 
@@ -231,7 +249,6 @@ router.post('/:offerId/request', sellerRoles, asyncHandler(async (req, res) => {
         shopId: ctx.shopId,
         shopName: ctx.shopName,
         deliveryGroupId: ctx.deliveryGroupId,
-        orderingSessionId: ctx.orderingSessionId,
         quantity,
         createdBy: actor.by,
         createdByName: actor.byName,
@@ -259,19 +276,22 @@ router.post('/:offerId/request', sellerRoles, asyncHandler(async (req, res) => {
 
   if (action === 'noop') return res.json({ ok: true, quantity, action: 'noop' });
 
-  // Магазин, який не мав основного замовлення, не має і номера коробки. Якщо
-  // номери вже заморожені (збирання почалось) — дістає наступний вільний у
-  // хвіст, існуючі не пересортовуються (§11). Якщо ще не заморожені, функція
-  // повертає null: старт збирання пронумерує його разом з усіма.
+  // Номер коробки — ПІДКАЗКА, а не умова роботи (рішення власника 05.08.2026).
+  // Якщо в групи вже є сесія з замороженими номерами, магазин дістає наступний
+  // вільний у хвіст, існуючі не пересортовуються (§11). Якщо сесії ще немає або
+  // номери не заморожені — просто немає номера, і склад пакує в коробку з
+  // назвою магазину. Створювати сесію заради номера ми не будемо.
   //
   // AWAIT, не fire-and-forget: поки номера немає, склад бачить рядок без
-  // коробки і не може його пакувати. Чекати тут — десятки мілісекунд, а
-  // фоновий виклик, який тихо впав, лишив би магазин без номера назавжди
-  // (повторювача немає).
-  try {
-    await assignLateShopNumber(ctx.orderingSessionId, ctx.shopId, ctx.shopName);
-  } catch (err) {
-    console.warn('[supplement] нумерація коробки не вдалась:', err.message);
+  // коробки. Чекати тут — десятки мілісекунд, а фоновий виклик, який тихо впав,
+  // лишив би магазин без номера назавжди (повторювача немає).
+  const sessionId = await boxNumberSessionId(ctx.deliveryGroupId, ctx.groupDayOfWeek);
+  if (sessionId) {
+    try {
+      await assignLateShopNumber(sessionId, ctx.shopId, ctx.shopName);
+    } catch (err) {
+      console.warn('[supplement] нумерація коробки не вдалась:', err.message);
+    }
   }
 
   emit('supplement_request_changed', {
@@ -377,16 +397,14 @@ router.get('/my', sellerRoles, asyncHandler(async (req, res) => {
  */
 router.get('/group/:deliveryGroupId', warehouseRoles, asyncHandler(async (req, res) => {
   const groupId = String(req.params.deliveryGroupId || '');
-  // Список ЗАВЖДИ читається за (група + поточна сесія) — так само, як
-  // рахується лічильник плитки в routes/picking.js. Інакше зависла frozen
-  // пропозиція минулого циклу домішалась би до сьогоднішніх, і склад запакував
-  // би її в коробки цієї доставки.
-  const group = await DeliveryGroup.findById(groupId, 'dayOfWeek').lean();
-  if (!group) return res.json({ offers: [], totalQty: 0, serverTime: new Date().toISOString() });
-  const schedule = await getOrderingSchedule();
-  const orderingSessionId = await getOrCreateSessionId(groupId, group.dayOfWeek, schedule);
+  if (!mongoose.Types.ObjectId.isValid(groupId)) {
+    return res.json({ offers: [], totalQty: 0, serverTime: new Date().toISOString() });
+  }
 
-  const offers = await findActiveOffersForSession(groupId, orderingSessionId);
+  // Список читається ЗА ГРУПОЮ — тим самим фільтром, що й лічильник плитки в
+  // routes/picking.js. Стан сесії збирання тут ні до чого: хвиля дозамовлення
+  // живе власним циклом і зникає з блока, коли закривається сама.
+  const offers = await findActiveOffersForGroup(groupId);
   if (!offers.length) return res.json({ offers: [], totalQty: 0, serverTime: new Date().toISOString() });
 
   const offerIds = offers.map((o) => o._id);
@@ -432,13 +450,20 @@ router.get('/group/:deliveryGroupId', warehouseRoles, asyncHandler(async (req, r
  * Спільна збірка повної картки — використовується GET і після кожної мутації.
  * `me` потрібен, щоб сервер сам сказав «товар у ТВОЇХ руках»: клієнт не знає
  * свого telegramId у цьому місці, а порівнювати замок він мусить безпомилково.
+ *
+ * Номери коробок беруться з поточної сесії групи, ЯКЩО вона є і вже їх заморозила.
+ * Немає сесії або номерів — картка чесно показує «немає номера», і це нормальний
+ * робочий стан, а не збій: пакувати можна і в коробку з назвою магазину.
  */
 async function buildOfferCard(offer, me = '') {
+  const group = await DeliveryGroup.findById(offer.deliveryGroupId, 'dayOfWeek').lean();
+  const sessionId = group ? await boxNumberSessionId(offer.deliveryGroupId, group.dayOfWeek) : null;
+
   const [requests, locations, productMap, session] = await Promise.all([
     SupplementRequest.find({ offerId: offer._id }).lean(),
     resolveProductLocations([offer.productId]),
     loadProductsFor([offer]),
-    OrderingSession.findById(offer.orderingSessionId, 'shopNumbers').lean(),
+    sessionId ? OrderingSession.findById(sessionId, 'shopNumbers').lean() : null,
   ]);
   const lookup = buildShopNumberLookup(session?.shopNumbers);
   const view = offerViewForWarehouse(offer, {
