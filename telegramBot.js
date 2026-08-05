@@ -981,6 +981,9 @@ module.exports = {
   getWebhookConfig,
   handleWebhookUpdate,
   getBot: () => bot,
+  // Виставлено для сервісів, які самі шлють повідомлення (services/supplementNotify.js):
+  // обгортка вже вміє 429-ретрай і позначає користувача, що заблокував бота.
+  sendMessageWithRetry,
   sendAdminNotification,
   sendRegistrationApprovedMessage,
   isUserInAllowedGroup,

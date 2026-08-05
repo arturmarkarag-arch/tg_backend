@@ -145,6 +145,35 @@ router.post('/ordering-schedule', telegramAuth, requireTelegramRole('admin'), as
   res.json(saved);
 }));
 
+// ── Дозамовлення ─────────────────────────────────────────────────────────────
+// Єдине налаштування першої версії (§6): скільки часу після проведення накладної
+// пропозиція лишається відкритою. Зміна НЕ рухає дедлайни вже відкритих
+// пропозицій — їхній closesAt зафіксовано при створенні.
+const {
+  getSupplementSettings,
+  invalidateSupplementSettingsCache,
+  normalizeSupplementSettings,
+  SUPPLEMENT_SETTINGS_KEY,
+  MIN_WINDOW_MINUTES,
+  MAX_WINDOW_MINUTES,
+} = require('../utils/supplementSettings');
+
+router.get('/supplement-settings', telegramAuth, requireTelegramRole('admin'), asyncHandler(async (req, res) => {
+  const settings = await getSupplementSettings();
+  res.json({ ...settings, minMinutes: MIN_WINDOW_MINUTES, maxMinutes: MAX_WINDOW_MINUTES });
+}));
+
+router.post('/supplement-settings', telegramAuth, requireTelegramRole('admin'), asyncHandler(async (req, res) => {
+  const raw = Math.trunc(Number(req.body?.windowMinutes));
+  if (!Number.isFinite(raw) || raw < MIN_WINDOW_MINUTES || raw > MAX_WINDOW_MINUTES) {
+    throw appError('supplement_settings_invalid', { min: MIN_WINDOW_MINUTES, max: MAX_WINDOW_MINUTES });
+  }
+  const value = normalizeSupplementSettings({ windowMinutes: raw });
+  await setAppSetting(SUPPLEMENT_SETTINGS_KEY, value);
+  await invalidateSupplementSettingsCache();
+  res.json({ ...value, minMinutes: MIN_WINDOW_MINUTES, maxMinutes: MAX_WINDOW_MINUTES });
+}));
+
 // GET /api/admin/cities — список міст з City колекції
 router.get('/cities', telegramAuth, requireTelegramRole('admin'), asyncHandler(async (req, res) => {
   const cities = await City.find().sort({ name: 1 }).lean();

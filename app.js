@@ -23,6 +23,7 @@ const shopProductsRouter  = require('./routes/shopProducts');
 const visionSearchRouter  = require('./routes/visionSearch');
 const productFeedbackRouter = require('./routes/productFeedback');
 const navBadgesRouter = require('./routes/navBadges');
+const supplementRouter = require('./routes/supplement');
 
 // The warehouse test harness (destructive: cleanup/seed/reset of real
 // collections) must NEVER be reachable in production. It is loaded and mounted
@@ -158,6 +159,7 @@ app.use('/api/shop-products',  shopProductsRouter);
 app.use('/api/vision-search', visionSearchRouter);
 app.use('/api/product-feedback', productFeedbackRouter);
 app.use('/api/nav-badges', navBadgesRouter);
+app.use('/api/supplement', supplementRouter);
 app.use('/api/v1/telegram', telegramV1Router);
 app.use('/api/v1/auth', authV1Router);
 if (ENABLE_TEST_API) {

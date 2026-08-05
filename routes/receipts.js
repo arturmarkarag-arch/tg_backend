@@ -473,6 +473,12 @@ router.post('/:id/items', staffOnly, asyncHandler(async (req, res) => {
   // NOTE: destination is currently just a bookkeeping marker — the delivery-group
   // / transit UI was removed for now, so we no longer hard-require groups here.
 
+  // КРИТИЧНЕ ПРАВИЛО (спека дозамовлень §4): галочка «Дозамовлення» дійсна лише
+  // для товару, що йде НА СКЛАД. Це не дублювання клієнтської валідації заради
+  // акуратності — старий клієнт або ручний POST не мають змоги створити
+  // дозамовлення для destination='shops' (§21, §22 тест 3).
+  const supplementOffer = parsed.fields.supplementOffer === 'true' && destination === 'shelf';
+
   // Quantity: either a manual total ('direct') or computed from a structure.
   const rawStructure = safeParseObject(parsed.fields.structure);
   if (rawStructure === undefined) throw appError('receipt_structure_invalid');
@@ -544,6 +550,7 @@ router.post('/:id/items', staffOnly, asyncHandler(async (req, res) => {
     barcode: String(parsed.fields.barcode || '').trim(),
     existingProductId: existingProductId || null,
     warehousePending: isWarehousePending,
+    supplementOffer,
   });
 
   // Save item AND re-check receipt.status='draft' in the SAME transaction so that
@@ -701,6 +708,16 @@ router.patch('/:id/items/:itemId', staffOnly, asyncHandler(async (req, res) => {
     ? deriveSplit(nextDestination, totalQty)
     : { shelfQty: item.shelfQty, transitQty: item.transitQty };
 
+  // «Дозамовлення» (§4). Прапорець ЗАВЖДИ перераховується, навіть коли клієнт
+  // його не надіслав: перемикання призначення на «На магазини» мусить його
+  // погасити саме по собі, інакше позиція поїхала б у магазини з увімкненим
+  // дозамовленням, яке ніхто вже не бачить у формі.
+  const nextSupplementOffer = nextDestination === 'shelf'
+    ? (parsed.fields.supplementOffer !== undefined
+      ? parsed.fields.supplementOffer === 'true'
+      : !!item.supplementOffer)
+    : false;
+
   // ── Build the set of fields this request actually changes, then enforce
   // the multi-worker ownership rules (also blocks edits to confirmed items).
   const arraysEqual = (a = [], b = []) =>
@@ -715,6 +732,7 @@ router.patch('/:id/items/:itemId', staffOnly, asyncHandler(async (req, res) => {
       && (parsed.fields.qtyPerPackage !== '' ? Number(parsed.fields.qtyPerPackage) : null) !== item.qtyPerPackage) changedFields.push('qtyPerPackage');
   if (parsed.fields.barcode !== undefined && String(parsed.fields.barcode).trim() !== (item.barcode || '')) changedFields.push('barcode');
   if (nextDestination !== (item.destination || 'shelf')) changedFields.push('destination');
+  if (nextSupplementOffer !== !!item.supplementOffer) changedFields.push('supplementOffer');
   if (totalQty !== item.totalQty) changedFields.push('totalQty');
   if (JSON.stringify(nextStructure) !== JSON.stringify(prevStructure)) changedFields.push('structure');
   if (parsed.fields.deliveryGroupIds !== undefined && !arraysEqual(deliveryGroupIds, item.deliveryGroupIds || [])) changedFields.push('deliveryGroupIds');
@@ -789,6 +807,7 @@ router.patch('/:id/items/:itemId', staffOnly, asyncHandler(async (req, res) => {
   item.transitQty = transitQty;
   item.shelfQty = shelfQty;
   item.destination = nextDestination;
+  item.supplementOffer = nextSupplementOffer;
   item.structure = nextStructure;
   item.deliveryGroupIds = deliveryGroupIds;
   item.qtyPerShop = qtyPerShop;
@@ -1333,7 +1352,44 @@ router.post('/:id/commit', staffOnly, asyncHandler(async (req, res) => {
     // Notify warehouse board that new products are available in the incoming strip
     try { getIO().emit('incoming_updated'); } catch (_) {}
 
-    res.json({ receipt, createdProductsCount: createdProducts.length });
+    // ── Дозамовлення (§4): запускається ПІСЛЯ проведення ВСІЄЇ накладної ──────
+    // Не після підтвердження окремої позиції — власник вирішив саме так, бо
+    // хвиля дозамовлення = одна накладна з одним дедлайном (§6).
+    //
+    // Поза транзакцією свідомо: створення ідемпотентне (унікальний індекс
+    // {receiptItemId, deliveryGroupId}), тому повторний виклик нічого не
+    // задублює, а збій розсилки не має відкочувати вже проведену накладну.
+    // Відповідь клієнту чекає на створення пропозицій (щоб «Проведено» і
+    // «дозамовлення відкрито» не розповзалися в часі), а Telegram — ні.
+    let supplementOffersCount = 0;
+    try {
+      const { createOffersForReceipt } = require('../services/supplementOffers');
+      const offers = await createOffersForReceipt(receipt._id);
+      supplementOffersCount = offers.length;
+      if (offers.length) {
+        for (const offer of offers) {
+          try {
+            getIO()?.emit('supplement_opened', {
+              offerId: String(offer._id),
+              deliveryGroupId: String(offer.deliveryGroupId),
+              orderingSessionId: String(offer.orderingSessionId),
+              closesAt: offer.closesAt,
+            });
+          } catch (_) { /* сокет не критичний */ }
+        }
+        // Розсилка — фоном: Telegram буває повільним, а склад не має чекати на
+        // нього, щоб побачити «Накладну проведено».
+        require('../services/supplementNotify')
+          .notifyOffers(offers, 'opened')
+          .catch((e) => console.error('[supplement] стартова розсилка впала:', e?.message));
+      }
+    } catch (err) {
+      // Накладна вже проведена і товар на складі — це головне. Провал відкриття
+      // дозамовлення логуємо, але не перетворюємо на помилку проведення.
+      console.error('[supplement] не вдалося відкрити дозамовлення для накладної', String(receipt._id), ':', err?.message);
+    }
+
+    res.json({ receipt, createdProductsCount: createdProducts.length, supplementOffersCount });
   } catch (err) {
     // Guard both: after a FAILED commitTransaction (e.g. a concurrent-commit
     // WriteConflict) the transaction is already terminal, so an unguarded

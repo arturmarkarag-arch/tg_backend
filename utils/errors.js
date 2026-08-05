@@ -197,6 +197,21 @@ const ERRORS = {
   picking_oos_already_packed:     { status: 409, message: 'Задачу вже зібрано повністю — архівувати товар через неї не можна' },
   picking_task_items_changed:     { status: 409, message: 'Список магазинів у завданні змінився — оновіть завдання' },
   expired_lock:                   { status: 403, message: 'Завдання вже взяв інший складник або час блокування минув' },
+
+  // ── Дозамовлення (supplement) ──────────────────────────────────────────────
+  supplement_offer_not_found:  { status: 404, message: 'Дозамовлення не знайдено' },
+  supplement_request_not_found:{ status: 404, message: 'Заявку не знайдено' },
+  supplement_closed:           { status: 409, message: 'Час дозамовлення вичерпано — змінити заявку вже не можна' },
+  // Жорстке блокування після packed — рішення власника замість «скинути галочку»
+  // (спека §13). Продавець бачить чесну причину, а не «спробуйте ще раз».
+  supplement_request_locked:   { status: 409, message: 'Склад уже спакував цю заявку — змінити або скасувати її не можна' },
+  supplement_wrong_group:      { status: 403, message: 'Це дозамовлення призначене іншій групі доставки' },
+  supplement_not_frozen:       { status: 409, message: 'Дозамовлення ще приймає заявки — завершити його можна лише після закриття' },
+  supplement_not_all_packed:   { status: 409, message: 'Не всі магазини спаковані — завершити дозамовлення не можна' },
+  supplement_no_requests:      { status: 409, message: 'Жоден магазин не замовив цей товар — завершувати нічого' },
+  supplement_quantity_invalid: { status: 400, message: 'Кількість має бути від 1 до 6' },
+  supplement_settings_invalid: { status: 400, message: ({ min, max } = {}) =>
+                                  `Тривалість дозамовлення має бути від ${min ?? 1} до ${max ?? 720} хвилин` },
   // ── Orders ─────────────────────────────────────────────────────────────────
   order_query_forbidden:          { status: 403, message: 'Ви можете запитувати лише власні замовлення' },
   // NB: order_not_found is defined once in the first Orders block above.

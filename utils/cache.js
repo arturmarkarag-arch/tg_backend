@@ -126,6 +126,7 @@ const KEYS = {
   ORDERING_SCHEDULE: 'ordering_schedule',
   CITIES: 'cities',
   DELIVERY_GROUPS: 'delivery_groups',
+  SUPPLEMENT_SETTINGS: 'supplement_settings',
 };
 
 module.exports = { get, set, invalidate, invalidateAll, KEYS };

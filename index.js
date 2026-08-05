@@ -21,6 +21,7 @@ const { isEnabled: redisEnabled } = require('./utils/redis');
 const Order = require('./models/Order');
 const PickingTask = require('./models/PickingTask');
 const { startRetentionScheduler } = require('./services/retention');
+const { startSupplementScheduler } = require('./services/supplementScheduler');
 
 let httpServer = null;
 let shuttingDown = false;
@@ -127,6 +128,22 @@ async function startServer() {
       );
     }
 
+    // Дозамовлення: обидва унікальні індекси — не оптимізація, а інваріанти.
+    // {receiptItemId, deliveryGroupId} робить створення пропозицій ідемпотентним
+    // (повторне проведення накладної не дублює), {offerId, shopId} гарантує ОДНУ
+    // заявку на магазин (подвійний тап / два продавці одного магазину).
+    // Без них обидві гарантії тримаються лише на послідовності запитів.
+    try {
+      await require('./models/SupplementOffer').syncIndexes();
+      await require('./models/SupplementRequest').syncIndexes();
+      console.log('[indexes] Supplement indexes synced');
+    } catch (err) {
+      console.error(
+        '[indexes] Supplement syncIndexes failed — дозамовлення можуть дублюватись ' +
+        'при повторному проведенні накладної або подвійному тапі продавця. Error:', err.message,
+      );
+    }
+
     // User: build the partial-unique googleSub index (Google login is keyed on
     // sub). GoogleLinkToken: build its TTL index so spent/expired link tokens are
     // reaped automatically. Non-fatal — log and continue if a build fails.
@@ -176,6 +193,11 @@ async function startServer() {
     // Daily sweep of long-dead completed picking tasks (TTL can't filter by
     // status, so this runs application-side). Logs reap themselves via TTL.
     startRetentionScheduler();
+
+    // Серверний годинник дозамовлень: заморозка за closesAt, нагадування,
+    // авто-завершення пропозицій без заявок. Перший тік іде одразу, тому після
+    // рестарту прострочені пропозиції замерзають негайно, а не чекають інтервалу.
+    startSupplementScheduler();
 
     server.on('error', (err) => {
       if (err.code === 'EADDRINUSE') {

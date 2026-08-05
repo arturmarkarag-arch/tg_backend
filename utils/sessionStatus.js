@@ -13,8 +13,9 @@
  * a duplicate lifecycle event.
  */
 
-const OrderingSession = require('../models/OrderingSession');
-const PickingTask     = require('../models/PickingTask');
+const OrderingSession   = require('../models/OrderingSession');
+const PickingTask       = require('../models/PickingTask');
+const SupplementOffer   = require('../models/SupplementOffer');
 const { LIFECYCLE_EVENT } = require('./sessionVocab');
 
 const MAX_EVENTS = 200; // keep the timeline bounded (order_added can fire often)
@@ -118,6 +119,20 @@ async function maybeCompleteSession(orderingSessionId, { actor = {}, meta = {}, 
   if (mongoSession) query.session(mongoSession);
   const remaining = await query;
   if (remaining > 0) return null;
+
+  // Дозамовлення — повноцінний блокер завершення сесії (§17 специфікації).
+  // Звичайні задачі можуть бути зібрані всі до одної, але поки пропозиція
+  // дозамовлення відкрита (магазини ще замовляють) або заморожена й не
+  // спакована — доставка ще не готова. Закрити сесію тут означало б, що
+  // віртуальний блок зникне разом із роботою, яку ніхто не зробив.
+  // ACTIVE_STATUSES живе на моделі, тому цей гард не тягне весь сервіс і не
+  // створює циклу require (services/supplementOffers сам кличе сюди).
+  const supplementQuery = SupplementOffer.countDocuments({
+    orderingSessionId: String(orderingSessionId),
+    status: { $in: SupplementOffer.ACTIVE_STATUSES },
+  });
+  if (mongoSession) supplementQuery.session(mongoSession);
+  if ((await supplementQuery) > 0) return null;
 
   // "No tasks left" is NOT the same as "everything was collected". An order item
   // that never received a task (product pulled from its block, archived, deleted,

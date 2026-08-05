@@ -22,6 +22,21 @@ const { transitionPickingStatus, maybeCompleteSession } = require('../utils/sess
 const { getSessionVocab, deriveSessionPhase } = require('../utils/sessionVocab');
 const { reconcileLateOrdersForSession } = require('../services/lateOrderReconcile');
 const { ensureSessionShopNumbers, buildShopNumberLookup } = require('../utils/shopNumbering');
+const SupplementOffer   = require('../models/SupplementOffer');
+const SupplementRequest = require('../models/SupplementRequest');
+
+/** Скільки дозамовлень цієї сесії ще в роботі (open/frozen). Best-effort. */
+async function countActiveSupplements(orderingSessionId) {
+  try {
+    return await SupplementOffer.countDocuments({
+      orderingSessionId: String(orderingSessionId),
+      status: { $in: SupplementOffer.ACTIVE_STATUSES },
+    });
+  } catch (err) {
+    console.warn('[picking] підрахунок дозамовлень не вдався:', err?.message);
+    return 0;
+  }
+}
 
 const {
   findAndLockNext,
@@ -324,6 +339,12 @@ router.post('/start-session', requireTelegramRoles(['warehouse', 'admin']), asyn
     // vocab travels with the events so the UI never hardcodes status/event
     // labels — backend stays the single source of truth for the enum + labels.
     // Payload is ~500 bytes and start-session is not a hot path.
+    // Активні дозамовлення — окремий канал роботи поза PickingTask. UI мусить
+    // знати про них навіть коли звичайних задач нуль, інакше віртуальний блок
+    // «Дозамовлення» стане недосяжним (кнопка «Показати замовлення» ховається
+    // на екрані «все зібрано»).
+    const supplementCount = await countActiveSupplements(currentSessionId);
+
     const baseEnvelope = {
       pickingStatus: session?.pickingStatus || 'pending',
       phase: basePhase,
@@ -331,6 +352,7 @@ router.post('/start-session', requireTelegramRoles(['warehouse', 'admin']), asyn
       groupDayOfWeek: group.dayOfWeek,
       events: recentEvents,
       vocab: getSessionVocab(),
+      supplementCount,
     };
 
     // 4. Branch on session status. Frontend keeps its existing envelope keys
@@ -407,7 +429,17 @@ router.post('/start-session', requireTelegramRoles(['warehouse', 'admin']), asyn
     // 7. Freeze the per-shop box numbers for this session (alphabetical by shop
     //    name, one number per shopId) so packing boxes can be labelled with digits.
     //    Uses the already-loaded session orders; idempotent and best-effort.
-    await ensureSessionShopNumbers(currentSessionId, sessionActiveOrders);
+    //
+    //    Магазини, які прийшли ЛИШЕ через дозамовлення (без основного замовлення),
+    //    входять у цей самий алфавітний прохід (§11). Це можливо саме тут, бо
+    //    коробки ще не підписані — збирання тільки стартує. Ті, хто дозамовить
+    //    ПІСЛЯ старту, отримають номер у хвіст через assignLateShopNumber, щоб
+    //    уже наклеєні цифри не почали брехати.
+    const supplementShops = await SupplementRequest.find(
+      { orderingSessionId: String(currentSessionId) },
+      'shopId shopName',
+    ).lean();
+    await ensureSessionShopNumbers(currentSessionId, [...sessionActiveOrders, ...supplementShops]);
 
     // 8. Build tasks, then move pending → confirmed.
     await buildPickingTasksFromOrders(deliveryGroupId, { orderingSessionId: currentSessionId });
@@ -435,7 +467,12 @@ router.post('/start-session', requireTelegramRoles(['warehouse', 'admin']), asyn
     });
     const confirmedDoc = confirmed ? (confirmed.toObject ? confirmed.toObject() : confirmed) : null;
 
-    if (builtCount === 0) {
+    // Сесія без звичайних задач, але з живим дозамовленням — НЕ порожня.
+    // Якби ми пішли гілкою noOrders, склад побачив би «Замовлень немає» і не
+    // дістався б до віртуального блока, у якому лежить реальна робота.
+    // maybeCompleteSession усе одно відмовився б її закрити (гард §17) — сесія
+    // так і зависла б у confirmed з екраном «нічого немає».
+    if (builtCount === 0 && supplementCount === 0) {
       // Empty session — close it out immediately so reloads see noOrders.
       const completed = await maybeCompleteSession(currentSessionId, {
         actor, meta: { reason: 'empty' },
@@ -456,6 +493,7 @@ router.post('/start-session', requireTelegramRoles(['warehouse', 'admin']), asyn
         }),
         events: (finalDoc?.events || []).slice(-10),
         vocab: getSessionVocab(),
+        supplementCount: 0,
       });
     }
 
@@ -473,6 +511,7 @@ router.post('/start-session', requireTelegramRoles(['warehouse', 'admin']), asyn
       }),
       events: (confirmedDoc?.events || []).slice(-10),
       vocab: getSessionVocab(),
+      supplementCount,
     });
   } catch (err) {
     if (err && (err.name === 'AppError' || err.name === 'CastError' || isTransientTx(err))) return next(err);
@@ -872,12 +911,17 @@ router.get('/queue-stats', requireTelegramRoles(['warehouse', 'admin']), async (
     let phase = null;
     let sessionSummary = null;
     let groupDayOfWeek = null;
+    // Дозамовлення живуть поза чергою PickingTask, тому їхній лічильник їде тим
+    // самим 5-секундним опитуванням: інакше віртуальний блок з'явився б у складу
+    // лише після перезавантаження сторінки, а спека вимагає real-time (§8).
+    let supplementCount = 0;
     try {
       const groupDoc = await DeliveryGroup.findById(deliveryGroupId, 'dayOfWeek').lean();
       if (groupDoc) {
         groupDayOfWeek = groupDoc.dayOfWeek;
         const schedule = await getOrderingSchedule();
         const sessionId = await getOrCreateSessionId(String(deliveryGroupId), groupDoc.dayOfWeek, schedule);
+        supplementCount = await countActiveSupplements(sessionId);
         const sessionDoc = await OrderingSession.findById(sessionId, 'pickingStatus events seq openDate').lean();
         if (sessionDoc) {
           pickingStatus = sessionDoc.pickingStatus || 'pending';
@@ -901,6 +945,7 @@ router.get('/queue-stats', requireTelegramRoles(['warehouse', 'admin']), async (
     res.json({
       pendingCount, lockedByMeCount, lockedByOtherCount, activeCount,
       orderedPositions, pickingStatus, events, phase, sessionSummary, groupDayOfWeek,
+      supplementCount,
     });
   } catch (err) {
     if (err && (err.name === 'AppError' || err.name === 'CastError' || isTransientTx(err))) return next(err);
