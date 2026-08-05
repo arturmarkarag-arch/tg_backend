@@ -4,12 +4,15 @@
  * Ядро «Дозамовлення» (Zlotoweczka_Dozamovlennia_Povna_spetsyfikatsiia_2026-08-05.md).
  *
  * Тут живе вся логіка, спільна для роутів, планувальника і гардів:
- *   • які групи взагалі є цільовими для пропозиції (§5);
  *   • ідемпотентне створення пропозицій після проведення накладної (§4, §21);
  *   • ЄДИНЕ джерело істини про те, чи пропозиція ще open (§21 — дедлайн
  *     перевіряється в кожній операції, а не тільки планувальником);
  *   • заморозка / авто-завершення / завершення складом;
  *   • фізичне місце товару для картки (§9).
+ *
+ * ЦІЛЬОВА ГРУПА СЮДИ НЕ НАЛЕЖИТЬ. Її обирає людина в модалці проведення, і вона
+ * зафіксована на самій накладній (Receipt.targetDeliveryGroupId / targetOrderingSessionId).
+ * Правила допуску груп живуть у services/supplementTargets.js.
  *
  * Свідомо ВІДСУТНЄ у першій версії (рішення власника 05.08.2026):
  *   • адміністративне скасування пропозиції (§16) і cleanup спакованих коробок;
@@ -19,7 +22,6 @@
 
 const mongoose = require('mongoose');
 
-const DeliveryGroup     = require('../models/DeliveryGroup');
 const OrderingSession   = require('../models/OrderingSession');
 const Block             = require('../models/Block');
 const Product           = require('../models/Product');
@@ -27,10 +29,10 @@ const ReceiptItem       = require('../models/ReceiptItem');
 const SupplementOffer   = require('../models/SupplementOffer');
 const SupplementRequest = require('../models/SupplementRequest');
 
-const { getOrderingSchedule } = require('../utils/getOrderingSchedule');
-const { isOrderingOpen } = require('../utils/orderingSchedule');
-const { getOrCreateSessionId } = require('../utils/getOrCreateSession');
-const { getSupplementSettings } = require('../utils/supplementSettings');
+const Receipt = require('../models/Receipt');
+
+const { transitionPickingStatus, maybeCompleteSession } = require('../utils/sessionStatus');
+const { withLock } = require('../utils/lock');
 const { getProductTitle } = require('./archiveProduct');
 const { getIO } = require('../socket');
 
@@ -61,121 +63,203 @@ function isOfferOpenForSellers(offer, now = new Date()) {
 // сесії — живе на моделі (див. models/SupplementOffer.js).
 const ACTIVE_STATUSES = SupplementOffer.ACTIVE_STATUSES;
 
-// ─── Цільові групи (§5) ──────────────────────────────────────────────────────
-
-/**
- * Групи, яким ЗАРАЗ можна відкрити дозамовлення:
- *   1. звичайне вікно замовлень уже закрите — інакше товар просто потрапить у
- *      звичайний каталог, і окремий канал не потрібен;
- *   2. сесія цієї групи існує і НЕ completed (§5, критичне правило) — у
- *      завершену доставку дозамовляти нічого.
- *
- * Сесія резолвиться тим самим getOrCreateSessionId, що й скрізь у системі, тож
- * ідентичність (groupId + openDate) збігається з рештою кодової бази. Для групи,
- * чия доставка вже давно проїхала, ця функція поверне ЇЇ ж сесію — і та буде
- * completed, тому група відсіється.
- */
-async function resolveTargetSessions() {
-  const schedule = await getOrderingSchedule();
-  const groups = await DeliveryGroup.find({}, 'name dayOfWeek').lean();
-
-  const targets = [];
-  for (const group of groups) {
-    if (!Number.isInteger(group.dayOfWeek)) continue;
-    if (isOrderingOpen(group.dayOfWeek, schedule).isOpen) continue;
-
-    const orderingSessionId = await getOrCreateSessionId(String(group._id), group.dayOfWeek, schedule);
-    const session = await OrderingSession.findById(orderingSessionId, 'pickingStatus').lean();
-    if (!session || session.pickingStatus === 'completed') continue;
-
-    targets.push({
-      deliveryGroupId: String(group._id),
-      groupName: group.name || '',
-      dayOfWeek: group.dayOfWeek,
-      orderingSessionId,
-    });
-  }
-  return targets;
-}
-
 // ─── Створення після проведення накладної (§4) ───────────────────────────────
 
 /**
- * Створює пропозиції для всіх позицій накладної з галочкою «Дозамовлення».
+ * Створює пропозиції для ВСІХ позицій накладної типу 'supplement'.
+ *
+ * Ціль хвилі більше не вгадується: група і сесія зафіксовані на самій накладній
+ * у момент проведення (див. services/supplementTargets.resolveSupplementTarget).
+ * Тому тут немає жодної евристики — лише «взяти те, що обрала людина».
  *
  * ІДЕМПОТЕНТНО (§21, §22 тест 2): унікальний індекс {receiptItemId, deliveryGroupId}
- * + insertMany({ordered:false}) означає, що повторний виклик (ретрай, друге
- * натискання «Провести») просто не вставить нічого нового — дублікати ловляться
- * як E11000 і мовчки пропускаються. Тому цей крок безпечно винесений ПІСЛЯ
- * транзакції проведення: він не може лишитися «напіввиконаним» у сенсі, що щось
- * доведеться відкочувати.
+ * означає, що повторний виклик (ретрай звірятеля, друге натискання «Провести»)
+ * не вставить нічого нового — дублікати ловляться як E11000 і пропускаються.
+ * Тому цей крок безпечно винесений ПІСЛЯ транзакції проведення: він не може
+ * лишитися «напіввиконаним» у сенсі, що щось доведеться відкочувати.
  *
- * КРИТИЧНЕ ПРАВИЛО (§4): позиція з destination='shops' НІКОЛИ не створює
- * пропозицію, навіть якщо прапорець якимось чином лишився true. Перевірка
+ * КРИТИЧНЕ ПРАВИЛО: позиція з destination='shops' пропозицію не створює. У
+ * накладній-дозамовленні таких бути не може (роут це забороняє), але перевірка
  * дублюється тут, бо роут — не єдиний шлях у базу.
  *
- * @returns {Promise<Array>} щойно СТВОРЕНІ пропозиції (для розсилки).
+ * @returns {Promise<{created: Array, complete: boolean}>} щойно СТВОРЕНІ пропозиції.
  */
 async function createOffersForReceipt(receiptId) {
+  const receipt = await Receipt.findById(
+    receiptId,
+    'type targetDeliveryGroupId targetOrderingSessionId supplementOpenedAt supplementClosesAt receiptNumber',
+  ).lean();
+  if (!receipt) return { created: [], complete: true };
+
+  // Звичайна накладна не має жодного стосунку до дозамовлень — і не має лишати
+  // по собі маркера, за який чіплятиметься звірятель.
+  if (receipt.type !== 'supplement') {
+    await Receipt.updateOne({ _id: receiptId }, { $set: { supplementStatus: null } });
+    return { created: [], complete: true };
+  }
+
+  // Ціль мусить бути зафіксована проведенням. Якщо її немає — це не «нічого не
+  // сталося», а зламана накладна: мовчки лишити її 'pending' означало б, що
+  // звірятель довіку ходитиме по ній щотіка.
+  if (!receipt.targetDeliveryGroupId || !receipt.targetOrderingSessionId) {
+    console.error('[supplement] накладна', receipt.receiptNumber, '— тип supplement без цільової групи; пропозиції не створюються');
+    await Receipt.updateOne({ _id: receiptId }, { $set: { supplementStatus: 'ready' } });
+    return { created: [], complete: true };
+  }
+
   const items = await ReceiptItem.find(
-    { receiptId, supplementOffer: true },
+    { receiptId },
     '_id destination createdProductId existingProductId name',
   ).lean();
 
   const eligible = items.filter(
     (i) => (i.destination || 'shelf') !== 'shops' && (i.createdProductId || i.existingProductId),
   );
-  if (!eligible.length) return [];
-
-  const targets = await resolveTargetSessions();
-  if (!targets.length) {
-    console.log('[supplement] накладна', String(receiptId), '— немає цільових груп (усі вікна відкриті або сесії завершені)');
-    return [];
+  if (!eligible.length) {
+    await Receipt.updateOne({ _id: receiptId }, { $set: { supplementStatus: 'ready' } });
+    return { created: [], complete: true };
   }
 
-  const { windowMinutes } = await getSupplementSettings();
-  const openedAt = new Date();
-  // Дедлайн фіксується ОДИН раз, на всю хвилю цієї накладної (§6). Пізніша
-  // накладна отримає власний, пізніший closesAt.
-  const closesAt = new Date(openedAt.getTime() + windowMinutes * 60 * 1000);
+  // Дві позиції накладної можуть вказувати на ОДИН існуючий товар (склад
+  // прийняв його двома палетами / двома рядками). Пропозиція ж — про товар, а
+  // не про рядок накладної, тож беремо кожен productId один раз. Інакше магазин
+  // побачив би дві однакові картки й міг замовити до 6 у кожній.
+  const byProduct = new Map();
+  for (const item of eligible) {
+    const productId = String(item.createdProductId || item.existingProductId);
+    if (!byProduct.has(productId)) byProduct.set(productId, item);
+  }
+
+  // Дедлайн і момент відкриття зафіксовані проведенням і живуть на накладній.
+  // Саме тому довідновлення напівстворених хвиль не роздає групам різні дедлайни
+  // і не подовжує вікно кожним ретраєм — на відміну від старої схеми, де
+  // closesAt рахувався від «зараз» на кожному виклику.
+  const openedAt = receipt.supplementOpenedAt ? new Date(receipt.supplementOpenedAt) : new Date();
+  const closesAt = new Date(receipt.supplementClosesAt);
+
+  const target = {
+    deliveryGroupId: String(receipt.targetDeliveryGroupId),
+    orderingSessionId: String(receipt.targetOrderingSessionId),
+  };
 
   const docs = [];
-  for (const item of eligible) {
-    const productId = item.createdProductId || item.existingProductId;
-    for (const t of targets) {
-      docs.push({
-        receiptId,
-        receiptItemId: item._id,
-        productId,
-        deliveryGroupId: t.deliveryGroupId,
-        orderingSessionId: t.orderingSessionId,
-        openedAt,
-        closesAt,
-        status: 'open',
-      });
-    }
+  for (const [productId, item] of byProduct) {
+    docs.push({
+      receiptId,
+      receiptItemId: item._id,
+      productId,
+      deliveryGroupId: target.deliveryGroupId,
+      orderingSessionId: target.orderingSessionId,
+      openedAt,
+      closesAt,
+      status: 'open',
+    });
   }
 
   // Вставляємо по одному, а не insertMany({ordered:false}): документів одиниці
-  // (позиції × групи), зате видно ТОЧНО, що створилось, а що впало дублікатом.
-  // Розбирати часткову помилку bulk-write заради цього не варто — саме зі списку
-  // створених іде Telegram-розсилка, і помилитися тут означає або спамити двічі,
-  // або промовчати зовсім.
+  // (по одному на товар), зате видно ТОЧНО, що створилось, що впало дублікатом,
+  // а що не вдалося. Саме зі списку створених іде Telegram-розсилка.
+  //
+  // ВАЖЛИВО: збій на одному документі НЕ перериває решту і НЕ кидає помилку
+  // назовні. Накладна вже проведена (транзакція закомічена), відкотити її не
+  // можна, а зупинитися посередині означало б: частина товарів хвилі видима,
+  // частина ні, і ніхто ніколи не дізнається. Тому доробляємо все, що можемо,
+  // а недороблене лишаємо позначеним для звірятеля (див. reconcilePendingReceipts).
   const created = [];
   let duplicates = 0;
+  let failed = 0;
   for (const doc of docs) {
     try {
       created.push(await SupplementOffer.create(doc));
     } catch (err) {
       if (err?.code === 11000) { duplicates += 1; continue; }
-      throw err;
+      failed += 1;
+      console.error('[supplement] не вдалося створити пропозицію', doc.productId, '→', doc.deliveryGroupId, ':', err?.message);
     }
   }
   if (duplicates) {
     console.log(`[supplement] накладна ${String(receiptId)}: ${duplicates} пропозицій уже існували — пропущено`);
   }
 
-  return created;
+  // Гонка з завершенням сесії: між вибором цільової групи і вставкою остання
+  // звичайна PickingTask могла завершитися, і maybeCompleteSession поставив би
+  // сесію в completed — а ми щойно поклали в неї живу пропозицію. Сесія
+  // «завершена», робота в ній є, і гард §17 уже не спрацює (він відпрацював ДО
+  // появи пропозиції). Тому звіряємось після вставки і повертаємо таку сесію в
+  // роботу — allowReopen для цього й існує (тим самим механізмом оживають
+  // запізнілі замовлення).
+  const touchedSessions = [...new Set(created.map((o) => String(o.orderingSessionId)))];
+  for (const sessionId of touchedSessions) {
+    const session = await OrderingSession.findById(sessionId, 'pickingStatus').lean();
+    if (session?.pickingStatus !== 'completed') continue;
+    const revived = await transitionPickingStatus(sessionId, 'in_progress', {
+      allowReopen: true,
+      meta: { reason: 'supplement_opened_after_completion' },
+    });
+    if (revived) {
+      console.warn('[supplement] сесія', sessionId, 'завершилась під час відкриття дозамовлення — повернуто в роботу');
+    }
+  }
+
+  const complete = failed === 0;
+  await Receipt.updateOne(
+    { _id: receiptId },
+    { $set: { supplementStatus: complete ? 'ready' : 'pending' } },
+  );
+  if (!complete) {
+    console.error(`[supplement] накладна ${String(receiptId)}: ${failed} пропозицій НЕ створено — позначено на повтор`);
+  }
+
+  return { created, complete };
+}
+
+/**
+ * Звірятель напівстворених хвиль.
+ *
+ * Накладна проводиться в транзакції, а пропозиції створюються після неї — тож
+ * падіння Mongo, мережі чи процесу в цьому проміжку лишає накладну проведеною
+ * без (частини) пропозицій. Повторно провести її вже неможливо: вона completed.
+ * Цей прохід — єдине, що реально доводить справу до кінця.
+ *
+ * Викликається планувальником на кожному тіку. Дешевий: індекс по
+ * supplementStatus, у нормі знаходить нуль документів.
+ *
+ * ВАЖЛИВО про дедлайн: повтор бере closesAt із самої накладної, тобто той, що
+ * був зафіксований при проведенні. Хвиля не подовжується від того, що її
+ * довелося довідновлювати — інакше кожен ретрай зсував би дедлайн уперед, і
+ * повідомлення «закриється о 12:48» розходилося б із реальністю.
+ * Наслідок, який варто пам'ятати: якщо процес пролежав довше за вікно, хвиля
+ * відкриється вже простроченою і планувальник заморозить її наступним тіком.
+ */
+async function reconcilePendingReceipts() {
+  const stuck = await Receipt.find({ supplementStatus: 'pending' }, '_id receiptNumber').limit(20).lean();
+  if (!stuck.length) return 0;
+
+  let repaired = 0;
+  for (const receipt of stuck) {
+    try {
+      const { created, complete } = await createOffersForReceipt(receipt._id);
+      if (created.length) {
+        // Розсилка йде тим самим шляхом, що й у звичайному відкритті.
+        const { notifyOffers } = require('./supplementNotify');
+        notifyOffers(created, 'opened').catch((e) =>
+          console.error('[supplement] розсилка після довідновлення впала:', e?.message));
+        for (const offer of created) {
+          emit('supplement_opened', {
+            offerId: String(offer._id),
+            deliveryGroupId: String(offer.deliveryGroupId),
+            orderingSessionId: String(offer.orderingSessionId),
+            closesAt: offer.closesAt,
+          });
+        }
+      }
+      if (complete) repaired += 1;
+      console.log(`[supplement] довідновлено накладну ${receipt.receiptNumber}: +${created.length} пропозицій`);
+    } catch (err) {
+      console.error('[supplement] довідновлення накладної', receipt.receiptNumber, 'впало:', err?.message);
+    }
+  }
+  return repaired;
 }
 
 // ─── Фізичне місце товару (§9) ───────────────────────────────────────────────
@@ -237,6 +321,10 @@ function offerViewForWarehouse(offer, { product, requests = [], location = null,
     requestId: String(r._id),
     shopId: String(r.shopId),
     shopName: r.shopName || '',
+    // null — номер коробки ще НЕ призначено. Клієнт мусить показати це як
+    // «немає номера» і не давати пакувати цей рядок. Вигадувати номер з позиції
+    // в списку не можна: працівник поклав би товар у коробку 3, а магазину за
+    // хвилину дісталася б коробка 27.
     shopNumber: boxNumberFor(r),
     quantity: r.quantity,
     packed: !!r.packed,
@@ -258,6 +346,10 @@ function offerViewForWarehouse(offer, { product, requests = [], location = null,
     shops: rows,
     totalQty: rows.reduce((s, r) => s + Number(r.quantity || 0), 0),
     packedCount: rows.filter((r) => r.packed).length,
+    // Хто тримає пропозицію в руках. Клієнт вирішує за цим, показати картку в
+    // роботі чи «зайнято колегою».
+    lockedBy: offer.lockedBy ? String(offer.lockedBy) : null,
+    lockedAt: offer.lockedAt || null,
     // Сервер сам каже, чи можна завершувати — клієнт не має відтворювати правило.
     canComplete: status === 'frozen' && rows.length > 0 && rows.every((r) => r.packed),
   };
@@ -278,18 +370,89 @@ function emit(event, payload) {
  * якої всі звичайні задачі вже зібрані, лишалась би in_progress назавжди:
  * maybeCompleteSession викликається лише після завершення PickingTask, а їх
  * більше не буде.
- *
- * Лінивий require: utils/sessionStatus читає модель SupplementOffer для гарда,
- * і статичний імпорт в обидва боки був би циклом.
  */
 async function nudgeSessionCompletion(orderingSessionId) {
   if (!orderingSessionId) return;
   try {
-    const { maybeCompleteSession } = require('../utils/sessionStatus');
     await maybeCompleteSession(orderingSessionId, { meta: { reason: 'supplement_closed' } });
   } catch (err) {
     console.warn('[supplement] спроба завершити сесію не вдалась:', err?.message);
   }
+}
+
+// ─── Серіалізація операцій над однією пропозицією ────────────────────────────
+
+/**
+ * ВСІ зміни, що стосуються однієї пропозиції, проходять через цей замок:
+ * створення/зміна/скасування заявки продавцем, галочка складу, заморозка,
+ * авто-завершення і «Спакував».
+ *
+ * Без нього кожна пара з них — гонка, і всі вони закінчуються фізичною
+ * розбіжністю, а не просто дивним записом у базі:
+ *
+ *   • продавець читає packed=false → склад ставить packed=true і кладе 2 шт →
+ *     запит продавця зберігає quantity=6. У коробці 2, у системі 6.
+ *   • те саме з видаленням: заявка зникає, товар уже лежить у коробці.
+ *   • запит, що почався за 50 мс до дедлайну, дописує заявку в пропозицію, яку
+ *     планувальник уже заморозив і закрив як порожню — заявка є, картки немає,
+ *     склад її ніколи не побачить.
+ *   • склад перевірив «усі спаковані» → колега зняв галочку → перший завершує
+ *     пропозицію з одним необробленим магазином.
+ *
+ * Redis робить замок наскрізним для всіх воркерів; без Redis він вироджується
+ * в мьютекс процесу — що коректно, бо index.js відмовляється стартувати з
+ * WEB_CONCURRENCY>1 без REDIS_URL.
+ */
+function withOfferLock(offerId, fn) {
+  return withLock(`supplement:${String(offerId)}`, fn, { ttlMs: 10_000, waitMs: 5_000 });
+}
+
+// Скільки пропозиція може «висіти» за складником, який пішов і не закрив картку.
+// Той самий поріг, що й для перехоплення звичайної задачі (pickingService).
+const LOCK_TIMEOUT_MS = 3 * 60 * 1000;
+
+/**
+ * Взяти пропозицію в роботу. Одна пропозиція — один складник (див. коментар у
+ * моделі про подвійне пакування).
+ *
+ * Ідемпотентно для власника: повторне відкриття картки тим самим працівником
+ * лише оновлює lockedAt (heartbeat). Прострочений чужий замок перехоплюється
+ * автоматично — інакше людина, яка пішла додому з відкритою карткою, заблокувала
+ * б товар до кінця зміни.
+ *
+ * @returns {{ ok: boolean, offer?: object, lockedBy?: string }}
+ */
+async function claimOffer(offerId, telegramId, now = new Date()) {
+  const me = String(telegramId || '');
+  const staleBefore = new Date(now.getTime() - LOCK_TIMEOUT_MS);
+
+  const claimed = await SupplementOffer.findOneAndUpdate(
+    {
+      _id: offerId,
+      status: { $in: ACTIVE_STATUSES },
+      $or: [
+        { lockedBy: null },
+        { lockedBy: me },
+        { lockedAt: { $lt: staleBefore } },
+      ],
+    },
+    { $set: { lockedBy: me, lockedAt: now } },
+    { new: true },
+  );
+  if (claimed) return { ok: true, offer: claimed };
+
+  const existing = await SupplementOffer.findById(offerId, 'lockedBy status').lean();
+  if (!existing) return { ok: false, reason: 'supplement_offer_not_found' };
+  if (existing.status === 'completed') return { ok: false, reason: 'supplement_closed' };
+  return { ok: false, reason: 'supplement_locked_by_other', lockedBy: String(existing.lockedBy || '') };
+}
+
+/** Відпустити пропозицію (закрили картку). Тільки власник — чужий замок не чіпаємо. */
+async function releaseOffer(offerId, telegramId) {
+  await SupplementOffer.updateOne(
+    { _id: offerId, lockedBy: String(telegramId || '') },
+    { $set: { lockedBy: null, lockedAt: null } },
+  );
 }
 
 /**
@@ -305,11 +468,14 @@ async function freezeDueOffers(now = new Date()) {
 
   const frozen = [];
   for (const o of due) {
-    const updated = await SupplementOffer.findOneAndUpdate(
+    // Під замком: інакше заморозка може стати між перевіркою дедлайну і
+    // вставкою заявки в запиті продавця, який почався до closesAt — і заявка
+    // осіла б у вже замороженій (а то й закритій) пропозиції.
+    const updated = await withOfferLock(o._id, () => SupplementOffer.findOneAndUpdate(
       { _id: o._id, status: 'open' },
       { $set: { status: 'frozen', frozenAt: now } },
       { new: true },
-    );
+    ));
     if (updated) frozen.push(updated);
   }
 
@@ -336,13 +502,18 @@ async function autoCompleteEmptyOffers(now = new Date()) {
 
   let closed = 0;
   for (const o of frozen) {
-    const hasRequests = await SupplementRequest.exists({ offerId: o._id });
-    if (hasRequests) continue;
-    const updated = await SupplementOffer.findOneAndUpdate(
-      { _id: o._id, status: 'frozen' },
-      { $set: { status: 'completed', completedAt: now } },
-      { new: true },
-    );
+    // Перевірка «заявок немає» і закриття мусять бути однією операцією: запит
+    // продавця, що стартував до дедлайну, міг саме зараз дописувати заявку.
+    // Без замка ми закрили б пропозицію, а заявка лишилась би всередині
+    // завершеної — магазин її бачить, склад ніколи не побачить.
+    const updated = await withOfferLock(o._id, async () => {
+      if (await SupplementRequest.exists({ offerId: o._id })) return null;
+      return SupplementOffer.findOneAndUpdate(
+        { _id: o._id, status: 'frozen' },
+        { $set: { status: 'completed', completedAt: now, lockedBy: null, lockedAt: null } },
+        { new: true },
+      );
+    });
     if (!updated) continue;
     closed += 1;
     emit('supplement_completed', {
@@ -368,36 +539,44 @@ async function autoCompleteEmptyOffers(now = new Date()) {
  *                          supplement_not_all_packed | supplement_no_requests
  */
 async function completeOffer(offerId, actor = {}, now = new Date()) {
-  const offer = await SupplementOffer.findById(offerId);
-  if (!offer) throw Object.assign(new Error('offer not found'), { code: 'supplement_offer_not_found' });
-  if (offer.status === 'completed') return offer; // ідемпотентно
+  // Увесь блок «перевірити → закрити» під замком. Інакше між читанням заявок і
+  // записом статусу колега встигав би зняти галочку (пропозиція закрилася б із
+  // необробленим магазином), а запит продавця з-перед дедлайну — дописати нову
+  // заявку всередину вже завершеної пропозиції.
+  const offer = await withOfferLock(offerId, async () => {
+    const doc = await SupplementOffer.findById(offerId);
+    if (!doc) throw Object.assign(new Error('offer not found'), { code: 'supplement_offer_not_found' });
+    if (doc.status === 'completed') return doc; // ідемпотентно
 
-  if (effectiveOfferStatus(offer, now) !== 'frozen') {
-    throw Object.assign(new Error('offer not frozen'), { code: 'supplement_not_frozen' });
-  }
+    if (effectiveOfferStatus(doc, now) !== 'frozen') {
+      throw Object.assign(new Error('offer not frozen'), { code: 'supplement_not_frozen' });
+    }
 
-  const requests = await SupplementRequest.find({ offerId: offer._id }, 'packed').lean();
-  if (!requests.length) throw Object.assign(new Error('no requests'), { code: 'supplement_no_requests' });
-  if (requests.some((r) => !r.packed)) {
-    throw Object.assign(new Error('not all packed'), { code: 'supplement_not_all_packed' });
-  }
+    const requests = await SupplementRequest.find({ offerId: doc._id }, 'packed').lean();
+    if (!requests.length) throw Object.assign(new Error('no requests'), { code: 'supplement_no_requests' });
+    if (requests.some((r) => !r.packed)) {
+      throw Object.assign(new Error('not all packed'), { code: 'supplement_not_all_packed' });
+    }
 
-  // Фільтр за $ne:'completed' — щоб два одночасні натискання не переписали
-  // completedBy. Статус ще міг бути 'open' (дедлайн минув, планувальник не
-  // встиг) — обидва варіанти допустимі, бо ефективний статус уже перевірено.
-  const updated = await SupplementOffer.findOneAndUpdate(
-    { _id: offer._id, status: { $ne: 'completed' } },
-    {
-      $set: {
-        status: 'completed',
-        completedAt: now,
-        frozenAt: offer.frozenAt || now,
-        completedBy: String(actor.by || ''),
-        completedByName: String(actor.byName || ''),
+    // Статус ще міг бути 'open' (дедлайн минув, планувальник не встиг) — обидва
+    // варіанти допустимі, бо ефективний статус уже перевірено. Замок знімаємо
+    // разом із закриттям: тримати завершену пропозицію «в руках» немає сенсу.
+    return SupplementOffer.findOneAndUpdate(
+      { _id: doc._id, status: { $ne: 'completed' } },
+      {
+        $set: {
+          status: 'completed',
+          completedAt: now,
+          frozenAt: doc.frozenAt || now,
+          completedBy: String(actor.by || ''),
+          completedByName: String(actor.byName || ''),
+          lockedBy: null,
+          lockedAt: null,
+        },
       },
-    },
-    { new: true },
-  );
+      { new: true },
+    ) || doc;
+  });
 
   emit('supplement_completed', {
     offerId: String(offer._id),
@@ -407,7 +586,7 @@ async function completeOffer(offerId, actor = {}, now = new Date()) {
   });
   await nudgeSessionCompletion(offer.orderingSessionId);
 
-  return updated || offer;
+  return offer;
 }
 
 // ─── Гарди / лічильники ──────────────────────────────────────────────────────
@@ -427,10 +606,19 @@ async function countActiveOffersForSession(orderingSessionId, mongoSession = nul
   return query;
 }
 
-/** Активні пропозиції групи — для віртуального блока складу (§8). */
-async function findActiveOffersForGroup(deliveryGroupId) {
+/**
+ * Активні пропозиції ПОТОЧНОЇ сесії групи — вміст віртуального блока (§8).
+ *
+ * Фільтр по сесії обов'язковий, а не косметичний: лічильник плитки (routes/picking.js)
+ * рахується саме по orderingSessionId, тож без нього список показував би інше,
+ * ніж плитка. Зависла frozen-пропозиція минулого циклу домішувалась би до
+ * сьогоднішніх і склад пакував би її в коробки цієї доставки.
+ */
+async function findActiveOffersForSession(deliveryGroupId, orderingSessionId) {
+  if (!orderingSessionId) return [];
   return SupplementOffer.find({
     deliveryGroupId: String(deliveryGroupId),
+    orderingSessionId: String(orderingSessionId),
     status: { $in: ACTIVE_STATUSES },
   }).sort({ closesAt: 1, createdAt: 1 }).lean();
 }
@@ -448,18 +636,22 @@ async function loadProductsFor(offers = []) {
 
 module.exports = {
   ACTIVE_STATUSES,
+  LOCK_TIMEOUT_MS,
   effectiveOfferStatus,
   isOfferOpenForSellers,
-  resolveTargetSessions,
   createOffersForReceipt,
+  reconcilePendingReceipts,
   resolveProductLocations,
   formatLocation,
   productView,
   offerViewForWarehouse,
+  withOfferLock,
+  claimOffer,
+  releaseOffer,
   freezeDueOffers,
   autoCompleteEmptyOffers,
   completeOffer,
   countActiveOffersForSession,
-  findActiveOffersForGroup,
+  findActiveOffersForSession,
   loadProductsFor,
 };

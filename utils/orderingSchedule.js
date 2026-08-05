@@ -364,6 +364,51 @@ function getOrderingWindowCloseAt(deliveryDayOfWeek, schedule) {
 }
 
 /**
+ * Returns the UTC Date when the ordering window LAST closed for the given group —
+ * the most recent PAST occurrence of (closeDay at closeHour:closeMinute Warsaw).
+ *
+ * Mirror image of getOrderingWindowOpenAt (which finds the last past open), and
+ * deliberately NOT "next close − 7 days": that subtraction is wrong by an hour
+ * across the two DST transitions, and this value is shown to a human as
+ * "замовлення закрилися 3 години тому".
+ *
+ * @param {number} deliveryDayOfWeek  0=Sun … 6=Sat
+ * @param {{ closeHour?: number, closeMinute?: number }} [schedule]
+ * @returns {Date}
+ */
+function getPreviousOrderingCloseAt(deliveryDayOfWeek, schedule) {
+  const { closeHour, closeMinute } = requireScheduleFields(schedule, ['closeHour', 'closeMinute']);
+  const closeDay = deliveryDayOfWeek;
+
+  const { dayOfWeek: nowDOW, hour: nowHour, minute: nowMinute } = getWarsawNow();
+  const nowMins   = nowHour * 60 + nowMinute;
+  const closeMins = closeHour * 60 + closeMinute;
+
+  // How many days back is the last occurrence of closeDay?
+  let daysBack = (nowDOW - closeDay + 7) % 7;
+  // Today IS closeDay but the close time hasn't arrived yet → look back a week.
+  if (daysBack === 0 && nowMins < closeMins) daysBack = 7;
+
+  const now = new Date();
+  const dateParts = new Intl.DateTimeFormat('en-US', {
+    timeZone: TIMEZONE,
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour12: false,
+  }).formatToParts(now);
+  const gd = (t) => parseInt(dateParts.find((p) => p.type === t)?.value ?? '0', 10);
+
+  const target = new Date(Date.UTC(gd('year'), gd('month') - 1, gd('day') - daysBack));
+
+  return warsawWallClockToUTC(
+    target.getUTCFullYear(),
+    target.getUTCMonth() + 1,
+    target.getUTCDate(),
+    closeHour,
+    closeMinute,
+  );
+}
+
+/**
  * True if the ordering window opens today and starts within `withinMinutes`.
  * Mirror of client/src/utils/orderingSchedule.js:isOrderingOpeningSoon.
  * @param {number} deliveryDayOfWeek 0=Sun…6=Sat
@@ -382,4 +427,4 @@ function isOrderingOpeningSoon(deliveryDayOfWeek, schedule, withinMinutes = 240)
   return minsUntilOpen > 0 && minsUntilOpen <= withinMinutes;
 }
 
-module.exports = { isOrderingOpen, isOrderingOpeningSoon, getWindowDescription, getWarsawNow, getOrderingWindowOpenAt, getOrderingWindowCloseAt, getOpenDateWarsaw, DAY_SHORT_UK, DAY_FULL_UK };
+module.exports = { isOrderingOpen, isOrderingOpeningSoon, getWindowDescription, getWarsawNow, getOrderingWindowOpenAt, getOrderingWindowCloseAt, getPreviousOrderingCloseAt, getOpenDateWarsaw, DAY_SHORT_UK, DAY_FULL_UK };

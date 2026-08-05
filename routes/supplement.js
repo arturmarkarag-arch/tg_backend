@@ -21,6 +21,7 @@ const express = require('express');
 const mongoose = require('mongoose');
 
 const Shop  = require('../models/Shop');
+const User  = require('../models/User');
 const DeliveryGroup = require('../models/DeliveryGroup');
 const OrderingSession = require('../models/OrderingSession');
 const SupplementOffer = require('../models/SupplementOffer');
@@ -40,8 +41,11 @@ const {
   formatLocation,
   productView,
   offerViewForWarehouse,
+  withOfferLock,
+  claimOffer,
+  releaseOffer,
   completeOffer,
-  findActiveOffersForGroup,
+  findActiveOffersForSession,
   loadProductsFor,
 } = require('../services/supplementOffers');
 
@@ -74,6 +78,11 @@ function emit(event, payload) {
  * Саме проти цієї пари (група + сесія) звіряються всі пропозиції — цього
  * достатньо, щоб продавець не міг дотягнутися до чужої групи навіть прямим
  * запитом з підставленим offerId (§21).
+ *
+ * ПРО АДМІНІСТРАТОРА: дозамовлення завжди прив'язане до магазину, тому адмін
+ * бачить його ЛИШЕ як продавець свого магазину. Глобальний адмін без shopId
+ * отримає no_shop і порожній блок — це не помилка, а наслідок того, що заявка
+ * належить магазину. Окремого адмінського перегляду по групах свідомо немає.
  */
 async function sellerContext(user) {
   if (!user?.shopId) throw appError('no_shop');
@@ -177,31 +186,48 @@ router.post('/:offerId/request', sellerRoles, asyncHandler(async (req, res) => {
     throw appError('supplement_quantity_invalid');
   }
 
-  // Дедлайн — рішення СЕРВЕРА, навіть якщо планувальник ще не поставив frozen (§21).
-  if (!isOfferOpenForSellers(offer)) throw appError('supplement_closed');
-
   const actor = actorOf(user);
-  const existing = await SupplementRequest.findOne({ offerId: offer._id, shopId: ctx.shopId });
 
-  // Жорстке блокування після packed (рішення власника): склад уже фізично
-  // поклав товар у коробку — міняти кількість пізно.
-  if (existing?.packed) throw appError('supplement_request_locked');
+  // ── Усе під замком пропозиції ────────────────────────────────────────────
+  // Перевірка дедлайну, перевірка packed і сам запис мусять бути ОДНІЄЮ
+  // операцією. Інакше: продавець читає packed=false → склад ставить галочку і
+  // кладе 2 шт → запит продавця дописує quantity=6. У коробці 2, у системі 6,
+  // і «жорстке блокування» обійдене без жодного злого умислу. Так само запит,
+  // що стартував за 50 мс до дедлайну, інакше дописав би заявку в пропозицію,
+  // яку планувальник уже заморозив і закрив як порожню.
+  const { action, request } = await withOfferLock(offer._id, async () => {
+    // Перечитуємо ВСЕРЕДИНІ замка — те, що ми прочитали до нього, вже застаріле.
+    const fresh = await SupplementOffer.findById(offer._id);
+    if (!fresh) throw appError('supplement_offer_not_found');
+    // Дедлайн — рішення СЕРВЕРА, навіть якщо планувальник ще не поставив frozen (§21).
+    if (!isOfferOpenForSellers(fresh)) throw appError('supplement_closed');
 
-  let request;
-  if (existing) {
-    if (existing.quantity === quantity) {
-      return res.json({ ok: true, quantity, action: 'noop' });
+    const existing = await SupplementRequest.findOne({ offerId: fresh._id, shopId: ctx.shopId });
+
+    // Жорстке блокування після packed (рішення власника): склад уже фізично
+    // поклав товар у коробку — міняти кількість пізно.
+    if (existing?.packed) throw appError('supplement_request_locked');
+
+    if (existing) {
+      if (existing.quantity === quantity) return { action: 'noop', request: existing };
+      const from = existing.quantity;
+      // findOneAndUpdate з packed:false у ФІЛЬТРІ — другий замок на випадок,
+      // якщо галочка складу якимось шляхом обійшла замок пропозиції.
+      const updated = await SupplementRequest.findOneAndUpdate(
+        { _id: existing._id, packed: false },
+        {
+          $set: { quantity, updatedBy: actor.by, updatedByName: actor.byName },
+          $push: { history: { ...actor, at: new Date(), action: 'quantity_changed', meta: { from, to: quantity } } },
+        },
+        { new: true },
+      );
+      if (!updated) throw appError('supplement_request_locked');
+      return { action: 'updated', request: updated };
     }
-    const from = existing.quantity;
-    existing.quantity = quantity;
-    existing.updatedBy = actor.by;
-    existing.updatedByName = actor.byName;
-    existing.history.push({ ...actor, action: 'quantity_changed', meta: { from, to: quantity } });
-    request = await existing.save();
-  } else {
+
     try {
-      request = await SupplementRequest.create({
-        offerId: offer._id,
+      const created = await SupplementRequest.create({
+        offerId: fresh._id,
         shopId: ctx.shopId,
         shopName: ctx.shopName,
         deliveryGroupId: ctx.deliveryGroupId,
@@ -213,37 +239,50 @@ router.post('/:offerId/request', sellerRoles, asyncHandler(async (req, res) => {
         updatedByName: actor.byName,
         history: [{ ...actor, action: 'created', meta: { quantity } }],
       });
+      return { action: 'created', request: created };
     } catch (err) {
       // Гонка двох продавців одного магазину: унікальний індекс віддав перемогу
       // першому. Другий не створює дубль — він оновлює те, що вже є.
       if (err?.code !== 11000) throw err;
-      const won = await SupplementRequest.findOne({ offerId: offer._id, shopId: ctx.shopId });
-      if (!won) throw err;
-      if (won.packed) throw appError('supplement_request_locked');
-      won.quantity = quantity;
-      won.updatedBy = actor.by;
-      won.updatedByName = actor.byName;
-      won.history.push({ ...actor, action: 'quantity_changed', meta: { to: quantity, raced: true } });
-      request = await won.save();
+      const won = await SupplementRequest.findOneAndUpdate(
+        { offerId: fresh._id, shopId: ctx.shopId, packed: false },
+        {
+          $set: { quantity, updatedBy: actor.by, updatedByName: actor.byName },
+          $push: { history: { ...actor, at: new Date(), action: 'quantity_changed', meta: { to: quantity, raced: true } } },
+        },
+        { new: true },
+      );
+      if (!won) throw appError('supplement_request_locked');
+      return { action: 'updated', request: won };
     }
-  }
+  });
+
+  if (action === 'noop') return res.json({ ok: true, quantity, action: 'noop' });
 
   // Магазин, який не мав основного замовлення, не має і номера коробки. Якщо
   // номери вже заморожені (збирання почалось) — дістає наступний вільний у
   // хвіст, існуючі не пересортовуються (§11). Якщо ще не заморожені, функція
-  // нічого не робить: старт збирання пронумерує його разом з усіма.
-  assignLateShopNumber(ctx.orderingSessionId, ctx.shopId, ctx.shopName)
-    .catch((err) => console.warn('[supplement] нумерація коробки не вдалась:', err.message));
+  // повертає null: старт збирання пронумерує його разом з усіма.
+  //
+  // AWAIT, не fire-and-forget: поки номера немає, склад бачить рядок без
+  // коробки і не може його пакувати. Чекати тут — десятки мілісекунд, а
+  // фоновий виклик, який тихо впав, лишив би магазин без номера назавжди
+  // (повторювача немає).
+  try {
+    await assignLateShopNumber(ctx.orderingSessionId, ctx.shopId, ctx.shopName);
+  } catch (err) {
+    console.warn('[supplement] нумерація коробки не вдалась:', err.message);
+  }
 
   emit('supplement_request_changed', {
     offerId: String(offer._id),
     deliveryGroupId: ctx.deliveryGroupId,
     shopId: ctx.shopId,
-    action: existing ? 'updated' : 'created',
+    action,
   });
   emit('user_order_updated', { buyerTelegramId: String(user.telegramId) });
 
-  res.json({ ok: true, quantity: request.quantity, action: existing ? 'updated' : 'created' });
+  res.json({ ok: true, quantity: request.quantity, action });
 }));
 
 /**
@@ -255,13 +294,25 @@ router.delete('/:offerId/request', sellerRoles, asyncHandler(async (req, res) =>
   const ctx = await sellerContext(user);
   const offer = await loadOfferForSeller(req.params.offerId, ctx);
 
-  if (!isOfferOpenForSellers(offer)) throw appError('supplement_closed');
+  // Скасування небезпечніше за зміну кількості: між перевіркою packed і
+  // видаленням склад міг спакувати цей магазин — і заявка зникла б, поки товар
+  // уже лежить у коробці. Ніхто б навіть не дізнався, що його треба вийняти.
+  // Тому: замок пропозиції + packed:false у ФІЛЬТРІ самого видалення.
+  const removed = await withOfferLock(offer._id, async () => {
+    const fresh = await SupplementOffer.findById(offer._id, 'status closesAt');
+    if (!fresh) throw appError('supplement_offer_not_found');
+    if (!isOfferOpenForSellers(fresh)) throw appError('supplement_closed');
 
-  const existing = await SupplementRequest.findOne({ offerId: offer._id, shopId: ctx.shopId });
-  if (!existing) return res.json({ ok: true, action: 'noop' });
-  if (existing.packed) throw appError('supplement_request_locked');
+    const existing = await SupplementRequest.findOne({ offerId: offer._id, shopId: ctx.shopId }, '_id packed');
+    if (!existing) return 'noop';
+    if (existing.packed) throw appError('supplement_request_locked');
 
-  await existing.deleteOne();
+    const deleted = await SupplementRequest.findOneAndDelete({ _id: existing._id, packed: false });
+    if (!deleted) throw appError('supplement_request_locked');
+    return 'cancelled';
+  });
+
+  if (removed === 'noop') return res.json({ ok: true, action: 'noop' });
 
   emit('supplement_request_changed', {
     offerId: String(offer._id),
@@ -326,7 +377,16 @@ router.get('/my', sellerRoles, asyncHandler(async (req, res) => {
  */
 router.get('/group/:deliveryGroupId', warehouseRoles, asyncHandler(async (req, res) => {
   const groupId = String(req.params.deliveryGroupId || '');
-  const offers = await findActiveOffersForGroup(groupId);
+  // Список ЗАВЖДИ читається за (група + поточна сесія) — так само, як
+  // рахується лічильник плитки в routes/picking.js. Інакше зависла frozen
+  // пропозиція минулого циклу домішалась би до сьогоднішніх, і склад запакував
+  // би її в коробки цієї доставки.
+  const group = await DeliveryGroup.findById(groupId, 'dayOfWeek').lean();
+  if (!group) return res.json({ offers: [], totalQty: 0, serverTime: new Date().toISOString() });
+  const schedule = await getOrderingSchedule();
+  const orderingSessionId = await getOrCreateSessionId(groupId, group.dayOfWeek, schedule);
+
+  const offers = await findActiveOffersForSession(groupId, orderingSessionId);
   if (!offers.length) return res.json({ offers: [], totalQty: 0, serverTime: new Date().toISOString() });
 
   const offerIds = offers.map((o) => o._id);
@@ -368,8 +428,12 @@ router.get('/group/:deliveryGroupId', warehouseRoles, asyncHandler(async (req, r
   });
 }));
 
-/** Спільна збірка повної картки — використовується GET і після кожної мутації. */
-async function buildOfferCard(offer) {
+/**
+ * Спільна збірка повної картки — використовується GET і після кожної мутації.
+ * `me` потрібен, щоб сервер сам сказав «товар у ТВОЇХ руках»: клієнт не знає
+ * свого telegramId у цьому місці, а порівнювати замок він мусить безпомилково.
+ */
+async function buildOfferCard(offer, me = '') {
   const [requests, locations, productMap, session] = await Promise.all([
     SupplementRequest.find({ offerId: offer._id }).lean(),
     resolveProductLocations([offer.productId]),
@@ -377,7 +441,7 @@ async function buildOfferCard(offer) {
     OrderingSession.findById(offer.orderingSessionId, 'shopNumbers').lean(),
   ]);
   const lookup = buildShopNumberLookup(session?.shopNumbers);
-  return offerViewForWarehouse(offer, {
+  const view = offerViewForWarehouse(offer, {
     product: productMap.get(String(offer.productId)),
     requests,
     location: locations.get(String(offer.productId)),
@@ -385,14 +449,60 @@ async function buildOfferCard(offer) {
       ?? lookup.byName.get(String(r.shopName || ''))
       ?? null,
   });
+  view.lockedByMe = !!me && String(offer.lockedBy || '') === String(me);
+  return view;
 }
 
-/** GET /api/supplement/offers/:offerId — повна картка для пакування. */
+/**
+ * GET /api/supplement/offers/:offerId — картка для перегляду (без захоплення).
+ * Використовується поллінгом уже відкритої картки.
+ */
 router.get('/offers/:offerId', warehouseRoles, asyncHandler(async (req, res) => {
   if (!mongoose.Types.ObjectId.isValid(req.params.offerId)) throw appError('supplement_offer_not_found');
   const offer = await SupplementOffer.findById(req.params.offerId).lean();
   if (!offer) throw appError('supplement_offer_not_found');
-  res.json({ offer: await buildOfferCard(offer), serverTime: new Date().toISOString() });
+  res.json({
+    offer: await buildOfferCard(offer, req.telegramUser?.telegramId),
+    serverTime: new Date().toISOString(),
+  });
+}));
+
+/**
+ * POST /api/supplement/offers/:offerId/claim — взяти пропозицію в роботу.
+ *
+ * Одна пропозиція — один складник. Без цього двоє могли відкрити ту саму
+ * картку, обидва побачити «Магазин №12 — 4 шт, не спаковано», обидва покласти
+ * по 4 і обидва натиснути галочку: у базі один packed=true, у коробці 8 штук.
+ * База такого дубля не бачить у принципі — тому не пускаємо його фізично.
+ *
+ * Ідемпотентно для власника (повторне відкриття = heartbeat). Прострочений
+ * чужий замок (>3 хв без активності) перехоплюється автоматично.
+ */
+router.post('/offers/:offerId/claim', warehouseRoles, asyncHandler(async (req, res) => {
+  if (!mongoose.Types.ObjectId.isValid(req.params.offerId)) throw appError('supplement_offer_not_found');
+  const me = String(req.telegramUser?.telegramId || '');
+
+  const result = await claimOffer(req.params.offerId, me);
+  if (!result.ok) {
+    if (result.reason === 'supplement_locked_by_other') {
+      const holder = result.lockedBy
+        ? await User.findOne({ telegramId: result.lockedBy }, 'firstName lastName').lean()
+        : null;
+      const name = holder ? [holder.firstName, holder.lastName].filter(Boolean).join(' ') : '';
+      throw appError('supplement_locked_by_other', { name });
+    }
+    throw appError(result.reason);
+  }
+
+  const claimedDoc = result.offer.toObject ? result.offer.toObject() : result.offer;
+  res.json({ offer: await buildOfferCard(claimedDoc, me), serverTime: new Date().toISOString() });
+}));
+
+/** POST /api/supplement/offers/:offerId/release — закрив картку, відпустив товар. */
+router.post('/offers/:offerId/release', warehouseRoles, asyncHandler(async (req, res) => {
+  if (!mongoose.Types.ObjectId.isValid(req.params.offerId)) throw appError('supplement_offer_not_found');
+  await releaseOffer(req.params.offerId, req.telegramUser?.telegramId);
+  res.json({ ok: true });
 }));
 
 /**
@@ -407,22 +517,40 @@ router.patch('/requests/:requestId/packed', warehouseRoles, asyncHandler(async (
   const packed = req.body?.packed !== false;
   const actor = actorOf(req.telegramUser);
 
-  const request = await SupplementRequest.findById(req.params.requestId);
-  if (!request) throw appError('supplement_request_not_found');
+  const head = await SupplementRequest.findById(req.params.requestId, 'offerId shopId').lean();
+  if (!head) throw appError('supplement_request_not_found');
 
-  const offer = await SupplementOffer.findById(request.offerId).lean();
-  if (!offer) throw appError('supplement_offer_not_found');
-  // Завершена пропозиція більше не приймає змін — ні від продавця, ні від складу (§21).
-  if (offer.status === 'completed') throw appError('supplement_closed');
+  const offer = await withOfferLock(head.offerId, async () => {
+    const fresh = await SupplementOffer.findById(head.offerId).lean();
+    if (!fresh) throw appError('supplement_offer_not_found');
+    // Завершена пропозиція більше не приймає змін — ні від продавця, ні від складу (§21).
+    if (fresh.status === 'completed') throw appError('supplement_closed');
+    // Товар має бути в руках саме цього працівника — див. /claim. Прострочений
+    // чужий замок перехоплюється тим самим викликом, тому це не глухий кут.
+    if (String(fresh.lockedBy || '') !== String(actor.by)) {
+      throw appError('supplement_not_claimed');
+    }
 
-  if (request.packed !== packed) {
-    request.packed = packed;
-    request.packedBy = packed ? actor.by : '';
-    request.packedByName = packed ? actor.byName : '';
-    request.packedAt = packed ? new Date() : null;
-    request.history.push({ ...actor, action: packed ? 'packed' : 'unpacked', meta: { quantity: request.quantity } });
-    await request.save();
-  }
+    // Один атомарний запис у ВЛАСНИЙ документ заявки: паралельна поява нового
+    // магазину не може стерти вже поставлені галочки (§22 тест 5). Фільтр за
+    // поточним значенням packed робить операцію ідемпотентною — повторний тап
+    // просто нічого не змінює.
+    await SupplementRequest.updateOne(
+      { _id: req.params.requestId, packed: !packed },
+      {
+        $set: {
+          packed,
+          packedBy: packed ? actor.by : '',
+          packedByName: packed ? actor.byName : '',
+          packedAt: packed ? new Date() : null,
+        },
+        $push: { history: { ...actor, at: new Date(), action: packed ? 'packed' : 'unpacked' } },
+      },
+    );
+    return fresh;
+  });
+
+  const request = { _id: req.params.requestId, shopId: head.shopId };
 
   emit('supplement_packed_changed', {
     offerId: String(offer._id),
@@ -435,7 +563,7 @@ router.patch('/requests/:requestId/packed', warehouseRoles, asyncHandler(async (
     packed,
   });
 
-  res.json({ offer: await buildOfferCard(offer) });
+  res.json({ offer: await buildOfferCard(offer, actor.by) });
 }));
 
 /**
@@ -444,6 +572,15 @@ router.patch('/requests/:requestId/packed', warehouseRoles, asyncHandler(async (
  * frozen + є заявки + усі packed. До заморозки завершити не можна (§18).
  */
 router.post('/offers/:offerId/complete', warehouseRoles, asyncHandler(async (req, res) => {
+  const me = String(req.telegramUser?.telegramId || '');
+  // Завершує лише той, хто тримає товар у руках. Інакше колега, у якого картка
+  // просто відкрита, міг би закрити пропозицію під час чужого пакування.
+  const holder = await SupplementOffer.findById(req.params.offerId, 'lockedBy status').lean();
+  if (!holder) throw appError('supplement_offer_not_found');
+  if (holder.status !== 'completed' && String(holder.lockedBy || '') !== me) {
+    throw appError('supplement_not_claimed');
+  }
+
   try {
     await completeOffer(req.params.offerId, actorOf(req.telegramUser));
   } catch (err) {

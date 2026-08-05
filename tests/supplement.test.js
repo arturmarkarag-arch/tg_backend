@@ -115,6 +115,30 @@ describe('canComplete — «Спакував» вирішує сервер (§21
   });
 });
 
+describe('номер коробки ніколи не вигадується', () => {
+  const now = new Date('2026-08-05T08:20:00Z');
+  const product = { _id: 'p1', brand: 'Товар', orderNumber: 1, imageUrls: [] };
+
+  // Магазин, який прийшов лише через дозамовлення, отримує номер окремим
+  // записом у сесію. Поки його немає, картка мусить сказати «немає», а не
+  // підставити позицію в списку: працівник поклав би товар у коробку 1, а
+  // магазину за секунду дісталася б коробка 27.
+  it('без запису в сесії shopNumber лишається null, а не позицією в списку', () => {
+    const view = offerViewForWarehouse({ status: 'frozen', closesAt: new Date(now.getTime() - MIN) }, {
+      product,
+      requests: [
+        { _id: 'r1', shopId: 's1', shopName: 'Альфа', quantity: 1, packed: false },
+        { _id: 'r2', shopId: 's2', shopName: 'Бета', quantity: 1, packed: false },
+      ],
+      location: null,
+      boxNumberFor: (r) => (String(r.shopId) === 's1' ? 4 : null),
+      now,
+    });
+    expect(view.shops.find((s) => s.shopName === 'Альфа').shopNumber).toBe(4);
+    expect(view.shops.find((s) => s.shopName === 'Бета').shopNumber).toBeNull();
+  });
+});
+
 describe('formatLocation — фізичне місце товару (§9)', () => {
   it('без блока товар лежить у Надходженнях', () => {
     expect(formatLocation(null)).toBe('Надходження');

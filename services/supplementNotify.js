@@ -100,6 +100,26 @@ async function claimNotification(offers, type) {
   return claimed;
 }
 
+/**
+ * Повернути застовплене право назад, якщо надіслати НЕ вдалося.
+ *
+ * Позначка ставиться ДО надсилання (щоб два воркери не задублювали пост), але
+ * без цього відкоту вона перетворювала збій на вічну тишу: бот ще не піднявся,
+ * Telegram лежав п'ять секунд, процес упав — і повідомлення про відкрите вікно
+ * не піде вже ніколи, бо notifiedTypes каже «надіслано». Для вікна, що живе 30
+ * хвилин, це означає, що магазини просто не дізнаються про товар.
+ *
+ * Ризик зворотного боку — рідкісний дубль, якщо збій стався ПІСЛЯ доставки
+ * частини повідомлень. Дубль у Telegram нешкідливий; мовчання — ні.
+ */
+async function releaseNotification(offers, type) {
+  if (!offers?.length) return;
+  await SupplementOffer.updateMany(
+    { _id: { $in: offers.map((o) => o._id) } },
+    { $pull: { notifiedTypes: type } },
+  );
+}
+
 /** Продавці (та адміни, прив'язані до магазину) цільової групи. */
 async function sellersOfGroup(deliveryGroupId) {
   const shops = await Shop.find(
@@ -186,14 +206,25 @@ async function notifyOffers(offers, type, { now = new Date() } = {}) {
   const { getBot } = require('../telegramBot');
   const bot = getBot();
   if (!bot) {
-    console.warn('[supplement/notify] бот не піднятий — повідомлення пропущено');
+    // Бот ще не піднявся (старт процесу / перевипуск токена). Відпускаємо
+    // право — наступний тік планувальника спробує ще раз.
+    console.warn('[supplement/notify] бот не піднятий — повідомлення відкладено');
+    await releaseNotification(claimed, type);
     return { sentPrivate: 0, sentGroups: 0 };
   }
   // sendMessageWithRetry сам обробляє 429 і позначає користувачів, що
   // заблокували бота — тому шлемо через нього, а не через bot.sendMessage.
   const { sendMessageWithRetry } = require('../telegramBot');
 
-  const productMap = await loadProductsFor(claimed);
+  let productMap;
+  try {
+    productMap = await loadProductsFor(claimed);
+  } catch (err) {
+    // Не змогли навіть зібрати текст — нічого не надіслано, право віддаємо.
+    console.error('[supplement/notify] підготовка повідомлення впала:', err?.message);
+    await releaseNotification(claimed, type);
+    throw err;
+  }
 
   const byGroup = new Map();
   for (const o of claimed) {
@@ -244,8 +275,14 @@ async function notifyOffers(offers, type, { now = new Date() } = {}) {
 }
 
 /**
- * Які нагадування (mid/soon) уже мали піти, але ще не пішли.
- * Викликається планувальником на кожному тіку.
+ * Які повідомлення вже мали піти, але ще не пішли. Викликається планувальником
+ * на кожному тіку.
+ *
+ * `opened` тут НЕ зайве. Стартовий пост шле проведення накладної, але воно може
+ * не встигнути: бот ще не піднявся, Telegram відповів помилкою, процес упав між
+ * створенням пропозицій і розсилкою. Разом із releaseNotification це означає, що
+ * пропущений старт добʼється на наступному тіку — поки вікно ще відкрите і в
+ * цьому ще є сенс. Без нього магазини просто не дізнавалися б про товар.
  */
 async function findDueReminders(now = new Date()) {
   const open = await SupplementOffer.find(
@@ -253,9 +290,9 @@ async function findDueReminders(now = new Date()) {
     '_id productId deliveryGroupId openedAt closesAt notifiedTypes',
   ).lean();
 
-  const due = { mid: [], soon: [] };
+  const due = { opened: [], mid: [], soon: [] };
   for (const offer of open) {
-    for (const type of ['mid', 'soon']) {
+    for (const type of ['opened', 'mid', 'soon']) {
       if ((offer.notifiedTypes || []).includes(type)) continue;
       const dueAt = dueAtFor(offer, type);
       if (!dueAt || dueAt.getTime() > now.getTime()) continue;

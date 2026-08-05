@@ -24,9 +24,6 @@ const { appError } = require('./errors');
 // must be allowed to re-upload the regenerated overlay.
 const OWNER_ONLY_FIELDS = new Set([
   'totalQty', 'shelfQty', 'transitQty', 'destination', 'structure',
-  // supplementOffer — така сама маршрутна ознака, як destination: вирішує, чи
-  // товар піде магазинам як дозамовлення. Чужий працівник не має її перемикати.
-  'supplementOffer',
   'deliveryGroupIds', 'qtyPerShop', 'barcode',
   'existingProductId', 'warehousePending',
   'notes', 'defectPhotoUrls',

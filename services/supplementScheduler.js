@@ -17,7 +17,7 @@
  * процес живим під час зупинки.
  */
 
-const { freezeDueOffers, autoCompleteEmptyOffers } = require('./supplementOffers');
+const { freezeDueOffers, autoCompleteEmptyOffers, reconcilePendingReceipts } = require('./supplementOffers');
 const { notifyOffers, findDueReminders } = require('./supplementNotify');
 
 // 15 с — дрібніше не має сенсу (дедлайни задаються у хвилинах), крупніше дало б
@@ -29,11 +29,23 @@ let timer = null;
 let running = false;
 
 async function runSupplementTick(now = new Date()) {
-  // 1. Нагадування — до заморозки, щоб «за 5 хв» не пішло вже після закриття.
+  // 0. Добити накладні, у яких пропозиції створилися не повністю (падіння між
+  //    проведенням і відкриттям). Повторно провести таку накладну неможливо —
+  //    вона вже completed, тож це єдиний шлях довести справу до кінця.
+  try {
+    const repaired = await reconcilePendingReceipts();
+    if (repaired) console.log(`[supplement/scheduler] довідновлено накладних: ${repaired}`);
+  } catch (err) {
+    console.error('[supplement/scheduler] звірка накладних впала:', err?.message);
+  }
+
+  // 1. Повідомлення — ДО заморозки, щоб «за 5 хв» не пішло вже після закриття.
+  //    'opened' тут ловить стартові пости, які не змогли піти при проведенні.
   try {
     const due = await findDueReminders(now);
-    if (due.mid.length)  await notifyOffers(due.mid, 'mid', { now });
-    if (due.soon.length) await notifyOffers(due.soon, 'soon', { now });
+    if (due.opened.length) await notifyOffers(due.opened, 'opened', { now });
+    if (due.mid.length)    await notifyOffers(due.mid, 'mid', { now });
+    if (due.soon.length)   await notifyOffers(due.soon, 'soon', { now });
   } catch (err) {
     console.error('[supplement/scheduler] нагадування впали:', err?.message);
   }

@@ -44,15 +44,9 @@ const ReceiptItemSchema = new mongoose.Schema(
     // derives shelfQty/transitQty from this so commit logic stays unchanged.
     destination: { type: String, enum: ['shelf', 'shops'], default: 'shelf' },
 
-    // «Дозамовлення»: після проведення НАКЛАДНОЇ цей товар буде запропонований
-    // групам, чиє звичайне вікно замовлень уже закрите, але доставка ще
-    // збирається (див. models/SupplementOffer.js).
-    //
-    // КРИТИЧНЕ ПРАВИЛО (спека §4): прапорець має сенс ЛИШЕ для destination='shelf'.
-    // Товар, що їде повз склад прямо в магазини, дозамовляти нікому. Правило
-    // дублюється на сервері (routes/receipts.js + services/supplementOffers.js),
-    // бо старий клієнт або ручний API-запит не мають змоги його обійти.
-    supplementOffer: { type: Boolean, default: false },
+    // ПРИМІТКА: поля `supplementOffer` тут БІЛЬШЕ НЕМАЄ. Дозамовлення тепер —
+    // властивість усієї накладної (Receipt.type='supplement'), а не окремої
+    // позиції. Позиція в такій накладній завжди має destination='shelf'.
 
     structure: { type: ReceiptItemStructureSchema, default: () => ({ type: 'direct' }) },
 

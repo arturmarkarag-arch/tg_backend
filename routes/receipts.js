@@ -420,11 +420,19 @@ async function getNextReceiptNumber() {
   return `REC-${String(counter.seq).padStart(4, '0')}`;
 }
 
+const RECEIPT_TYPES = ['regular', 'supplement'];
+
 router.post('/', staffOnly, asyncHandler(async (req, res) => {
+  // Тип задається ОДИН раз, тут. Далі він визначає і дозволені призначення
+  // позицій, і те, що станеться при проведенні (див. POST /:id/commit).
+  const type = String(req.body?.type || 'regular');
+  if (!RECEIPT_TYPES.includes(type)) throw appError('receipt_type_invalid');
+
   const receiptNumber = await getNextReceiptNumber();
   const receipt = new Receipt({
     receiptNumber,
     status: 'draft',
+    type,
     createdBy: req.user.telegramId,
   });
   try {
@@ -440,6 +448,42 @@ router.post('/', staffOnly, asyncHandler(async (req, res) => {
     actor: getActor(req),
   }).catch((e) => console.error('[ReceiptItemLog] receipt_create error:', e));
   res.status(201).json(receipt);
+}));
+
+/**
+ * PATCH /:id — зміна типу накладної.
+ *
+ * Дозволено ЛИШЕ поки накладна порожня і не проведена. Тип керує призначенням
+ * позицій ('supplement' → тільки на склад), тож перемикання вже наповненої
+ * накладної означало б тихо перекроїти сенс кожної позиції: рядок «на магазини»
+ * раптом став би товаром дозамовлення, який ніхто не переперевіряв.
+ * Порожня накладна такої історії не має — там це просто виправлення описки.
+ */
+router.patch('/:id', staffOnly, asyncHandler(async (req, res) => {
+  const type = String(req.body?.type || '');
+  if (!RECEIPT_TYPES.includes(type)) throw appError('receipt_type_invalid');
+
+  const receipt = await Receipt.findById(req.params.id);
+  if (!receipt) throw appError('receipt_not_found');
+  if (receipt.status !== 'draft') throw appError('receipt_already_completed');
+  if (receipt.type === type) return res.json(receipt);
+
+  const itemCount = await ReceiptItem.countDocuments({ receiptId: receipt._id });
+  if (itemCount > 0) throw appError('receipt_type_locked');
+
+  const from = receipt.type;
+  receipt.type = type;
+  await receipt.save();
+
+  ReceiptItemLog.create({
+    receiptId: receipt._id,
+    itemName: receipt.receiptNumber,
+    action: 'receipt_type_change',
+    actor: getActor(req),
+    changes: [{ field: 'type', label: 'Тип накладної', from, to: type }],
+  }).catch((e) => console.error('[ReceiptItemLog] receipt_type_change error:', e));
+
+  res.json(receipt);
 }));
 
 router.post('/:id/items', staffOnly, asyncHandler(async (req, res) => {
@@ -473,11 +517,13 @@ router.post('/:id/items', staffOnly, asyncHandler(async (req, res) => {
   // NOTE: destination is currently just a bookkeeping marker — the delivery-group
   // / transit UI was removed for now, so we no longer hard-require groups here.
 
-  // КРИТИЧНЕ ПРАВИЛО (спека дозамовлень §4): галочка «Дозамовлення» дійсна лише
-  // для товару, що йде НА СКЛАД. Це не дублювання клієнтської валідації заради
-  // акуратності — старий клієнт або ручний POST не мають змоги створити
-  // дозамовлення для destination='shops' (§21, §22 тест 3).
-  const supplementOffer = parsed.fields.supplementOffer === 'true' && destination === 'shelf';
+  // КРИТИЧНЕ ПРАВИЛО: у накладній-дозамовленні кожна позиція йде НА СКЛАД.
+  // Товар, що їде повз склад прямо в магазини, дозамовляти нікому — його там
+  // фізично не буде, коли склад пакуватиме коробки. Перевірка серверна, бо
+  // старий клієнт або ручний POST не мають змоги її обійти.
+  if (receipt.type === 'supplement' && destination !== 'shelf') {
+    throw appError('receipt_supplement_shelf_only');
+  }
 
   // Quantity: either a manual total ('direct') or computed from a structure.
   const rawStructure = safeParseObject(parsed.fields.structure);
@@ -550,7 +596,6 @@ router.post('/:id/items', staffOnly, asyncHandler(async (req, res) => {
     barcode: String(parsed.fields.barcode || '').trim(),
     existingProductId: existingProductId || null,
     warehousePending: isWarehousePending,
-    supplementOffer,
   });
 
   // Save item AND re-check receipt.status='draft' in the SAME transaction so that
@@ -678,6 +723,11 @@ router.patch('/:id/items/:itemId', staffOnly, asyncHandler(async (req, res) => {
     nextDestination = String(parsed.fields.destination);
     if (!['shelf', 'shops'].includes(nextDestination)) throw appError('receipt_destination_required');
   }
+  // Той самий гард, що й при створенні: у накладній-дозамовленні позиція не може
+  // з'їхати «на магазини» пізнішим редагуванням.
+  if (receipt.type === 'supplement' && nextDestination !== 'shelf') {
+    throw appError('receipt_supplement_shelf_only');
+  }
   // Groups intentionally not required — destination is a marker for now.
 
   let nextStructure = prevStructure;
@@ -708,16 +758,6 @@ router.patch('/:id/items/:itemId', staffOnly, asyncHandler(async (req, res) => {
     ? deriveSplit(nextDestination, totalQty)
     : { shelfQty: item.shelfQty, transitQty: item.transitQty };
 
-  // «Дозамовлення» (§4). Прапорець ЗАВЖДИ перераховується, навіть коли клієнт
-  // його не надіслав: перемикання призначення на «На магазини» мусить його
-  // погасити саме по собі, інакше позиція поїхала б у магазини з увімкненим
-  // дозамовленням, яке ніхто вже не бачить у формі.
-  const nextSupplementOffer = nextDestination === 'shelf'
-    ? (parsed.fields.supplementOffer !== undefined
-      ? parsed.fields.supplementOffer === 'true'
-      : !!item.supplementOffer)
-    : false;
-
   // ── Build the set of fields this request actually changes, then enforce
   // the multi-worker ownership rules (also blocks edits to confirmed items).
   const arraysEqual = (a = [], b = []) =>
@@ -732,7 +772,6 @@ router.patch('/:id/items/:itemId', staffOnly, asyncHandler(async (req, res) => {
       && (parsed.fields.qtyPerPackage !== '' ? Number(parsed.fields.qtyPerPackage) : null) !== item.qtyPerPackage) changedFields.push('qtyPerPackage');
   if (parsed.fields.barcode !== undefined && String(parsed.fields.barcode).trim() !== (item.barcode || '')) changedFields.push('barcode');
   if (nextDestination !== (item.destination || 'shelf')) changedFields.push('destination');
-  if (nextSupplementOffer !== !!item.supplementOffer) changedFields.push('supplementOffer');
   if (totalQty !== item.totalQty) changedFields.push('totalQty');
   if (JSON.stringify(nextStructure) !== JSON.stringify(prevStructure)) changedFields.push('structure');
   if (parsed.fields.deliveryGroupIds !== undefined && !arraysEqual(deliveryGroupIds, item.deliveryGroupIds || [])) changedFields.push('deliveryGroupIds');
@@ -807,7 +846,6 @@ router.patch('/:id/items/:itemId', staffOnly, asyncHandler(async (req, res) => {
   item.transitQty = transitQty;
   item.shelfQty = shelfQty;
   item.destination = nextDestination;
-  item.supplementOffer = nextSupplementOffer;
   item.structure = nextStructure;
   item.deliveryGroupIds = deliveryGroupIds;
   item.qtyPerShop = qtyPerShop;
@@ -1162,11 +1200,48 @@ router.post('/:id/items/:itemId/unconfirm', staffOnly, asyncHandler(async (req, 
   }
 }));
 
+/**
+ * GET /:id/supplement-targets — стан кожної групи доставки для модалки проведення.
+ *
+ * Живе на накладній, а не в /api/supplement, бо це крок ПРИЙМАННЯ: його бачить
+ * склад, а не продавець, і питання тут одне — «кому відкрити цю хвилю».
+ * Список читається щоразу заново: між відкриттям модалки і натисканням кнопки
+ * вікно замовлень може закритися, тому фінальне слово все одно за commit.
+ */
+router.get('/:id/supplement-targets', staffOnly, asyncHandler(async (req, res) => {
+  const receipt = await Receipt.findById(req.params.id, 'type status').lean();
+  if (!receipt) throw appError('receipt_not_found');
+  if (receipt.type !== 'supplement') throw appError('receipt_not_supplement');
+
+  const { describeSupplementTargets } = require('../services/supplementTargets');
+  res.json(await describeSupplementTargets());
+}));
+
 router.post('/:id/commit', staffOnly, asyncHandler(async (req, res) => {
   // Cheap pre-flight (avoids opening a session for the obviously-bad case).
   const receiptCheck = await Receipt.findById(req.params.id).lean();
   if (!receiptCheck) throw appError('receipt_not_found');
   if (receiptCheck.status === 'completed') throw appError('receipt_already_completed');
+
+  // ── Ціль хвилі дозамовлення ───────────────────────────────────────────────
+  // Резолвимо ДО транзакції: перевірка допуску читає розклад, сесію і
+  // замовлення, а тримати все це всередині транзакції проведення немає причин.
+  // Якщо група вже не підходить (вікно закрилося, сесію завершили, настав
+  // наступний день) — падаємо ТУТ, поки накладна ще draft і її можна провести
+  // повторно з іншою групою.
+  let supplementTarget = null;
+  if (receiptCheck.type === 'supplement') {
+    const { resolveSupplementTarget } = require('../services/supplementTargets');
+    const { getSupplementSettings } = require('../utils/supplementSettings');
+
+    supplementTarget = await resolveSupplementTarget(req.body?.targetDeliveryGroupId);
+
+    // Дедлайн фіксується ТУТ і лягає на накладну — далі його читають і
+    // пропозиції, і звірятель, і Telegram-повідомлення. Одне число, одне місце.
+    const { windowMinutes } = await getSupplementSettings();
+    supplementTarget.openedAt = new Date();
+    supplementTarget.closesAt = new Date(supplementTarget.openedAt.getTime() + windowMinutes * 60 * 1000);
+  }
 
   const session = await mongoose.connection.startSession();
   session.startTransaction();
@@ -1178,7 +1253,23 @@ router.post('/:id/commit', staffOnly, asyncHandler(async (req, res) => {
     // переписав/видалив позицію вже після нашої перевірки.
     const receipt = await Receipt.findOneAndUpdate(
       { _id: req.params.id, status: 'draft' },
-      { $set: { status: 'completed', completedAt: new Date() } },
+      {
+        $set: {
+          status: 'completed',
+          completedAt: new Date(),
+          // Ціль хвилі стає частиною самого акту проведення: або накладна
+          // проведена І має групу, або не проведена зовсім. Записати її окремим
+          // апдейтом після коміту означало б вікно, у якому накладна вже
+          // completed, а кому вона адресована — невідомо.
+          ...(supplementTarget ? {
+            targetDeliveryGroupId:   supplementTarget.deliveryGroupId,
+            targetOrderingSessionId: supplementTarget.orderingSessionId,
+            supplementOpenedAt:      supplementTarget.openedAt,
+            supplementClosesAt:      supplementTarget.closesAt,
+            supplementStatus:        'pending',
+          } : {}),
+        },
+      },
       { new: true, session },
     );
     if (!receipt) {
@@ -1352,9 +1443,9 @@ router.post('/:id/commit', staffOnly, asyncHandler(async (req, res) => {
     // Notify warehouse board that new products are available in the incoming strip
     try { getIO().emit('incoming_updated'); } catch (_) {}
 
-    // ── Дозамовлення (§4): запускається ПІСЛЯ проведення ВСІЄЇ накладної ──────
-    // Не після підтвердження окремої позиції — власник вирішив саме так, бо
-    // хвиля дозамовлення = одна накладна з одним дедлайном (§6).
+    // ── Дозамовлення: запускається ПІСЛЯ проведення ВСІЄЇ накладної ───────────
+    // Уся накладна — одна хвиля з одним дедлайном для однієї групи, тому
+    // пропозиції відкриваються тут, а не при підтвердженні окремої позиції.
     //
     // Поза транзакцією свідомо: створення ідемпотентне (унікальний індекс
     // {receiptItemId, deliveryGroupId}), тому повторний виклик нічого не
@@ -1362,9 +1453,13 @@ router.post('/:id/commit', staffOnly, asyncHandler(async (req, res) => {
     // Відповідь клієнту чекає на створення пропозицій (щоб «Проведено» і
     // «дозамовлення відкрито» не розповзалися в часі), а Telegram — ні.
     let supplementOffersCount = 0;
-    try {
+    if (supplementTarget) try {
       const { createOffersForReceipt } = require('../services/supplementOffers');
-      const offers = await createOffersForReceipt(receipt._id);
+      // Часткова невдача НЕ кидає помилку: створене лишається створеним, а
+      // накладна позначається supplementStatus:'pending' — звірятель у
+      // supplementScheduler добʼє решту. Провести накладну вдруге неможливо,
+      // тому «просто впасти тут» означало б втратити частину дозамовлень назавжди.
+      const { created: offers } = await createOffersForReceipt(receipt._id);
       supplementOffersCount = offers.length;
       if (offers.length) {
         for (const offer of offers) {
@@ -1389,7 +1484,17 @@ router.post('/:id/commit', staffOnly, asyncHandler(async (req, res) => {
       console.error('[supplement] не вдалося відкрити дозамовлення для накладної', String(receipt._id), ':', err?.message);
     }
 
-    res.json({ receipt, createdProductsCount: createdProducts.length, supplementOffersCount });
+    res.json({
+      receipt,
+      createdProductsCount: createdProducts.length,
+      supplementOffersCount,
+      // Клієнт показує це в тості: для якої групи і до котрої години відкрито
+      // хвилю. Без цього «Проведено» нічого не каже про головне — кому.
+      supplementTarget: supplementTarget ? {
+        deliveryGroupId: supplementTarget.deliveryGroupId,
+        closesAt: supplementTarget.closesAt,
+      } : null,
+    });
   } catch (err) {
     // Guard both: after a FAILED commitTransaction (e.g. a concurrent-commit
     // WriteConflict) the transaction is already terminal, so an unguarded
