@@ -416,19 +416,8 @@ router.post('/start-session', requireTelegramRoles(['warehouse', 'admin']), asyn
       buyerTelegramId: String(o.buyerTelegramId),
     }));
 
-    // 7. Freeze the per-shop box numbers for this session (alphabetical by shop
-    //    name, one number per shopId) so packing boxes can be labelled with digits.
-    //    Uses the already-loaded session orders; idempotent and best-effort.
-    //
-    //    Магазини, які прийшли ЛИШЕ через дозамовлення (без основного замовлення),
-    //    входять у цей самий алфавітний прохід (§11). Це можливо саме тут, бо
-    //    коробки ще не підписані — збирання тільки стартує. Ті, хто дозамовить
-    //    ПІСЛЯ старту, отримають номер у хвіст через assignLateShopNumber, щоб
-    //    уже наклеєні цифри не почали брехати.
-    //
-    //    Беремо заявки з ЖИВИХ хвиль групи, а не «заявки цієї сесії»: хвиля до
-    //    сесії не прив'язана. Заявки закритих хвиль тут не потрібні — ті магазини
-    //    склад уже спакував.
+    // Заморожуємо номери коробок. Активні дозамовлення додають магазини без
+    // основного Order; пізніші магазини отримують номер у хвіст.
     const activeOffers = await SupplementOffer.find(
       { deliveryGroupId: String(deliveryGroupId), status: { $in: SupplementOffer.ACTIVE_STATUSES } },
       '_id',
@@ -467,19 +456,8 @@ router.post('/start-session', requireTelegramRoles(['warehouse', 'admin']), asyn
     });
     const confirmedDoc = confirmed ? (confirmed.toObject ? confirmed.toObject() : confirmed) : null;
 
-    // «Порожня сесія» = НЕМА ЗВИЧАЙНИХ ЗАДАЧ. Дозамовлення тут свідомо не
-    // враховується (рішення власника 05.08.2026, четверта ітерація).
-    //
-    // Раніше умова була `builtCount === 0 && supplementCount === 0`, і це
-    // трималось на гарді §17: сесію з живою хвилею все одно не дали б закрити,
-    // тому її лишали в confirmed, щоб склад дійшов до віртуального блока. Гард
-    // знято — і та сама умова стала пасткою: сесія без жодної задачі йшла в
-    // confirmed, а закрити її не могло вже НІЩО (maybeCompleteSession кличеться
-    // лише після завершення PickingTask, а їх нуль). Порожня сесія висіла б у
-    // confirmed вічно.
-    //
-    // Вхід до віртуального блока від цього не страждає: він окремою кнопкою на
-    // сторінці збирання і не залежить від стану сесії.
+    // Порожня сесія визначається лише за звичайними PickingTask.
+    // Дозамовлення має незалежний цикл: docs/supplement/readme.md.
     if (builtCount === 0) {
       // Empty session — close it out immediately so reloads see noOrders.
       const completed = await maybeCompleteSession(currentSessionId, {
@@ -922,13 +900,7 @@ router.get('/queue-stats', requireTelegramRoles(['warehouse', 'admin']), async (
     let phase = null;
     let sessionSummary = null;
     let groupDayOfWeek = null;
-    // Дозамовлення живуть поза чергою PickingTask, тому їхній лічильник їде тим
-    // самим 5-секундним опитуванням: інакше віртуальний блок з'явився б у складу
-    // лише після перезавантаження сторінки, а спека вимагає real-time (§8).
-    //
-    // Рахується ПОЗА блоком нижче і без жодного стосунку до сесії: віртуальний
-    // блок мусить бути видимий навіть коли сесії ще немає (хвилю відкрили
-    // майбутній групі) або вона вже завершена.
+    // Лічильник дозамовлень оновлюється незалежно від OrderingSession.
     const supplementCount = await countActiveOffersForGroup(deliveryGroupId);
     try {
       const groupDoc = await DeliveryGroup.findById(deliveryGroupId, 'dayOfWeek').lean();

@@ -24,6 +24,7 @@ const visionSearchRouter  = require('./routes/visionSearch');
 const productFeedbackRouter = require('./routes/productFeedback');
 const navBadgesRouter = require('./routes/navBadges');
 const supplementRouter = require('./routes/supplement');
+const { getMaintenanceState, maintenanceReadOnlyMiddleware } = require('./services/maintenanceState');
 
 // The warehouse test harness (destructive: cleanup/seed/reset of real
 // collections) must NEVER be reachable in production. It is loaded and mounted
@@ -85,6 +86,7 @@ const publicApiPaths = [
   /^\/api\/shops\/registry$/,
   /^\/api\/shop-products\/barcode\/.+$/,
   /^\/api\/health$/,
+  /^\/api\/maintenance$/,
   /^\/api\/bot-status$/,
   /^\/api\/openai-status$/,
   /^\/api\/gemini-status$/,
@@ -107,7 +109,16 @@ function requireAuthForApi(req, res, next) {
 app.use(requireAuthForApi);
 
 app.get('/api/health', (req, res) => {
-  res.json({ status: 'ok', environment: process.env.NODE_ENV || 'development' });
+  const maintenance = getMaintenanceState();
+  res.json({
+    status: maintenance.active ? 'maintenance' : 'ok',
+    environment: process.env.NODE_ENV || 'development',
+    maintenance,
+  });
+});
+
+app.get('/api/maintenance', (req, res) => {
+  res.json(getMaintenanceState());
 });
 
 app.get('/api/bot-status', (req, res) => {
@@ -140,6 +151,9 @@ app.get('/api/gemini-status', async (req, res) => {
     });
   }
 });
+
+// Критичні індекси: docs/operations/maintenance-mode.md
+app.use(maintenanceReadOnlyMiddleware);
 
 app.use('/api/products', productsRouter);
 app.use('/api/v1/products', productsRouter);

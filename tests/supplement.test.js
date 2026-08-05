@@ -107,3 +107,24 @@ describe('Telegram-тексти', () => {
     expect(REMINDER_EVERY_MS).toBe(2 * 60 * 60 * 1000);
   });
 });
+
+describe('індекси повторних накладних-дозамовлень', () => {
+  it('не забороняє одночасні пропозиції того самого товару в одній групі з різних накладних', () => {
+    const SupplementOffer = require('../models/SupplementOffer');
+    const indexes = SupplementOffer.schema.indexes();
+
+    const hasReceiptItemUnique = indexes.some(([keys, options]) => (
+      keys.receiptItemId === 1
+      && keys.deliveryGroupId === 1
+      && options.unique === true
+    ));
+    expect(hasReceiptItemUnique).toBe(true);
+
+    const hasProductGroupUnique = indexes.some(([keys, options]) => (
+      keys.productId === 1
+      && keys.deliveryGroupId === 1
+      && options.unique === true
+    ));
+    expect(hasProductGroupUnique).toBe(false);
+  });
+});

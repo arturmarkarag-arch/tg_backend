@@ -29,6 +29,7 @@ const UserSchema = new mongoose.Schema(
     shopId: { type: mongoose.Schema.Types.ObjectId, ref: 'Shop', default: null },
     deliveryGroupId: { type: String, default: '' },
     warehouseZone: { type: String, default: '' },
+    // Legacy shift-модель: docs/architecture/technical-debt.md#стара-логіка-зміни-складу
     isWarehouseManager: { type: Boolean, default: false },
     isOnShift: { type: Boolean, default: false },
     shiftZone: {

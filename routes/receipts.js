@@ -1359,12 +1359,8 @@ router.post('/:id/commit', staffOnly, asyncHandler(async (req, res) => {
           }
           if (item.price !== null) currentProduct.price = item.price;
           if (item.qtyPerPackage) currentProduct.quantityPerPackage = item.qtyPerPackage;
-          // INVARIANT «active ⟺ лежить у блоці»: commit НЕ робить товар active.
-          // Отриманий товар лишається 'pending' (Надходження), доки склад не
-          // покладе його в блок (blocks.js POST /:n/add). Єдиний прямий шлях у
-          // 'active' — block_photo (вантажиться одразу в блок). Раніше тут було
-          // status='active' → товар ставав active без блока: не видно в Надходженні,
-          // збирач не може знайти. Прибрано.
+          // Проведення лишає товар у «Надходженнях»; active задає фізичний блок.
+          // Див. docs/receipt/readme.md.
           await currentProduct.save({ session });
           item.createdProductId = currentProduct._id;
           if (item.shelfQty > 0) item.stockApplied = true;

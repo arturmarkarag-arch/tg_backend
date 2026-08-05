@@ -1,13 +1,6 @@
 'use strict';
 
-/**
- * Telegram-розсилка дозамовлень.
- *
- * • одне стартове повідомлення після проведення накладної;
- * • поки дозамовлення open — нагадування кожні 2 години;
- * • назв товарів, цін, дедлайнів і повідомлення про закриття немає;
- * • посилання на Mini App читається ТІЛЬКИ з AppSetting('supplement.settings').
- */
+// Telegram-правила: docs/supplement/readme.md#7-telegram
 
 const User = require('../models/User');
 const Shop = require('../models/Shop');

@@ -119,14 +119,7 @@ async function maybeCompleteSession(orderingSessionId, { actor = {}, meta = {}, 
   const remaining = await query;
   if (remaining > 0) return null;
 
-  // ДОЗАМОВЛЕННЯ ТУТ СВІДОМО НЕ ПЕРЕВІРЯЄТЬСЯ (рішення власника 05.08.2026,
-  // друга ітерація). Колишній гард §17 тримав сесію відкритою, поки жива хоч
-  // одна пропозиція — і саме він робив дві речі неможливими: відкрити хвилю
-  // групі, чиєї сесії ще немає, і закрити доставку, яка насправді поїхала.
-  // Тепер звичайна сесія завершується за своїми звичайними задачами, а хвиля
-  // дозамовлення живе власним циклом open → frozen → completed і закривається
-  // сама (або складом). Якщо колись знову захочеться зв'язати їх — спершу
-  // перечитайте коментар у models/SupplementOffer.js.
+  // Дозамовлення не входять у життєвий цикл OrderingSession. Див. docs/supplement/readme.md.
 
   // "No tasks left" is NOT the same as "everything was collected". An order item
   // that never received a task (product pulled from its block, archived, deleted,

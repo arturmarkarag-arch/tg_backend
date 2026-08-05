@@ -201,9 +201,7 @@ const ERRORS = {
   // ── Дозамовлення (supplement) ──────────────────────────────────────────────
   supplement_offer_not_found:  { status: 404, message: 'Дозамовлення не знайдено' },
   supplement_request_not_found:{ status: 404, message: 'Заявку не знайдено' },
-  supplement_closed:           { status: 409, message: 'Час дозамовлення вичерпано — змінити заявку вже не можна' },
-  // Жорстке блокування після packed — рішення власника замість «скинути галочку»
-  // (спека §13). Продавець бачить чесну причину, а не «спробуйте ще раз».
+  supplement_closed:           { status: 409, message: 'Прийом дозамовлень закрито — змінити заявку вже не можна' },
   supplement_request_locked:   { status: 409, message: 'Склад уже спакував цю заявку — змінити або скасувати її не можна' },
   supplement_wrong_group:      { status: 403, message: 'Це дозамовлення призначене іншій групі доставки' },
   supplement_not_frozen:       { status: 409, message: 'Дозамовлення ще приймає заявки — завершити його можна лише після закриття' },

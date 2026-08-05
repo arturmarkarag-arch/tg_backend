@@ -22,13 +22,12 @@ const Order = require('./models/Order');
 const PickingTask = require('./models/PickingTask');
 const { startRetentionScheduler } = require('./services/retention');
 const { startSupplementScheduler } = require('./services/supplementScheduler');
+const { enterMaintenance, isMaintenanceActive } = require('./services/maintenanceState');
 
 let httpServer = null;
 let shuttingDown = false;
 
-// Graceful shutdown: stop accepting new connections, close Mongo, then exit.
-// Bounded by a hard timeout so a hung connection can't block the platform's
-// stop signal forever.
+// Graceful shutdown із жорстким таймаутом.
 async function shutdown(signal, code = 0) {
   if (shuttingDown) return;
   shuttingDown = true;
@@ -49,9 +48,7 @@ async function shutdown(signal, code = 0) {
   }
 }
 
-// A rejected promise nobody handled is a bug but not necessarily fatal — log
-// it loudly and keep serving. An uncaught exception leaves the process in an
-// undefined state — log and shut down so the platform restarts us clean.
+// Uncaught exception завершує процес; unhandled rejection журналюється.
 process.on('unhandledRejection', (reason) => {
   console.error('[unhandledRejection]', reason);
 });
@@ -90,83 +87,106 @@ async function startServer() {
     await mongoose.connect(MONGODB_URI, { useNewUrlParser: true, useUnifiedTopology: true });
     console.log('Connected to MongoDB');
     await migrateOrdersToSessionIds();
-    await ensureShopProductIndexes();
 
-    // Build the Order indexes explicitly (incl. one_active_order_per_buyer_shop_session).
-    // syncIndexes surfaces a failure here loudly instead of letting Mongoose's
-    // background autoIndex swallow it on connection.on('index'). If pre-existing
-    // active-order duplicates exist the unique build throws E11000 — we log the
-    // exact error so it can be cleaned up, but do NOT crash the whole server over
-    // an index that is a backstop (the Redis lock still guards the live path).
     try {
-      await Order.syncIndexes();
-      console.log('[indexes] Order indexes synced');
+      await ensureShopProductIndexes();
+      console.log('[indexes] shop_products synced');
     } catch (err) {
-      console.error(
-        '[indexes] Order.syncIndexes failed — likely pre-existing duplicate active ' +
-        'orders blocking one_active_order_per_buyer_shop_session. Resolve duplicates ' +
-        'then restart. Continuing without the unique backstop. Error:', err.message,
-      );
+      console.error('[indexes] shop_products failed:', err?.message);
+      enterMaintenance({
+        key: 'shop_products',
+        title: 'Не створився критичний індекс каталогу магазинів',
+        whatBroke: 'Товари без штрихкоду можуть не додаватися до каталогу або дублюватися.',
+        technicalDetails: err?.message || String(err),
+        howToFix: [
+          'Перевірте db.shopproducts.getIndexes().',
+          'Звірте індекс barcode_1 і дублікати непорожніх barcode.',
+          'Виправте дані та перезапустіть сервер.',
+        ],
+        docsPath: 'docs/operations/maintenance-mode.md',
+      });
     }
 
-    // PickingTask indexes are syncIndexes()'d (not just background autoIndex) so a
-    // STALE index removed from the schema is actually DROPPED, not left behind.
-    // Specifically this drops the legacy `productId_1` unique index: a remnant of
-    // the pre-delivery-group schema that enforced ONE active task per product
-    // GLOBALLY. While it lingered, a product ordered in two delivery groups whose
-    // picking overlapped lost the second group's task to a swallowed E11000 in
-    // taskBuilder — the item was silently never picked. The schema only declares
-    // the correct per-(product, deliveryGroup) unique index.
-    try {
-      await PickingTask.syncIndexes();
-      console.log('[indexes] PickingTask indexes synced');
-    } catch (err) {
-      console.error(
-        '[indexes] PickingTask.syncIndexes failed. Continuing — the legacy global ' +
-        'productId_1 unique index may still be present and can strand a product ' +
-        'ordered across two concurrently-picked delivery groups. Error:', err.message,
-      );
-    }
+    // Критичні індекси: docs/operations/maintenance-mode.md
+    const syncCritical = async ({ key, title, whatBroke, howToFix, models }) => {
+      try {
+        for (const model of models) await model.syncIndexes();
+        console.log(`[indexes] ${key} synced`);
+      } catch (err) {
+        console.error(`[indexes] ${key} failed:`, err?.message);
+        enterMaintenance({
+          key,
+          title,
+          whatBroke,
+          technicalDetails: err?.message || String(err),
+          howToFix,
+          docsPath: 'docs/operations/maintenance-mode.md',
+        });
+      }
+    };
 
-    // Дозамовлення: обидва унікальні індекси — не оптимізація, а інваріанти.
-    // {receiptItemId, deliveryGroupId} робить створення пропозицій ідемпотентним
-    // (повторне проведення накладної не дублює), {offerId, shopId} гарантує ОДНУ
-    // заявку на магазин (подвійний тап / два продавці одного магазину).
-    // Без них обидві гарантії тримаються лише на послідовності запитів.
-    try {
-      await require('./models/SupplementOffer').syncIndexes();
-      await require('./models/SupplementRequest').syncIndexes();
-      console.log('[indexes] Supplement indexes synced');
-    } catch (err) {
-      console.error(
-        '[indexes] Supplement syncIndexes failed — дозамовлення можуть дублюватись ' +
-        'при повторному проведенні накладної або подвійному тапі продавця. Error:', err.message,
-      );
-    }
+    await syncCritical({
+      key: 'orders',
+      title: 'Не створився критичний індекс замовлень',
+      whatBroke: 'Не підтверджено правило: одне активне замовлення на покупця, магазин і сесію.',
+      howToFix: [
+        'Відкрийте логи сервера та знайдіть [indexes] orders failed.',
+        'Перевірте дублікати активних замовлень за інструкцією в docs/operations/maintenance-mode.md.',
+        'Виправте дублікати та перезапустіть сервер.',
+      ],
+      models: [Order],
+    });
 
-    // User: build the partial-unique googleSub index (Google login is keyed on
-    // sub). GoogleLinkToken: build its TTL index so spent/expired link tokens are
-    // reaped automatically. Non-fatal — log and continue if a build fails.
+    await syncCritical({
+      key: 'picking_tasks',
+      title: 'Не створився критичний індекс складських задач',
+      whatBroke: 'Не підтверджено унікальність активної задачі товару в групі або лишився застарілий індекс.',
+      howToFix: [
+        'Перевірте db.pickingtasks.getIndexes().',
+        'Видаліть застарілий productId_1 лише якщо він реально існує.',
+        'Виправте дублікати активних задач і перезапустіть сервер.',
+      ],
+      models: [PickingTask],
+    });
+
+    await syncCritical({
+      key: 'supplements',
+      title: 'Не створилися критичні індекси дозамовлень',
+      whatBroke: 'Не підтверджено ідемпотентність пропозицій або правило однієї заявки магазину.',
+      howToFix: [
+        'Перевірте db.supplementoffers.getIndexes() і db.supplementrequests.getIndexes().',
+        'Старого унікального індексу productId + deliveryGroupId більше не повинно бути.',
+        'Звірте дублікати, виправте дані та перезапустіть сервер.',
+      ],
+      models: [require('./models/SupplementOffer'), require('./models/SupplementRequest')],
+    });
+
+    await syncCritical({
+      key: 'users',
+      title: 'Не створилися критичні індекси користувачів',
+      whatBroke: 'Не підтверджено унікальність прив’язаної Google identity.',
+      howToFix: [
+        'Знайдіть дублікати googleEmail/googleSub.',
+        'Об’єднайте або виправте акаунти.',
+        'Перезапустіть сервер.',
+      ],
+      models: [require('./models/User')],
+    });
+
+    // Некритичні TTL-індекси токенів.
     try {
-      await require('./models/User').syncIndexes();
       await require('./models/GoogleLinkToken').syncIndexes();
       await require('./models/RegistrationToken').syncIndexes();
-      console.log('[indexes] User + GoogleLinkToken + RegistrationToken indexes synced');
+      console.log('[indexes] token TTL indexes synced');
     } catch (err) {
-      console.error('[indexes] User/GoogleLinkToken/RegistrationToken.syncIndexes failed:', err.message);
+      console.error('[indexes] token TTL sync failed:', err.message);
     }
 
-    // Log-retention TTL indexes. syncIndexes() drops the old plain index on each
-    // field and rebuilds it WITH expireAfterSeconds, so MongoDB reaps stale audit
-    // rows on its own (ShopAuditLog 180d, ReceiptItemLog + VisionTestLog 365d).
-    // Non-fatal: a failed build just means the collection keeps growing until the
-    // next clean boot, not an outage.
+    // Некритичні TTL-індекси журналів.
     try {
       await require('./models/ShopAuditLog').syncIndexes();
       await require('./models/ReceiptItemLog').syncIndexes();
       await require('./models/VisionTestLog').syncIndexes();
-      // CatalogReview: TTL (180d) + the {sessionId, telegramId} unique index that
-      // makes "переглянув усі товари" idempotent on a double tap.
       await require('./models/CatalogReview').syncIndexes();
       console.log('[indexes] log-retention TTL indexes synced');
     } catch (err) {
@@ -184,20 +204,18 @@ async function startServer() {
     const GEMINI_API_KEY = geminiKeyFromDb?.value || process.env.GEMINI_API_KEY;
     initGemini(GEMINI_API_KEY);
 
-    initBot(TELEGRAM_BOT_TOKEN);
+    if (!isMaintenanceActive()) initBot(TELEGRAM_BOT_TOKEN);
 
     const server = http.createServer(app);
     httpServer = server;
     initSocket(server);
 
-    // Daily sweep of long-dead completed picking tasks (TTL can't filter by
-    // status, so this runs application-side). Logs reap themselves via TTL.
-    startRetentionScheduler();
-
-    // Серверний годинник дозамовлень: заморозка за closesAt, нагадування,
-    // авто-завершення пропозицій без заявок. Перший тік іде одразу, тому після
-    // рестарту прострочені пропозиції замерзають негайно, а не чекають інтервалу.
-    startSupplementScheduler();
+    if (isMaintenanceActive()) {
+      console.error('[maintenance] Фонові планувальники й Telegram-бот вимкнені до відновлення індексів.');
+    } else {
+      startRetentionScheduler();
+      startSupplementScheduler();
+    }
 
     server.on('error', (err) => {
       if (err.code === 'EADDRINUSE') {

@@ -1,14 +1,6 @@
 'use strict';
 
-/**
- * Планувальник дозамовлень.
- *
- * Дозамовлення більше НЕ заморожується за таймером. open → frozen виконує
- * вручну склад або адмін. Планувальник лишився для двох фонових задач:
- *   1. довідновити пропозиції проведеної накладної після збою;
- *   2. надсилати нагадування кожні 2 години, поки хвиля open;
- *   3. прибирати frozen-пропозиції без жодної заявки.
- */
+// Фонові задачі дозамовлень: docs/supplement/readme.md
 
 const { autoCompleteEmptyOffers, reconcilePendingReceipts } = require('./supplementOffers');
 const { notifyOffers, findDueReminders } = require('./supplementNotify');

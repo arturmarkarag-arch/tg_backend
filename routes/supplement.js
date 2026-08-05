@@ -1,21 +1,6 @@
 'use strict';
 
-/**
- * API дозамовлень.
- *
- * Дві аудиторії, один набір правил:
- *   • продавець — бачить активні пропозиції СВОЄЇ групи і керує заявкою СВОГО
- *     магазину (§10);
- *   • склад — бачить віртуальний блок, ставить галочки і закриває пропозицію (§8, §12).
- *
- * Усі серверні інваріанти §21 живуть тут або в services/supplementOffers.js:
- *   • дедлайн перевіряється в КОЖНІЙ операції продавця (effectiveOfferStatus),
- *     а не тільки планувальником;
- *   • одна заявка на (offerId, shopId) — унікальний індекс + upsert;
- *   • продавець торкається лише свого магазину і лише своєї групи;
- *   • «Спакував» перевіряється сервером (frozen + усі packed);
- *   • completed більше не приймає змін.
- */
+// API дозамовлень. Правила: docs/supplement/readme.md
 
 const express = require('express');
 const mongoose = require('mongoose');
@@ -57,7 +42,7 @@ const sellerRoles    = requireTelegramRoles(['seller', 'admin']);
 const warehouseRoles = requireTelegramRoles(['warehouse', 'admin']);
 
 const MIN_QTY = 1;
-// Та сама межа, що й у звичайному каталозі (routes/orders.js) — §10.
+// Та сама межа, що й у звичайному каталозі.
 const MAX_QTY = Number(process.env.MAX_QTY_PER_PRODUCT) || 6;
 
 function actorOf(user) {
@@ -75,20 +60,7 @@ function emit(event, payload) {
   } catch { /* сокет може бути вимкнений */ }
 }
 
-/**
- * Контекст продавця: його магазин і його група доставки.
- *
- * Саме проти групи звіряються всі пропозиції — цього достатньо, щоб продавець не
- * дотягнувся до чужої групи навіть прямим запитом з підставленим offerId (§21).
- * СЕСІЇ ТУТ НЕМА свідомо: хвиля дозамовлення до OrderingSession не прив'язана,
- * тому продавець бачить її незалежно від того, чи існує сесія збирання, чи вона
- * вже завершена — у цьому й був сенс переробки.
- *
- * ПРО АДМІНІСТРАТОРА: дозамовлення завжди прив'язане до магазину, тому адмін
- * бачить його ЛИШЕ як продавець свого магазину. Глобальний адмін без shopId
- * отримає no_shop і порожній блок — це не помилка, а наслідок того, що заявка
- * належить магазину. Окремого адмінського перегляду по групах свідомо немає.
- */
+/** Магазин і група продавця для перевірки доступу до пропозиції. */
 async function sellerContext(user) {
   if (!user?.shopId) throw appError('no_shop');
   const shop = await Shop.findById(user.shopId).lean();
@@ -137,15 +109,7 @@ async function boxNumberSessionId(deliveryGroupId, dayOfWeek) {
 
 // ─── ПРОДАВЕЦЬ ───────────────────────────────────────────────────────────────
 
-/**
- * GET /api/supplement/available
- * Активні пропозиції для магазину продавця + його поточна заявка на кожну.
- *
- * Показується НЕЗАЛЕЖНО від того, відкрите звичайне вікно замовлень чи ні, і
- * незалежно від стану сесії збирання: увесь сенс дозамовлення в тому, що воно
- * живе своїм життям (§10). Старий каталог при цьому НЕ відкривається — це
- * окремий список.
- */
+/** GET /api/supplement/available — активні пропозиції групи продавця. */
 router.get('/available', sellerRoles, asyncHandler(async (req, res) => {
   const ctx = await sellerContext(req.telegramUser);
 
@@ -164,13 +128,10 @@ router.get('/available', sellerRoles, asyncHandler(async (req, res) => {
 
   const now = new Date();
   res.json({
-    // serverTime — щоб зворотний відлік у мініаппі рахувався від СЕРВЕРНОГО
-    // часу. Годинник телефона може бути зсунутий, а рішення про закриття
-    // приймає сервер; без цього таймер показував би одне, а API відповідав інше.
+    // Серверний час для узгодженого відображення клієнта.
     serverTime: now.toISOString(),
     shopId: ctx.shopId,
-    // Клієнт фільтрує широкомовні сокет-події за цими двома — інакше кожен
-    // продавець перечитував би список на кожну чужу заявку в системі.
+    // Ключі для фільтрації socket-подій на клієнті.
     deliveryGroupId: ctx.deliveryGroupId,
     groupName: ctx.groupName,
     offers: offers.map((offer) => {
@@ -188,13 +149,7 @@ router.get('/available', sellerRoles, asyncHandler(async (req, res) => {
   });
 }));
 
-/**
- * POST /api/supplement/:offerId/request  { quantity: 1..6 }
- * Створити або змінити заявку СВОГО магазину.
- *
- * Заявка належить магазину: upsert по (offerId, shopId), тож два продавці одного
- * магазину працюють з одним рядком, а не створюють два (§10, §21, §22 тест 4).
- */
+/** POST /api/supplement/:offerId/request — створити або змінити заявку магазину. */
 router.post('/:offerId/request', sellerRoles, asyncHandler(async (req, res) => {
   const user = req.telegramUser;
   const ctx = await sellerContext(user);
@@ -207,31 +162,23 @@ router.post('/:offerId/request', sellerRoles, asyncHandler(async (req, res) => {
 
   const actor = actorOf(user);
 
-  // ── Усе під замком пропозиції ────────────────────────────────────────────
-  // Перевірка дедлайну, перевірка packed і сам запис мусять бути ОДНІЄЮ
-  // операцією. Інакше: продавець читає packed=false → склад ставить галочку і
-  // кладе 2 шт → запит продавця дописує quantity=6. У коробці 2, у системі 6,
-  // і «жорстке блокування» обійдене без жодного злого умислу. Так само запит,
-  // що стартував за 50 мс до дедлайну, інакше дописав би заявку в пропозицію,
-  // яку планувальник уже заморозив і закрив як порожню.
+  // Перевірка статусу, packed і запис виконуються під одним offer-lock.
   const { action, request } = await withOfferLock(offer._id, async () => {
-    // Перечитуємо ВСЕРЕДИНІ замка — те, що ми прочитали до нього, вже застаріле.
+    // Статус перечитується всередині lock.
     const fresh = await SupplementOffer.findById(offer._id);
     if (!fresh) throw appError('supplement_offer_not_found');
-    // Дедлайн — рішення СЕРВЕРА, навіть якщо планувальник ще не поставив frozen (§21).
+    // Лише open-пропозиція приймає зміни продавця.
     if (!isOfferOpenForSellers(fresh)) throw appError('supplement_closed');
 
     const existing = await SupplementRequest.findOne({ offerId: fresh._id, shopId: ctx.shopId });
 
-    // Жорстке блокування після packed (рішення власника): склад уже фізично
-    // поклав товар у коробку — міняти кількість пізно.
+    // Після packed продавець не змінює заявку.
     if (existing?.packed) throw appError('supplement_request_locked');
 
     if (existing) {
       if (existing.quantity === quantity) return { action: 'noop', request: existing };
       const from = existing.quantity;
-      // findOneAndUpdate з packed:false у ФІЛЬТРІ — другий замок на випадок,
-      // якщо галочка складу якимось шляхом обійшла замок пропозиції.
+      // packed:false дублює перевірку на рівні MongoDB.
       const updated = await SupplementRequest.findOneAndUpdate(
         { _id: existing._id, packed: false },
         {
@@ -259,8 +206,7 @@ router.post('/:offerId/request', sellerRoles, asyncHandler(async (req, res) => {
       });
       return { action: 'created', request: created };
     } catch (err) {
-      // Гонка двох продавців одного магазину: унікальний індекс віддав перемогу
-      // першому. Другий не створює дубль — він оновлює те, що вже є.
+      // Другий паралельний запит оновлює вже створену заявку магазину.
       if (err?.code !== 11000) throw err;
       const won = await SupplementRequest.findOneAndUpdate(
         { offerId: fresh._id, shopId: ctx.shopId, packed: false },
@@ -277,15 +223,7 @@ router.post('/:offerId/request', sellerRoles, asyncHandler(async (req, res) => {
 
   if (action === 'noop') return res.json({ ok: true, quantity, action: 'noop' });
 
-  // Номер коробки — ПІДКАЗКА, а не умова роботи (рішення власника 05.08.2026).
-  // Якщо в групи вже є сесія з замороженими номерами, магазин дістає наступний
-  // вільний у хвіст, існуючі не пересортовуються (§11). Якщо сесії ще немає або
-  // номери не заморожені — просто немає номера, і склад пакує в коробку з
-  // назвою магазину. Створювати сесію заради номера ми не будемо.
-  //
-  // AWAIT, не fire-and-forget: поки номера немає, склад бачить рядок без
-  // коробки. Чекати тут — десятки мілісекунд, а фоновий виклик, який тихо впав,
-  // лишив би магазин без номера назавжди (повторювача немає).
+  // Якщо поточна сесія вже має нумерацію, новий магазин отримує номер у хвіст.
   const sessionId = await boxNumberSessionId(ctx.deliveryGroupId, ctx.groupDayOfWeek);
   if (sessionId) {
     try {
@@ -306,19 +244,13 @@ router.post('/:offerId/request', sellerRoles, asyncHandler(async (req, res) => {
   res.json({ ok: true, quantity: request.quantity, action });
 }));
 
-/**
- * DELETE /api/supplement/:offerId/request — прибрати заявку магазину.
- * Ті самі гарди: дедлайн і жорстке блокування після packed.
- */
+/** DELETE /api/supplement/:offerId/request — прибрати неспаковану заявку магазину. */
 router.delete('/:offerId/request', sellerRoles, asyncHandler(async (req, res) => {
   const user = req.telegramUser;
   const ctx = await sellerContext(user);
   const offer = await loadOfferForSeller(req.params.offerId, ctx);
 
-  // Скасування небезпечніше за зміну кількості: між перевіркою packed і
-  // видаленням склад міг спакувати цей магазин — і заявка зникла б, поки товар
-  // уже лежить у коробці. Ніхто б навіть не дізнався, що його треба вийняти.
-  // Тому: замок пропозиції + packed:false у ФІЛЬТРІ самого видалення.
+  // Видалення виконується під offer-lock і лише для packed=false.
   const removed = await withOfferLock(offer._id, async () => {
     const fresh = await SupplementOffer.findById(offer._id, 'status');
     if (!fresh) throw appError('supplement_offer_not_found');
@@ -346,11 +278,7 @@ router.delete('/:offerId/request', sellerRoles, asyncHandler(async (req, res) =>
   res.json({ ok: true, action: 'cancelled' });
 }));
 
-/**
- * GET /api/supplement/my — заявки мого магазину для «Моїх замовлень» (§11).
- * Заявка показується ОДРАЗУ після створення, а не тільки після заморозки.
- * Вікно — 30 днів, як і в основній історії замовлень.
- */
+/** GET /api/supplement/my — заявки магазину за останні 30 днів. */
 router.get('/my', sellerRoles, asyncHandler(async (req, res) => {
   const user = req.telegramUser;
   if (!user?.shopId) return res.json({ requests: [] });
@@ -390,20 +318,14 @@ router.get('/my', sellerRoles, asyncHandler(async (req, res) => {
 
 // ─── СКЛАД ───────────────────────────────────────────────────────────────────
 
-/**
- * GET /api/supplement/group/:deliveryGroupId
- * Зведення для віртуального блока (§8): скільки активних пропозицій і скільки
- * штук у них. Блок існує в UI лише поки цей список непорожній.
- */
+/** GET /api/supplement/group/:deliveryGroupId — активний віртуальний блок групи. */
 router.get('/group/:deliveryGroupId', warehouseRoles, asyncHandler(async (req, res) => {
   const groupId = String(req.params.deliveryGroupId || '');
   if (!mongoose.Types.ObjectId.isValid(groupId)) {
     return res.json({ offers: [], totalQty: 0, serverTime: new Date().toISOString() });
   }
 
-  // Список читається ЗА ГРУПОЮ — тим самим фільтром, що й лічильник плитки в
-  // routes/picking.js. Стан сесії збирання тут ні до чого: хвиля дозамовлення
-  // живе власним циклом і зникає з блока, коли закривається сама.
+  // Дозамовлення читаються лише за групою, незалежно від OrderingSession.
   const offers = await findActiveOffersForGroup(groupId);
   if (!offers.length) return res.json({ offers: [], totalQty: 0, serverTime: new Date().toISOString() });
 
@@ -554,13 +476,7 @@ router.post('/offers/:offerId/release', warehouseRoles, asyncHandler(async (req,
   res.json({ ok: true });
 }));
 
-/**
- * PATCH /api/supplement/requests/:requestId/packed  { packed: boolean }
- *
- * Склад може пакувати ще поки пропозиція open (§12) — заборонено лише фінальне
- * завершення. Кожна галочка — атомарний запис В СВІЙ документ, тому паралельна
- * поява нового магазину не стирає вже поставлені галочки (§22 тест 5).
- */
+/** PATCH /api/supplement/requests/:requestId/packed — змінити галочку магазину. */
 router.patch('/requests/:requestId/packed', warehouseRoles, asyncHandler(async (req, res) => {
   if (!mongoose.Types.ObjectId.isValid(req.params.requestId)) throw appError('supplement_request_not_found');
   const packed = req.body?.packed !== false;
@@ -572,18 +488,14 @@ router.patch('/requests/:requestId/packed', warehouseRoles, asyncHandler(async (
   const offer = await withOfferLock(head.offerId, async () => {
     const fresh = await SupplementOffer.findById(head.offerId).lean();
     if (!fresh) throw appError('supplement_offer_not_found');
-    // Завершена пропозиція більше не приймає змін — ні від продавця, ні від складу (§21).
+    // Completed-пропозиція не приймає змін.
     if (fresh.status === 'completed') throw appError('supplement_closed');
-    // Товар має бути в руках саме цього працівника — див. /claim. Прострочений
-    // чужий замок перехоплюється тим самим викликом, тому це не глухий кут.
+    // Галочку ставить складник, який взяв пропозицію в роботу.
     if (String(fresh.lockedBy || '') !== String(actor.by)) {
       throw appError('supplement_not_claimed');
     }
 
-    // Один атомарний запис у ВЛАСНИЙ документ заявки: паралельна поява нового
-    // магазину не може стерти вже поставлені галочки (§22 тест 5). Фільтр за
-    // поточним значенням packed робить операцію ідемпотентною — повторний тап
-    // просто нічого не змінює.
+    // Фільтр за поточним packed робить повторний тап ідемпотентним.
     await SupplementRequest.updateOne(
       { _id: req.params.requestId, packed: !packed },
       {
@@ -605,9 +517,7 @@ router.patch('/requests/:requestId/packed', warehouseRoles, asyncHandler(async (
     offerId: String(offer._id),
     deliveryGroupId: String(offer.deliveryGroupId),
     requestId: String(request._id),
-    // shopId — щоб продавець перечитав свою картку ЛИШЕ коли спакували саме
-    // його магазин (галочка складу блокує йому зміну кількості), а не на кожну
-    // галочку по всіх магазинах групи.
+    // shopId дає клієнту відфільтрувати socket-подію.
     shopId: String(request.shopId),
     packed,
   });
@@ -615,15 +525,10 @@ router.patch('/requests/:requestId/packed', warehouseRoles, asyncHandler(async (
   res.json({ offer: await buildOfferCard(offer, actor.by) });
 }));
 
-/**
- * POST /api/supplement/offers/:offerId/complete — «Спакував».
- * Умови перевіряє сервер (services/supplementOffers.completeOffer):
- * frozen + є заявки + усі packed. До заморозки завершити не можна (§18).
- */
+/** POST /api/supplement/offers/:offerId/complete — завершити frozen-пропозицію. */
 router.post('/offers/:offerId/complete', warehouseRoles, asyncHandler(async (req, res) => {
   const me = String(req.telegramUser?.telegramId || '');
-  // Завершує лише той, хто тримає товар у руках. Інакше колега, у якого картка
-  // просто відкрита, міг би закрити пропозицію під час чужого пакування.
+  // Завершує складник, який узяв пропозицію в роботу.
   const holder = await SupplementOffer.findById(req.params.offerId, 'lockedBy status').lean();
   if (!holder) throw appError('supplement_offer_not_found');
   if (holder.status !== 'completed' && String(holder.lockedBy || '') !== me) {

@@ -1,29 +1,6 @@
 'use strict';
 
-/**
- * Ядро «Дозамовлення» (Zlotoweczka_Dozamovlennia_Povna_spetsyfikatsiia_2026-08-05.md).
- *
- * Тут живе вся логіка, спільна для роутів, планувальника і гардів:
- *   • ідемпотентне створення пропозицій після проведення накладної (§4, §21);
- *   • ЄДИНЕ джерело істини про те, чи пропозиція ще open (§21 — дедлайн
- *     перевіряється в кожній операції, а не тільки планувальником);
- *   • заморозка / авто-завершення / завершення складом;
- *   • фізичне місце товару для картки (§9).
- *
- * ЦІЛЬОВА ГРУПА СЮДИ НЕ НАЛЕЖИТЬ. Її обирає людина в модалці проведення, і вона
- * зафіксована на самій накладній (Receipt.targetDeliveryGroupId). Перевірка
- * вибору живе у services/supplementTargets.js.
- *
- * ХВИЛЯ НЕ ЗНАЄ ПРО OrderingSession (рішення власника 05.08.2026, друга ітерація).
- * Ні тут, ні деінде дозамовлення не створює, не оживляє і не блокує звичайну
- * сесію збирання: у нього власний цикл open → frozen → completed, прив'язаний
- * лише до групи. Див. довгий коментар у models/SupplementOffer.js.
- *
- * Свідомо ВІДСУТНЄ у першій версії (рішення власника 05.08.2026):
- *   • адміністративне скасування пропозиції (§16) і cleanup спакованих коробок;
- *   • OOS / часткове виконання / архівування з віртуального блока (§14).
- * TODO на майбутнє (§24): облік залишку та резервування, розподіл при нестачі.
- */
+// Актуальна бізнес-логіка: docs/supplement/readme.md
 
 const mongoose = require('mongoose');
 
@@ -41,16 +18,7 @@ const { getIO } = require('../socket');
 
 // ─── Статус ──────────────────────────────────────────────────────────────────
 
-/**
- * Реальний статус пропозиції ЗАРАЗ.
- *
- * Планувальник переводить open → frozen раз на кілька секунд, тому між моментом
- * closesAt і його тіком у базі ще лежить 'open'. Якби продавець і склад читали
- * сирий status, у цьому вікні продавець ще міг би змінити заявку, а склад уже
- * бачив би кнопку «Спакував» — два різні стани одночасно (§22, тест 8).
- * Усі перевірки йдуть через цю функцію, тож рішення завжди приймає СЕРВЕРНИЙ
- * час, а не те, чи встиг спрацювати таймер.
- */
+/** Поточний збережений статус пропозиції. */
 function effectiveOfferStatus(offer) {
   if (!offer) return null;
   return offer.status;
@@ -61,31 +29,11 @@ function isOfferOpenForSellers(offer, now = new Date()) {
   return effectiveOfferStatus(offer, now) === 'open';
 }
 
-// Одне визначення «активної» пропозиції для сервісу, роутів і гарда завершення
-// сесії — живе на моделі (див. models/SupplementOffer.js).
+// Спільне визначення активної пропозиції.
 const ACTIVE_STATUSES = SupplementOffer.ACTIVE_STATUSES;
 
-// ─── Створення після проведення накладної (§4) ───────────────────────────────
-
-/**
- * Створює пропозиції для ВСІХ позицій накладної типу 'supplement'.
- *
- * Ціль хвилі не вгадується: група зафіксована на самій накладній у момент
- * проведення (див. services/supplementTargets.resolveSupplementTarget). Тому тут
- * немає жодної евристики — лише «взяти те, що обрала людина».
- *
- * ІДЕМПОТЕНТНО (§21, §22 тест 2): унікальний індекс {receiptItemId, deliveryGroupId}
- * означає, що повторний виклик (ретрай звірятеля, друге натискання «Провести»)
- * не вставить нічого нового — дублікати ловляться як E11000 і пропускаються.
- * Тому цей крок безпечно винесений ПІСЛЯ транзакції проведення: він не може
- * лишитися «напіввиконаним» у сенсі, що щось доведеться відкочувати.
- *
- * КРИТИЧНЕ ПРАВИЛО: позиція з destination='shops' пропозицію не створює. У
- * накладній-дозамовленні таких бути не може (роут це забороняє), але перевірка
- * дублюється тут, бо роут — не єдиний шлях у базу.
- *
- * @returns {Promise<{created: Array, complete: boolean}>} щойно СТВОРЕНІ пропозиції.
- */
+// Створення пропозицій після проведення: docs/receipt/readme.md#2-проведення-накладної-дозамовлення
+/** @returns {Promise<{created: Array, complete: boolean}>} */
 async function createOffersForReceipt(receiptId) {
   const receipt = await Receipt.findById(
     receiptId,
@@ -93,16 +41,13 @@ async function createOffersForReceipt(receiptId) {
   ).lean();
   if (!receipt) return { created: [], complete: true };
 
-  // Звичайна накладна не має жодного стосунку до дозамовлень — і не має лишати
-  // по собі маркера, за який чіплятиметься звірятель.
+  // Звичайна накладна не створює дозамовлення.
   if (receipt.type !== 'supplement') {
     await Receipt.updateOne({ _id: receiptId }, { $set: { supplementStatus: null } });
     return { created: [], complete: true };
   }
 
-  // Ціль мусить бути зафіксована проведенням. Якщо її немає — це не «нічого не
-  // сталося», а зламана накладна: мовчки лишити її 'pending' означало б, що
-  // звірятель довіку ходитиме по ній щотіка.
+  // Проведена накладна-дозамовлення повинна мати цільову групу.
   if (!receipt.targetDeliveryGroupId) {
     console.error('[supplement] накладна', receipt.receiptNumber, '— тип supplement без цільової групи; пропозиції не створюються');
     await Receipt.updateOne({ _id: receiptId }, { $set: { supplementStatus: 'ready' } });
@@ -122,18 +67,14 @@ async function createOffersForReceipt(receiptId) {
     return { created: [], complete: true };
   }
 
-  // Дві позиції накладної можуть вказувати на ОДИН існуючий товар (склад
-  // прийняв його двома палетами / двома рядками). Пропозиція ж — про товар, а
-  // не про рядок накладної, тож беремо кожен productId один раз. Інакше магазин
-  // побачив би дві однакові картки й міг замовити до 6 у кожній.
+  // Усередині однієї накладної однаковий товар показується один раз.
   const byProduct = new Map();
   for (const item of eligible) {
     const productId = String(item.createdProductId || item.existingProductId);
     if (!byProduct.has(productId)) byProduct.set(productId, item);
   }
 
-  // Момент відкриття зафіксований проведенням. Закриття виконується вручну
-  // кнопкою складу/адміна, тому дедлайну немає.
+  // Закриття виконується вручну, тому дедлайну немає.
   const openedAt = receipt.supplementOpenedAt ? new Date(receipt.supplementOpenedAt) : new Date();
 
   const deliveryGroupId = String(receipt.targetDeliveryGroupId);
@@ -152,15 +93,7 @@ async function createOffersForReceipt(receiptId) {
     });
   }
 
-  // Вставляємо по одному, а не insertMany({ordered:false}): документів одиниці
-  // (по одному на товар), зате видно ТОЧНО, що створилось, що впало дублікатом,
-  // а що не вдалося. Саме зі списку створених іде Telegram-розсилка.
-  //
-  // ВАЖЛИВО: збій на одному документі НЕ перериває решту і НЕ кидає помилку
-  // назовні. Накладна вже проведена (транзакція закомічена), відкотити її не
-  // можна, а зупинитися посередині означало б: частина товарів хвилі видима,
-  // частина ні, і ніхто ніколи не дізнається. Тому доробляємо все, що можемо,
-  // а недороблене лишаємо позначеним для звірятеля (див. reconcilePendingReceipts).
+  // Окремі помилки не зупиняють решту вставок; pending добиває звірятель.
   const created = [];
   let duplicates = 0;
   let failed = 0;
@@ -177,10 +110,6 @@ async function createOffersForReceipt(receiptId) {
     console.log(`[supplement] накладна ${String(receiptId)}: ${duplicates} пропозицій уже існували — пропущено`);
   }
 
-  // Раніше тут був цілий блок «оживити сесію, яка завершилась під час відкриття
-  // хвилі» (transitionPickingStatus з allowReopen). Він більше не потрібен: хвиля
-  // до сесії не прив'язана, тому завершена сесія їй не заважає, а її власний
-  // цикл open → frozen → completed доводить роботу до кінця сам.
   const complete = failed === 0;
   await Receipt.updateOne(
     { _id: receiptId },
@@ -193,24 +122,7 @@ async function createOffersForReceipt(receiptId) {
   return { created, complete };
 }
 
-/**
- * Звірятель напівстворених хвиль.
- *
- * Накладна проводиться в транзакції, а пропозиції створюються після неї — тож
- * падіння Mongo, мережі чи процесу в цьому проміжку лишає накладну проведеною
- * без (частини) пропозицій. Повторно провести її вже неможливо: вона completed.
- * Цей прохід — єдине, що реально доводить справу до кінця.
- *
- * Викликається планувальником на кожному тіку. Дешевий: індекс по
- * supplementStatus, у нормі знаходить нуль документів.
- *
- * ВАЖЛИВО про дедлайн: повтор бере closesAt із самої накладної, тобто той, що
- * був зафіксований при проведенні. Хвиля не подовжується від того, що її
- * довелося довідновлювати — інакше кожен ретрай зсував би дедлайн уперед, і
- * повідомлення «закриється о 12:48» розходилося б із реальністю.
- * Наслідок, який варто пам'ятати: якщо процес пролежав довше за вікно, хвиля
- * відкриється вже простроченою і планувальник заморозить її наступним тіком.
- */
+/** Доводить до кінця проведені накладні зі supplementStatus='pending'. */
 async function reconcilePendingReceipts() {
   const stuck = await Receipt.find({ supplementStatus: 'pending' }, '_id receiptNumber').limit(20).lean();
   if (!stuck.length) return 0;
@@ -241,15 +153,9 @@ async function reconcilePendingReceipts() {
   return repaired;
 }
 
-// ─── Фізичне місце товару (§9) ───────────────────────────────────────────────
+// Фізичне місце товару: docs/supplement/readme.md#5-віртуальний-блок
 
-/**
- * Де товар лежить ЗАРАЗ: у звичайному блоці чи ще в «Надходженнях».
- * Віртуальний блок описує ТИП роботи, а не адресу, тому картка має показувати
- * справжнє місце і оновлювати його, коли склад розкладає товар по полицях.
- *
- * @returns {Promise<Map<string, {blockId:number, positionIndex:number}|null>>}
- */
+/** @returns {Promise<Map<string, {blockId:number, positionIndex:number}|null>>} */
 async function resolveProductLocations(productIds = []) {
   const ids = [...new Set(productIds.map(String))].filter(Boolean);
   const out = new Map(ids.map((id) => [id, null]));
@@ -300,10 +206,7 @@ function offerViewForWarehouse(offer, { product, requests = [], location = null,
     requestId: String(r._id),
     shopId: String(r.shopId),
     shopName: r.shopName || '',
-    // null — номер коробки ще НЕ призначено. Клієнт мусить показати це як
-    // «немає номера» і не давати пакувати цей рядок. Вигадувати номер з позиції
-    // в списку не можна: працівник поклав би товар у коробку 3, а магазину за
-    // хвилину дісталася б коробка 27.
+    // null означає, що номер коробки ще не призначено; пакування це не блокує.
     shopNumber: boxNumberFor(r),
     quantity: r.quantity,
     packed: !!r.packed,
@@ -344,27 +247,7 @@ function emit(event, payload) {
 
 // ─── Серіалізація операцій над однією пропозицією ────────────────────────────
 
-/**
- * ВСІ зміни, що стосуються однієї пропозиції, проходять через цей замок:
- * створення/зміна/скасування заявки продавцем, галочка складу, заморозка,
- * авто-завершення і «Спакував».
- *
- * Без нього кожна пара з них — гонка, і всі вони закінчуються фізичною
- * розбіжністю, а не просто дивним записом у базі:
- *
- *   • продавець читає packed=false → склад ставить packed=true і кладе 2 шт →
- *     запит продавця зберігає quantity=6. У коробці 2, у системі 6.
- *   • те саме з видаленням: заявка зникає, товар уже лежить у коробці.
- *   • запит, що почався за 50 мс до дедлайну, дописує заявку в пропозицію, яку
- *     планувальник уже заморозив і закрив як порожню — заявка є, картки немає,
- *     склад її ніколи не побачить.
- *   • склад перевірив «усі спаковані» → колега зняв галочку → перший завершує
- *     пропозицію з одним необробленим магазином.
- *
- * Redis робить замок наскрізним для всіх воркерів; без Redis він вироджується
- * в мьютекс процесу — що коректно, бо index.js відмовляється стартувати з
- * WEB_CONCURRENCY>1 без REDIS_URL.
- */
+/** Серіалізує зміни однієї пропозиції між продавцем і складом. */
 function withOfferLock(offerId, fn) {
   return withLock(`supplement:${String(offerId)}`, fn, { ttlMs: 10_000, waitMs: 5_000 });
 }
@@ -373,17 +256,7 @@ function withOfferLock(offerId, fn) {
 // Той самий поріг, що й для перехоплення звичайної задачі (pickingService).
 const LOCK_TIMEOUT_MS = 3 * 60 * 1000;
 
-/**
- * Взяти пропозицію в роботу. Одна пропозиція — один складник (див. коментар у
- * моделі про подвійне пакування).
- *
- * Ідемпотентно для власника: повторне відкриття картки тим самим працівником
- * лише оновлює lockedAt (heartbeat). Прострочений чужий замок перехоплюється
- * автоматично — інакше людина, яка пішла додому з відкритою карткою, заблокувала
- * б товар до кінця зміни.
- *
- * @returns {{ ok: boolean, offer?: object, lockedBy?: string }}
- */
+/** Взяти пропозицію в роботу. @returns {{ ok: boolean, offer?: object, lockedBy?: string }} */
 async function claimOffer(offerId, telegramId, now = new Date()) {
   const me = String(telegramId || '');
   const staleBefore = new Date(now.getTime() - LOCK_TIMEOUT_MS);
@@ -417,11 +290,7 @@ async function releaseOffer(offerId, telegramId) {
   );
 }
 
-/**
- * Заморозити всі пропозиції, дедлайн яких минув. CAS-фільтр status:'open'
- * гарантує, що два воркери не заморозять одну пропозицію двічі.
- * @returns {Promise<Array>} щойно заморожені пропозиції.
- */
+/** Ручне закриття прийому для всіх відкритих пропозицій накладної. */
 async function freezeReceiptOffers(receiptId, actor = {}, now = new Date()) {
   if (!mongoose.Types.ObjectId.isValid(String(receiptId || ''))) {
     throw Object.assign(new Error('receipt not found'), { code: 'receipt_not_found' });
@@ -455,11 +324,7 @@ async function freezeReceiptOffers(receiptId, actor = {}, now = new Date()) {
   return frozen;
 }
 
-/**
- * Пропозиція, яку ніхто не замовив, після дедлайну закривається сама і зникає з
- * віртуального блока — складу нема чого робити (§7, §22 тест 10).
- * @returns {Promise<number>} скільки закрито.
- */
+/** Після ручного frozen автоматично закриває пропозиції без заявок. */
 async function autoCompleteEmptyOffers(now = new Date()) {
   const frozen = await SupplementOffer.find(
     { status: 'frozen' },
@@ -468,10 +333,7 @@ async function autoCompleteEmptyOffers(now = new Date()) {
 
   let closed = 0;
   for (const o of frozen) {
-    // Перевірка «заявок немає» і закриття мусять бути однією операцією: запит
-    // продавця, що стартував до дедлайну, міг саме зараз дописувати заявку.
-    // Без замка ми закрили б пропозицію, а заявка лишилась би всередині
-    // завершеної — магазин її бачить, склад ніколи не побачить.
+    // Перевірка й закриття виконуються під одним offer-lock.
     const updated = await withOfferLock(o._id, async () => {
       if (await SupplementRequest.exists({ offerId: o._id })) return null;
       return SupplementOffer.findOneAndUpdate(
@@ -491,22 +353,9 @@ async function autoCompleteEmptyOffers(now = new Date()) {
   return closed;
 }
 
-/**
- * «Спакував» — фінальне закриття пропозиції складом.
- *
- * Усі умови перевіряються СЕРВЕРОМ (§21):
- *   • пропозиція існує і ще не completed;
- *   • ефективний статус = frozen (до дедлайну завершувати не можна, §18);
- *   • кожна заявка магазину позначена packed.
- *
- * @throws {Error} з .code: supplement_offer_not_found | supplement_not_frozen |
- *                          supplement_not_all_packed | supplement_no_requests
- */
+/** Завершує frozen-пропозицію, якщо всі заявки packed. */
 async function completeOffer(offerId, actor = {}, now = new Date()) {
-  // Увесь блок «перевірити → закрити» під замком. Інакше між читанням заявок і
-  // записом статусу колега встигав би зняти галочку (пропозиція закрилася б із
-  // необробленим магазином), а запит продавця з-перед дедлайну — дописати нову
-  // заявку всередину вже завершеної пропозиції.
+  // Перевірка й завершення виконуються під одним offer-lock.
   const offer = await withOfferLock(offerId, async () => {
     const doc = await SupplementOffer.findById(offerId);
     if (!doc) throw Object.assign(new Error('offer not found'), { code: 'supplement_offer_not_found' });
@@ -522,7 +371,7 @@ async function completeOffer(offerId, actor = {}, now = new Date()) {
       throw Object.assign(new Error('not all packed'), { code: 'supplement_not_all_packed' });
     }
 
-    // Замок знімаємо разом із закриттям: тримати завершену пропозицію «в руках» немає сенсу.
+    // Завершена пропозиція більше не потребує lock.
     return SupplementOffer.findOneAndUpdate(
       { _id: doc._id, status: { $ne: 'completed' } },
       {
@@ -568,14 +417,7 @@ async function countActiveOffersForGroup(deliveryGroupId) {
   }
 }
 
-/**
- * Активні пропозиції групи — вміст віртуального блока (§8).
- *
- * Раніше вибірка додатково фільтрувалась по orderingSessionId, «щоб зависла
- * frozen-пропозиція минулого циклу не домішалась до сьогоднішніх». Тепер такого
- * стану не буває в принципі: заморожена хвиля без заявок закривається сама, а з
- * заявками — після того, як склад їх спакував. Отже все, що тут є, і є роботою.
- */
+/** Активні пропозиції групи для віртуального блока. */
 async function findActiveOffersForGroup(deliveryGroupId) {
   if (!deliveryGroupId) return [];
   return SupplementOffer.find({

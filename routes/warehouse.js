@@ -10,6 +10,8 @@ const { appError, asyncHandler } = require('../utils/errors');
 
 const router = express.Router();
 
+// Legacy shift endpoints: docs/architecture/technical-debt.md#стара-логіка-зміни-складу
+
 function normalizeWorkerId(id) {
   if (!id) return null;
   return String(id).trim();

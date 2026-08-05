@@ -3,6 +3,7 @@
 const OrderingSession = require('../models/OrderingSession');
 const Order           = require('../models/Order');
 const { getOrderingWindowOpenAt, getOpenDateWarsaw } = require('./orderingSchedule');
+const { isMaintenanceActive } = require('../services/maintenanceState');
 
 /**
  * Race-safe find-or-create for an OrderingSession document.
@@ -54,6 +55,13 @@ async function getOrCreateSessionId(groupId, dayOfWeek, schedule = {}) {
   const gid      = String(groupId);
   const openAt   = getOrderingWindowOpenAt(dayOfWeek, schedule);
   const openDate = getOpenDateWarsaw(dayOfWeek, schedule);
+
+  // Maintenance має бути справді read-only: навіть GET/profile не створює сесію.
+  // Див. docs/operations/maintenance-mode.md#побічні-записи-під-час-читання
+  if (isMaintenanceActive()) {
+    const existing = await OrderingSession.findOne({ groupId: gid, openDate }, '_id').lean();
+    return existing ? String(existing._id) : null;
+  }
 
   const doc = await upsertSession(gid, openDate, openAt);
   return String(doc._id);
@@ -112,6 +120,11 @@ async function getOrCreateNextSessionId(groupId, dayOfWeek, schedule = {}) {
   const curOpenDate  = getOpenDateWarsaw(dayOfWeek, schedule);
   const nextOpenDate = addDaysToDateStr(curOpenDate, 7);
   const nextOpenAt   = new Date(curOpenAt.getTime() + 7 * 24 * 60 * 60 * 1000);
+
+  if (isMaintenanceActive()) {
+    const existing = await OrderingSession.findOne({ groupId: gid, openDate: nextOpenDate }, '_id').lean();
+    return existing ? String(existing._id) : null;
+  }
 
   const doc = await upsertSession(gid, nextOpenDate, nextOpenAt);
   return String(doc._id);
