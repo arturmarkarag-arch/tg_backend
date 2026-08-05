@@ -295,22 +295,34 @@ router.get('/my', sellerRoles, asyncHandler(async (req, res) => {
     { _id: { $in: requests.map((r) => r.offerId) } },
   ).lean();
   const offerById = new Map(offers.map((o) => [String(o._id), o]));
-  const productMap = await loadProductsFor(offers);
+  const receiptIds = [...new Set(offers.map((o) => String(o.receiptId || '')).filter(Boolean))];
+  const [productMap, receipts, shop] = await Promise.all([
+    loadProductsFor(offers),
+    Receipt.find({ _id: { $in: receiptIds } }, '_id receiptNumber').lean(),
+    Shop.findById(user.shopId, 'name cityId').populate('cityId', 'name').lean(),
+  ]);
+  const receiptById = new Map(receipts.map((receipt) => [String(receipt._id), receipt]));
 
   const now = new Date();
   res.json({
     serverTime: now.toISOString(),
     requests: requests.map((r) => {
       const offer = offerById.get(String(r.offerId));
+      const receiptId = offer?.receiptId ? String(offer.receiptId) : '';
+      const receipt = receiptById.get(receiptId);
       return {
         requestId: String(r._id),
         offerId: String(r.offerId),
+        receiptId,
+        receiptNumber: receipt?.receiptNumber || '',
         createdAt: r.createdAt,
+        openedAt: offer?.openedAt || r.createdAt,
         quantity: r.quantity,
         packed: !!r.packed,
         status: offer ? effectiveOfferStatus(offer, now) : 'completed',
         product: productView(offer ? productMap.get(String(offer.productId)) : null),
-        shopName: r.shopName || '',
+        shopName: r.shopName || shop?.name || '',
+        shopCity: shop?.cityId?.name || '',
       };
     }),
   });

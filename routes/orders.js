@@ -14,7 +14,7 @@ const { getTelegramAuth } = require('../utils/validateTelegramInitData');
 const { telegramAuth, requireTelegramRoles } = require('../middleware/telegramAuth');
 const { getIO } = require('../socket');
 const { isOrderingOpen, getOrderingWindowOpenAt } = require('../utils/orderingSchedule');
-const { getOrCreateSessionId } = require('../utils/getOrCreateSession');
+const { getOrCreateSessionId, findCurrentSessionId } = require('../utils/getOrCreateSession');
 const { ensureSessionSeq } = require('../utils/sessionSeq');
 const OrderingSession = require('../models/OrderingSession');
 const { pushSessionEvent } = require('../utils/sessionStatus');
@@ -69,6 +69,7 @@ async function getAllDeliveryGroups() {
 
 const router = express.Router();
 const staffOnly = requireTelegramRoles(['admin', 'warehouse']);
+const sellerOnly = requireTelegramRoles(['seller', 'admin']);
 const adminOnly = requireTelegramRoles(['admin']);
 
 // Business rule: per ordering session a buyer may order 1..6 units of any one
@@ -496,6 +497,64 @@ router.get('/', async (req, res) => {
     pageCount: pageSize > 0 ? Math.ceil(total / pageSize) : 1,
   });
 });
+
+
+/**
+ * GET /current-items — легкий список позицій поточного замовлення продавця.
+ * Викликається ліниво лише після розкриття блока «Замовлено N товарів».
+ * Читання не створює OrderingSession як побічний ефект.
+ */
+router.get('/current-items', sellerOnly, asyncHandler(async (req, res) => {
+  const user = req.telegramUser;
+  if (!user?.shopId) return res.json({ orderIds: [], items: [] });
+
+  const shop = await getShop(user.shopId);
+  if (!shop?.deliveryGroupId) return res.json({ orderIds: [], items: [] });
+
+  const group = normalizeDeliveryGroup(await getDeliveryGroup(shop.deliveryGroupId));
+  if (!group) return res.json({ orderIds: [], items: [] });
+
+  const schedule = await getOrderingSchedule();
+  const currentSessionId = await findCurrentSessionId(String(group._id), group.dayOfWeek, schedule);
+  if (!currentSessionId) return res.json({ orderIds: [], items: [] });
+
+  const orders = await Order.find({
+    buyerTelegramId: String(user.telegramId),
+    orderingSessionId: currentSessionId,
+    status: { $in: ['new', 'in_progress'] },
+  })
+    .select('_id createdAt updatedAt items')
+    .populate('items.productId', ORDER_ITEM_PRODUCT_FIELDS)
+    .sort({ createdAt: 1 })
+    .lean();
+
+  const items = [];
+  for (const order of orders) {
+    for (const item of order.items || []) {
+      if (item.cancelled || item.skipped || Number(item.quantity || 0) <= 0) continue;
+      const product = item.productId && typeof item.productId === 'object' ? item.productId : null;
+      const productId = String(product?._id || item.productId || '');
+      if (!productId) continue;
+      items.push({
+        orderId: String(order._id),
+        productId,
+        name: product?.name || item.name || 'Товар',
+        price: Number(item.price || 0),
+        quantity: Number(item.quantity || 0),
+        imageUrl: (Array.isArray(product?.imageUrls) && product.imageUrls[0])
+          || product?.localImageUrl
+          || product?.originalImageUrl
+          || '',
+      });
+    }
+  }
+
+  res.json({
+    orderingSessionId: currentSessionId,
+    orderIds: orders.map((order) => String(order._id)),
+    items,
+  });
+}));
 
 router.get('/transit/active', staffOnly, async (req, res, next) => {
   try {
