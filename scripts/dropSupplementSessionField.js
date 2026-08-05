@@ -66,7 +66,18 @@ async function dropIndexIfPresent(col, name) {
     const before = await col.countDocuments({ [field]: { $exists: true } }, { readPreference: 'primary' });
     console.log(`${name}.${field}: ${before} документів`);
 
-    if (!EXECUTE) continue;
+    if (!EXECUTE) {
+      // Індекси показуємо і в dry-run: нуль документів НЕ означає «робити нічого».
+      // Поле могло ніколи не заповнитись, а індекс під нього Mongo вже створила —
+      // і сам він не зникне, бо syncIndexes для цих колекцій не викликається.
+      if (indexes.length) {
+        const existing = new Set((await col.indexes()).map((i) => i.name));
+        for (const idx of indexes) {
+          console.log(`  індекс ${idx}: ${existing.has(idx) ? 'ІСНУЄ — буде знято' : 'відсутній'}`);
+        }
+      }
+      continue;
+    }
 
     if (before) {
       const res = await col.updateMany({ [field]: { $exists: true } }, { $unset: { [field]: '' } });

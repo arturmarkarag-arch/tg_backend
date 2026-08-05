@@ -13,7 +13,7 @@ const { getProductTitle } = require('../services/archiveProduct');
 const { buildPickingTasksFromOrders } = require('../services/taskBuilder');
 const { auditSessionCoverage, resolveCoverageGap } = require('../services/sessionCoverage');
 const { isOrderingOpen, getOrderingWindowCloseAt, getOrderingWindowOpenAt, getOpenDateWarsaw } = require('../utils/orderingSchedule');
-const { getOrCreateSessionId } = require('../utils/getOrCreateSession');
+const { getOrCreateSessionId, findCurrentSessionId } = require('../utils/getOrCreateSession');
 const { normalizeDeliveryGroup } = require('../utils/deliveryGroupHelpers');
 const { getOrderingSchedule } = require('../utils/getOrderingSchedule');
 const { appError, asyncHandler } = require('../utils/errors');
@@ -467,12 +467,20 @@ router.post('/start-session', requireTelegramRoles(['warehouse', 'admin']), asyn
     });
     const confirmedDoc = confirmed ? (confirmed.toObject ? confirmed.toObject() : confirmed) : null;
 
-    // Сесія без звичайних задач, але з живим дозамовленням — НЕ порожня.
-    // Якби ми пішли гілкою noOrders, склад побачив би «Замовлень немає» і не
-    // дістався б до віртуального блока, у якому лежить реальна робота.
-    // maybeCompleteSession усе одно відмовився б її закрити (гард §17) — сесія
-    // так і зависла б у confirmed з екраном «нічого немає».
-    if (builtCount === 0 && supplementCount === 0) {
+    // «Порожня сесія» = НЕМА ЗВИЧАЙНИХ ЗАДАЧ. Дозамовлення тут свідомо не
+    // враховується (рішення власника 05.08.2026, четверта ітерація).
+    //
+    // Раніше умова була `builtCount === 0 && supplementCount === 0`, і це
+    // трималось на гарді §17: сесію з живою хвилею все одно не дали б закрити,
+    // тому її лишали в confirmed, щоб склад дійшов до віртуального блока. Гард
+    // знято — і та сама умова стала пасткою: сесія без жодної задачі йшла в
+    // confirmed, а закрити її не могло вже НІЩО (maybeCompleteSession кличеться
+    // лише після завершення PickingTask, а їх нуль). Порожня сесія висіла б у
+    // confirmed вічно.
+    //
+    // Вхід до віртуального блока від цього не страждає: він окремою кнопкою на
+    // сторінці збирання і не залежить від стану сесії.
+    if (builtCount === 0) {
       // Empty session — close it out immediately so reloads see noOrders.
       const completed = await maybeCompleteSession(currentSessionId, {
         actor, meta: { reason: 'empty' },
@@ -493,7 +501,10 @@ router.post('/start-session', requireTelegramRoles(['warehouse', 'admin']), asyn
         }),
         events: (finalDoc?.events || []).slice(-10),
         vocab: getSessionVocab(),
-        supplementCount: 0,
+        // Справжній лічильник, а не нуль: «звичайних замовлень немає» і «немає
+        // дозамовлень» — різні речі, і клієнт малює кнопку віртуального блока
+        // саме за цим числом.
+        supplementCount,
       });
     }
 
@@ -924,8 +935,17 @@ router.get('/queue-stats', requireTelegramRoles(['warehouse', 'admin']), async (
       if (groupDoc) {
         groupDayOfWeek = groupDoc.dayOfWeek;
         const schedule = await getOrderingSchedule();
-        const sessionId = await getOrCreateSessionId(String(deliveryGroupId), groupDoc.dayOfWeek, schedule);
-        const sessionDoc = await OrderingSession.findById(sessionId, 'pickingStatus events seq openDate').lean();
+        // findCurrentSessionId, НЕ getOrCreate: це опитування раз на 5 секунд для
+        // ПОКАЗУ сторінки. Створювати сесію тут означало, що достатньо відкрити
+        // «Збирання» на групі з ще відкритим вікном замовлень — і в базі
+        // з'являлась порожня OrderingSession, яку ніхто не просив (сам
+        // /start-session у цьому стані виходить раніше й нічого не створює).
+        // Немає сесії — немає й статусу: клієнт просто не малює чип, а вхід у
+        // віртуальний блок дозамовлень від сесії не залежить.
+        const sessionId = await findCurrentSessionId(String(deliveryGroupId), groupDoc.dayOfWeek, schedule);
+        const sessionDoc = sessionId
+          ? await OrderingSession.findById(sessionId, 'pickingStatus events seq openDate').lean()
+          : null;
         if (sessionDoc) {
           pickingStatus = sessionDoc.pickingStatus || 'pending';
           events = (sessionDoc.events || []).slice(-10);
