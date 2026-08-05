@@ -25,6 +25,7 @@ const User  = require('../models/User');
 const DeliveryGroup = require('../models/DeliveryGroup');
 const OrderingSession = require('../models/OrderingSession');
 const SupplementOffer = require('../models/SupplementOffer');
+const Receipt = require('../models/Receipt');
 const SupplementRequest = require('../models/SupplementRequest');
 
 const { requireTelegramRoles } = require('../middleware/telegramAuth');
@@ -44,6 +45,7 @@ const {
   withOfferLock,
   claimOffer,
   releaseOffer,
+  freezeReceiptOffers,
   completeOffer,
   findActiveOffersForGroup,
   loadProductsFor,
@@ -150,7 +152,7 @@ router.get('/available', sellerRoles, asyncHandler(async (req, res) => {
   const offers = await SupplementOffer.find({
     deliveryGroupId: ctx.deliveryGroupId,
     status: { $in: ACTIVE_STATUSES },
-  }).sort({ closesAt: 1, createdAt: 1 }).lean();
+  }).sort({ createdAt: 1 }).lean();
 
   if (!offers.length) return res.json({ offers: [], serverTime: new Date().toISOString() });
 
@@ -176,7 +178,6 @@ router.get('/available', sellerRoles, asyncHandler(async (req, res) => {
       return {
         offerId: String(offer._id),
         status: effectiveOfferStatus(offer, now),
-        closesAt: offer.closesAt,
         product: productView(productMap.get(String(offer.productId))),
         myQuantity: mine?.quantity ?? 0,
         // Клієнт не має відтворювати правило блокування — сервер каже прямо.
@@ -319,7 +320,7 @@ router.delete('/:offerId/request', sellerRoles, asyncHandler(async (req, res) =>
   // уже лежить у коробці. Ніхто б навіть не дізнався, що його треба вийняти.
   // Тому: замок пропозиції + packed:false у ФІЛЬТРІ самого видалення.
   const removed = await withOfferLock(offer._id, async () => {
-    const fresh = await SupplementOffer.findById(offer._id, 'status closesAt');
+    const fresh = await SupplementOffer.findById(offer._id, 'status');
     if (!fresh) throw appError('supplement_offer_not_found');
     if (!isOfferOpenForSellers(fresh)) throw appError('supplement_closed');
 
@@ -380,7 +381,6 @@ router.get('/my', sellerRoles, asyncHandler(async (req, res) => {
         quantity: r.quantity,
         packed: !!r.packed,
         status: offer ? effectiveOfferStatus(offer, now) : 'completed',
-        closesAt: offer?.closesAt || null,
         product: productView(offer ? productMap.get(String(offer.productId)) : null),
         shopName: r.shopName || '',
       };
@@ -408,11 +408,14 @@ router.get('/group/:deliveryGroupId', warehouseRoles, asyncHandler(async (req, r
   if (!offers.length) return res.json({ offers: [], totalQty: 0, serverTime: new Date().toISOString() });
 
   const offerIds = offers.map((o) => o._id);
-  const [productMap, requests, locations] = await Promise.all([
+  const receiptIds = [...new Set(offers.map((offer) => String(offer.receiptId)))];
+  const [productMap, requests, locations, receipts] = await Promise.all([
     loadProductsFor(offers),
     SupplementRequest.find({ offerId: { $in: offerIds } }, 'offerId quantity packed').lean(),
     resolveProductLocations(offers.map((o) => o.productId)),
+    Receipt.find({ _id: { $in: receiptIds } }, '_id receiptNumber').lean(),
   ]);
+  const receiptNumberById = new Map(receipts.map((receipt) => [String(receipt._id), receipt.receiptNumber || '']));
 
   const byOffer = new Map();
   for (const r of requests) {
@@ -428,8 +431,9 @@ router.get('/group/:deliveryGroupId', warehouseRoles, asyncHandler(async (req, r
     const location = locations.get(String(offer.productId));
     return {
       offerId: String(offer._id),
+      receiptId: String(offer.receiptId),
+      receiptNumber: receiptNumberById.get(String(offer.receiptId)) || '',
       status,
-      closesAt: offer.closesAt,
       product: productView(productMap.get(String(offer.productId))),
       locationLabel: formatLocation(location),
       shopCount: rows.length,
@@ -477,6 +481,26 @@ async function buildOfferCard(offer, me = '') {
   view.lockedByMe = !!me && String(offer.lockedBy || '') === String(me);
   return view;
 }
+
+/**
+ * POST /api/supplement/receipts/:receiptId/freeze
+ * Ручне закриття прийому дозамовлень для всієї накладної. Доступне складу й
+ * адміну. Telegram-повідомлення про закриття свідомо НЕ надсилається.
+ */
+router.post('/receipts/:receiptId/freeze', warehouseRoles, asyncHandler(async (req, res) => {
+  const receiptId = String(req.params.receiptId || '');
+  if (!mongoose.Types.ObjectId.isValid(receiptId)) throw appError('receipt_not_found');
+
+  const receipt = await Receipt.findById(receiptId, 'type targetDeliveryGroupId').lean();
+  if (!receipt || receipt.type !== 'supplement') throw appError('receipt_not_found');
+
+  const frozen = await freezeReceiptOffers(receiptId, actorOf(req.telegramUser));
+  // frozen без заявок одразу закриваємо, щоб порожні картки не висіли до тіку.
+  const { autoCompleteEmptyOffers } = require('../services/supplementOffers');
+  await autoCompleteEmptyOffers(new Date());
+
+  res.json({ ok: true, frozenCount: frozen.length });
+}));
 
 /**
  * GET /api/supplement/offers/:offerId — картка для перегляду (без захоплення).

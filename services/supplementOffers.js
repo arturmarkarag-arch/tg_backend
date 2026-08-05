@@ -51,10 +51,9 @@ const { getIO } = require('../socket');
  * Усі перевірки йдуть через цю функцію, тож рішення завжди приймає СЕРВЕРНИЙ
  * час, а не те, чи встиг спрацювати таймер.
  */
-function effectiveOfferStatus(offer, now = new Date()) {
+function effectiveOfferStatus(offer) {
   if (!offer) return null;
-  if (offer.status !== 'open') return offer.status;
-  return new Date(offer.closesAt).getTime() <= now.getTime() ? 'frozen' : 'open';
+  return offer.status;
 }
 
 /** Пропозиція ще приймає зміни від продавців? */
@@ -90,7 +89,7 @@ const ACTIVE_STATUSES = SupplementOffer.ACTIVE_STATUSES;
 async function createOffersForReceipt(receiptId) {
   const receipt = await Receipt.findById(
     receiptId,
-    'type targetDeliveryGroupId supplementOpenedAt supplementClosesAt receiptNumber',
+    'type targetDeliveryGroupId supplementOpenedAt receiptNumber',
   ).lean();
   if (!receipt) return { created: [], complete: true };
 
@@ -133,12 +132,9 @@ async function createOffersForReceipt(receiptId) {
     if (!byProduct.has(productId)) byProduct.set(productId, item);
   }
 
-  // Дедлайн і момент відкриття зафіксовані проведенням і живуть на накладній.
-  // Саме тому довідновлення напівстворених хвиль не роздає групам різні дедлайни
-  // і не подовжує вікно кожним ретраєм — на відміну від старої схеми, де
-  // closesAt рахувався від «зараз» на кожному виклику.
+  // Момент відкриття зафіксований проведенням. Закриття виконується вручну
+  // кнопкою складу/адміна, тому дедлайну немає.
   const openedAt = receipt.supplementOpenedAt ? new Date(receipt.supplementOpenedAt) : new Date();
-  const closesAt = new Date(receipt.supplementClosesAt);
 
   const deliveryGroupId = String(receipt.targetDeliveryGroupId);
 
@@ -150,8 +146,9 @@ async function createOffersForReceipt(receiptId) {
       productId,
       deliveryGroupId,
       openedAt,
-      closesAt,
+      closesAt: null,
       status: 'open',
+      lastReminderAt: openedAt,
     });
   }
 
@@ -425,20 +422,24 @@ async function releaseOffer(offerId, telegramId) {
  * гарантує, що два воркери не заморозять одну пропозицію двічі.
  * @returns {Promise<Array>} щойно заморожені пропозиції.
  */
-async function freezeDueOffers(now = new Date()) {
-  const due = await SupplementOffer.find(
-    { status: 'open', closesAt: { $lte: now } },
-    '_id deliveryGroupId productId closesAt notifiedTypes',
-  ).lean();
+async function freezeReceiptOffers(receiptId, actor = {}, now = new Date()) {
+  if (!mongoose.Types.ObjectId.isValid(String(receiptId || ''))) {
+    throw Object.assign(new Error('receipt not found'), { code: 'receipt_not_found' });
+  }
 
+  const open = await SupplementOffer.find({ receiptId, status: 'open' }, '_id deliveryGroupId').lean();
   const frozen = [];
-  for (const o of due) {
-    // Під замком: інакше заморозка може стати між перевіркою дедлайну і
-    // вставкою заявки в запиті продавця, який почався до closesAt — і заявка
-    // осіла б у вже замороженій (а то й закритій) пропозиції.
+  for (const o of open) {
     const updated = await withOfferLock(o._id, () => SupplementOffer.findOneAndUpdate(
       { _id: o._id, status: 'open' },
-      { $set: { status: 'frozen', frozenAt: now } },
+      {
+        $set: {
+          status: 'frozen',
+          frozenAt: now,
+          frozenBy: String(actor.by || ''),
+          frozenByName: String(actor.byName || ''),
+        },
+      },
       { new: true },
     ));
     if (updated) frozen.push(updated);
@@ -447,6 +448,7 @@ async function freezeDueOffers(now = new Date()) {
   for (const o of frozen) {
     emit('supplement_frozen', {
       offerId: String(o._id),
+      receiptId: String(receiptId),
       deliveryGroupId: String(o.deliveryGroupId),
     });
   }
@@ -510,7 +512,7 @@ async function completeOffer(offerId, actor = {}, now = new Date()) {
     if (!doc) throw Object.assign(new Error('offer not found'), { code: 'supplement_offer_not_found' });
     if (doc.status === 'completed') return doc; // ідемпотентно
 
-    if (effectiveOfferStatus(doc, now) !== 'frozen') {
+    if (doc.status !== 'frozen') {
       throw Object.assign(new Error('offer not frozen'), { code: 'supplement_not_frozen' });
     }
 
@@ -520,9 +522,7 @@ async function completeOffer(offerId, actor = {}, now = new Date()) {
       throw Object.assign(new Error('not all packed'), { code: 'supplement_not_all_packed' });
     }
 
-    // Статус ще міг бути 'open' (дедлайн минув, планувальник не встиг) — обидва
-    // варіанти допустимі, бо ефективний статус уже перевірено. Замок знімаємо
-    // разом із закриттям: тримати завершену пропозицію «в руках» немає сенсу.
+    // Замок знімаємо разом із закриттям: тримати завершену пропозицію «в руках» немає сенсу.
     return SupplementOffer.findOneAndUpdate(
       { _id: doc._id, status: { $ne: 'completed' } },
       {
@@ -581,7 +581,7 @@ async function findActiveOffersForGroup(deliveryGroupId) {
   return SupplementOffer.find({
     deliveryGroupId: String(deliveryGroupId),
     status: { $in: ACTIVE_STATUSES },
-  }).sort({ closesAt: 1, createdAt: 1 }).lean();
+  }).sort({ createdAt: 1 }).lean();
 }
 
 /** Товари пропозицій одним запитом (картки і каталог продавця). */
@@ -609,7 +609,7 @@ module.exports = {
   withOfferLock,
   claimOffer,
   releaseOffer,
-  freezeDueOffers,
+  freezeReceiptOffers,
   autoCompleteEmptyOffers,
   completeOffer,
   countActiveOffersForGroup,

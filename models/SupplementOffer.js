@@ -21,8 +21,8 @@ const mongoose = require('mongoose');
  * доставка) або чия сесія вже закрита, а сама сесія не могла завершитись, поки
  * жива хвиля. Тепер хвиля — самостійна сутність із власним циклом:
  *
- *   open ──(closesAt минув)──► frozen ──(усі заявки спаковані)──► completed
- *                                  └──(заявок немає)────────────► completed
+ *   open ──(кнопка складу/адміна)──► frozen ──(усі заявки спаковані)──► completed
+ *                                         └──(заявок немає)────────────► completed
  *
  * Звичайна OrderingSession завершується за своїми звичайними задачами і про
  * дозамовлення нічого не знає. Номер коробки (якщо він у сесії вже є) показується
@@ -55,12 +55,14 @@ const SupplementOfferSchema = new mongoose.Schema(
     deliveryGroupId: { type: String, required: true },
 
     openedAt: { type: Date, default: Date.now },
-    // Дедлайн ФІКСУЄТЬСЯ тут при створенні. Зміна глобального налаштування
-    // тривалості НЕ рухає дедлайн уже відкритих пропозицій (§6).
-    closesAt: { type: Date, required: true },
+    // Поле лишене для сумісності зі старими документами. Нові дозамовлення
+    // закриваються вручну й дедлайну не мають.
+    closesAt: { type: Date, default: null },
 
     status: { type: String, enum: ['open', 'frozen', 'completed'], default: 'open' },
     frozenAt:    { type: Date, default: null },
+    frozenBy:    { type: String, default: '' },
+    frozenByName:{ type: String, default: '' },
     completedAt: { type: Date, default: null },
 
     // ── Хто зараз пакує цю пропозицію ────────────────────────────────────────
@@ -83,8 +85,9 @@ const SupplementOfferSchema = new mongoose.Schema(
     // повторний тік планувальника не має дублювати повідомлення. Замість окремої
     // колекції NotificationLog (§19) — множина вже надісланих типів на самій
     // пропозиції; кожен запис ставиться атомарним $addToSet із фільтром «ще немає».
-    // Значення: 'opened' | 'mid' | 'soon' | 'frozen'.
+    // Значення: 'opened'. Повторні нагадування керуються lastReminderAt.
     notifiedTypes: { type: [String], default: [] },
+    lastReminderAt: { type: Date, default: null },
   },
   { timestamps: true },
 );
@@ -113,7 +116,7 @@ SupplementOfferSchema.index(
 // Віртуальний блок складу, список продавця і лічильник плитки — усі три читають
 // «активні пропозиції цієї групи». Єдиний потрібний складений індекс.
 SupplementOfferSchema.index({ deliveryGroupId: 1, status: 1 });
-// Планувальник заморозки: «відкриті, дедлайн яких минув».
-SupplementOfferSchema.index({ status: 1, closesAt: 1 });
+// Планувальник нагадувань: відкриті хвилі, яким давно не нагадували.
+SupplementOfferSchema.index({ status: 1, lastReminderAt: 1 });
 
 module.exports = mongoose.model('SupplementOffer', SupplementOfferSchema);

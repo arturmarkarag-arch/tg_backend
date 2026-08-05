@@ -146,32 +146,29 @@ router.post('/ordering-schedule', telegramAuth, requireTelegramRole('admin'), as
 }));
 
 // ── Дозамовлення ─────────────────────────────────────────────────────────────
-// Єдине налаштування першої версії (§6): скільки часу після проведення накладної
-// пропозиція лишається відкритою. Зміна НЕ рухає дедлайни вже відкритих
-// пропозицій — їхній closesAt зафіксовано при створенні.
+// Пряме посилання на Mini App для Telegram-сповіщень. Без fallback на env або
+// username бота: зміна посилання виконується тільки через це налаштування.
 const {
   getSupplementSettings,
   invalidateSupplementSettingsCache,
   normalizeSupplementSettings,
+  isValidSupplementAppUrl,
   SUPPLEMENT_SETTINGS_KEY,
-  MIN_WINDOW_MINUTES,
-  MAX_WINDOW_MINUTES,
 } = require('../utils/supplementSettings');
 
 router.get('/supplement-settings', telegramAuth, requireTelegramRole('admin'), asyncHandler(async (req, res) => {
-  const settings = await getSupplementSettings();
-  res.json({ ...settings, minMinutes: MIN_WINDOW_MINUTES, maxMinutes: MAX_WINDOW_MINUTES });
+  res.json(await getSupplementSettings());
 }));
 
 router.post('/supplement-settings', telegramAuth, requireTelegramRole('admin'), asyncHandler(async (req, res) => {
-  const raw = Math.trunc(Number(req.body?.windowMinutes));
-  if (!Number.isFinite(raw) || raw < MIN_WINDOW_MINUTES || raw > MAX_WINDOW_MINUTES) {
-    throw appError('supplement_settings_invalid', { min: MIN_WINDOW_MINUTES, max: MAX_WINDOW_MINUTES });
+  const appUrl = String(req.body?.appUrl || '').trim();
+  if (!isValidSupplementAppUrl(appUrl)) {
+    throw appError('supplement_app_url_invalid');
   }
-  const value = normalizeSupplementSettings({ windowMinutes: raw });
+  const value = normalizeSupplementSettings({ appUrl });
   await setAppSetting(SUPPLEMENT_SETTINGS_KEY, value);
   await invalidateSupplementSettingsCache();
-  res.json({ ...value, minMinutes: MIN_WINDOW_MINUTES, maxMinutes: MAX_WINDOW_MINUTES });
+  res.json(value);
 }));
 
 // GET /api/admin/cities — список міст з City колекції

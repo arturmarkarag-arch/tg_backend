@@ -1,14 +1,15 @@
 'use strict';
 
 /**
- * Налаштування дозамовлень. У першій версії воно рівно ОДНЕ (§6, §27):
- * скільки часу після проведення накладної пропозиція лишається відкритою.
+ * Налаштування дозамовлень.
  *
- * Читається з AppSetting('supplement.settings') через спільний двошаровий кеш.
- * На відміну від ordering.schedule тут Є дефолт: відсутність запису означає
- * «адмін ще не заходив у налаштування», і падати з помилкою посеред проведення
- * накладної через це не можна — накладна не має жодного стосунку до того, чи
- * встиг адмін відкрити налаштування.
+ * У поточній версії дозамовлення закривається ВРУЧНУ кнопкою складу/адміна,
+ * тому таймера і windowMinutes більше немає.
+ *
+ * Єдине налаштування — пряме посилання на Mini App, яке вставляється в
+ * Telegram-повідомлення. Фолбеків немає свідомо: якщо посилання заблокували або
+ * змінили, адмін замінює його тут і наступні повідомлення одразу використовують
+ * нове значення.
  */
 
 const AppSetting = require('../models/AppSetting');
@@ -16,21 +17,21 @@ const cache = require('./cache');
 
 const SUPPLEMENT_SETTINGS_KEY = 'supplement.settings';
 
-const DEFAULTS = {
-  // 30 хв — типова «хвиля» ранкового приймання: товар приїхав ~07:40, склад
-  // ще збирається, магазини встигають відреагувати до виїзду.
-  windowMinutes: 30,
-};
-
-const MIN_WINDOW_MINUTES = 1;
-const MAX_WINDOW_MINUTES = 12 * 60;
-
 function normalize(raw) {
-  const n = Math.trunc(Number(raw?.windowMinutes));
-  const windowMinutes = Number.isFinite(n)
-    ? Math.min(MAX_WINDOW_MINUTES, Math.max(MIN_WINDOW_MINUTES, n))
-    : DEFAULTS.windowMinutes;
-  return { windowMinutes };
+  return {
+    appUrl: String(raw?.appUrl || '').trim(),
+  };
+}
+
+function isValidAppUrl(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return false;
+  try {
+    const url = new URL(raw);
+    return url.protocol === 'https:';
+  } catch {
+    return false;
+  }
 }
 
 async function getSupplementSettings() {
@@ -51,8 +52,6 @@ module.exports = {
   getSupplementSettings,
   invalidateSupplementSettingsCache,
   normalizeSupplementSettings: normalize,
+  isValidSupplementAppUrl: isValidAppUrl,
   SUPPLEMENT_SETTINGS_KEY,
-  SUPPLEMENT_DEFAULTS: DEFAULTS,
-  MIN_WINDOW_MINUTES,
-  MAX_WINDOW_MINUTES,
 };

@@ -215,8 +215,7 @@ const ERRORS = {
                                   ? `Цей товар зараз пакує ${name}. Перехопити можна через 3 хвилини бездіяльності.`
                                   : 'Цей товар зараз пакує інший складник. Перехопити можна через 3 хвилини бездіяльності.' },
   supplement_not_claimed:      { status: 409, message: 'Спершу візьміть товар у роботу — відкрийте картку дозамовлення заново' },
-  supplement_settings_invalid: { status: 400, message: ({ min, max } = {}) =>
-                                  `Тривалість дозамовлення має бути від ${min ?? 1} до ${max ?? 720} хвилин` },
+  supplement_app_url_invalid: { status: 400, message: 'Вкажіть коректне HTTPS-посилання на Telegram Mini App' },
   // ── Orders ─────────────────────────────────────────────────────────────────
   order_query_forbidden:          { status: 403, message: 'Ви можете запитувати лише власні замовлення' },
   // NB: order_not_found is defined once in the first Orders block above.

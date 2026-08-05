@@ -1227,22 +1227,13 @@ router.post('/:id/commit', staffOnly, asyncHandler(async (req, res) => {
   if (receiptCheck.status === 'completed') throw appError('receipt_already_completed');
 
   // ── Ціль хвилі дозамовлення ───────────────────────────────────────────────
-  // Резолвимо ДО транзакції: перевірка читає групу й магазини, а тримати це
-  // всередині транзакції проведення немає причин. Перевіряється лише те, що не
-  // може змінити рішення працівника (група існує, у ній є магазини) — стан вікна
-  // замовлень і збирання проведення НЕ блокує.
+  // Працівник сам обирає будь-яку групу. Статуси груп — лише інформація.
+  // Закриття дозамовлення виконується вручну складом/адміном, без дедлайну.
   let supplementTarget = null;
   if (receiptCheck.type === 'supplement') {
     const { resolveSupplementTarget } = require('../services/supplementTargets');
-    const { getSupplementSettings } = require('../utils/supplementSettings');
-
     supplementTarget = await resolveSupplementTarget(req.body?.targetDeliveryGroupId);
-
-    // Дедлайн фіксується ТУТ і лягає на накладну — далі його читають і
-    // пропозиції, і звірятель, і Telegram-повідомлення. Одне число, одне місце.
-    const { windowMinutes } = await getSupplementSettings();
     supplementTarget.openedAt = new Date();
-    supplementTarget.closesAt = new Date(supplementTarget.openedAt.getTime() + windowMinutes * 60 * 1000);
   }
 
   const session = await mongoose.connection.startSession();
@@ -1266,7 +1257,7 @@ router.post('/:id/commit', staffOnly, asyncHandler(async (req, res) => {
           ...(supplementTarget ? {
             targetDeliveryGroupId: supplementTarget.deliveryGroupId,
             supplementOpenedAt:    supplementTarget.openedAt,
-            supplementClosesAt:    supplementTarget.closesAt,
+            supplementClosesAt:    null,
             supplementStatus:      'pending',
           } : {}),
         },
@@ -1468,7 +1459,6 @@ router.post('/:id/commit', staffOnly, asyncHandler(async (req, res) => {
             getIO()?.emit('supplement_opened', {
               offerId: String(offer._id),
               deliveryGroupId: String(offer.deliveryGroupId),
-              closesAt: offer.closesAt,
             });
           } catch (_) { /* сокет не критичний */ }
         }
@@ -1492,7 +1482,6 @@ router.post('/:id/commit', staffOnly, asyncHandler(async (req, res) => {
       // хвилю. Без цього «Проведено» нічого не каже про головне — кому.
       supplementTarget: supplementTarget ? {
         deliveryGroupId: supplementTarget.deliveryGroupId,
-        closesAt: supplementTarget.closesAt,
       } : null,
     });
   } catch (err) {

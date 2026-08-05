@@ -54,7 +54,6 @@ const {
   getPreviousOrderingCloseAt,
   DAY_FULL_UK,
 } = require('../utils/orderingSchedule');
-const { getSupplementSettings } = require('../utils/supplementSettings');
 const { appError } = require('../utils/errors');
 
 // ─── Формат тривалості ───────────────────────────────────────────────────────
@@ -146,17 +145,12 @@ async function describeGroup(group, schedule, now) {
     deliveryGroupId: String(group._id),
     isActive: true,
   });
-  if (!shopCount) {
-    return {
-      ...base,
-      state: 'no_shops',
-      selectable: false,
-      title: 'У групі немає активних магазинів',
-      details: ['Дозамовлення нікому показувати'],
-    };
-  }
-
   base.shopCount = shopCount;
+  // Навіть група без активних магазинів лишається клікабельною: статус тут
+  // інформаційний, а остаточне рішення завжди приймає працівник.
+  if (!shopCount) {
+    base.note = 'У групі зараз немає активних магазинів. Дозамовлення відкриється, але продавців для приватного сповіщення може не бути.';
+  }
 
   // ── Вікно ще відкрите ──────────────────────────────────────────────────────
   if (windowOpen) {
@@ -233,7 +227,6 @@ async function describeGroup(group, schedule, now) {
  */
 async function describeSupplementTargets(now = new Date()) {
   const schedule = await getOrderingSchedule();
-  const { windowMinutes } = await getSupplementSettings();
   const groups = await DeliveryGroup.find({}, 'name dayOfWeek').sort({ dayOfWeek: 1, name: 1 }).lean();
 
   const described = [];
@@ -242,20 +235,10 @@ async function describeSupplementTargets(now = new Date()) {
     described.push(await describeGroup(group, schedule, now));
   }
 
-  // Групи без магазинів — у хвіст. Решта лишається в природному порядку днів:
-  // сортувати за «доречністю» означало б знову вирішувати за людину.
-  described.sort((a, b) => Number(b.selectable) - Number(a.selectable));
-
-  const closesAt = new Date(now.getTime() + windowMinutes * MINUTE);
+  // Жодного поділу на «доступні/недоступні»: усі коректні групи клікабельні,
+  // а статуси потрібні тільки як підказка.
   return {
-    groups: described,
-    window: {
-      minutes: windowMinutes,
-      humanDuration: humanDuration(windowMinutes * MINUTE),
-      // Орієнтовний час закриття: справжній рахується в момент проведення.
-      closesAtPreview: closesAt,
-      closesAtLabel: fmtTime(closesAt),
-    },
+    groups: described.map((g) => ({ ...g, selectable: true })),
     serverTime: now.toISOString(),
   };
 }
@@ -283,13 +266,9 @@ async function resolveSupplementTarget(deliveryGroupId) {
   if (!gid || !mongoose.Types.ObjectId.isValid(gid)) throw appError('supplement_target_required');
 
   const group = await DeliveryGroup.findById(gid, 'name dayOfWeek').lean();
-  // dayOfWeek потрібен не для допуску, а тому що без нього для групи неможливо
-  // порахувати ні розклад, ні номери коробок — така група зламана.
-  if (!group || !Number.isInteger(group.dayOfWeek)) throw appError('supplement_target_not_found');
+  if (!group) throw appError('supplement_target_not_found');
 
-  const shopCount = await Shop.countDocuments({ deliveryGroupId: gid, isActive: true });
-  if (!shopCount) throw appError('supplement_target_no_shops', { group: group.name || '' });
-
+  // Ні сесія, ні вікно замовлень, ні кількість магазинів не блокують вибір.
   return { deliveryGroupId: gid };
 }
 

@@ -37,10 +37,8 @@ const ReceiptSchema = new mongoose.Schema(
     // прив'язується — див. models/SupplementOffer.js.
     targetDeliveryGroupId: { type: String, default: null },
 
-    // Дедлайн хвилі рахується ОДИН раз, у момент проведення, і живе тут.
-    // Пропозиції беруть його готовим — тому довідновлення напівстворених хвиль
-    // (reconcilePendingReceipts) не роздає групам різні дедлайни і не подовжує
-    // вікно кожним ретраєм.
+    // supplementClosesAt лишено для сумісності зі старими документами. Нові
+    // дозамовлення закриваються вручну й дедлайну не мають.
     supplementOpenedAt: { type: Date, default: null },
     supplementClosesAt: { type: Date, default: null },
 
