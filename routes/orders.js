@@ -497,7 +497,7 @@ router.get('/', async (req, res) => {
     .select('-history')
     .populate('items.productId', ORDER_ITEM_PRODUCT_FIELDS)
     .populate('receiptId', 'receiptNumber')
-    .sort({ createdAt: -1 });
+    .sort({ createdAt: -1, _id: -1 });
 
   if (pageSize > 0) {
     orderQuery.skip((page - 1) * pageSize).limit(pageSize);

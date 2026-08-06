@@ -42,5 +42,6 @@ const SupplementRequestSchema = new mongoose.Schema(
 SupplementRequestSchema.index({ offerId: 1, shopId: 1 }, { unique: true });
 SupplementRequestSchema.index({ deliveryGroupId: 1, shopId: 1 });
 SupplementRequestSchema.index({ shopId: 1, createdAt: -1 });
+SupplementRequestSchema.index({ createdBy: 1, createdAt: -1 });
 
 module.exports = mongoose.model('SupplementRequest', SupplementRequestSchema);

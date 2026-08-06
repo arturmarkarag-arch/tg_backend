@@ -27,6 +27,7 @@ const { normalizeDeliveryGroup } = require('../utils/deliveryGroupHelpers');
 const cache = require('../utils/cache');
 
 const staffOnly = requireTelegramRoles(['admin', 'warehouse']);
+const registeredOnly = requireTelegramRoles(['seller', 'admin', 'warehouse']);
 
 function escapeRegex(value = '') {
   return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -650,7 +651,7 @@ router.post('/broadcast', async (req, res) => {
 // Telegram the object's public URL — Telegram fetches it, so no bytes pass
 // through Express — forward to the groups, then DELETE the R2 object: the photo
 // lives on only as a Telegram file_id (reused for resends), never stored in R2.
-router.post('/report-missing', asyncHandler(async (req, res) => {
+router.post('/report-missing', registeredOnly, asyncHandler(async (req, res) => {
   const barcodeValue = String(req.body?.barcode || '').trim();
   const filename = String(req.body?.filename || '').replace(/[^a-zA-Z0-9._-]/g, '');
 

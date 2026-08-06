@@ -6,7 +6,7 @@
  *     model.syncIndexes() path the server runs at boot (ShopAuditLog 180d,
  *     ReceiptItemLog + VisionTestLog 365d);
  *   - drop the dead, empty `activitylogs` collection (removed from the codebase);
- *   - run the initial completed-PickingTask purge (>30d).
+ *   - run the initial completed-PickingTask purge (>90d).
  * Idempotent + safe to re-run. Reports the resulting TTL indexes for verification.
  */
 require('dotenv').config({ path: require('path').resolve(__dirname, '../../.env') });

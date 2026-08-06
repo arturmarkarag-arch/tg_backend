@@ -3,6 +3,7 @@ const { S3Client, HeadBucketCommand } = require('@aws-sdk/client-s3');
 const { normalizeBarcode } = require('../utils/barcodeScanner');
 const SearchProduct = require('../models/SearchProduct');
 const { appError, asyncHandler } = require('../utils/errors');
+const { telegramAuth, requireTelegramRoles } = require('../middleware/telegramAuth');
 
 const s3Client = new S3Client({
   region: process.env.R2_REGION || 'auto',
@@ -92,7 +93,7 @@ router.get('/', asyncHandler(async (req, res) => {
   res.json({ items });
 }));
 
-router.post('/resend', asyncHandler(async (req, res) => {
+router.post('/resend', telegramAuth, requireTelegramRoles(['seller', 'admin', 'warehouse']), asyncHandler(async (req, res) => {
   const barcodeValue = String(req.body.barcode || '').trim();
   if (!barcodeValue) throw appError('product_barcode_required');
 

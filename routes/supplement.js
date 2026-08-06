@@ -40,6 +40,7 @@ const router = express.Router();
 
 const sellerRoles    = requireTelegramRoles(['seller', 'admin']);
 const warehouseRoles = requireTelegramRoles(['warehouse', 'admin']);
+const adminOnly       = requireTelegramRoles(['admin']);
 
 const MIN_QTY = 1;
 // Та сама межа, що й у звичайному каталозі.
@@ -323,6 +324,88 @@ router.get('/my', sellerRoles, asyncHandler(async (req, res) => {
         product: productView(offer ? productMap.get(String(offer.productId)) : null),
         shopName: r.shopName || shop?.name || '',
         shopCity: shop?.cityId?.name || '',
+      };
+    }),
+  });
+}));
+
+
+/** GET /api/supplement/admin/seller/:telegramId — дозамовлення, створені конкретним продавцем. */
+router.get('/admin/seller/:telegramId', adminOnly, asyncHandler(async (req, res) => {
+  const telegramId = String(req.params.telegramId || '').trim();
+  if (!telegramId) return res.json({ requests: [] });
+
+  const page = Math.max(1, Number.parseInt(req.query.page, 10) || 1);
+  const pageSize = Math.min(500, Math.max(1, Number.parseInt(req.query.pageSize, 10) || 500));
+  const filter = { createdBy: telegramId };
+  const [total, requests] = await Promise.all([
+    SupplementRequest.countDocuments(filter),
+    SupplementRequest.find(filter)
+      .sort({ createdAt: -1, _id: -1 })
+      .skip((page - 1) * pageSize)
+      .limit(pageSize)
+      .lean(),
+  ]);
+
+  if (!requests.length) {
+    return res.json({
+      requests: [],
+      total,
+      page,
+      pageSize,
+      pageCount: Math.max(1, Math.ceil(total / pageSize)),
+    });
+  }
+
+  const offers = await SupplementOffer.find({
+    _id: { $in: requests.map((request) => request.offerId) },
+  }).lean();
+  const offerById = new Map(offers.map((offer) => [String(offer._id), offer]));
+
+  const receiptIds = [...new Set(
+    offers.map((offer) => String(offer.receiptId || '')).filter(Boolean),
+  )];
+  const shopIds = [...new Set(
+    requests.map((request) => String(request.shopId || '')).filter(Boolean),
+  )];
+
+  const [productMap, receipts, shops] = await Promise.all([
+    loadProductsFor(offers),
+    Receipt.find({ _id: { $in: receiptIds } }, '_id receiptNumber').lean(),
+    Shop.find({ _id: { $in: shopIds } }, 'name cityId deliveryGroupId')
+      .populate('cityId', 'name')
+      .lean(),
+  ]);
+
+  const receiptById = new Map(receipts.map((receipt) => [String(receipt._id), receipt]));
+  const shopById = new Map(shops.map((shop) => [String(shop._id), shop]));
+  const now = new Date();
+
+  res.json({
+    serverTime: now.toISOString(),
+    total,
+    page,
+    pageSize,
+    pageCount: Math.max(1, Math.ceil(total / pageSize)),
+    requests: requests.map((request) => {
+      const offer = offerById.get(String(request.offerId));
+      const receiptId = offer?.receiptId ? String(offer.receiptId) : '';
+      const receipt = receiptById.get(receiptId);
+      const shop = shopById.get(String(request.shopId));
+      return {
+        requestId: String(request._id),
+        offerId: String(request.offerId),
+        receiptId,
+        receiptNumber: receipt?.receiptNumber || '',
+        createdAt: request.createdAt,
+        openedAt: offer?.openedAt || request.createdAt,
+        quantity: request.quantity,
+        packed: !!request.packed,
+        status: offer ? effectiveOfferStatus(offer, now) : 'completed',
+        product: productView(offer ? productMap.get(String(offer.productId)) : null),
+        shopName: request.shopName || shop?.name || '',
+        shopCity: shop?.cityId?.name || '',
+        deliveryGroupId: String(request.deliveryGroupId || offer?.deliveryGroupId || shop?.deliveryGroupId || ''),
       };
     }),
   });

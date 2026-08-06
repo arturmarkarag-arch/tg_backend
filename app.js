@@ -65,12 +65,11 @@ if (ENABLE_TEST_API) {
   });
 }
 
-const { telegramAuth } = require('./middleware/telegramAuth');
+const { telegramAuth, requireTelegramRole } = require('./middleware/telegramAuth');
 
 const publicApiPaths = [
   /^\/api\/v1\/auth(\/.*)?$/,
   /^\/api\/search-products(\/.*)?$/,
-  /^\/api\/v1\/products\/report-missing$/,
   /^\/api\/v1\/telegram\/validate$/,
   /^\/api\/v1\/telegram\/register-request$/,
   // Self-service invite for a group member who opened the mini-app without a
@@ -88,8 +87,6 @@ const publicApiPaths = [
   /^\/api\/health$/,
   /^\/api\/maintenance$/,
   /^\/api\/bot-status$/,
-  /^\/api\/openai-status$/,
-  /^\/api\/gemini-status$/,
 ];
 
 // The test harness UI calls warehouse-test without auth. This is acceptable
@@ -125,7 +122,7 @@ app.get('/api/bot-status', (req, res) => {
   res.json(getBotStatus());
 });
 
-app.get('/api/openai-status', async (req, res) => {
+app.get('/api/openai-status', requireTelegramRole('admin'), async (req, res) => {
   try {
     const result = await verifyOpenAIConnection();
     res.json(result);
@@ -139,7 +136,7 @@ app.get('/api/openai-status', async (req, res) => {
   }
 });
 
-app.get('/api/gemini-status', async (req, res) => {
+app.get('/api/gemini-status', requireTelegramRole('admin'), async (req, res) => {
   try {
     const result = await verifyGeminiConnection();
     res.json(result);

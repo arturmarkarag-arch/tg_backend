@@ -16,7 +16,7 @@ const ARCHIVE_TO_SHOP_DAYS = 30;
 // counted on the board — tasks from sessions weeks in the past are pure dead
 // weight. A TTL index can't express "status === 'completed' AND old" (TTL indexes
 // cannot be partial), so this is swept on a schedule instead of by the engine.
-const COMPLETED_PICKING_RETENTION_DAYS = 30;
+const COMPLETED_PICKING_RETENTION_DAYS = 90;
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
