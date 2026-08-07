@@ -25,8 +25,10 @@ slot or block the current cycle.
 - shift board shows historical orphan tasks explicitly as `НЕ блокує`.
 - read-only `scripts/auditOperationalContracts.js` added for shop/seller/order/task invariants.
 
-## Deliberately not hard-enforced yet
+## Seller / shop / Order contract
 
-`1 shop = 1 seller = 1 active order/session` is the target contract but live data must be
-repaired before adding a strict shop/session unique index. Current start-session conflict
-protection remains in place.
+Multiple sellers per shop are supported. One seller has at most one active Order for
+`buyer + shop + orderingSession`; that Order contains many product positions. A shop is a
+conflict only when current-session active Orders belong to 2+ distinct buyers. That conflict
+blocks **picking start only** and is resolved by moving or unassigning a seller. Do not add a
+strict `(shop, session)` unique index.

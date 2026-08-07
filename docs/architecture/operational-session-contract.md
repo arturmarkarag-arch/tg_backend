@@ -21,7 +21,7 @@ Only defects that belong to the CURRENT `orderingSessionId` may block that sessi
 - active current-session PickingTasks;
 - current-session coverage gaps;
 - current-session unterminated Order items;
-- multiple Orders from different buyers for one shop inside the current session.
+- session-owned task/order with a delivery-group mismatch (corruption guard);
 
 Historical/foreign state is visibility-only:
 
@@ -58,16 +58,20 @@ Picking checkbox state is server-authoritative. There is no localStorage restore
 shops. Before final complete/OOS, the client waits until the newest progress write has been
 acknowledged by the server.
 
-## Shop -> seller -> order contract (not yet hard-indexed)
+## Shop -> seller -> order contract
 
-The intended business contract is one seller per shop and one full active order per shop per
-session. Today:
+Multiple sellers MAY be assigned to one shop. Seller presence alone is not a conflict.
 
-- transfer/start-session logic detects current-session seller/order conflicts;
-- `auditOperationalContracts.js` reports shops with multiple sellers and multiple active
-  Orders for `(shop, session)`;
-- the existing Order DB unique index is still `(buyer, shop, session)`.
+- one seller has at most one active Order for `(buyer, shop, orderingSession)`;
+- that Order contains N product positions;
+- a shop becomes a conflict only when CURRENT-session active Orders (`new|in_progress`)
+  belong to 2+ distinct buyers;
+- that conflict is a HARD gate only before picking starts;
+- after picking has started, the same condition is informational only and MUST NOT block
+  picking-session closure;
+- staff may move a conflicting seller to any other active shop or unassign them. Moving a
+  conflict is allowed: if the destination then has active Orders from 2+ buyers, the same
+  pre-start gate simply remains blocked there until staff resolves it.
 
-Do NOT replace it with a strict `(shop, session)` unique index until live conflicts are
-repaired. A failed unique-index deployment must never become tomorrow morning's warehouse
-outage.
+The Order DB unique index intentionally remains `(buyer, shop, session)`. Do NOT replace it
+with `(shop, session)`: multiple sellers per shop are a supported business state.

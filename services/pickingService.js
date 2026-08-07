@@ -81,11 +81,22 @@ async function finalizeSessionAndGetBlockers(orderingSessionId, deliveryGroupId,
   const completed = await maybeCompleteSession(sessionId, { actor });
   if (completed) return [];
 
-  const active = await PickingTask.countDocuments({
-    orderingSessionId: sessionId,
-    status: { $in: ['pending', 'locked'] },
-  });
-  if (active > 0) return [];
+  const [active, activeInExpectedGroup] = await Promise.all([
+    PickingTask.countDocuments({
+      orderingSessionId: sessionId,
+      status: { $in: ['pending', 'locked'] },
+    }),
+    PickingTask.countDocuments({
+      orderingSessionId: sessionId,
+      deliveryGroupId: groupId,
+      status: { $in: ['pending', 'locked'] },
+    }),
+  ]);
+  // Normal live work is not a closure error worth spamming after every product.
+  // But if session-owned active tasks exist OUTSIDE the expected group, do run the
+  // audit: otherwise maybeCompleteSession is blocked by them and the worker sees
+  // no explanation because the normal group queue is already empty.
+  if (active > 0 && active === activeInExpectedGroup) return [];
 
   // Lazy import avoids the sessionClosure -> sessionCoverage -> archiveProduct ->
   // sessionStatus cycle at module initialisation time.

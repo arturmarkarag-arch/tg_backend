@@ -53,7 +53,6 @@ const cache = require('../utils/cache');
 const { getShop, getDeliveryGroup, invalidateShop } = require('../utils/modelCache');
 const { withLock } = require('../utils/lock');
 const { migrateSellerShop } = require('../services/migrateSellerShop');
-const { computeTargetShopState } = require('../utils/shopConflict');
 const { unassignSellerAndPark } = require('../services/unassignSeller');
 const { activeOrderShopFilter } = require('../utils/orderShopFilter');
 const { reconcileLateOrderStrict } = require('../services/lateOrderReconcile');
@@ -347,8 +346,12 @@ router.get('/conflicts', staffOnly, async (req, res) => {
 
 /**
  * POST /conflicts/resolve — admin/warehouse resolves a shop conflict by either
- * moving one seller (with their active order) to a clean shop, or unassigning a
- * seller (parking their not-yet-picked order so it follows them on next assignment).
+ * moving one seller (with their active order) to another active shop, or
+ * unassigning the seller (parking their not-yet-picked order so it follows them
+ * on the next assignment). The destination does NOT have to be empty: seller
+ * presence alone is not a conflict. If the destination has another buyer's active
+ * Order, the canonical pre-picking gate simply reports the conflict there until
+ * staff resolves it.
  * Body: { shopId, buyerTelegramId, action: 'move'|'unassign', toShopId? }
  */
 router.post('/conflicts/resolve', staffOnly, asyncHandler(async (req, res) => {
@@ -385,13 +388,12 @@ router.post('/conflicts/resolve', staffOnly, asyncHandler(async (req, res) => {
       const toShop = await Shop.findById(toShopId).populate('cityId', 'name').session(session);
       if (!toShop || !toShop.isActive) throw appError('order_shop_not_found');
 
-      // Target must be completely clean — moving into an occupied shop would just
-      // relocate the conflict.
-      const targetState = await computeTargetShopState(String(toShop._id), '', session);
-      if (targetState.sellers.length > 0 || targetState.activeOrders.length > 0) {
-        throw appError('conflict_target_not_empty');
-      }
+      if (String(toShop._id) === String(shopId)) throw appError('conflict_target_same_shop');
 
+      // Intentionally no "target must be empty" rule. Multiple assigned sellers
+      // are legal; only ACTIVE Orders from multiple buyers constitute a conflict.
+      // If moving here creates/relocates such a conflict, shop-status + the server
+      // start-session gate will keep picking blocked until it is resolved.
       const result = await migrateSellerShop({
         session,
         existingUser: seller,

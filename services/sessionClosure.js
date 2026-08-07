@@ -5,7 +5,8 @@
  *
  * blockers = defects that belong to this exact session and may stop ONLY this
  * session from becoming completed.
- * warnings = historical/foreign state in the same delivery group. Warnings are
+ * warnings = informational/non-blocking state (historical/foreign debris,
+ * parked orders, or a conflict that appeared after picking start). Warnings are
  * visible for repair but NEVER block the current session or next week's work.
  */
 const Order = require('../models/Order');
@@ -35,33 +36,74 @@ async function auditSessionClosure({ deliveryGroupId, orderingSessionId }) {
     return { ok: false, blockers, warnings, session: session || null };
   }
 
-  const active = await PickingTask.find({
-    deliveryGroupId: groupId,
+  // Session ownership is canonical. Query ALL active tasks by sessionId first,
+  // then validate their group. Otherwise a corrupted task with the correct
+  // orderingSessionId but a wrong deliveryGroupId can block maybeCompleteSession()
+  // while disappearing from this audit — the exact "can't close and can't see why"
+  // failure this audit exists to prevent.
+  const sessionActiveTasks = await PickingTask.find({
     orderingSessionId: sessionId,
     status: { $in: ['pending', 'locked'] },
-  }, '_id productId blockId positionIndex status lockedBy lockedAt').sort({ blockId: 1, positionIndex: 1 }).lean();
+  }, '_id productId deliveryGroupId blockId positionIndex status lockedBy lockedAt').sort({ blockId: 1, positionIndex: 1 }).lean();
+
+  const active = sessionActiveTasks.filter((t) => str(t.deliveryGroupId) === groupId);
+  const taskGroupMismatches = sessionActiveTasks.filter((t) => str(t.deliveryGroupId) !== groupId);
   if (active.length) blockers.push(issue('active_tasks', active.map((t) => ({
     taskId: str(t._id), productId: str(t.productId), blockId: t.blockId,
     positionIndex: t.positionIndex, status: t.status, lockedBy: str(t.lockedBy) || null,
     lockedAt: t.lockedAt || null,
   }))));
+  if (taskGroupMismatches.length) blockers.push(issue('session_task_group_mismatch', taskGroupMismatches.map((t) => ({
+    taskId: str(t._id), productId: str(t.productId), deliveryGroupId: str(t.deliveryGroupId) || null,
+    expectedDeliveryGroupId: groupId, blockId: t.blockId, positionIndex: t.positionIndex,
+    status: t.status, lockedBy: str(t.lockedBy) || null, lockedAt: t.lockedAt || null,
+  }))));
 
   const coverage = await auditSessionCoverage({ deliveryGroupId: groupId, orderingSessionId: sessionId });
   if (!coverage.ok) blockers.push(issue('coverage_gaps', coverage.gaps));
 
-  // Direct invariant, independent of Order.status. `expired` is terminal at the
-  // order level and is intentionally outside the delivery cycle.
-  const orders = await Order.find({
-    'buyerSnapshot.deliveryGroupId': groupId,
+  // Session ownership is also canonical for Orders. Fetch by sessionId first so a
+  // damaged buyerSnapshot.deliveryGroupId cannot make an Order invisible to the
+  // end-of-session audit. `expired` is terminal at order level and intentionally
+  // outside the delivery cycle.
+  const sessionOrders = await Order.find({
     orderingSessionId: sessionId,
     status: { $ne: 'expired' },
   }, '_id orderNumber status buyerTelegramId shopId buyerSnapshot items').lean();
-  // 4. One shop must not have active/order-bearing rows from multiple sellers
-  // inside the SAME session. start-session already blocks this before task build;
-  // this is the backstop for a conflict introduced later by an admin/late-order path.
-  // Historical sessions are intentionally outside this query.
+
+  // An unassigned seller's active Order is intentionally PARKED by
+  // unassignSellerAndPark(): shopId + snapshot shop/group are cleared while the
+  // old orderingSessionId is left as historical provenance until the seller is
+  // assigned again. That is NOT corruption and must not block warehouse closure.
+  const isParkedOrder = (o) => (
+    !str(o.shopId) &&
+    !str(o.buyerSnapshot?.shopId) &&
+    !str(o.buyerSnapshot?.deliveryGroupId)
+  );
+  const parkedOrders = sessionOrders.filter(isParkedOrder);
+  const operationalOrders = sessionOrders.filter((o) => !isParkedOrder(o));
+  const orders = operationalOrders.filter((o) => str(o.buyerSnapshot?.deliveryGroupId) === groupId);
+  const orderGroupMismatches = operationalOrders.filter((o) => str(o.buyerSnapshot?.deliveryGroupId) !== groupId);
+  if (orderGroupMismatches.length) blockers.push(issue('session_order_group_mismatch', orderGroupMismatches.map((o) => ({
+    orderId: str(o._id), orderNumber: o.orderNumber ?? null, status: o.status,
+    buyerTelegramId: str(o.buyerTelegramId), shopName: o.buyerSnapshot?.shopName || '',
+    deliveryGroupId: str(o.buyerSnapshot?.deliveryGroupId) || null,
+    expectedDeliveryGroupId: groupId,
+    livePositions: (o.items || []).filter((i) => !terminalItem(i)).length,
+  }))));
+  if (parkedOrders.length) warnings.push(issue('parked_session_orders', parkedOrders.map((o) => ({
+    orderId: str(o._id), orderNumber: o.orderNumber ?? null, status: o.status,
+    buyerTelegramId: str(o.buyerTelegramId),
+    livePositions: (o.items || []).filter((i) => !terminalItem(i)).length,
+  })), { blocking: false, scope: 'unassigned_seller' }));
+
+  // Seller/order conflicts are a PRE-PICKING gate. start-session is authoritative
+  // and blocks before task build. If one somehow appears after picking started it
+  // is useful forensic information, but it must NEVER become a second closure gate.
+  // Keep the canonical conflict definition: ACTIVE orders (new|in_progress) from
+  // 2+ distinct buyers on one shop in THIS session.
   const ordersByShop = new Map();
-  for (const order of orders) {
+  for (const order of orders.filter((o) => ['new', 'in_progress'].includes(o.status))) {
     const shopId = str(order.shopId || order.buyerSnapshot?.shopId);
     if (!shopId) continue;
     if (!ordersByShop.has(shopId)) ordersByShop.set(shopId, []);
@@ -76,14 +118,15 @@ async function auditSessionClosure({ deliveryGroupId, orderingSessionId }) {
       shopName: rows[0]?.buyerSnapshot?.shopName || '',
       buyerTelegramIds: buyers,
       orders: rows.map((o) => ({
-        orderId: str(o._id),
-        orderNumber: o.orderNumber ?? null,
-        status: o.status,
+        orderId: str(o._id), orderNumber: o.orderNumber ?? null, status: o.status,
         buyerTelegramId: str(o.buyerTelegramId),
       })),
     });
   }
-  if (shopOrderConflicts.length) blockers.push(issue('shop_order_conflicts', shopOrderConflicts));
+  if (shopOrderConflicts.length) warnings.push(issue('shop_order_conflicts', shopOrderConflicts, {
+    blocking: false,
+    scope: 'pre_picking_conflict',
+  }));
 
   const unterminated = [];
   for (const o of orders) {
