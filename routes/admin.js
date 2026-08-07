@@ -391,17 +391,32 @@ router.get('/telegram-groups/:groupId/members', telegramAuth, requireTelegramRol
   res.json(members);
 }));
 
-// Re-check a single unregistered member's live group status and, if they are
-// still in the group (and still not registered), re-push the registration
-// prompt. If they actually left, mark them so the list drops them.
+// Live-check one person. IMPORTANT: this is a notification-free admin audit.
+// It only reads getChatMember and updates technical status fields in GroupMember.
+// No welcome / registration / push message is sent or deleted.
 router.post('/telegram-groups/:groupId/members/:telegramId/recheck', telegramAuth, requireTelegramRole('admin'), asyncHandler(async (req, res) => {
-  const { recheckAndRepushWelcome } = require('../telegramBot');
+  const { checkAndPersistGroupMember } = require('../services/groupMemberAudit');
   const groupId = String(req.params.groupId).trim();
   const telegramId = String(req.params.telegramId).trim();
   const allowedIds = await getAllowedGroupIds();
   if (!allowedIds.includes(groupId)) return res.status(403).json({ error: 'Група не авторизована' });
 
-  const result = await recheckAndRepushWelcome(groupId, telegramId);
+  const result = await checkAndPersistGroupMember(groupId, telegramId);
+  if (!result.ok) return res.status(502).json(result);
+  res.json(result);
+}));
+
+// Bulk live-check for the selected group. Includes everyone the bot has ever
+// observed in that group + all registered sellers, which surfaces the reverse
+// discrepancy "є в додатку, але немає в Telegram-групі". Sequential by design
+// to stay below Telegram rate limits. Never sends notifications.
+router.post('/telegram-groups/:groupId/check-all', telegramAuth, requireTelegramRole('admin'), asyncHandler(async (req, res) => {
+  const { auditGroup } = require('../services/groupMemberAudit');
+  const groupId = String(req.params.groupId).trim();
+  const allowedIds = await getAllowedGroupIds();
+  if (!allowedIds.includes(groupId)) return res.status(403).json({ error: 'Група не авторизована' });
+
+  const result = await auditGroup(groupId);
   if (!result.ok) return res.status(502).json(result);
   res.json(result);
 }));

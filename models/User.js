@@ -43,6 +43,10 @@ const UserSchema = new mongoose.Schema(
     sessionsValidFrom: { type: Date, default: null },
     botLastActivityAt: { type: Date, default: null },
     botLastSessionAt: { type: Date, default: null },
+    // Real application open marker. Updated whenever an authenticated profile is
+    // bootstrapped (Telegram Mini App or browser session). Older accounts may be
+    // null until their first open after this field was introduced.
+    lastAppOpenedAt: { type: Date, default: null },
     miniAppState: {
       lastViewedProductId: { type: String, default: '' },
       currentIndex: { type: Number, default: 0 },

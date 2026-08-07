@@ -130,7 +130,7 @@ async function syncGroupMemberRows(telegramId, user, results, now) {
       updateOne: {
         filter: { groupChatId: r.groupChatId, telegramId: String(telegramId) },
         update: {
-          $set: { left: !r.present, statusCheckedAt: now },
+          $set: { left: !r.present, telegramStatus: r.status || (r.present ? 'member' : 'not_found'), statusCheckedAt: now, statusCheckError: '' },
           // Імена лише при створенні — щоб свіп не затирав те, що прийшло з
           // живого чату (там вони свіжіші й з username).
           $setOnInsert: {

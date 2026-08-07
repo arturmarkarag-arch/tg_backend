@@ -137,6 +137,13 @@ async function resolveWarehouseZone(user) {
 // Telegram mini-app path (POST /me, initData) and the browser path
 // (GET /api/v1/auth/me, JWT) so both return an identical shape.
 async function buildUserProfile(user) {
+  // This function is only used to bootstrap an authenticated app/browser
+  // profile, so it is the canonical place to record a real app open.
+  const appOpenedAt = new Date();
+  await User.updateOne({ _id: user._id }, { $set: { lastAppOpenedAt: appOpenedAt } }).catch((err) => {
+    console.warn('[buildUserProfile] lastAppOpenedAt update failed:', err?.message);
+  });
+
   const userShop = user.shopId ? await getShop(user.shopId) : null;
   const fallbackGroupId = userShop?.deliveryGroupId || user.deliveryGroupId || '';
 
@@ -241,6 +248,7 @@ async function buildUserProfile(user) {
     isOnShift: user.isOnShift || false,
     shiftZone: user.shiftZone || { startBlock: null, endBlock: null },
     sessionOpenAt,
+    lastAppOpenedAt: appOpenedAt,
     miniAppState: normalizeMiniAppState(user.miniAppState || {
       lastViewedProductId: '',
       currentIndex: 0,

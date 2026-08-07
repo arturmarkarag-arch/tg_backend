@@ -139,21 +139,22 @@ async function ensureOrderNotInPickingPipeline(orderId, session = null) {
 }
 
 /**
- * Middleware: returns 423 Locked when the ordering window is closed for a seller.
- * Staff (admin / warehouse) always pass through unchanged.
- * Requires telegramAuth to have run first (req.telegramUser populated).
+ * Middleware: returns 423 Locked when the ordering window is closed.
+ * Applies to EVERY role — see the note below. Requires telegramAuth to have run
+ * first (req.telegramUser populated).
  */
 async function requireOrderingWindowOpen(req, res, next) {
   try {
     const user = req.telegramUser;
-    // Warehouse users cannot place orders at all — they manage picking, not ordering.
-    if (!user || user.role === 'warehouse') return next();
-    // Non-sellers (admins) with no shop assigned cannot order — return clear error.
-    if (user.role !== 'seller' && !user.shopId) {
-      return res.status(403).json({ error: 'no_shop', message: 'Вас не призначено до жодного магазину.' });
-    }
-    if (user.role !== 'seller') return next(); // admin with shop — skip window check
+    if (!user) return next();
 
+    // The window binds every role. admin (and warehouse) used to walk straight
+    // past this check, and that bypass was a live channel for creating order
+    // positions during the dead time — after picking had already started. Such a
+    // position can never get a PickingTask (start-session stops building the plan
+    // once pickingStatus leaves 'pending'), so it dies `skipped` on the next
+    // lateOrderReconcile sweep, silently. Who may touch an order at all is decided
+    // by the role checks inside the routes; this gate only decides WHEN.
     if (!user.shopId) {
       return res.status(403).json({
         error: 'no_shop',

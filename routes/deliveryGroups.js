@@ -7,6 +7,7 @@ const Order = require('../models/Order');
 const Shop = require('../models/Shop');
 const PickingTask = require('../models/PickingTask');
 const CatalogReview = require('../models/CatalogReview');
+const OrderingSession = require('../models/OrderingSession');
 const { telegramAuth, requireTelegramRole, requireTelegramRoles } = require('../middleware/telegramAuth');
 const {
   isOrderingOpen,
@@ -16,6 +17,7 @@ const {
 const { getOrCreateSessionId } = require('../utils/getOrCreateSession');
 const { pushSessionEvent } = require('../utils/sessionStatus');
 const { normalizeDeliveryGroup } = require('../utils/deliveryGroupHelpers');
+const { deriveSessionPhase, PHASE_VOCAB } = require('../utils/sessionVocab');
 const { getIO } = require('../socket');
 
 const { getOrderingSchedule } = require('../utils/getOrderingSchedule');
@@ -32,6 +34,251 @@ async function getAllDeliveryGroups() {
 }
 
 const router = express.Router();
+
+function addDaysToDateString(dateString, days) {
+  if (!dateString) return null;
+  const [year, month, day] = String(dateString).split('-').map(Number);
+  if (!year || !month || !day) return null;
+  const date = new Date(Date.UTC(year, month - 1, day + Number(days || 0)));
+  return date.toISOString().slice(0, 10);
+}
+
+function getSessionDeliveryDate(openDate, deliveryDayOfWeek) {
+  const dayBefore = (Number(deliveryDayOfWeek) - 1 + 7) % 7;
+  const openDay = dayBefore === 0 ? 6 : dayBefore;
+  const offsetDays = (Number(deliveryDayOfWeek) - openDay + 7) % 7;
+  return addDaysToDateString(openDate, offsetDays);
+}
+
+function summarizeSellerOrders(orders = []) {
+  const summary = {
+    exists: orders.length > 0,
+    orderCount: orders.length,
+    orderNumbers: [],
+    firstOrderedAt: null,
+    lastUpdatedAt: null,
+    positionsTotal: 0,
+    positionsProcessed: 0,
+    positionsPacked: 0,
+    positionsPending: 0,
+    positionsCancelled: 0,
+    positionsSkipped: 0,
+    positionsShortfall: 0,
+    unitsOrdered: 0,
+    unitsPacked: 0,
+    unitsPending: 0,
+    unitsNotComing: 0,
+    shortfallUnits: 0,
+    problemItems: [],
+    items: [],
+  };
+
+  for (const order of orders) {
+    if (order.orderNumber != null) summary.orderNumbers.push(order.orderNumber);
+    const createdAt = order.createdAt ? new Date(order.createdAt) : null;
+    const updatedAt = order.updatedAt ? new Date(order.updatedAt) : null;
+    if (createdAt && (!summary.firstOrderedAt || createdAt < summary.firstOrderedAt)) summary.firstOrderedAt = createdAt;
+    if (updatedAt && (!summary.lastUpdatedAt || updatedAt > summary.lastUpdatedAt)) summary.lastUpdatedAt = updatedAt;
+
+    for (const item of order.items || []) {
+      const ordered = Math.max(0, Number(item.quantity || 0));
+      if (!ordered) continue;
+      summary.positionsTotal += 1;
+      summary.unitsOrdered += ordered;
+
+      if (item.cancelled) {
+        summary.positionsProcessed += 1;
+        summary.positionsCancelled += 1;
+        summary.unitsNotComing += ordered;
+        const line = {
+          name: item.name || 'Товар',
+          type: 'cancelled',
+          ordered,
+          packed: 0,
+          message: 'Закінчився на складі — не приїде',
+        };
+        summary.problemItems.push(line);
+        summary.items.push({ ...line, status: 'cancelled', statusLabel: 'Не приїде' });
+        continue;
+      }
+
+      if (item.skipped) {
+        summary.positionsProcessed += 1;
+        summary.positionsSkipped += 1;
+        summary.unitsNotComing += ordered;
+        const line = {
+          name: item.name || 'Товар',
+          type: 'skipped',
+          ordered,
+          packed: 0,
+          message: 'Не потрапив у поточне збирання — не приїде',
+        };
+        summary.problemItems.push(line);
+        summary.items.push({ ...line, status: 'skipped', statusLabel: 'Пропущено' });
+        continue;
+      }
+
+      if (item.packed) {
+        const packed = item.packedQuantity == null
+          ? ordered
+          : Math.max(0, Math.min(ordered, Number(item.packedQuantity || 0)));
+        summary.positionsProcessed += 1;
+        summary.positionsPacked += 1;
+        summary.unitsPacked += packed;
+        if (packed < ordered) {
+          const missing = ordered - packed;
+          summary.positionsShortfall += 1;
+          summary.shortfallUnits += missing;
+          summary.unitsNotComing += missing;
+          const line = {
+            name: item.name || 'Товар',
+            type: 'short_pick',
+            ordered,
+            packed,
+            message: `Зібрано ${packed} із ${ordered} шт.`,
+          };
+          summary.problemItems.push(line);
+          summary.items.push({ ...line, status: 'short_pick', statusLabel: 'Частково зібрано' });
+        } else {
+          summary.items.push({
+            name: item.name || 'Товар',
+            type: 'packed',
+            ordered,
+            packed,
+            message: `Зібрано ${packed} шт.`,
+            status: 'packed',
+            statusLabel: 'Зібрано',
+          });
+        }
+        continue;
+      }
+
+      summary.positionsPending += 1;
+      summary.unitsPending += ordered;
+      summary.items.push({
+        name: item.name || 'Товар',
+        type: 'pending',
+        ordered,
+        packed: 0,
+        message: 'Ще не опрацьовано складом',
+        status: 'pending',
+        statusLabel: 'Очікує',
+      });
+    }
+  }
+
+  summary.orderNumbers = [...new Set(summary.orderNumbers)].sort((a, b) => a - b);
+  summary.firstOrderedAt = summary.firstOrderedAt ? summary.firstOrderedAt.toISOString() : null;
+  summary.lastUpdatedAt = summary.lastUpdatedAt ? summary.lastUpdatedAt.toISOString() : null;
+  return summary;
+}
+
+async function buildSellerClosedDashboard({ user, shop, group, schedule, sessionId, catalogReviewedAt }) {
+  const session = await OrderingSession.findById(
+    sessionId,
+    'seq openDate pickingStatus pickingConfirmedAt pickingStartedAt pickingCompletedAt shopNumbers',
+  ).lean();
+
+  const [orders, groupOrderCount, totalTasks, completedTasks, lockedTasks] = await Promise.all([
+    Order.find({
+      buyerTelegramId: String(user.telegramId),
+      orderingSessionId: String(sessionId),
+      status: { $ne: 'expired' },
+      $or: [{ orderType: 'manual' }, { orderType: { $exists: false } }],
+    }).select('orderNumber status createdAt updatedAt items').lean(),
+    Order.countDocuments({ orderingSessionId: String(sessionId), status: { $ne: 'expired' } }),
+    PickingTask.countDocuments({ orderingSessionId: String(sessionId) }),
+    PickingTask.countDocuments({ orderingSessionId: String(sessionId), status: 'completed' }),
+    PickingTask.countDocuments({ orderingSessionId: String(sessionId), status: 'locked' }),
+  ]);
+
+  const order = summarizeSellerOrders(orders);
+  const pickingStatus = session?.pickingStatus || 'pending';
+  const hasWork = pickingStatus === 'completed' ? totalTasks > 0 : groupOrderCount > 0;
+  const phase = deriveSessionPhase({ pickingStatus, windowOpen: false, hasWork });
+  const phaseLabel = PHASE_VOCAB[phase]?.label || 'Очікує';
+  const shopNumber = (session?.shopNumbers || []).find((entry) => String(entry.shopId) === String(shop._id))?.number ?? null;
+  const progressPercent = totalTasks > 0 ? Math.round((completedTasks / totalTasks) * 100) : 0;
+  const myProgressPercent = order.positionsTotal > 0
+    ? Math.round((order.positionsProcessed / order.positionsTotal) * 100)
+    : 0;
+
+  let deliveryStatus = 'none';
+  let deliveryStatusLabel = 'У цьому циклі у вас немає замовлення';
+  if (order.exists) {
+    const myOrderProcessed = order.positionsTotal > 0 && order.positionsProcessed >= order.positionsTotal;
+    if (phase === 'awaiting_picking') {
+      deliveryStatus = 'waiting_picking';
+      deliveryStatusLabel = 'Замовлення прийнято — очікує збирання на складі';
+    } else if (phase === 'picking' && myOrderProcessed) {
+      deliveryStatus = 'waiting_group';
+      deliveryStatusLabel = 'Ваше замовлення вже опрацьовано — очікує завершення збирання всієї групи';
+    } else if (phase === 'picking') {
+      deliveryStatus = 'picking';
+      deliveryStatusLabel = 'Ваше замовлення зараз формують на складі';
+    } else if (phase === 'completed') {
+      deliveryStatus = 'ready';
+      deliveryStatusLabel = 'Склад завершив збирання групи — фактичний виїзд доставки система поки не відстежує';
+    } else {
+      deliveryStatus = 'accepted';
+      deliveryStatusLabel = 'Замовлення прийнято системою';
+    }
+  }
+
+  return {
+    seller: {
+      name: [user.firstName, user.lastName].filter(Boolean).join(' ') || 'Користувач',
+      telegramId: String(user.telegramId || ''),
+    },
+    shop: {
+      id: String(shop._id),
+      name: shop.name || '',
+      city: shop.cityId?.name || '',
+      address: shop.address || '',
+    },
+    group: {
+      id: String(group._id),
+      name: group.name || '',
+      dayOfWeek: Number(group.dayOfWeek),
+    },
+    session: {
+      id: String(sessionId),
+      seq: session?.seq ?? null,
+      openDate: session?.openDate ?? null,
+      deliveryDate: getSessionDeliveryDate(session?.openDate, group.dayOfWeek),
+      pickingStatus,
+      phase,
+      phaseLabel,
+      pickingConfirmedAt: session?.pickingConfirmedAt || null,
+      pickingStartedAt: session?.pickingStartedAt || null,
+      pickingCompletedAt: session?.pickingCompletedAt || null,
+      shopNumber,
+    },
+    order: {
+      ...order,
+      progressPercent: myProgressPercent,
+      catalogReviewedAt: catalogReviewedAt || null,
+    },
+    warehouse: {
+      phase,
+      phaseLabel,
+      totalTasks,
+      completedTasks,
+      activeTasks: Math.max(0, totalTasks - completedTasks),
+      lockedTasks,
+      progressPercent,
+    },
+    delivery: {
+      status: deliveryStatus,
+      statusLabel: deliveryStatusLabel,
+      date: getSessionDeliveryDate(session?.openDate, group.dayOfWeek),
+      dayOfWeek: Number(group.dayOfWeek),
+      shopNumber,
+      destination: [shop.cityId?.name, shop.address].filter(Boolean).join(', '),
+      trackingAvailable: false,
+    },
+  };
+}
 
 async function buildDeliveryGroupSessionSummary(group, schedule, ordersByGroup) {
   const normalizedGroup = normalizeDeliveryGroup(group);
@@ -109,7 +356,7 @@ router.get('/ordering-status', telegramAuth, async (req, res) => {
     });
   }
 
-  const shop = await Shop.findById(user.shopId).lean();
+  const shop = await Shop.findById(user.shopId).populate('cityId', 'name').lean();
   if (!shop || !shop.deliveryGroupId) {
     return res.json({
       isOpen: false,
@@ -148,12 +395,33 @@ router.get('/ordering-status', telegramAuth, async (req, res) => {
     console.warn('[ordering-status] catalog review lookup failed:', e?.message || e);
   }
 
+  let closedDashboard = null;
+  if (!status.isOpen) {
+    try {
+      const sessionId = await getOrCreateSessionId(String(group._id), group.dayOfWeek, schedule);
+      closedDashboard = await buildSellerClosedDashboard({
+        user,
+        shop,
+        group,
+        schedule,
+        sessionId,
+        catalogReviewedAt,
+      });
+    } catch (e) {
+      // The enriched closed-screen dashboard is informative, not authorization-
+      // critical. A transient aggregation failure must not hide the basic window
+      // status; the client has a backward-compatible compact fallback.
+      console.warn('[ordering-status] closed dashboard failed:', e?.message || e);
+    }
+  }
+
   return res.json({
     ...status,
     groupName: group.name,
     window,
     sessionOpenAt,
     catalogReviewedAt,
+    closedDashboard,
     ...transferPayload,
   });
 });

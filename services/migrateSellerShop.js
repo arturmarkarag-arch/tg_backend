@@ -9,6 +9,7 @@ const User = require('../models/User');
 const Order = require('../models/Order');
 const DeliveryGroup = require('../models/DeliveryGroup');
 const PickingTask = require('../models/PickingTask');
+const OrderingSession = require('../models/OrderingSession');
 const { getOrCreateSessionId, getOrCreateNextSessionId } = require('../utils/getOrCreateSession');
 const { getOrderingSchedule } = require('../utils/getOrderingSchedule');
 const { appError } = require('../utils/errors');
@@ -91,25 +92,24 @@ async function migrateSellerShop({
       targetSessionId = newSessionId;
 
       // If the destination group's CURRENT session is already being picked, an
-      // order added now would never get a PickingTask: start-session is idempotent
-      // (won't rebuild once tasks exist) and reconcile only removes/trims, never
-      // adds. So such an order would sit task-less, then expire as stale next cycle.
-      // Detect "picking already started" robustly = a task references one of this
-      // session's orders (ignores leftover tasks from older sessions). If so, park
-      // the incoming order in the NEXT session — it is collected next cycle instead
-      // of being stranded. If no tasks reference current orders yet (incl. the
-      // confirmed-but-zero-tasks case), start-session will still rebuild, so the
-      // current session is the correct target.
-      const currentSessionOrderIds = (await Order.find(
-        { 'buyerSnapshot.deliveryGroupId': newDeliveryGroupId, orderingSessionId: newSessionId },
-        '_id',
-      ).session(session).lean()).map((o) => o._id);
-
-      const currentSessionInPicking = currentSessionOrderIds.length > 0 && !!(await PickingTask.exists({
-        deliveryGroupId: newDeliveryGroupId,
-        status: { $in: ['pending', 'locked', 'completed'] },
-        'items.orderId': { $in: currentSessionOrderIds },
-      }).session(session));
+      // order added now would never get a PickingTask: once pickingStatus leaves
+      // 'pending', start-session stops building the plan entirely (routes/picking.js
+      // returns `alreadyStarted` before the confirm branch), and lateOrderReconcile
+      // can only ride an item along on a still-OPEN (pending) task. So park the
+      // incoming order in the NEXT session — it is collected next cycle instead of
+      // being stranded.
+      //
+      // The state is read straight off the session. The previous heuristic ("a task
+      // references one of this session's orders") silently returned false for an
+      // EMPTY session — it short-circuits on `currentSessionOrderIds.length > 0`. A
+      // session the warehouse started with zero orders goes `confirmed` and then
+      // immediately `completed` (picking_confirmed taskCount:0 → picking_completed
+      // reason:'empty'), and an order moved into it died whole: every item `skipped`,
+      // order `cancelled`. That is exactly how order #3 was lost on 06.08.2026.
+      const targetSessionDoc = newSessionId
+        ? await OrderingSession.findById(newSessionId, 'pickingStatus').session(session).lean()
+        : null;
+      const currentSessionInPicking = !!targetSessionDoc && targetSessionDoc.pickingStatus !== 'pending';
 
       if (currentSessionInPicking) {
         targetSessionId = await getOrCreateNextSessionId(String(newGroup._id), newGroup.dayOfWeek, schedule);

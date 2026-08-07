@@ -61,14 +61,23 @@ async function countNewProducts() {
   return result?.count ?? 0;
 }
 
-// Live Telegram lookups (one getChatMember sweep per allowed group), so this is
-// by far the most expensive count here — the reason the client polls slowly.
+// Cheap count from the latest persisted group state. Deliberate live Telegram
+// checks happen only from the Groups admin page; navigation polling must never
+// fan out hundreds of getChatMember calls.
 async function countUnregisteredGroupMembers() {
   const { getMembersWithStatus } = require('../services/groupMemberSync');
   const { getAllowedGroupIds } = require('./admin');
   const groupIds = await getAllowedGroupIds();
   const results = await Promise.all(groupIds.map((id) => getMembersWithStatus(id)));
-  return results.flat().filter((r) => !r.isRegistered).length;
+  const present = new Set(['member', 'administrator', 'creator', 'restricted']);
+  return results.flat().filter((r) => {
+    if (r.isRegistered) return false;
+    const status = r.member?.telegramStatus || '';
+    if (present.has(status)) return true;
+    // Legacy rows created before live statuses existed: keep the old badge
+    // behaviour until the first audit tells us something more precise.
+    return !status && r.member?.left === false;
+  }).length;
 }
 
 // Resolves to the count, or to 0 if the source throws. Never rejects.
