@@ -111,39 +111,31 @@ async function transitionPickingStatus(sessionId, toStatus, { actor = {}, meta =
  */
 async function maybeCompleteSession(orderingSessionId, { actor = {}, meta = {}, skipCoverageAudit = false } = {}, mongoSession = null) {
   if (!orderingSessionId) return null;
-  const query = PickingTask.countDocuments({
+
+  // Contract stays EXACTLY as before: success => OrderingSession, blocked => null.
+  // Callers use truthiness; returning {completed:false} here would be dangerous.
+  const q = PickingTask.countDocuments({
     orderingSessionId: String(orderingSessionId),
     status: { $in: ['pending', 'locked'] },
   });
-  if (mongoSession) query.session(mongoSession);
-  const remaining = await query;
+  if (mongoSession) q.session(mongoSession);
+  const remaining = await q;
   if (remaining > 0) return null;
 
-  // Дозамовлення не входять у життєвий цикл OrderingSession. Див. docs/supplement/readme.md.
-
-  // "No tasks left" is NOT the same as "everything was collected". An order item
-  // that never received a task (product pulled from its block, archived, deleted,
-  // or a build that failed) leaves zero trace here — so completing on the task
-  // count alone is exactly how a product goes missing while the session reports
-  // success. Re-run the coverage audit before declaring the session done.
-  //
-  // Required lazily: sessionCoverage → taskBuilder/archiveProduct → back to this
-  // module, so a top-level require would be circular.
-  if (!skipCoverageAudit) {
-    const session = await OrderingSession.findById(orderingSessionId, 'groupId').lean();
-    if (session?.groupId) {
-      const { auditSessionCoverage } = require('../services/sessionCoverage');
-      const coverage = await auditSessionCoverage({
-        deliveryGroupId: session.groupId,
-        orderingSessionId,
-      });
-      // Leave the session in_progress: the operator still has to resolve the gap
-      // (return the product to a block, or cancel the positions). Completing here
-      // would bury it.
-      if (!coverage.ok) return null;
-    }
+  // Transactional callers cannot run a read-only audit outside their uncommitted
+  // snapshot. Existing live completion paths call this again after commit.
+  if (!skipCoverageAudit && !mongoSession) {
+    const sessionDoc = await OrderingSession.findById(orderingSessionId, 'groupId').lean();
+    if (!sessionDoc?.groupId) return null;
+    const { auditSessionClosure } = require('../services/sessionClosure');
+    const closure = await auditSessionClosure({
+      deliveryGroupId: sessionDoc.groupId,
+      orderingSessionId,
+    });
+    if (!closure.ok) return null;
   }
 
+  // Supplements are intentionally outside OrderingSession lifecycle.
   return transitionPickingStatus(orderingSessionId, 'completed', { actor, meta }, mongoSession);
 }
 

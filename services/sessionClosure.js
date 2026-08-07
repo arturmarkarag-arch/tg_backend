@@ -1,0 +1,160 @@
+'use strict';
+
+/**
+ * Canonical read-only closure audit for ONE OrderingSession.
+ *
+ * blockers = defects that belong to this exact session and may stop ONLY this
+ * session from becoming completed.
+ * warnings = historical/foreign state in the same delivery group. Warnings are
+ * visible for repair but NEVER block the current session or next week's work.
+ */
+const Order = require('../models/Order');
+const PickingTask = require('../models/PickingTask');
+const OrderingSession = require('../models/OrderingSession');
+const Product = require('../models/Product');
+const { auditSessionCoverage } = require('./sessionCoverage');
+
+const str = (v) => (v == null ? '' : String(v));
+const terminalItem = (i) => Boolean(i?.packed || i?.cancelled || i?.skipped);
+
+function issue(code, items, extra = {}) {
+  return { code, count: Array.isArray(items) ? items.length : 0, items: items || [], ...extra };
+}
+
+async function auditSessionClosure({ deliveryGroupId, orderingSessionId }) {
+  const groupId = str(deliveryGroupId);
+  const sessionId = str(orderingSessionId);
+  const blockers = [];
+  const warnings = [];
+
+  const session = sessionId
+    ? await OrderingSession.findById(sessionId, '_id groupId seq openDate pickingStatus pickingConfirmedAt pickingStartedAt pickingCompletedAt').lean()
+    : null;
+  if (!session || str(session.groupId) !== groupId) {
+    blockers.push(issue('session_identity_invalid', [{ sessionId, deliveryGroupId: groupId, actualGroupId: str(session?.groupId) }]));
+    return { ok: false, blockers, warnings, session: session || null };
+  }
+
+  const active = await PickingTask.find({
+    deliveryGroupId: groupId,
+    orderingSessionId: sessionId,
+    status: { $in: ['pending', 'locked'] },
+  }, '_id productId blockId positionIndex status lockedBy lockedAt').sort({ blockId: 1, positionIndex: 1 }).lean();
+  if (active.length) blockers.push(issue('active_tasks', active.map((t) => ({
+    taskId: str(t._id), productId: str(t.productId), blockId: t.blockId,
+    positionIndex: t.positionIndex, status: t.status, lockedBy: str(t.lockedBy) || null,
+    lockedAt: t.lockedAt || null,
+  }))));
+
+  const coverage = await auditSessionCoverage({ deliveryGroupId: groupId, orderingSessionId: sessionId });
+  if (!coverage.ok) blockers.push(issue('coverage_gaps', coverage.gaps));
+
+  // Direct invariant, independent of Order.status. `expired` is terminal at the
+  // order level and is intentionally outside the delivery cycle.
+  const orders = await Order.find({
+    'buyerSnapshot.deliveryGroupId': groupId,
+    orderingSessionId: sessionId,
+    status: { $ne: 'expired' },
+  }, '_id orderNumber status buyerTelegramId shopId buyerSnapshot items').lean();
+  // 4. One shop must not have active/order-bearing rows from multiple sellers
+  // inside the SAME session. start-session already blocks this before task build;
+  // this is the backstop for a conflict introduced later by an admin/late-order path.
+  // Historical sessions are intentionally outside this query.
+  const ordersByShop = new Map();
+  for (const order of orders) {
+    const shopId = str(order.shopId || order.buyerSnapshot?.shopId);
+    if (!shopId) continue;
+    if (!ordersByShop.has(shopId)) ordersByShop.set(shopId, []);
+    ordersByShop.get(shopId).push(order);
+  }
+  const shopOrderConflicts = [];
+  for (const [shopId, rows] of ordersByShop.entries()) {
+    const buyers = [...new Set(rows.map((o) => str(o.buyerTelegramId)).filter(Boolean))];
+    if (buyers.length <= 1) continue;
+    shopOrderConflicts.push({
+      shopId,
+      shopName: rows[0]?.buyerSnapshot?.shopName || '',
+      buyerTelegramIds: buyers,
+      orders: rows.map((o) => ({
+        orderId: str(o._id),
+        orderNumber: o.orderNumber ?? null,
+        status: o.status,
+        buyerTelegramId: str(o.buyerTelegramId),
+      })),
+    });
+  }
+  if (shopOrderConflicts.length) blockers.push(issue('shop_order_conflicts', shopOrderConflicts));
+
+  const unterminated = [];
+  for (const o of orders) {
+    const positions = (o.items || []).filter((i) => !terminalItem(i)).map((i) => ({
+      itemId: str(i._id), productId: str(i.productId) || null, name: i.name || '', quantity: Number(i.quantity) || 0,
+    }));
+    if (positions.length) unterminated.push({
+      orderId: str(o._id), orderNumber: o.orderNumber ?? null, orderStatus: o.status,
+      shopName: o.buyerSnapshot?.shopName || '', positions,
+    });
+  }
+  if (unterminated.length) blockers.push(issue('unterminated_items', unterminated, {
+    positionCount: unterminated.reduce((n, o) => n + o.positions.length, 0),
+  }));
+
+  // Foreign active tasks/orders are deliberately WARNINGS. They may be broken,
+  // but last week's dirt must never stop this week's warehouse shift.
+  const orphanTasks = await PickingTask.find({
+    deliveryGroupId: groupId,
+    status: { $in: ['pending', 'locked'] },
+    orderingSessionId: { $ne: sessionId },
+  }, '_id productId orderingSessionId blockId positionIndex status lockedBy lockedAt createdAt').sort({ createdAt: 1 }).lean();
+  if (orphanTasks.length) {
+    const pids = [...new Set(orphanTasks.map((t) => str(t.productId)).filter(Boolean))];
+    const ownerSessionIds = [...new Set(orphanTasks.map((t) => str(t.orderingSessionId)).filter(Boolean))];
+    const [products, ownerSessions] = await Promise.all([
+      pids.length ? Product.find({ _id: { $in: pids } }, '_id brand model category orderNumber').lean() : [],
+      ownerSessionIds.length ? OrderingSession.find({ _id: { $in: ownerSessionIds } }, '_id seq openDate pickingStatus').lean() : [],
+    ]);
+    const byPid = new Map(products.map((p) => [str(p._id), p]));
+    const bySession = new Map(ownerSessions.map((row) => [str(row._id), row]));
+    warnings.push(issue('orphan_tasks', orphanTasks.map((t) => {
+      const p = byPid.get(str(t.productId));
+      const owner = bySession.get(str(t.orderingSessionId));
+      return {
+        taskId: str(t._id), productId: str(t.productId),
+        productTitle: p ? (p.brand || p.model || p.category || `#${p.orderNumber}`) : '',
+        ownerSessionId: str(t.orderingSessionId) || null,
+        ownerSession: owner ? {
+          sessionId: str(owner._id), seq: owner.seq ?? null, openDate: owner.openDate || null, pickingStatus: owner.pickingStatus || null,
+        } : null,
+        blockId: t.blockId, positionIndex: t.positionIndex, status: t.status,
+        lockedBy: str(t.lockedBy) || null, lockedAt: t.lockedAt || null, createdAt: t.createdAt || null,
+      };
+    })));
+  }
+
+  const staleOrders = await Order.find({
+    'buyerSnapshot.deliveryGroupId': groupId,
+    status: { $in: ['new', 'in_progress'] },
+    orderingSessionId: { $ne: sessionId },
+  }, '_id orderNumber status orderingSessionId buyerSnapshot items createdAt updatedAt').sort({ createdAt: 1 }).lean();
+  if (staleOrders.length) warnings.push(issue('stale_orders', staleOrders.map((o) => ({
+    orderId: str(o._id), orderNumber: o.orderNumber ?? null, status: o.status,
+    ownerSessionId: str(o.orderingSessionId) || null, shopName: o.buyerSnapshot?.shopName || '',
+    livePositions: (o.items || []).filter((i) => !terminalItem(i)).length,
+    createdAt: o.createdAt || null, updatedAt: o.updatedAt || null,
+  }))));
+
+  return {
+    ok: blockers.length === 0,
+    blockers,
+    warnings,
+    session: {
+      sessionId, deliveryGroupId: groupId, seq: session.seq ?? null,
+      openDate: session.openDate || null, pickingStatus: session.pickingStatus,
+      pickingConfirmedAt: session.pickingConfirmedAt || null,
+      pickingStartedAt: session.pickingStartedAt || null,
+      pickingCompletedAt: session.pickingCompletedAt || null,
+    },
+  };
+}
+
+module.exports = { auditSessionClosure };

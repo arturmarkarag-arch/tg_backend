@@ -860,13 +860,17 @@ router.post('/:id/close-ordering-session', telegramAuth, requireTelegramRole('ad
     }
   }
 
+  // This endpoint is a HISTORICAL cleanup tool, not a way to close today's
+  // picking cycle. Old orders may be expired/parked, but the current session is
+  // owned exclusively by its own closure lifecycle (coverage + picking tasks).
+  // Therefore currentSessionId is ALWAYS excluded, regardless of whether the
+  // ordering window is open or closed. This prevents an admin cleanup from
+  // expiring a current coverage-gap order simply because it had no PickingTask yet.
   const staleOrderFilter = {
     'buyerSnapshot.deliveryGroupId': String(group._id),
     status: { $in: ['new', 'in_progress'] },
+    orderingSessionId: { $ne: currentSessionId },
   };
-  if (status.isOpen) {
-    staleOrderFilter.orderingSessionId = { $ne: currentSessionId };
-  }
   if (protectedOrderIds.length > 0) {
     staleOrderFilter._id = { $nin: protectedOrderIds };
   }

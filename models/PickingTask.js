@@ -50,13 +50,9 @@ const PickingTaskSchema = new mongoose.Schema(
         packed: { type: Boolean, default: false },
       },
     ],
-    // A completed out-of-stock task (status:'completed' with an item packed:false) is
-    // the orphan-archive sweep's standing signal to (re)archive the product
-    // (services/pickingService.archiveOrphanedOutOfStockProducts). Product
-    // restore-from-archive (routes/archive.js) sets this true to CONSUME that signal:
-    // restore deliberately un-archives the product, so its old OOS task must stop
-    // re-triggering the sweep — otherwise the next next-task/start-session poll
-    // re-archives the just-restored product. The sweep filters archiveReconciled:{$ne:true}.
+    // A completed task with completionReason:'out_of_stock' is the orphan-archive
+    // recovery signal. `items[].packed` is NOT the cause. Restore sets this true to
+    // consume historical OOS intents so an old session cannot re-archive new stock.
     archiveReconciled: { type: Boolean, default: false },
     // Who finalised this task (completed OR marked out-of-stock). `lockedBy` is
     // nulled on completion, so without this the picker's identity is lost — and
@@ -90,10 +86,17 @@ PickingTaskSchema.index({ productId: 1, blockId: 1 });
 // Session-scoped lookups: "active/completed tasks of THIS ordering session".
 PickingTaskSchema.index({ orderingSessionId: 1, status: 1 });
 
-// One active (pending/locked) task per (product, deliveryGroup) at a time.
+// One active (pending/locked) task per product INSIDE one concrete ordering
+// session. A task left behind by last week's session must never occupy the slot
+// of the new cycle for the same product + delivery group. Old tasks remain visible
+// to repair/audit tools, but operational uniqueness is session-scoped.
 PickingTaskSchema.index(
-  { productId: 1, deliveryGroupId: 1 },
-  { unique: true, partialFilterExpression: { status: { $in: ['pending', 'locked'] } } }
+  { productId: 1, deliveryGroupId: 1, orderingSessionId: 1 },
+  {
+    unique: true,
+    name: 'one_active_task_per_product_group_session',
+    partialFilterExpression: { status: { $in: ['pending', 'locked'] } },
+  }
 );
 
 module.exports = mongoose.model('PickingTask', PickingTaskSchema);

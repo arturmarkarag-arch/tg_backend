@@ -81,11 +81,7 @@ async function auditSessionCoverage({ deliveryGroupId, orderingSessionId }) {
     Product.find({ _id: { $in: productIds } }, '_id status brand model category orderNumber imageUrls localImageUrl').lean(),
     getShippingBlockPositions(productIds),
     PickingTask.find(
-      {
-        deliveryGroupId: groupId,
-        orderingSessionId: sessionId,
-        status: { $in: ['pending', 'locked'] },
-      },
+      { deliveryGroupId: groupId, orderingSessionId: sessionId, status: { $in: ['pending', 'locked'] } },
       'productId items.orderId',
     ).lean(),
   ]);
@@ -208,6 +204,15 @@ async function resolveCoverageGap({ deliveryGroupId, orderingSessionId, productI
     }
     order.status = resolveOrderStatusAfterCancel(order, orderingOpenNow);
     await order.save();
+  }
+
+  // Direct fallback bypasses archiveProduct, so it would otherwise have no
+  // lifecycle trigger to re-check whether this was the final closure blocker.
+  if (cancelledCount > 0) {
+    const { maybeCompleteSession } = require('../utils/sessionStatus');
+    await maybeCompleteSession(sessionId).catch((err) =>
+      console.warn('[sessionCoverage] maybeCompleteSession after fallback failed:', err?.message || err),
+    );
   }
 
   return { cancelledCount, archived: false };

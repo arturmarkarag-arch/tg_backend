@@ -2,6 +2,7 @@ const express = require('express');
 const mongoose = require('mongoose');
 const Product = require('../models/Product');
 const PickingTask = require('../models/PickingTask');
+const { buildUnreconciledOosTaskFilter } = require('../utils/pickingOosRecovery');
 const { getIO } = require('../socket');
 const { telegramAuth, requireTelegramRoles } = require('../middleware/telegramAuth');
 const { appError, asyncHandler } = require('../utils/errors');
@@ -125,16 +126,11 @@ router.post('/:id/restore', asyncHandler(async (req, res) => {
       // Надходження by the warehouse worker, not silently by this endpoint.
       await product.save({ session });
 
-      // Restore deliberately reverses the out-of-stock. Consume this product's
-      // completed OOS picking tasks so the orphan-archive sweep
-      // (services/pickingService.archiveOrphanedOutOfStockProducts) stops treating
-      // them as a standing "(re)archive me" signal. Without this, the next
-      // next-task/start-session poll for the group re-archives the just-restored
-      // product — a completed task with an unpacked item + a non-archived product is
-      // exactly what the sweep matches. Scoped to this product across all groups,
-      // and atomic with the restore itself (same transaction).
+      // Restore consumes the exact same canonical OOS signal the recovery sweep
+      // reads. This is intentionally product-wide across historical sessions: once
+      // stock is restored, no old OOS intent may re-archive the product later.
       await PickingTask.updateMany(
-        { productId: product._id, status: 'completed', 'items.packed': false, archiveReconciled: { $ne: true } },
+        buildUnreconciledOosTaskFilter({ productId: product._id }),
         { $set: { archiveReconciled: true } },
         { session },
       );

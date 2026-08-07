@@ -12,6 +12,7 @@ const { requireTelegramRoles } = require('../middleware/telegramAuth');
 const { getProductTitle } = require('../services/archiveProduct');
 const { buildPickingTasksFromOrders } = require('../services/taskBuilder');
 const { auditSessionCoverage, resolveCoverageGap } = require('../services/sessionCoverage');
+const { auditSessionClosure } = require('../services/sessionClosure');
 const { isOrderingOpen, getOrderingWindowCloseAt, getOrderingWindowOpenAt, getOpenDateWarsaw } = require('../utils/orderingSchedule');
 const { getOrCreateSessionId, findCurrentSessionId } = require('../utils/getOrCreateSession');
 const { normalizeDeliveryGroup } = require('../utils/deliveryGroupHelpers');
@@ -69,14 +70,6 @@ function isTransientTx(err) {
 // Counts product "positions" (one per productId, matching task granularity), not
 // units. Read-only: resolves the session via getOpenDateWarsaw + a findOne (no
 // upsert) so a polling GET never mutates. Best-effort — returns 0 on any failure.
-async function findCurrentPickingSessionId(deliveryGroupId) {
-  const group = await DeliveryGroup.findById(deliveryGroupId, 'dayOfWeek').lean();
-  if (!group) return { group: null, sessionId: null, schedule: null };
-  const schedule = await getOrderingSchedule();
-  const sessionId = await findCurrentSessionId(String(deliveryGroupId), group.dayOfWeek, schedule);
-  return { group, sessionId, schedule };
-}
-
 async function countOrderedPositions(deliveryGroupId) {
   try {
     const group = await DeliveryGroup.findById(deliveryGroupId, 'dayOfWeek').lean();
@@ -108,6 +101,19 @@ async function countOrderedPositions(deliveryGroupId) {
     console.warn('[picking/queue-stats] countOrderedPositions failed:', err?.message || err);
     return 0;
   }
+}
+
+// Resolve the CURRENT ordering session for operational picking reads. Old sessions
+// are deliberately never used as fallback: their tasks/orders are history/repair
+// data and must not leak into the live warehouse queue.
+async function resolveCurrentPickingSession(deliveryGroupId) {
+  const groupId = String(deliveryGroupId || '');
+  if (!groupId) return { group: null, sessionId: null, schedule: null };
+  const group = await DeliveryGroup.findById(groupId, 'dayOfWeek name').lean();
+  if (!group) return { group: null, sessionId: null, schedule: null };
+  const schedule = await getOrderingSchedule();
+  const sessionId = await findCurrentSessionId(groupId, group.dayOfWeek, schedule);
+  return { group, sessionId, schedule };
 }
 
 // Derive the single UI phase for a session. Centralised so /start-session and
@@ -157,7 +163,7 @@ async function buildSessionSummary(phase, { deliveryGroupId, sessionId, session 
   return null;
 }
 
-async function buildTaskResponse(task, { wrappedAround = false, isSecondChance = false } = {}) {
+async function buildTaskResponse(task, { isSecondChance = false } = {}) {
   if (!task) return null;
   const product = await Product.findById(task.productId).lean();
   if (!product) return null;
@@ -189,7 +195,6 @@ async function buildTaskResponse(task, { wrappedAround = false, isSecondChance =
     positionIndex: task.positionIndex,
     status: task.status,
     lockedBy: task.lockedBy,
-    wrappedAround,
     isSecondChance,
     items: (task.items || [])
       .map((item) => ({
@@ -297,7 +302,7 @@ router.post('/start-session', requireTelegramRoles(['warehouse', 'admin']), asyn
     // block-tasks / queue-stats already use.
     await releaseWorkerAndStaleLocks(user.telegramId, deliveryGroupId, { releaseOwnLocks: false });
     const currentSessionId = await getOrCreateSessionId(String(deliveryGroupId), group.dayOfWeek, schedule);
-    await archiveOrphanedOutOfStockProducts(deliveryGroupId);
+    await archiveOrphanedOutOfStockProducts(deliveryGroupId, currentSessionId);
     await reconcileActiveTasksForSession(deliveryGroupId, currentSessionId);
 
     // 3. STRICT late-order reconciliation. Picking is a frozen snapshot once
@@ -633,12 +638,9 @@ router.get('/my-task', requireTelegramRoles(['warehouse', 'admin']), async (req,
   try {
     const user = req.telegramUser;
     const deliveryGroupId = req.query.deliveryGroupId || null;
-    let currentSessionId = null;
-    if (deliveryGroupId) {
-      const resolved = await findCurrentPickingSessionId(deliveryGroupId);
-      if (!resolved.group || !resolved.sessionId) return res.json({ task: null });
-      currentSessionId = String(resolved.sessionId);
-    }
+    if (!deliveryGroupId) return res.json({ task: null });
+    const { sessionId } = await resolveCurrentPickingSession(deliveryGroupId);
+    if (!sessionId) return res.json({ task: null });
 
     // Sorted by lockedAt DESC: with the one-task invariant there is at most one
     // match, but a doc left over from before the invariant existed must resolve
@@ -647,10 +649,8 @@ router.get('/my-task', requireTelegramRoles(['warehouse', 'admin']), async (req,
     const [task, ...stale] = await PickingTask.find({
       status: 'locked',
       lockedBy: String(user.telegramId),
-      ...(deliveryGroupId ? {
-        deliveryGroupId: String(deliveryGroupId),
-        orderingSessionId: currentSessionId,
-      } : {}),
+      deliveryGroupId: String(deliveryGroupId),
+      orderingSessionId: String(sessionId),
     })
       .sort({ lockedAt: -1 })
       .lean();
@@ -698,12 +698,9 @@ router.get('/next-task', requireTelegramRoles(['warehouse', 'admin']), async (re
       return next(appError('picking_delivery_group_required'));
     }
 
-    // Resolve the concrete session READ-ONLY. Automatic picking must never pull a
-    // pending task merely because it belongs to the same delivery group.
-    const { group, sessionId: currentSessionId } = await findCurrentPickingSessionId(deliveryGroupId);
-    if (!group) return next(appError('group_not_found'));
-    if (!currentSessionId) {
-      return res.json({ task: null, reviewMode: false, message: 'Немає активної сесії збирання' });
+    const { sessionId } = await resolveCurrentPickingSession(deliveryGroupId);
+    if (!sessionId) {
+      return res.json({ task: null, reviewMode: false, message: 'Немає поточної сесії збирання' });
     }
 
     // Release stale locks:
@@ -715,46 +712,41 @@ router.get('/next-task', requireTelegramRoles(['warehouse', 'admin']), async (re
     // Recovery: якщо сервер упав між фазою 1 (task completed) і фазою 2 (archiveProduct)
     // в out-of-stock flow — довиконуємо архівування тут, а не тільки в start-session.
     if (deliveryGroupId) {
-      archiveOrphanedOutOfStockProducts(deliveryGroupId).catch((e) =>
+      archiveOrphanedOutOfStockProducts(deliveryGroupId, sessionId).catch((e) =>
         console.warn('[picking/next-task] archiveOrphaned failed:', e?.message),
       );
     }
 
-    const { task, wrappedAround, stopReason, blockedTask } = await findAndLockNext(
+    const { task, routeBlocked } = await findAndLockNext(
       user.telegramId,
       currentBlock,
       deliveryGroupId,
-      {
-        actor: actorOf(user),
-        fromPosition: 0,
-        orderingSessionId: currentSessionId,
-      },
+      { orderingSessionId: sessionId, fromPosition: 0, actor: actorOf(user) },
     );
     if (!task) {
-      const pendingCount = await PickingTask.countDocuments({
-        orderingSessionId: currentSessionId,
+      const pendingFilter = {
         status: 'pending',
-      });
-      const routeBlocked = stopReason === 'worker_ahead';
+        deliveryGroupId: String(deliveryGroupId),
+        orderingSessionId: String(sessionId),
+      };
+      const pendingCount = await PickingTask.countDocuments(pendingFilter);
       return res.json({
         task: null,
-        routeBlocked,
-        blockedTask: routeBlocked ? blockedTask : null,
-        reviewMode: routeBlocked || pendingCount > 0,
-        message: routeBlocked
+        routeBlocked: routeBlocked || null,
+        reviewMode: pendingCount > 0 && !routeBlocked,
+        message: routeBlocked?.code === 'worker_ahead'
           ? 'Попереду вже працює інший складник. Оберіть новий блок.'
-          : (pendingCount > 0 ? 'Залишились задачі в інших місцях — оберіть новий блок.' : 'Немає задач для збирання'),
+          : pendingCount > 0 ? 'Залишились пропущені задачі' : 'Немає задач для збирання',
       });
     }
 
-    const taskData = await buildTaskResponse(task, { wrappedAround });
+    const taskData = await buildTaskResponse(task);
     if (!taskData) {
       // Product archived — release and return empty
       await PickingTask.findByIdAndUpdate(task._id, {
         $set: { status: 'pending', lockedBy: null, lockedAt: null },
       });
-      const pendingFilter = { status: 'pending' };
-      if (deliveryGroupId) pendingFilter.deliveryGroupId = String(deliveryGroupId);
+      const pendingFilter = { status: 'pending', deliveryGroupId: String(deliveryGroupId), orderingSessionId: String(sessionId) };
       const pendingCount = await PickingTask.countDocuments(pendingFilter);
       return res.json({
         task: null,
@@ -784,10 +776,8 @@ router.get('/block-tasks', requireTelegramRoles(['warehouse', 'admin']), async (
     if (!Number.isInteger(blockId) || blockId < 1) {
       return next(appError('picking_block_invalid'));
     }
-    if (!deliveryGroupId) return next(appError('picking_delivery_group_required'));
-
-    const { group, sessionId } = await findCurrentPickingSessionId(deliveryGroupId);
-    if (!group) return next(appError('group_not_found'));
+    if (!deliveryGroupId) return res.json({ tasks: [] });
+    const { sessionId } = await resolveCurrentPickingSession(deliveryGroupId);
     if (!sessionId) return res.json({ tasks: [] });
 
     // Do NOT release the caller's own lock here. The block picker is polled every
@@ -800,9 +790,9 @@ router.get('/block-tasks', requireTelegramRoles(['warehouse', 'admin']), async (
 
     const filter = {
       blockId,
+      status: { $in: ['pending', 'locked'] },
       deliveryGroupId: String(deliveryGroupId),
       orderingSessionId: String(sessionId),
-      status: { $in: ['pending', 'locked'] },
     };
 
     const tasks = await PickingTask.find(filter)
@@ -871,14 +861,13 @@ router.get('/blocks-overview', requireTelegramRoles(['warehouse', 'admin']), asy
     const me = String(req.telegramUser.telegramId || '');
     const deliveryGroupId = req.query.deliveryGroupId || null;
     if (!deliveryGroupId) return res.json({ blocks: [] });
-
-    const { group, sessionId } = await findCurrentPickingSessionId(deliveryGroupId);
-    if (!group || !sessionId) return res.json({ blocks: [] });
+    const { sessionId } = await resolveCurrentPickingSession(deliveryGroupId);
+    if (!sessionId) return res.json({ blocks: [] });
 
     const filter = {
+      status: { $in: ['pending', 'locked'] },
       deliveryGroupId: String(deliveryGroupId),
       orderingSessionId: String(sessionId),
-      status: { $in: ['pending', 'locked'] },
     };
 
     const tasks = await PickingTask.find(filter, 'blockId items status lockedBy').lean();
@@ -922,14 +911,15 @@ router.get('/queue-stats', requireTelegramRoles(['warehouse', 'admin']), async (
       return res.json({ pendingCount: 0, lockedByMeCount: 0, lockedByOtherCount: 0, activeCount: 0 });
     }
 
+    const { sessionId: currentSessionId } = await resolveCurrentPickingSession(deliveryGroupId);
+
     // Queue polling must NOT release current worker's active lock.
     // Otherwise the worker gets `expired_lock` while completing a task.
     await releaseWorkerAndStaleLocks(user.telegramId, deliveryGroupId, { releaseOwnLocks: false });
 
-    const { sessionId: queueSessionId } = await findCurrentPickingSessionId(deliveryGroupId);
-    const base = queueSessionId
-      ? { deliveryGroupId: String(deliveryGroupId), orderingSessionId: String(queueSessionId) }
-      : { _id: { $exists: false } };
+    const base = currentSessionId
+      ? { deliveryGroupId: String(deliveryGroupId), orderingSessionId: String(currentSessionId) }
+      : { deliveryGroupId: '__no_current_session__' };
 
     const [pendingCount, lockedByMeCount, lockedByOtherCount] = await Promise.all([
       PickingTask.countDocuments({ ...base, status: 'pending' }),
@@ -1012,13 +1002,7 @@ router.post('/tasks/:taskId/complete', requireTelegramRoles(['warehouse', 'admin
     const user = req.telegramUser;
     const { items = [], nextBlock } = req.body;
 
-    const {
-      completedTask,
-      nextTask: nextRaw,
-      wrappedAround: nwa,
-      stopReason,
-      blockedTask,
-    } = await completePickingTask({
+    const { completedTask, nextTask: nextRaw, routeBlocked, closureBlockers = [] } = await completePickingTask({
       taskId: req.params.taskId,
       userTelegramId: user.telegramId,
       userFirstName:  user.firstName,
@@ -1028,14 +1012,8 @@ router.post('/tasks/:taskId/complete', requireTelegramRoles(['warehouse', 'admin
       nextBlock,
     });
 
-    const nextTaskData = nextRaw ? await buildTaskResponse(nextRaw, { wrappedAround: nwa }) : null;
-    res.json({
-      message: 'Task completed',
-      nextTask: nextTaskData,
-      routeBlocked: stopReason === 'worker_ahead',
-      blockedTask: stopReason === 'worker_ahead' ? blockedTask : null,
-      stopReason: stopReason || null,
-    });
+    const nextTaskData = nextRaw ? await buildTaskResponse(nextRaw) : null;
+    res.json({ message: 'Task completed', nextTask: nextTaskData, routeBlocked: routeBlocked || null, closureBlockers });
   } catch (err) {
     if (err && (err.name === 'AppError' || err.name === 'CastError' || isTransientTx(err))) return next(err);
     if (err.code === 'picking_task_items_changed') return next(appError('picking_task_items_changed'));
@@ -1184,12 +1162,7 @@ router.post('/tasks/:taskId/out-of-stock', requireTelegramRoles(['warehouse', 'a
     const user = req.telegramUser;
     const { nextBlock, packedOrderIds = [] } = req.body;
 
-    const {
-      nextTask: nextRaw,
-      wrappedAround: nwa,
-      stopReason,
-      blockedTask,
-    } = await outOfStockPickingTask({
+    const { nextTask: nextRaw, routeBlocked, closureBlockers = [] } = await outOfStockPickingTask({
       taskId: req.params.taskId,
       userTelegramId: user.telegramId,
       userFirstName:  user.firstName,
@@ -1199,15 +1172,9 @@ router.post('/tasks/:taskId/out-of-stock', requireTelegramRoles(['warehouse', 'a
       nextBlock,
     });
 
-    const nextTaskData = nextRaw ? await buildTaskResponse(nextRaw, { wrappedAround: nwa }) : null;
+    const nextTaskData = nextRaw ? await buildTaskResponse(nextRaw) : null;
 
-    res.json({
-      message: 'Out-of-stock recorded',
-      nextTask: nextTaskData,
-      routeBlocked: stopReason === 'worker_ahead',
-      blockedTask: stopReason === 'worker_ahead' ? blockedTask : null,
-      stopReason: stopReason || null,
-    });
+    res.json({ message: 'Out-of-stock recorded', nextTask: nextTaskData, routeBlocked: routeBlocked || null, closureBlockers });
   } catch (err) {
     if (err && (err.name === 'AppError' || err.name === 'CastError' || isTransientTx(err))) return next(err);
     // Map service-thrown codes to clean 4xx (mirrors /complete) — a stale / wrong /
@@ -1230,9 +1197,8 @@ router.get('/locked-tasks', requireTelegramRoles(['warehouse', 'admin']), async 
     const user = req.telegramUser;
     const deliveryGroupId = req.query.deliveryGroupId || null;
     if (!deliveryGroupId) return res.json({ tasks: [] });
-
-    const { group, sessionId } = await findCurrentPickingSessionId(deliveryGroupId);
-    if (!group || !sessionId) return res.json({ tasks: [] });
+    const { sessionId } = await resolveCurrentPickingSession(deliveryGroupId);
+    if (!sessionId) return res.json({ tasks: [] });
 
     const filter = {
       status: 'locked',
@@ -1276,6 +1242,33 @@ router.get('/locked-tasks', requireTelegramRoles(['warehouse', 'admin']), async 
 });
 
 // ---------------------------------------------------------------------------
+// GET /api/picking/session-closure?deliveryGroupId=...
+// Read-only integrity view of the CURRENT session. Historical/foreign state is
+// returned only as warnings and NEVER participates in the current-session gate.
+// ---------------------------------------------------------------------------
+router.get('/session-closure', requireTelegramRoles(['warehouse', 'admin']), async (req, res, next) => {
+  try {
+    const deliveryGroupId = String(req.query.deliveryGroupId || '');
+    if (!deliveryGroupId) return res.status(400).json({ error: 'delivery_group_required' });
+
+    const resolved = await resolveCurrentPickingSession(deliveryGroupId);
+    if (!resolved.sessionId) {
+      return res.json({ ok: true, blockers: [], warnings: [], session: null });
+    }
+
+    const audit = await auditSessionClosure({
+      deliveryGroupId,
+      orderingSessionId: resolved.sessionId,
+    });
+    return res.json(audit);
+  } catch (err) {
+    if (err && (err.name === 'AppError' || err.name === 'CastError' || isTransientTx(err))) return next(err);
+    console.error('[picking/session-closure]', err);
+    return next(appError('picking_next_failed'));
+  }
+});
+
+// ---------------------------------------------------------------------------
 // GET /api/picking/shift-board?deliveryGroupId=...
 // Live "shift board": who is working, how many tasks each person completed,
 // session start time, last activity time.
@@ -1306,7 +1299,7 @@ router.get('/shift-board', requireTelegramRoles(['admin']), async (req, res, nex
 
     // Active workers (currently have a locked task)
     const lockedTasks = await PickingTask.find(
-      { deliveryGroupId: dgId, status: 'locked', lockedBy: { $ne: null } },
+      { ...sessionScope, deliveryGroupId: dgId, status: 'locked', lockedBy: { $ne: null } },
       'lockedBy lockedAt',
     ).lean();
     const activeWorkerIds = new Set(lockedTasks.map((t) => String(t.lockedBy)));
@@ -1320,7 +1313,7 @@ router.get('/shift-board', requireTelegramRoles(['admin']), async (req, res, nex
       'updatedAt',
     ).lean();
     const totalCompleted = completedTasks.length;
-    const totalPending = await PickingTask.countDocuments({ deliveryGroupId: dgId, status: 'pending' });
+    const totalPending = await PickingTask.countDocuments({ ...sessionScope, deliveryGroupId: dgId, status: 'pending' });
     const lastActivity = completedTasks.length
       ? completedTasks.reduce((max, t) => (t.updatedAt > max ? t.updatedAt : max), completedTasks[0].updatedAt)
       : null;
@@ -1446,6 +1439,21 @@ router.get('/shift-board', requireTelegramRoles(['admin']), async (req, res, nex
       console.warn('[picking/shift-board] unfinished aggregation failed:', e.message);
     }
 
+    // Canonical session integrity. HARD blockers are current-session only;
+    // old/foreign orders/tasks are warnings, so last week's debris can be shown
+    // without ever stopping today's workers. Best-effort for this dashboard.
+    let sessionClosure = null;
+    try {
+      if (sessionId) {
+        sessionClosure = await auditSessionClosure({
+          deliveryGroupId: dgId,
+          orderingSessionId: sessionId,
+        });
+      }
+    } catch (e) {
+      console.warn('[picking/shift-board] session closure audit failed:', e.message);
+    }
+
     // ── "Переглянули каталог" — who pressed «Я переглянув усі товари» this session ──
     // Roster of every seller/admin assigned to a shop of this group, each with the
     // timestamp of their mark (or null). Purely informational, so it is built
@@ -1533,7 +1541,7 @@ router.get('/shift-board', requireTelegramRoles(['admin']), async (req, res, nex
       console.warn('[picking/shift-board] catalog review aggregation failed:', e.message);
     }
 
-    res.json({ groupName, sessionStart, lastActivity, workers, totalCompleted, totalPending, unfinished, catalogReview });
+    res.json({ groupName, sessionStart, lastActivity, workers, totalCompleted, totalPending, unfinished, sessionClosure, catalogReview });
   } catch (err) {
     if (err && (err.name === 'AppError' || err.name === 'CastError' || isTransientTx(err))) return next(err);
     console.error('[picking/shift-board]', err);

@@ -88,7 +88,7 @@ async function reconcileLateOrderStrict(orderId, { maxRetries = 3 } = {}) {
           if (alreadyTasked.has(`${order._id}_${pid}`)) continue; // on-time, already in a task
 
           // Ride along ONLY on a still-pending task (atomic). The unique partial
-          // index guarantees at most one active task per (product, group), so this
+          // index guarantees at most one active task per (product, group, session), so this
           // matches 0 or 1. A locked/completed/absent task → no match → skip.
           const res = await PickingTask.updateOne(
             { productId: item.productId, deliveryGroupId: groupId, orderingSessionId: sessionId, status: 'pending' },
@@ -107,7 +107,8 @@ async function reconcileLateOrderStrict(orderId, { maxRetries = 3 } = {}) {
                   quantity: item.quantity || 0,
                   packed: false,
                 },
-              },            },
+              },
+            },
             { session },
           );
 

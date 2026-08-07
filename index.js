@@ -140,10 +140,11 @@ async function startServer() {
     await syncCritical({
       key: 'picking_tasks',
       title: 'Не створився критичний індекс складських задач',
-      whatBroke: 'Не підтверджено унікальність активної задачі товару в групі або лишився застарілий індекс.',
+      whatBroke: 'Не підтверджено правило: одна активна задача товару на групу І конкретну ordering-сесію, або лишився застарілий індекс.',
       howToFix: [
         'Перевірте db.pickingtasks.getIndexes().',
-        'Видаліть застарілий productId_1 лише якщо він реально існує.',
+        'Перевірте, що активний unique index містить productId + deliveryGroupId + orderingSessionId.',
+        'Видаліть застарілий productId_1 або старий group-scoped active index лише якщо syncIndexes не зміг зробити це автоматично.',
         'Виправте дублікати активних задач і перезапустіть сервер.',
       ],
       models: [PickingTask],

@@ -15,6 +15,7 @@ const { getOrderingSchedule } = require('../utils/getOrderingSchedule');
 const { getIO } = require('../socket');
 const { withLock } = require('../utils/lock');
 const { transitionPickingStatus, maybeCompleteSession } = require('../utils/sessionStatus');
+const { buildUnreconciledOosTaskFilter } = require('../utils/pickingOosRecovery');
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -67,6 +68,34 @@ async function runOperationWithRetry(work, maxRetries = 3) {
 }
 
 // ── Core helpers ─────────────────────────────────────────────────────────────
+
+// Only produce closure diagnostics once this session's live queue is empty.
+// `maybeCompleteSession` keeps its historical OrderingSession|null contract; this
+// helper is the separate visibility channel for the rare "queue is empty but the
+// integrity gate still says no" case.
+async function finalizeSessionAndGetBlockers(orderingSessionId, deliveryGroupId, actor = {}) {
+  const sessionId = String(orderingSessionId || '');
+  const groupId = String(deliveryGroupId || '');
+  if (!sessionId || !groupId) return [];
+
+  const completed = await maybeCompleteSession(sessionId, { actor });
+  if (completed) return [];
+
+  const active = await PickingTask.countDocuments({
+    orderingSessionId: sessionId,
+    status: { $in: ['pending', 'locked'] },
+  });
+  if (active > 0) return [];
+
+  // Lazy import avoids the sessionClosure -> sessionCoverage -> archiveProduct ->
+  // sessionStatus cycle at module initialisation time.
+  const { auditSessionClosure } = require('./sessionClosure');
+  const audit = await auditSessionClosure({
+    deliveryGroupId: groupId,
+    orderingSessionId: sessionId,
+  });
+  return Array.isArray(audit?.blockers) ? audit.blockers : [];
+}
 
 /**
  * Mark Order items as packed for a given product and auto-fulfil the Order
@@ -134,75 +163,60 @@ async function markOrderItemsPacked(taskItems, productId, actor = { by: 'system'
 }
 
 /**
- * Atomically advance a worker FORWARD through the warehouse.
+ * Atomically advance a worker FORWARD inside ONE ordering session.
  *
- * Cursor = (blockId, positionIndex). Completed positions are skipped because
- * they are already terminal. The first still-active position ahead is decisive:
+ * Cursor = (blockId, positionIndex). We inspect the nearest still-active task
+ * ahead. Completed tasks are naturally skipped. If the nearest active task is
+ * locked by another worker, that worker is a PHYSICAL BARRIER: we do not jump
+ * over them to 51/52/etc. The caller sends the picker back to block selection.
  *
- *   pending          → atomically claim it
- *   locked by other  → STOP. Do not jump over the colleague.
- *   nothing ahead    → STOP. Never wrap around to the beginning.
- *
- * This matches the physical workflow: two workers may start at positions 1 and
- * 50 and both walk forward. When the worker from behind catches the colleague,
- * their route ends and the UI sends them to choose a new block.
- *
- * orderingSessionId, when supplied, hard-scopes the route to ONE ordering
- * session so old/future work of the same delivery group cannot enter the path.
+ * There is deliberately NO wrap-around to previous positions/blocks. Old work
+ * behind the cursor stays visible in review/repair flows, but automatic walking
+ * never turns around.
  */
 async function findAndLockNext(
   userTelegramId,
   fromBlock,
   deliveryGroupId = null,
-  {
-    actor = {},
-    fromPosition = 0,
-    orderingSessionId = null,
-  } = {},
+  { orderingSessionId = null, fromPosition = 0, actor = {} } = {},
 ) {
   const groupId = deliveryGroupId ? String(deliveryGroupId) : '';
-  if (!groupId) return { task: null, wrappedAround: false, stopReason: 'no_group', blockedTask: null };
+  const sessionId = orderingSessionId ? String(orderingSessionId) : '';
+  const block = Number(fromBlock);
+  const position = Math.max(0, Number(fromPosition) || 0);
+  if (!groupId || !sessionId || !Number.isFinite(block)) {
+    return { task: null, routeBlocked: null };
+  }
 
-  const block = Number.isInteger(Number(fromBlock)) ? Number(fromBlock) : 1;
-  const position = Number.isInteger(Number(fromPosition)) ? Number(fromPosition) : 0;
-  const sessionId = orderingSessionId ? String(orderingSessionId) : null;
-
-  const scope = {
-    deliveryGroupId: groupId,
-    ...(sessionId ? { orderingSessionId: sessionId } : {}),
-  };
-
-  const afterCursor = {
+  const uid = String(userTelegramId || '');
+  const cursor = {
     $or: [
       { blockId: { $gt: block } },
       { blockId: block, positionIndex: { $gt: position } },
     ],
   };
 
-  // A claim race can change the first candidate from pending → locked between
-  // our read and update. Re-read a few times; the next iteration will then see
-  // that fresh lock as the barrier instead of skipping past it.
+  // Re-read after claim races. A candidate that another worker locks between our
+  // read and update becomes the barrier on the next iteration; it is never skipped.
   for (let attempt = 0; attempt < 8; attempt += 1) {
     const candidate = await PickingTask.findOne({
-      ...scope,
-      ...afterCursor,
+      deliveryGroupId: groupId,
+      orderingSessionId: sessionId,
       status: { $in: ['pending', 'locked'] },
-    })
-      .sort({ blockId: 1, positionIndex: 1 })
-      .lean();
+      ...cursor,
+    }).sort({ blockId: 1, positionIndex: 1 });
 
-    if (!candidate) {
-      return { task: null, wrappedAround: false, stopReason: 'end_of_route', blockedTask: null };
-    }
+    if (!candidate) return { task: null, routeBlocked: null };
 
     if (candidate.status === 'locked') {
-      // Under the one-task-per-worker invariant this should normally be another
-      // worker. Treat ANY surviving lock as a route barrier rather than guessing.
+      if (String(candidate.lockedBy || '') === uid) {
+        await markSessionInProgress(candidate.orderingSessionId, actor);
+        return { task: candidate, routeBlocked: null };
+      }
       return {
         task: null,
-        wrappedAround: false,
-        stopReason: 'worker_ahead',
-        blockedTask: {
+        routeBlocked: {
+          code: 'worker_ahead',
           taskId: String(candidate._id),
           blockId: candidate.blockId,
           positionIndex: candidate.positionIndex,
@@ -212,25 +226,24 @@ async function findAndLockNext(
       };
     }
 
-    const task = await PickingTask.findOneAndUpdate(
+    const claimed = await PickingTask.findOneAndUpdate(
       {
         _id: candidate._id,
-        ...scope,
         status: 'pending',
+        deliveryGroupId: groupId,
+        orderingSessionId: sessionId,
       },
-      { $set: { status: 'locked', lockedBy: userTelegramId, lockedAt: new Date() } },
+      { $set: { status: 'locked', lockedBy: uid, lockedAt: new Date() } },
       { new: true },
     );
 
-    if (!task) continue; // candidate changed concurrently; inspect the frontier again
-
-    await markSessionInProgress(task.orderingSessionId, actor);
-    return { task, wrappedAround: false, stopReason: null, blockedTask: null };
+    if (!claimed) continue;
+    await releaseOtherLocksOfWorker(uid, claimed._id);
+    await markSessionInProgress(claimed.orderingSessionId, actor);
+    return { task: claimed, routeBlocked: null };
   }
 
-  // Heavy contention: do not guess and do not jump. The caller can refresh the
-  // block chooser and retry from a fresh server view.
-  return { task: null, wrappedAround: false, stopReason: 'contention', blockedTask: null };
+  return { task: null, routeBlocked: { code: 'claim_race' } };
 }
 
 /**
@@ -387,31 +400,27 @@ async function completePickingTask({ taskId, userTelegramId, userFirstName = '',
     }
   });
 
-  // After commit: if this was the last active task of the session, mark it
-  // completed (всі товари зібрані). Idempotent + concurrency-safe.
-  if (task.orderingSessionId) {
-    await maybeCompleteSession(task.orderingSessionId, { actor: { by: actor.by, byName: actor.byName } });
-  }
+  // After commit: close the session if possible. If the live queue is already
+  // empty but integrity still blocks closure, surface those blockers to the worker
+  // instead of silently returning null from maybeCompleteSession.
+  const closureBlockers = await finalizeSessionAndGetBlockers(
+    task.orderingSessionId,
+    task.deliveryGroupId,
+    { by: actor.by, byName: actor.byName },
+  );
 
-  const fromBlock = typeof nextBlock === 'number' ? nextBlock : task.blockId;
-  const { task: nextRaw, wrappedAround, stopReason, blockedTask } = await findAndLockNext(
+  const { task: nextRaw, routeBlocked } = await findAndLockNext(
     userTelegramId,
-    fromBlock,
+    task.blockId,
     task.deliveryGroupId || null,
     {
+      orderingSessionId: task.orderingSessionId,
       fromPosition: task.positionIndex,
-      orderingSessionId: task.orderingSessionId || null,
-      actor,
+      actor: { by: actor.by, byName: actor.byName },
     },
   );
 
-  return {
-    completedTask: task.toObject(),
-    nextTask: nextRaw ? nextRaw.toObject() : null,
-    wrappedAround,
-    stopReason,
-    blockedTask,
-  };
+  return { completedTask: task.toObject(), nextTask: nextRaw ? nextRaw.toObject() : null, routeBlocked, closureBlockers };
 }
 
 /**
@@ -445,23 +454,14 @@ async function outOfStockPickingTask({ taskId, userTelegramId, userFirstName = '
       // archiveProduct now retries transient tx errors internally.
       await archiveProduct(productForRetry, { notifyBuyers: false, bot: null, reason: 'out_of_stock', actor });
     }
-    const fromBlockRetry = typeof nextBlock === 'number' ? nextBlock : task.blockId;
-    const { task: nextRaw, wrappedAround, stopReason, blockedTask } = await findAndLockNext(
-      userTelegramId,
-      fromBlockRetry,
-      task.deliveryGroupId || null,
-      {
-        fromPosition: task.positionIndex,
-        orderingSessionId: task.orderingSessionId || null,
-        actor,
-      },
+    const closureBlockers = await finalizeSessionAndGetBlockers(
+      task.orderingSessionId, task.deliveryGroupId, { by: actor.by, byName: actor.byName },
     );
-    return {
-      nextTask: nextRaw ? nextRaw.toObject() : null,
-      wrappedAround,
-      stopReason,
-      blockedTask,
-    };
+    const { task: nextRaw, routeBlocked } = await findAndLockNext(
+      userTelegramId, task.blockId, task.deliveryGroupId || null,
+      { orderingSessionId: task.orderingSessionId, fromPosition: task.positionIndex, actor },
+    );
+    return { nextTask: nextRaw ? nextRaw.toObject() : null, routeBlocked, closureBlockers };
   }
 
   // Auto-claim if still pending (called from review list)
@@ -535,27 +535,15 @@ async function outOfStockPickingTask({ taskId, userTelegramId, userFirstName = '
     await archiveProduct(productDoc, { notifyBuyers: false, bot: null, reason: 'out_of_stock', actor });
   }
 
-  if (task.orderingSessionId) {
-    await maybeCompleteSession(task.orderingSessionId, { actor: { by: actor.by, byName: actor.byName } });
-  }
-
-  const fromBlock = typeof nextBlock === 'number' ? nextBlock : task.blockId;
-  const { task: nextRaw, wrappedAround, stopReason, blockedTask } = await findAndLockNext(
-    userTelegramId,
-    fromBlock,
-    task.deliveryGroupId || null,
-    {
-      fromPosition: task.positionIndex,
-      orderingSessionId: task.orderingSessionId || null,
-      actor,
-    },
+  const closureBlockers = await finalizeSessionAndGetBlockers(
+    task.orderingSessionId, task.deliveryGroupId, { by: actor.by, byName: actor.byName },
   );
-  return {
-    nextTask: nextRaw ? nextRaw.toObject() : null,
-    wrappedAround,
-    stopReason,
-    blockedTask,
-  };
+
+  const { task: nextRaw, routeBlocked } = await findAndLockNext(
+    userTelegramId, task.blockId, task.deliveryGroupId || null,
+    { orderingSessionId: task.orderingSessionId, fromPosition: task.positionIndex, actor },
+  );
+  return { nextTask: nextRaw ? nextRaw.toObject() : null, routeBlocked, closureBlockers };
 }
 
 /**
@@ -623,11 +611,7 @@ async function reconcileActiveTasksForSession(deliveryGroupId, orderingSessionId
   const allowedOrderIds = new Set(currentOrders.map((o) => String(o._id)));
 
   const activeTasks = await PickingTask.find(
-    {
-      deliveryGroupId: groupId,
-      orderingSessionId: sessionId,
-      status: { $in: ['pending', 'locked'] },
-    },
+    { deliveryGroupId: groupId, orderingSessionId: sessionId, status: { $in: ['pending', 'locked'] } },
     '_id status items',
   ).lean();
 
@@ -664,9 +648,10 @@ async function reconcileActiveTasksForSession(deliveryGroupId, orderingSessionId
  * Fired fire-and-forget on every next-task poll, so it is serialised per group
  * (skip-if-busy) and processes products sequentially with retries — see impl.
  */
-async function archiveOrphanedOutOfStockProducts(deliveryGroupId) {
+async function archiveOrphanedOutOfStockProducts(deliveryGroupId, orderingSessionId) {
   const groupId = String(deliveryGroupId || '');
-  if (!groupId) return { fixedCount: 0 };
+  const sessionId = String(orderingSessionId || '');
+  if (!groupId || !sessionId) return { fixedCount: 0 };
 
   // waitMs: 0 → if a sweep for this group is already running, skip immediately
   // instead of queueing. Concurrent sweeps each spawn archiveProduct
@@ -674,8 +659,8 @@ async function archiveOrphanedOutOfStockProducts(deliveryGroupId) {
   // deadlock with "Write conflict ... yielding is disabled".
   try {
     return await withLock(
-      `picking:orphan-archive:${groupId}`,
-      () => archiveOrphanedOutOfStockProductsImpl(groupId),
+      `picking:orphan-archive:${groupId}:${sessionId}`,
+      () => archiveOrphanedOutOfStockProductsImpl(groupId, sessionId),
       { ttlMs: 120_000, waitMs: 0 },
     );
   } catch (err) {
@@ -684,22 +669,15 @@ async function archiveOrphanedOutOfStockProducts(deliveryGroupId) {
   }
 }
 
-async function archiveOrphanedOutOfStockProductsImpl(groupId) {
-  // Only OUT-OF-STOCK completions need archiving. A normal completion packs
-  // every shop (all items.packed === true) and the product MUST stay active for
-  // future sessions. An out-of-stock completion (full or partial) always leaves
-  // at least one item with packed === false. Without this $elemMatch filter the
-  // sweep archived in-stock products that had just been packed normally.
+async function archiveOrphanedOutOfStockProductsImpl(groupId, sessionId) {
+  // Recovery is BOTH cause-scoped and session-scoped. An OOS intent from a
+  // previous week is historical data; it must never re-archive stock during the
+  // new session. Restore consumes the same canonical signal via archiveReconciled.
   const completedTasks = await PickingTask.find(
-    {
+    buildUnreconciledOosTaskFilter({
       deliveryGroupId: groupId,
-      status: 'completed',
-      items: { $elemMatch: { packed: false } },
-      // Skip tasks whose archive intent was deliberately consumed by a
-      // product restore-from-archive — otherwise restore is silently undone
-      // on the next poll (the product is re-archived). See models/PickingTask.
-      archiveReconciled: { $ne: true },
-    },
+      orderingSessionId: sessionId,
+    }),
     'productId',
   ).sort({ updatedAt: -1 }).limit(200).lean();
 
@@ -723,7 +701,11 @@ async function archiveOrphanedOutOfStockProductsImpl(groupId) {
       // a large backlog could re-archive a product that was just restored. Restore
       // must win, so skip if no unreconciled OOS task remains for this product.
       const orphanTask = await PickingTask.findOne(
-        { productId: product._id, status: 'completed', 'items.packed': false, archiveReconciled: { $ne: true } },
+        buildUnreconciledOosTaskFilter({
+          productId: product._id,
+          deliveryGroupId: groupId,
+          orderingSessionId: sessionId,
+        }),
         '_id',
       ).lean();
       if (!orphanTask) continue;

@@ -43,8 +43,14 @@ async function getShippingBlockPositions(productIds) {
  * Guard: re-entrant calls are silently dropped (only one run at a time).
  */
 async function buildPickingTasksFromOrders(targetDeliveryGroupId = null, options = {}) {
+  const orderingSessionId = options?.orderingSessionId ? String(options.orderingSessionId) : '';
+  if (targetDeliveryGroupId !== null && !orderingSessionId) {
+    throw new Error('taskBuilder requires orderingSessionId for a delivery-group build');
+  }
+  // The lock follows the same identity as the data. A historical repair/build
+  // for session #41 must never serialize or delay the live build of session #42.
   const lockKey = targetDeliveryGroupId !== null
-    ? `taskbuilder:${String(targetDeliveryGroupId)}`
+    ? `taskbuilder:${String(targetDeliveryGroupId)}:${orderingSessionId}`
     : 'taskbuilder:__all__';
   try {
     return await withLock(
@@ -73,14 +79,11 @@ async function buildPickingTasksImpl(targetDeliveryGroupId = null, options = {})
     // 1. Find already assigned order/product pairs so we don't create duplicates.
     const activeTaskFilter = { status: { $in: ['pending', 'locked'] } };
     if (targetDeliveryGroupId !== null) activeTaskFilter.deliveryGroupId = String(targetDeliveryGroupId);
-    // A PickingTask belongs to exactly one OrderingSession for its whole life.
-    // A session-scoped build must never discover an old active task and "adopt"
-    // it into the current cycle.
     if (orderingSessionId) activeTaskFilter.orderingSessionId = orderingSessionId;
 
     const activeTasks = await PickingTask.find(
       activeTaskFilter,
-      'productId items.orderId blockId positionIndex deliveryGroupId'
+      'productId items.orderId blockId positionIndex deliveryGroupId orderingSessionId'
     ).lean();
 
     const assignedOrderProducts = new Set();
@@ -181,14 +184,14 @@ async function buildPickingTasksImpl(targetDeliveryGroupId = null, options = {})
     }
 
     if (toAppend.size) {
-      // Session membership is immutable. We only append to tasks discovered by
-      // the session-scoped activeTaskFilter above; never rewrite orderingSessionId
-      // as a side effect of adding a late order.
+      // A PickingTask's orderingSessionId is immutable membership, not mutable
+      // metadata. Because activeTasks is already scoped to this session, appending
+      // may only add items; it must NEVER retag an old task into a new cycle.
       await Promise.all(
         Array.from(toAppend.values()).map(({ taskId, newItems }) =>
           PickingTask.updateOne(
-            { _id: taskId },
-            { $addToSet: { items: { $each: newItems } } },
+            { _id: taskId, orderingSessionId },
+            { $addToSet: { items: { $each: newItems } } }
           )
         )
       );
@@ -221,7 +224,8 @@ async function buildPickingTasksImpl(targetDeliveryGroupId = null, options = {})
       await PickingTask.insertMany(tasks, { ordered: false });
     } catch (err) {
       // Duplicate key (11000) is EXPECTED: the unique partial index on
-      // (productId, deliveryGroupId) is what makes concurrent builds idempotent.
+      // (productId, deliveryGroupId, orderingSessionId) makes concurrent builds idempotent
+      // WITHOUT letting last week's task block this week's task.
       // Anything else is a task that was NOT created — previously the whole
       // BulkWriteError was swallowed by name, so an unrelated write failure
       // vanished without a line in the log and the start proceeded regardless.

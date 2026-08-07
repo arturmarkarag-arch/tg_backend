@@ -29,6 +29,7 @@ const { isOrderingOpen } = require('../utils/orderingSchedule');
 const { resolveOrderStatusAfterCancel } = require('../utils/orderStatus');
 const { getOrderingSchedule } = require('../utils/getOrderingSchedule');
 const { getIO } = require('../socket');
+const { buildUnreconciledOosTaskFilter } = require('../utils/pickingOosRecovery');
 
 function getProductTitle(product) {
   return product.brand || product.model || product.category || `#${product.orderNumber}`;
@@ -62,6 +63,7 @@ async function archiveProduct(productOrId, { notifyBuyers = false, bot = null, r
   let product;
   let orderNotifications = [];
   let affectedGroupIds = new Set();
+  let affectedSessionIds = new Set();
   let cancelledCount = 0;
   let affectedBlockIds = [];
 
@@ -69,6 +71,7 @@ async function archiveProduct(productOrId, { notifyBuyers = false, bot = null, r
     // Per-attempt accumulators — reset on every retry.
     const attemptNotifications = [];
     const attemptGroupIds = new Set();
+    const attemptSessionIds = new Set();
     let attemptCancelled = 0;
     let oldOrderNumber;
     let attemptBlockIds = [];
@@ -163,9 +166,27 @@ async function archiveProduct(productOrId, { notifyBuyers = false, bot = null, r
       if (order.buyerSnapshot?.deliveryGroupId) {
         attemptGroupIds.add(String(order.buyerSnapshot.deliveryGroupId));
       }
+      if (order.orderingSessionId) attemptSessionIds.add(String(order.orderingSessionId));
     }
 
     // ── 2. Close open PickingTasks ───────────────────────────────────────────
+    // Capture their owning sessions BEFORE the update. Session membership is
+    // immutable, and every affected session must be re-evaluated after commit.
+    const openTasks = await PickingTask.find(
+      { productId: product._id, status: { $in: ['pending', 'locked'] } },
+      'orderingSessionId',
+    ).session(session).lean();
+    for (const t of openTasks) if (t.orderingSessionId) attemptSessionIds.add(String(t.orderingSessionId));
+
+    // Crash-retry OOS can have no active OrderItem and no open task anymore: phase 1
+    // already completed the task, then the server died before archiveProduct. That
+    // completed/out_of_stock task is still an affected-session source.
+    const oosSignals = await PickingTask.find(
+      buildUnreconciledOosTaskFilter({ productId: product._id }),
+      'orderingSessionId',
+    ).session(session).lean();
+    for (const t of oosSignals) if (t.orderingSessionId) attemptSessionIds.add(String(t.orderingSessionId));
+
     // completedExpireAt stamps the 90-day TTL so these system-closed tasks are
     // reaped like normal completions (no completedBy — excluded from ranking).
     await PickingTask.updateMany(
@@ -199,6 +220,7 @@ async function archiveProduct(productOrId, { notifyBuyers = false, bot = null, r
       cancelledCount     = attemptCancelled;
       orderNotifications = attemptNotifications;
       affectedGroupIds   = attemptGroupIds;
+      affectedSessionIds = attemptSessionIds;
       affectedBlockIds   = attemptBlockIds;
       break;
     } catch (err) {
@@ -214,6 +236,18 @@ async function archiveProduct(productOrId, { notifyBuyers = false, bot = null, r
       continue;
     } finally {
       session.endSession();
+    }
+  }
+
+  // Re-evaluate EVERY session whose own Orders/Tasks were changed. This is not a
+  // cross-session gate: each maybeCompleteSession audits only that session. Old
+  // sessions may heal in the background, but they can never block the current one.
+  if (affectedSessionIds.size) {
+    const { maybeCompleteSession } = require('../utils/sessionStatus');
+    for (const sid of affectedSessionIds) {
+      if (!sid) continue;
+      try { await maybeCompleteSession(sid); }
+      catch (e) { console.warn(`[archiveProduct] maybeCompleteSession ${sid} failed:`, e?.message || e); }
     }
   }
 
