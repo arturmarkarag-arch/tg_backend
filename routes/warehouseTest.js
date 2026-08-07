@@ -483,8 +483,6 @@ router.post('/run', asyncHandler(async (req, res) => {
           role: 'warehouse',
           firstName: `${w.firstName || 'Worker'}${TEST_MARKER}`,
           lastName: `${w.lastName || 'Warehouse'}${TEST_MARKER}`,
-          deliveryGroupId: String(deliveryGroup._id),
-          warehouseZone: w.warehouseZone || '',
           isWarehouseManager: w.isWarehouseManager || false,
         })))
         : await User.insertMany(Array.from({ length: activeWorkersCount }, (_, i) => ({
@@ -492,7 +490,6 @@ router.post('/run', asyncHandler(async (req, res) => {
           role: 'warehouse',
           firstName: `Worker${i + 1}${TEST_MARKER}`,
           lastName: `Warehouse${TEST_MARKER}`,
-          deliveryGroupId: String(deliveryGroup._id),
         })));
       appendLog(job, `Створено ${workers.length} warehouse-працівників`);
 

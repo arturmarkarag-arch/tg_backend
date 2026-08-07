@@ -58,9 +58,10 @@ async function unassignSellerAndPark({ session, seller, fromShopId, actor, reaso
     }
   }
 
+  // Знімаємо тільки магазин — група/зона з нього ж і виводяться.
   await User.updateOne(
     { telegramId: seller.telegramId },
-    { $set: { shopId: null, deliveryGroupId: '', warehouseZone: '' } },
+    { $set: { shopId: null } },
     { session },
   );
 

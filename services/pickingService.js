@@ -134,40 +134,103 @@ async function markOrderItemsPacked(taskItems, productId, actor = { by: 'system'
 }
 
 /**
- * Atomically find and lock the next pending task for a worker.
- * Pass 1: fromBlock → end; Pass 2: 1 → fromBlock-1 (wrap-around).
+ * Atomically advance a worker FORWARD through the warehouse.
  *
- * deliveryGroupId is REQUIRED. An absent/empty group must never fall through to
- * "the globally-next pending task" — that would lock (and hand a worker) a task
- * from a delivery group they are not picking, silently stealing another group's
- * work. Callers that derive the group from a task (complete / out-of-stock) pass
- * the task's own group; a groupless task simply yields no next task here.
+ * Cursor = (blockId, positionIndex). Completed positions are skipped because
+ * they are already terminal. The first still-active position ahead is decisive:
+ *
+ *   pending          → atomically claim it
+ *   locked by other  → STOP. Do not jump over the colleague.
+ *   nothing ahead    → STOP. Never wrap around to the beginning.
+ *
+ * This matches the physical workflow: two workers may start at positions 1 and
+ * 50 and both walk forward. When the worker from behind catches the colleague,
+ * their route ends and the UI sends them to choose a new block.
+ *
+ * orderingSessionId, when supplied, hard-scopes the route to ONE ordering
+ * session so old/future work of the same delivery group cannot enter the path.
  */
-async function findAndLockNext(userTelegramId, fromBlock, deliveryGroupId = null, { actor = {} } = {}) {
+async function findAndLockNext(
+  userTelegramId,
+  fromBlock,
+  deliveryGroupId = null,
+  {
+    actor = {},
+    fromPosition = 0,
+    orderingSessionId = null,
+  } = {},
+) {
   const groupId = deliveryGroupId ? String(deliveryGroupId) : '';
-  if (!groupId) return { task: null, wrappedAround: false };
+  if (!groupId) return { task: null, wrappedAround: false, stopReason: 'no_group', blockedTask: null };
 
-  const lock = { $set: { status: 'locked', lockedBy: userTelegramId, lockedAt: new Date() } };
-  const opts = { sort: { blockId: 1, positionIndex: 1 }, new: true };
-  const fresh = { status: 'pending', deliveryGroupId: groupId };
+  const block = Number.isInteger(Number(fromBlock)) ? Number(fromBlock) : 1;
+  const position = Number.isInteger(Number(fromPosition)) ? Number(fromPosition) : 0;
+  const sessionId = orderingSessionId ? String(orderingSessionId) : null;
 
-  let task = await PickingTask.findOneAndUpdate({ ...fresh, blockId: { $gte: fromBlock } }, lock, opts);
-  if (task) {
-    await markSessionInProgress(task.orderingSessionId, actor);
-    return { task, wrappedAround: false };
-  }
+  const scope = {
+    deliveryGroupId: groupId,
+    ...(sessionId ? { orderingSessionId: sessionId } : {}),
+  };
 
-  if (fromBlock > 1) {
-    task = await PickingTask.findOneAndUpdate(
-      { ...fresh, blockId: { $gte: 1, $lt: fromBlock } }, lock, opts,
-    );
-    if (task) {
-      await markSessionInProgress(task.orderingSessionId, actor);
-      return { task, wrappedAround: true };
+  const afterCursor = {
+    $or: [
+      { blockId: { $gt: block } },
+      { blockId: block, positionIndex: { $gt: position } },
+    ],
+  };
+
+  // A claim race can change the first candidate from pending → locked between
+  // our read and update. Re-read a few times; the next iteration will then see
+  // that fresh lock as the barrier instead of skipping past it.
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const candidate = await PickingTask.findOne({
+      ...scope,
+      ...afterCursor,
+      status: { $in: ['pending', 'locked'] },
+    })
+      .sort({ blockId: 1, positionIndex: 1 })
+      .lean();
+
+    if (!candidate) {
+      return { task: null, wrappedAround: false, stopReason: 'end_of_route', blockedTask: null };
     }
+
+    if (candidate.status === 'locked') {
+      // Under the one-task-per-worker invariant this should normally be another
+      // worker. Treat ANY surviving lock as a route barrier rather than guessing.
+      return {
+        task: null,
+        wrappedAround: false,
+        stopReason: 'worker_ahead',
+        blockedTask: {
+          taskId: String(candidate._id),
+          blockId: candidate.blockId,
+          positionIndex: candidate.positionIndex,
+          lockedBy: candidate.lockedBy ? String(candidate.lockedBy) : null,
+          lockedAt: candidate.lockedAt || null,
+        },
+      };
+    }
+
+    const task = await PickingTask.findOneAndUpdate(
+      {
+        _id: candidate._id,
+        ...scope,
+        status: 'pending',
+      },
+      { $set: { status: 'locked', lockedBy: userTelegramId, lockedAt: new Date() } },
+      { new: true },
+    );
+
+    if (!task) continue; // candidate changed concurrently; inspect the frontier again
+
+    await markSessionInProgress(task.orderingSessionId, actor);
+    return { task, wrappedAround: false, stopReason: null, blockedTask: null };
   }
 
-  return { task: null, wrappedAround: false };
+  // Heavy contention: do not guess and do not jump. The caller can refresh the
+  // block chooser and retry from a fresh server view.
+  return { task: null, wrappedAround: false, stopReason: 'contention', blockedTask: null };
 }
 
 /**
@@ -331,9 +394,24 @@ async function completePickingTask({ taskId, userTelegramId, userFirstName = '',
   }
 
   const fromBlock = typeof nextBlock === 'number' ? nextBlock : task.blockId;
-  const { task: nextRaw, wrappedAround } = await findAndLockNext(userTelegramId, fromBlock, task.deliveryGroupId || null);
+  const { task: nextRaw, wrappedAround, stopReason, blockedTask } = await findAndLockNext(
+    userTelegramId,
+    fromBlock,
+    task.deliveryGroupId || null,
+    {
+      fromPosition: task.positionIndex,
+      orderingSessionId: task.orderingSessionId || null,
+      actor,
+    },
+  );
 
-  return { completedTask: task.toObject(), nextTask: nextRaw ? nextRaw.toObject() : null, wrappedAround };
+  return {
+    completedTask: task.toObject(),
+    nextTask: nextRaw ? nextRaw.toObject() : null,
+    wrappedAround,
+    stopReason,
+    blockedTask,
+  };
 }
 
 /**
@@ -368,8 +446,22 @@ async function outOfStockPickingTask({ taskId, userTelegramId, userFirstName = '
       await archiveProduct(productForRetry, { notifyBuyers: false, bot: null, reason: 'out_of_stock', actor });
     }
     const fromBlockRetry = typeof nextBlock === 'number' ? nextBlock : task.blockId;
-    const { task: nextRaw, wrappedAround } = await findAndLockNext(userTelegramId, fromBlockRetry, task.deliveryGroupId || null);
-    return { nextTask: nextRaw ? nextRaw.toObject() : null, wrappedAround };
+    const { task: nextRaw, wrappedAround, stopReason, blockedTask } = await findAndLockNext(
+      userTelegramId,
+      fromBlockRetry,
+      task.deliveryGroupId || null,
+      {
+        fromPosition: task.positionIndex,
+        orderingSessionId: task.orderingSessionId || null,
+        actor,
+      },
+    );
+    return {
+      nextTask: nextRaw ? nextRaw.toObject() : null,
+      wrappedAround,
+      stopReason,
+      blockedTask,
+    };
   }
 
   // Auto-claim if still pending (called from review list)
@@ -448,8 +540,22 @@ async function outOfStockPickingTask({ taskId, userTelegramId, userFirstName = '
   }
 
   const fromBlock = typeof nextBlock === 'number' ? nextBlock : task.blockId;
-  const { task: nextRaw, wrappedAround } = await findAndLockNext(userTelegramId, fromBlock, task.deliveryGroupId || null);
-  return { nextTask: nextRaw ? nextRaw.toObject() : null, wrappedAround };
+  const { task: nextRaw, wrappedAround, stopReason, blockedTask } = await findAndLockNext(
+    userTelegramId,
+    fromBlock,
+    task.deliveryGroupId || null,
+    {
+      fromPosition: task.positionIndex,
+      orderingSessionId: task.orderingSessionId || null,
+      actor,
+    },
+  );
+  return {
+    nextTask: nextRaw ? nextRaw.toObject() : null,
+    wrappedAround,
+    stopReason,
+    blockedTask,
+  };
 }
 
 /**
@@ -517,7 +623,11 @@ async function reconcileActiveTasksForSession(deliveryGroupId, orderingSessionId
   const allowedOrderIds = new Set(currentOrders.map((o) => String(o._id)));
 
   const activeTasks = await PickingTask.find(
-    { deliveryGroupId: groupId, status: { $in: ['pending', 'locked'] } },
+    {
+      deliveryGroupId: groupId,
+      orderingSessionId: sessionId,
+      status: { $in: ['pending', 'locked'] },
+    },
     '_id status items',
   ).lean();
 

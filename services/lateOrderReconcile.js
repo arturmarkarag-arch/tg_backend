@@ -69,7 +69,7 @@ async function reconcileLateOrderStrict(orderId, { maxRetries = 3 } = {}) {
         // (orderId,productId) pairs already represented by an active task for this
         // order — those are on-time items, leave them alone.
         const activeTasks = await PickingTask.find(
-          { deliveryGroupId: groupId, status: { $in: ['pending', 'locked'] }, 'items.orderId': order._id },
+          { deliveryGroupId: groupId, orderingSessionId: sessionId, status: { $in: ['pending', 'locked'] }, 'items.orderId': order._id },
           'productId items.orderId',
         ).session(session).lean();
         const alreadyTasked = new Set();
@@ -91,7 +91,7 @@ async function reconcileLateOrderStrict(orderId, { maxRetries = 3 } = {}) {
           // index guarantees at most one active task per (product, group), so this
           // matches 0 or 1. A locked/completed/absent task → no match → skip.
           const res = await PickingTask.updateOne(
-            { productId: item.productId, deliveryGroupId: groupId, status: 'pending' },
+            { productId: item.productId, deliveryGroupId: groupId, orderingSessionId: sessionId, status: 'pending' },
             {
               $addToSet: {
                 items: {
@@ -107,9 +107,7 @@ async function reconcileLateOrderStrict(orderId, { maxRetries = 3 } = {}) {
                   quantity: item.quantity || 0,
                   packed: false,
                 },
-              },
-              $set: { orderingSessionId: sessionId },
-            },
+              },            },
             { session },
           );
 
@@ -195,7 +193,7 @@ async function reconcileLateOrdersForSession(deliveryGroupId, orderingSessionId)
   // overwhelming majority (on-time orders, fully tasked) are skipped here, so a
   // routine picking-page open does not spin up one transaction per order.
   const activeTasks = await PickingTask.find(
-    { deliveryGroupId: groupId, status: { $in: ['pending', 'locked'] } },
+    { deliveryGroupId: groupId, orderingSessionId: sessionId, status: { $in: ['pending', 'locked'] } },
     'productId items.orderId',
   ).lean();
   const tasked = new Set();

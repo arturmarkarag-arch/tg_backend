@@ -326,9 +326,9 @@ router.patch('/:id', telegramAuth, requireTelegramRole('admin'), asyncHandler(as
 
   const { name, cityId, deliveryGroupId, address, isActive } = req.body;
 
-  // Snapshot the delivery group BEFORE mutation so we can detect a real change
-  // and cascade it to the shop's sellers (their deliveryGroupId/warehouseZone are
-  // denormalized copies — see users.js sanitizeUserPayload).
+  // Snapshot the delivery group BEFORE mutation so we can detect a real change:
+  // від нього залежить попередження про відкриту сесію старої групи (нижче).
+  // Каскаду на продавців НЕ потрібно — група живе лише на магазині.
   const prevDeliveryGroupId = shop.deliveryGroupId ? String(shop.deliveryGroupId) : '';
 
   // Match POST: name and cityId must never become empty on an existing shop.
@@ -424,31 +424,16 @@ router.patch('/:id', telegramAuth, requireTelegramRole('admin'), asyncHandler(as
     }
   }
 
-  // Cascade a delivery-group change onto the shop's sellers. deliveryGroupId and
-  // warehouseZone are denormalized onto each seller's User doc; without this they
-  // keep computing their ordering window / picking group from the OLD group until
-  // someone re-saves each user individually.
+  // Каскаду на продавців тут БІЛЬШЕ НЕМАЄ і він не потрібен: група живе тільки на
+  // магазині, тож зміна Shop.deliveryGroupId автоматично перемикає всіх, хто до
+  // цього магазину прив'язаний. Раніше тут стояв User.updateMany по денормалізованих
+  // User.deliveryGroupId/warehouseZone — саме він і був місцем, де один пропущений
+  // шлях зміни залишав продавця у старій групі.
   //
-  // NOTE: already-placed ACTIVE orders are intentionally NOT moved to the new
-  // group — an order belongs to the ordering session / picking run it was placed
-  // in (its orderingSessionId is tied to the old group). Only the sellers move, so
-  // their NEXT order lands in the new group. The current run finishes where it was.
-  const newDeliveryGroupId = shop.deliveryGroupId ? String(shop.deliveryGroupId) : '';
-  if (deliveryGroupId !== undefined && newDeliveryGroupId !== prevDeliveryGroupId) {
-    let warehouseZone = '';
-    if (newDeliveryGroupId) {
-      const grp = await DeliveryGroup.findById(newDeliveryGroupId).lean();
-      warehouseZone = grp?.name || '';
-    }
-    // Cascade to sellers AND admins bound to this shop — an admin with a shopId
-    // also derives their ordering window / picking group from these denormalized
-    // fields, so leaving them stale would route the admin's next order to the OLD
-    // group. (warehouse users carry no shop, so they're untouched.)
-    await User.updateMany(
-      { shopId: shop._id, role: { $in: ['seller', 'admin'] } },
-      { $set: { deliveryGroupId: newDeliveryGroupId, warehouseZone } },
-    );
-  }
+  // NOTE (без змін): уже створені АКТИВНІ замовлення в нову групу НЕ переносяться —
+  // замовлення належить тій сесії/збиранню, в якій було створене (orderingSessionId
+  // прив'язаний до старої групи). Переходить лише магазин, тож НАСТУПНЕ замовлення
+  // потрапить у нову групу, а поточний прогін завершиться там, де почався.
 
   res.json(shop);
 }));

@@ -292,7 +292,8 @@ router.post('/:id/approve', telegramAuth, requireTelegramRole('admin'), asyncHan
       }).session(session);
 
       if (targetCurrentSeller) {
-        const displacedPatch = { shopId: null, deliveryGroupId: '', warehouseZone: '' };
+        // Знімаємо лише магазин — група/зона похідні від нього.
+        const displacedPatch = { shopId: null };
 
         await User.updateOne(
           { telegramId: targetCurrentSeller.telegramId },
@@ -371,16 +372,10 @@ router.post('/:id/approve', telegramAuth, requireTelegramRole('admin'), asyncHan
       // For initial assignment: just set the shop directly (no order to migrate, no lastSeller, no history)
       // For shop change: use full migration service
       if (isAssignment) {
-        const warehouseZone = toShop.deliveryGroupId
-          ? (await require('../models/DeliveryGroup').findById(toShop.deliveryGroupId).lean())?.name || ''
-          : '';
+        // Тільки shopId: група й зона читаються з магазину.
         await User.updateOne(
           { telegramId: seller.telegramId },
-          { $set: {
-            shopId: toShop._id,
-            deliveryGroupId: toShop.deliveryGroupId || '',
-            warehouseZone,
-          }},
+          { $set: { shopId: toShop._id } },
           { session }
         );
         const assignOldShopId = seller.shopId ? String(seller.shopId) : '';

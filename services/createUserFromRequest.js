@@ -1,7 +1,7 @@
 'use strict';
 // Shared "turn an approved/eligible applicant into a User" logic, used by BOTH
-// the admin approve path (warehouse) and seller auto-registration. Resolves the
-// seller's shop → deliveryGroup → warehouseZone and creates the User inside the
+// the admin approve path (warehouse) and seller auto-registration. Validates the
+// seller's shop (must exist and be active) and creates the User inside the
 // caller's transaction.
 //
 // create() (not upsert) is deliberate: a concurrent create of the same
@@ -15,7 +15,6 @@
 
 const User = require('../models/User');
 const Shop = require('../models/Shop');
-const DeliveryGroup = require('../models/DeliveryGroup');
 const { appError } = require('../utils/errors');
 
 async function resolveAndCreateUser({
@@ -26,26 +25,20 @@ async function resolveAndCreateUser({
   lastName,
   phoneNumber,
   shopId,
-  deliveryGroupId,
 }) {
   let resolvedShopId = null;
-  let resolvedDeliveryGroupId = role === 'seller' ? (deliveryGroupId || '') : '';
-  let resolvedWarehouseZone = '';
 
   if (role === 'seller' && shopId) {
     const shop = await Shop.findOne({ _id: shopId, isActive: true })
-      .populate('cityId', 'name')
       .session(session)
       .lean();
     if (!shop) throw appError('registration_shop_inactive');
     resolvedShopId = shop._id;
-    resolvedDeliveryGroupId = shop.deliveryGroupId || resolvedDeliveryGroupId;
-    if (resolvedDeliveryGroupId) {
-      const grp = await DeliveryGroup.findById(resolvedDeliveryGroupId).session(session).lean();
-      resolvedWarehouseZone = grp?.name || '';
-    }
   }
 
+  // Група доставки НЕ копіюється в User: вона належить магазину. Заявка
+  // (RegistrationRequest.deliveryGroupId) свою копію зберігає — це знімок умов
+  // подання, і саме він гейтить approve.
   const [user] = await User.create([{
     telegramId,
     role,
@@ -53,8 +46,6 @@ async function resolveAndCreateUser({
     lastName,
     phoneNumber: phoneNumber || '',
     shopId: resolvedShopId,
-    deliveryGroupId: resolvedDeliveryGroupId,
-    warehouseZone: resolvedWarehouseZone,
   }], { session });
 
   return user;

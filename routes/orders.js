@@ -859,7 +859,10 @@ async function placeOrderImpl(req, res) {
     shopName: shop?.name || '',
     shopCity: shop?.cityId?.name || '',
     shopAddress: shop?.address || '',
-    deliveryGroupId: buyer.deliveryGroupId || '',
+    // Гілка «групи немає» — покупець без магазину, тож і групи взяти нізвідки.
+    // Раніше тут стояв buyer.deliveryGroupId (копія на User); вона могла лишитися
+    // від попереднього магазину і ставила на замовлення чужу групу.
+    deliveryGroupId: '',
   };
 
   const buyerActor = {
@@ -1141,13 +1144,11 @@ router.patch('/:id/snapshot', staffOnly, async (req, res) => {
 
       // Resolve delivery group data once inside the transaction
       let newSessionId = null;
-      let warehouseZone = '';
       if (shop.deliveryGroupId) {
         const newGroup = await DeliveryGroup.findById(shop.deliveryGroupId).session(session).lean();
         if (newGroup) {
           const schedule = await getOrderingSchedule();
           newSessionId = await getOrCreateSessionId(String(newGroup._id), newGroup.dayOfWeek, schedule);
-          warehouseZone = newGroup.name || '';
         }
       }
 
@@ -1177,22 +1178,16 @@ router.patch('/:id/snapshot', staffOnly, async (req, res) => {
         { arrayFilters: [{ 'elem.orderId': fresh._id }], session },
       );
 
-      // Update the buyer: move them to the new shop with the FULL set of derived
-      // fields (shopName/shopCity/deliveryGroupId/warehouseZone) so legacy fallbacks
-      // never read stale values, and clear their cart since the active order moved.
+      // Update the buyer: прив'язуємо до нового магазину (група/зона виводяться з
+      // нього) і чистимо кошик, бо активне замовлення переїхало.
       if (fresh.buyerTelegramId) {
-        const buyerUser = await User.findOne({ telegramId: fresh.buyerTelegramId }).session(session).lean();
         const userUpdate = {
           shopId: shop._id,
-          deliveryGroupId: shop.deliveryGroupId ? String(shop.deliveryGroupId) : '',
           'cartState.orderItems': {},
           'cartState.orderItemIds': [],
           'cartState.updatedAt': new Date(),
           'cartState.reservedForGroupId': null,
         };
-        if (buyerUser?.role === 'seller') {
-          userUpdate.warehouseZone = warehouseZone;
-        }
         await User.updateOne(
           { telegramId: fresh.buyerTelegramId },
           { $set: userUpdate },
@@ -1267,9 +1262,15 @@ router.post('/:id/stale/restore-to-cart', telegramAuth, adminOnly, asyncHandler(
       if (activeItems.length === 0) throw appError('validation_failed', { field: 'items' });
 
       // Resolve current ordering session for the buyer's delivery group.
-      const deliveryGroupId = staleOrder.buyerSnapshot?.deliveryGroupId
+      // Пріоритет — знімок замовлення; якщо його немає, беремо з ПОТОЧНОГО магазину
+      // покупця (раніше тут читалася копія User.deliveryGroupId).
+      let deliveryGroupId = staleOrder.buyerSnapshot?.deliveryGroupId
         ? String(staleOrder.buyerSnapshot.deliveryGroupId)
-        : (buyer.deliveryGroupId ? String(buyer.deliveryGroupId) : null);
+        : null;
+      if (!deliveryGroupId && buyer.shopId) {
+        const buyerShop = await Shop.findById(buyer.shopId).session(mongoSession).lean();
+        deliveryGroupId = buyerShop?.deliveryGroupId ? String(buyerShop.deliveryGroupId) : null;
+      }
       if (!deliveryGroupId) throw appError('no_delivery_group');
       const group = normalizeDeliveryGroup(await getDeliveryGroup(deliveryGroupId));
       if (!group) throw appError('delivery_group_not_found');

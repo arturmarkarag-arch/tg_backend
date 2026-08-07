@@ -6,9 +6,22 @@
 
 У проєкті паралельно існують `Product`, `ShopProduct` і `SearchProduct`. Потрібно окремо дослідити відповідальність кожної сутності, перейменувати їх у зрозумілі терміни та прибрати зайві дзеркала. До цього завдання не торкатися структури без окремого плану міграції.
 
-### Джерело групи доставки
+### Джерело групи доставки — ЗАКРИТО (07.08.2026)
 
-Належність до групи дублюється в `Shop.deliveryGroupId`, `User.deliveryGroupId` і `DeliveryGroup.members`. Майбутня ціль — одне джерело істини: `User → Shop → DeliveryGroup`, а інші поля зробити похідними або прибрати.
+Одне джерело істини: `User.shopId → Shop.deliveryGroupId → DeliveryGroup`.
+
+`User.deliveryGroupId` і `User.warehouseZone` прибрані зі схеми й з бази
+(`scripts/normalizeUserGroup.js`). Разом з ними зник каскад `User.updateMany` у
+`routes/shops.js`, який тримав копії в актуальному стані й був єдиною причиною,
+чому пропущений шлях зміни магазину міг залишити продавця в старій групі.
+
+Похідні значення обчислюються в місці використання; API-контракт незмінний —
+профіль `/v1/telegram` віддає `deliveryGroupId` + `warehouseZone`, список
+користувачів — `shopDeliveryGroupId`.
+
+НЕ плутати з `Order.buyerSnapshot.deliveryGroupId` і
+`RegistrationRequest.deliveryGroupId`: це історичні знімки, вони canonical для
+свого документа і залишаються.
 
 ### Стара логіка зміни складу
 

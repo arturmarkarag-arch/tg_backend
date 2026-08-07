@@ -73,6 +73,10 @@ async function buildPickingTasksImpl(targetDeliveryGroupId = null, options = {})
     // 1. Find already assigned order/product pairs so we don't create duplicates.
     const activeTaskFilter = { status: { $in: ['pending', 'locked'] } };
     if (targetDeliveryGroupId !== null) activeTaskFilter.deliveryGroupId = String(targetDeliveryGroupId);
+    // A PickingTask belongs to exactly one OrderingSession for its whole life.
+    // A session-scoped build must never discover an old active task and "adopt"
+    // it into the current cycle.
+    if (orderingSessionId) activeTaskFilter.orderingSessionId = orderingSessionId;
 
     const activeTasks = await PickingTask.find(
       activeTaskFilter,
@@ -177,17 +181,14 @@ async function buildPickingTasksImpl(targetDeliveryGroupId = null, options = {})
     }
 
     if (toAppend.size) {
-      // Stamp orderingSessionId on the task we append to (only when this build is
-      // session-scoped) so detection stays membership-based. Never overwrite with
-      // null from an unscoped build.
+      // Session membership is immutable. We only append to tasks discovered by
+      // the session-scoped activeTaskFilter above; never rewrite orderingSessionId
+      // as a side effect of adding a late order.
       await Promise.all(
         Array.from(toAppend.values()).map(({ taskId, newItems }) =>
           PickingTask.updateOne(
             { _id: taskId },
-            // addToSet by orderId to prevent duplicates in multi-process environments
-            orderingSessionId
-              ? { $addToSet: { items: { $each: newItems } }, $set: { orderingSessionId } }
-              : { $addToSet: { items: { $each: newItems } } }
+            { $addToSet: { items: { $each: newItems } } },
           )
         )
       );

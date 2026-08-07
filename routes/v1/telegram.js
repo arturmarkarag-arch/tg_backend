@@ -78,7 +78,8 @@ function normalizeCartState(cartState) {
 
 async function resolveOrderingSessionContext(user, userShop = null) {
   const resolvedShop = userShop || (user?.shopId ? await getShop(user.shopId) : null);
-  const resolvedGroupId = resolvedShop?.deliveryGroupId || user?.deliveryGroupId || '';
+  // Єдине джерело групи — магазин. Копії на User більше немає (див. models/User.js).
+  const resolvedGroupId = resolvedShop?.deliveryGroupId || '';
 
   if (!['seller', 'admin'].includes(user?.role) || !resolvedGroupId) {
     return {
@@ -118,18 +119,20 @@ async function resolveOrderingSessionContext(user, userShop = null) {
   };
 }
 
+// shopId → shop → deliveryGroupId → group.name. Єдиний шлях: без магазину зони
+// немає (поле в профілі лишається у відповіді, просто порожнє).
 async function resolveWarehouseZone(user) {
-  // New architecture: shopId → shop → deliveryGroupId → group
-  if (user?.shopId) {
-    const shop = await Shop.findById(user.shopId).lean();
-    if (shop?.deliveryGroupId) {
-      const group = await DeliveryGroup.findById(shop.deliveryGroupId).lean();
-      return group?.name || '';
-    }
-  }
-  // Legacy fallback
-  if (!user?.deliveryGroupId) return '';
-  const group = await DeliveryGroup.findById(user.deliveryGroupId).lean();
+  if (!user?.shopId) return '';
+  const shop = await Shop.findById(user.shopId).lean();
+  if (!shop?.deliveryGroupId) return '';
+  const group = await DeliveryGroup.findById(shop.deliveryGroupId).lean();
+  return group?.name || '';
+}
+
+// Те саме для магазину, який уже прочитано (PATCH /me/shop), — без зайвого читання.
+async function resolveZoneForShop(shop) {
+  if (!shop?.deliveryGroupId) return '';
+  const group = await DeliveryGroup.findById(shop.deliveryGroupId).lean();
   return group?.name || '';
 }
 
@@ -145,7 +148,7 @@ async function buildUserProfile(user) {
   });
 
   const userShop = user.shopId ? await getShop(user.shopId) : null;
-  const fallbackGroupId = userShop?.deliveryGroupId || user.deliveryGroupId || '';
+  const fallbackGroupId = userShop?.deliveryGroupId || '';
 
   let resolvedGroupId = fallbackGroupId;
   let sessionOpenAt = null;
@@ -320,7 +323,7 @@ router.patch('/me/shop', asyncHandler(async (req, res) => {
       shopName: shop.name || '',
       shopCity: shop.cityId?.name || '',
       deliveryGroupId: shop.deliveryGroupId ? String(shop.deliveryGroupId) : null,
-      warehouseZone: fresh?.warehouseZone || '',
+      warehouseZone: await resolveZoneForShop(shop),
       cartState: normalizeCartState(fresh?.cartState ?? null),
     });
   }
@@ -384,7 +387,7 @@ router.patch('/me/shop', asyncHandler(async (req, res) => {
     shopName: shop.name || '',
     shopCity: shop.cityId?.name || '',
     deliveryGroupId: shop.deliveryGroupId ? String(shop.deliveryGroupId) : null,
-    warehouseZone: updatedUser?.warehouseZone || '',
+    warehouseZone: await resolveZoneForShop(shop),
     cartState: normalizeCartState(updatedUser?.cartState ?? null),
     ...(migrationResult?.movedOrder ? { orderMoved: true } : {}),
   });
@@ -863,7 +866,6 @@ router.post('/register-request', asyncHandler(async (req, res) => {
           lastName,
           phoneNumber: cleanPhone,
           shopId: String(shop._id),
-          deliveryGroupId: shop.deliveryGroupId,
         });
       });
     } catch (err) {
@@ -984,7 +986,6 @@ router.post('/register-requests/:id/approve', adminOnly, asyncHandler(async (req
         lastName: request.lastName,
         phoneNumber: request.phoneNumber,
         shopId: request.role === 'seller' ? request.shopId : null,
-        deliveryGroupId: request.deliveryGroupId,
       });
 
       await RegistrationRequest.deleteOne({ _id: request._id }, { session });

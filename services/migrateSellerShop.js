@@ -83,11 +83,9 @@ async function migrateSellerShop({
   let newSessionId = null;
   let targetSessionId = null;
   let routedToNextSession = false;
-  let warehouseZone = '';
   if (newDeliveryGroupId) {
     const newGroup = await DeliveryGroup.findById(newDeliveryGroupId).session(session).lean();
     if (newGroup) {
-      warehouseZone = newGroup.name || '';
       newSessionId = await getOrCreateSessionId(String(newGroup._id), newGroup.dayOfWeek, schedule);
       targetSessionId = newSessionId;
 
@@ -199,15 +197,11 @@ async function migrateSellerShop({
     }
   }
 
-  // 2. Update User
+  // 2. Update User. Пишемо ТІЛЬКИ shopId: група доставки й назва зони читаються
+  // з магазину (Shop.deliveryGroupId → DeliveryGroup.name) там, де потрібні.
   const userUpdate = {
     shopId: newShopFull._id,
-    deliveryGroupId: newDeliveryGroupId,
   };
-  // Only sellers carry a warehouseZone-derived-from-shop; preserve other roles' values
-  if (existingUser.role === 'seller') {
-    userUpdate.warehouseZone = warehouseZone;
-  }
   if (resetCartNavigation) {
     userUpdate['cartState.lastViewedProductId'] = '';
     userUpdate['cartState.lastViewedOrderNumber'] = 0;

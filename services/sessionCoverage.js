@@ -81,7 +81,11 @@ async function auditSessionCoverage({ deliveryGroupId, orderingSessionId }) {
     Product.find({ _id: { $in: productIds } }, '_id status brand model category orderNumber imageUrls localImageUrl').lean(),
     getShippingBlockPositions(productIds),
     PickingTask.find(
-      { deliveryGroupId: groupId, status: { $in: ['pending', 'locked'] } },
+      {
+        deliveryGroupId: groupId,
+        orderingSessionId: sessionId,
+        status: { $in: ['pending', 'locked'] },
+      },
       'productId items.orderId',
     ).lean(),
   ]);

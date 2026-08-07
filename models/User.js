@@ -26,9 +26,16 @@ const UserSchema = new mongoose.Schema(
     // Lowercased/trimmed on save; queries must normalize the same way.
     googleEmail: { type: String, default: '', lowercase: true, trim: true },
     shopNumber: { type: String, default: '' },
+    // Магазин — ЄДИНИЙ звʼязок продавця з групою доставки:
+    //     User.shopId → Shop.deliveryGroupId → DeliveryGroup
+    // Полів deliveryGroupId/warehouseZone тут свідомо НЕМАЄ. Це були
+    // денормалізовані копії заради швидкого читання, і їх правильність трималася
+    // на тому, що КОЖЕН шлях зміни магазину не забуде зробити каскад
+    // (User.updateMany у shops.js). Один пропущений endpoint = продавець у групі A,
+    // магазин у групі B. Похідні значення тепер обчислюються з магазину в місці
+    // використання; API-контракт (профіль /v1/telegram, список користувачів) віддає
+    // їх так само, як раніше.
     shopId: { type: mongoose.Schema.Types.ObjectId, ref: 'Shop', default: null },
-    deliveryGroupId: { type: String, default: '' },
-    warehouseZone: { type: String, default: '' },
     // Legacy shift-модель: docs/architecture/technical-debt.md#стара-логіка-зміни-складу
     isWarehouseManager: { type: Boolean, default: false },
     isOnShift: { type: Boolean, default: false },

@@ -41,40 +41,24 @@ async function sanitizeUserPayload(payload, existing = null) {
     data.botBlocked = Boolean(payload.botBlocked === 'false' ? false : payload.botBlocked);
   }
 
-  // Seller-specific fields. deliveryGroupId + warehouseZone are derived from the shop
-  // in the same payload so a single atomic update covers all three values.
+  // Seller-specific fields. Група доставки НЕ пишеться в User — вона живе на
+  // магазині (Shop.deliveryGroupId), тож призначення магазину саме по собі й
+  // визначає групу.
   if (role === 'seller') {
     if (payload.shopId !== undefined) data.shopId = payload.shopId || null;
     if (payload.shopNumber !== undefined) data.shopNumber = payload.shopNumber;
-    const resolveShopId = data.shopId !== undefined ? data.shopId : existing?.shopId;
-    if (resolveShopId) {
-      const shop = await Shop.findById(resolveShopId).lean();
-      data.deliveryGroupId = shop?.deliveryGroupId || '';
-      if (shop?.deliveryGroupId) {
-        const grp = await DeliveryGroup.findById(shop.deliveryGroupId).lean();
-        data.warehouseZone = grp?.name || '';
-      } else {
-        data.warehouseZone = '';
-      }
-    } else {
-      data.deliveryGroupId = '';
-      data.warehouseZone = '';
-    }
   } else {
     data.shopId = null;
     data.shopNumber = '';
-    data.deliveryGroupId = '';
   }
 
   // Warehouse-specific fields
   if (role === 'warehouse') {
     if (payload.isWarehouseManager !== undefined) data.isWarehouseManager = Boolean(payload.isWarehouseManager);
-    if (payload.warehouseZone !== undefined) data.warehouseZone = payload.warehouseZone;
   } else if (role !== 'seller') {
     data.isWarehouseManager = false;
     data.isOnShift = false;
     data.shiftZone = { startBlock: null, endBlock: null };
-    data.warehouseZone = '';
   } else {
     // role === 'seller' — clear warehouse-only flags
     data.isWarehouseManager = false;
@@ -96,12 +80,19 @@ router.get('/', asyncHandler(async (req, res) => {
 
   const filter = {};
   if (roleFilter && roleFilter !== 'all') filter.role = roleFilter;
-  if (groupFilter && groupFilter !== 'all') filter.deliveryGroupId = groupFilter;
 
-  // City filter: cityId → shops in that city → filter by shopId
-  if (cityFilter && cityFilter !== 'all') {
-    const cityShops = await Shop.find({ cityId: cityFilter }, '_id').lean();
-    filter.shopId = { $in: cityShops.map((s) => s._id) };
+  // Група і місто — обидва властивості МАГАЗИНА, тому резолвяться одним запитом
+  // у спільний набір shopIds. Окремими присвоєннями filter.shopId другий тихо
+  // затирав би перший (і фільтр «місто + група» повертав би не той зріз).
+  // Група більше не читається з User: джерело — Shop.deliveryGroupId.
+  const shopScope = {};
+  if (groupFilter && groupFilter !== 'all') shopScope.deliveryGroupId = groupFilter;
+  if (cityFilter && cityFilter !== 'all') shopScope.cityId = cityFilter;
+  if (Object.keys(shopScope).length) {
+    const scopedShops = await Shop.find(shopScope, '_id').lean();
+    // Порожній $in навмисне: немає магазинів під фільтр — немає й користувачів.
+    // Заразом це відсікає warehouse/admin (у них shopId=null), як і раніше.
+    filter.shopId = { $in: scopedShops.map((s) => s._id) };
   }
 
   // Text search across name, phone, telegramId and the seller's shop (name /
@@ -588,7 +579,6 @@ router.patch('/:telegramId', asyncHandler(async (req, res) => {
     // Apply non-shop fields first, then run migration for shop-related fields
     const nonShopPayload = { ...payload };
     delete nonShopPayload.shopId;
-    delete nonShopPayload.deliveryGroupId;
 
     const result = await withLock(`user:${req.params.telegramId}:shop`, async () => {
       const session = await mongoose.connection.startSession();
@@ -635,7 +625,6 @@ router.patch('/:telegramId', asyncHandler(async (req, res) => {
     const actor = req.telegramUser || { telegramId: 'admin', firstName: 'Admin', lastName: '', role: 'admin' };
     const nonShopPayload = { ...payload };
     delete nonShopPayload.shopId;
-    delete nonShopPayload.deliveryGroupId;
     const updated = await withLock(`user:${req.params.telegramId}:shop`, async () => {
       const session = await mongoose.connection.startSession();
       try {
