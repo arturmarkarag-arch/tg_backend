@@ -7,7 +7,9 @@ const BotInteractionLogSchema = new mongoose.Schema(
     action: { type: String, required: true },
     label: { type: String, default: '' },
     context: { type: mongoose.Schema.Types.Mixed, default: {} },
-    createdAt: { type: Date, default: Date.now, index: true },
+    // Без index: true — індекс по createdAt оголошений нижче з TTL. Два оголошення
+    // на один ключ дають конфлікт імені createdAt_1, і TTL просто не створюється.
+    createdAt: { type: Date, default: Date.now },
   },
   { versionKey: false }
 );

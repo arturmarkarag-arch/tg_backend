@@ -64,9 +64,11 @@ const ProductSchema = new mongoose.Schema(
 // історичне значення і може колізіювати з активними. Restore (див. archive.js)
 // присвоює свіжий max+1, тому конфлікту по orderNumber з активними блоками
 // бути не може.
+// $ne у partialFilterExpression MongoDB не приймає ("Expression not supported in
+// partial index: $not"), тому «не archived» виражаємо через $in по решті enum.
 ProductSchema.index(
   { orderNumber: 1 },
-  { unique: true, partialFilterExpression: { status: { $ne: 'archived' } } }
+  { unique: true, partialFilterExpression: { status: { $in: ['pending', 'active'] } } }
 );
 
 // Унікальний частковий індекс: barcode унікальний тільки серед не-порожніх значень.

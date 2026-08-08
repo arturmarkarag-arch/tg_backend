@@ -1,64 +1,94 @@
 'use strict';
 
 /**
- * Pre-production data wipe.
+ * Pre-production data wipe — чистка перед бойовим стартом.
  *
- * Keeps only the REAL business entities and config; resets everything
- * transactional/transient so the app starts production from a clean slate.
+ * Лишає РЕАЛЬНІ сутності й конфіг, зносить увесь каталог і транзакційний шар,
+ * щоб продакшн стартував з чистого аркуша (каталог заливається наново).
  *
- *   KEEP  : users (cart/history reset), shops, cities, groupmembers,
- *           deliverygroups, appsettings
- *   WIPE  : orders, picking, catalog (products/shopproducts/productvectors/
- *           blocks/searchproducts), receipts, ordering sessions, logs, tokens
- *   DROP  : dead collections with no live model
- *   RESET : all counters (orderNumber restarts at #1); users.cartState /
- *           miniAppState / history
+ *   KEEP  : users (кошик/стан/історія обнуляються, identity+role+shop лишаються),
+ *           shops, cities, groupmembers, deliverygroups, appsettings,
+ *           registrationtokens (живі ZP-коди!), registrationrequests,
+ *           googlelinktokens, shoptransferrequests
+ *   WIPE  : каталог (products/shopproducts/productvectors/searchproducts/blocks),
+ *           цикл замовлень (orders/pickingtasks/orderingsessions/catalogreviews/
+ *           clearedcarts/supplementoffers/supplementrequests),
+ *           накладні (receipts/receiptitems/receiptitemlogs),
+ *           журнали (shopauditlogs/botinteractionlogs/visiontestlogs),
+ *           productfeedbacks
+ *   RESET : усі лічильники (orderNumber/blockId/receiptNumber/session-seq → з 1)
  *
- * SAFE BY DEFAULT: dry-run prints what WOULD change. Pass --execute to write.
+ * ІНДЕКСИ (--reset-indexes): на ОЧИЩЕНИХ колекціях робиться dropIndexes (крім
+ * _id_) і одразу model.syncIndexes() — індекси відновлюються рівно за схемою.
+ * Колекції НЕ дропаються, тому Atlas Search / $vectorSearch індекс на
+ * productvectors лишається живим. KEEP-колекції не чіпаються взагалі.
  *
- *   node scripts/preprodWipe.js              # dry-run
- *   node scripts/preprodWipe.js --execute    # perform the wipe
+ * БЕЗПЕЧНО ЗА ЗАМОВЧУВАННЯМ: без --execute це dry-run, який лише рахує.
+ *
+ *   node scripts/preprodWipe.js                              # dry-run
+ *   node scripts/preprodWipe.js --execute                    # виконати чистку
+ *   node scripts/preprodWipe.js --execute --reset-indexes    # + перезібрати індекси
+ *   node scripts/preprodWipe.js --execute --force            # без 5-секундної паузи
  */
 
 require('dotenv').config({ path: require('path').join(__dirname, '..', '..', '.env') });
 const mongoose = require('mongoose');
 
-const EXECUTE = process.argv.includes('--execute');
+const argv = process.argv.slice(2);
+const has = (f) => argv.includes(f);
 
-// Collections emptied but kept (indexes/shape preserved).
+const EXECUTE       = has('--execute');
+const RESET_INDEXES = has('--reset-indexes');
+const FORCE         = has('--force');
+
+// Колекції, що спорожняються. Модель потрібна, щоб (а) взяти справжню назву
+// колекції, (б) відновити індекси за схемою.
 const WIPE = [
-  'orders',
-  'pickingtasks',
-  'clearedcarts',
-  'shoptransferrequests',
-  'productfeedbacks',
-  'registrationrequests',
-  'registrationtokens',
-  'googlelinktokens',
-  'shopauditlogs',
-  'visiontestlogs',
-  'receiptitemlogs',
-  'botinteractionlogs',
-  'products',
-  'shopproducts',
-  'productvectors',
-  'blocks',
-  'searchproducts',
-  'receipts',
-  'receiptitems',
-  'orderingsessions',
+  // ── каталог ───────────────────────────────────────────────────────────────
+  ['Product',        '../models/Product',        'товари складу'],
+  ['ShopProduct',    '../models/ShopProduct',    'товари магазинів (дзеркала + власні)'],
+  ['ProductVector',  '../models/ProductVector',  'вектори фото-пошуку'],
+  ['SearchProduct',  '../models/SearchProduct',  'легасі-пошук'],
+  ['Block',          '../models/Block',          'блоки складу (полиці)'],
+  // ── цикл замовлень ────────────────────────────────────────────────────────
+  ['Order',            '../models/Order',            'замовлення'],
+  ['PickingTask',      '../models/PickingTask',      'задачі збирання'],
+  ['OrderingSession',  '../models/OrderingSession',  'сесії замовлення'],
+  ['CatalogReview',    '../models/CatalogReview',    'позначки «переглянув каталог»'],
+  ['ClearedCart',      '../models/ClearedCart',      'знімки очищених кошиків'],
+  ['SupplementOffer',  '../models/SupplementOffer',  'пропозиції дозамовлення'],
+  ['SupplementRequest','../models/SupplementRequest','заявки на дозамовлення'],
+  // ── накладні ──────────────────────────────────────────────────────────────
+  ['Receipt',        '../models/Receipt',        'накладні надходження'],
+  ['ReceiptItem',    '../models/ReceiptItem',    'позиції накладних'],
+  ['ReceiptItemLog', '../models/ReceiptItemLog', 'журнал позицій накладних'],
+  // ── журнали / фідбек ──────────────────────────────────────────────────────
+  ['ShopAuditLog',      '../models/ShopAuditLog',      'журнал дій по магазинах'],
+  ['BotInteractionLog', '../models/BotInteractionLog', 'журнал взаємодій з ботом'],
+  ['VisionTestLog',     '../models/VisionTestLog',     'журнал тестів фото-пошуку'],
+  ['ProductFeedback',   '../models/ProductFeedback',   'скарги «Проблеми з товаром?»'],
 ];
 
-// Dead collections — no live model references them. Dropped entirely.
-const DROP_DEAD = ['pricerequests', 'botsessions', 'pendingreactions', 'warehousetasks'];
+// Не чіпаються (перелічені лише для звіту).
+const KEEP = [
+  ['users',                'акаунти (кошик/стан/історія обнуляються)'],
+  ['shops',                'магазини'],
+  ['cities',               'міста'],
+  ['groupmembers',         'учасники Telegram-груп'],
+  ['deliverygroups',       'групи доставки'],
+  ['appsettings',          'налаштування (графік вікна замовлень тощо)'],
+  ['registrationtokens',   'ZP-коди реєстрації — живі посилання'],
+  ['registrationrequests', 'заявки на реєстрацію'],
+  ['googlelinktokens',     'токени прив’язки Google'],
+  ['shoptransferrequests', 'заявки на переведення магазинів'],
+];
 
-// Kept untouched (listed only for the report).
-const KEEP = ['users', 'shops', 'cities', 'groupmembers', 'deliverygroups', 'appsettings'];
-
+// Дефолти піддокументів User — мають збігатися зі схемою models/User.js.
 const CART_DEFAULT = {
   orderItems: {},
   orderItemIds: [],
   lastOrderPositions: 0,
+  navigationSessionId: '',
   lastViewedProductId: '',
   lastViewedOrderNumber: 0,
   currentIndex: 0,
@@ -73,60 +103,114 @@ const MINIAPP_DEFAULT = {
   updatedAt: null,
 };
 
+const pad = (n) => String(n).padStart(7);
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
 async function main() {
   const uri = process.env.MONGODB_URI;
+  if (!uri) {
+    console.error('MONGODB_URI не заданий у .env — нічого робити.');
+    process.exit(2);
+  }
+
   await mongoose.connect(uri);
   const db = mongoose.connection.db;
-  const dbName = db.databaseName;
 
-  console.log(`\n${EXECUTE ? '⚠️  EXECUTE' : '🔍 DRY-RUN'} — database: ${dbName}\n`);
+  console.log(`\n${EXECUTE ? '⚠️  ЗАПИС (--execute)' : '🔍 DRY-RUN (нічого не пишеться)'}`);
+  console.log(`   база: ${db.databaseName}   host: ${mongoose.connection.host}\n`);
+
+  if (EXECUTE && !FORCE) {
+    console.log('   Чистка почнеться через 5 секунд. Ctrl+C — скасувати.\n');
+    await sleep(5000);
+  }
 
   const existing = new Set((await db.listCollections().toArray()).map((c) => c.name));
-  const count = async (n) => (existing.has(n) ? db.collection(n).estimatedDocumentCount() : 0);
+  const count = async (n) => (existing.has(n) ? db.collection(n).countDocuments() : 0);
 
-  // ── KEEP report ──
-  console.log('✅ KEEP (untouched):');
-  for (const n of KEEP) console.log(`   ${String(await count(n)).padStart(6)}  ${n}`);
-
-  // ── WIPE ──
-  console.log('\n🗑️  WIPE (delete all docs):');
-  let wiped = 0;
-  for (const n of WIPE) {
-    if (!existing.has(n)) { console.log(`   ${'—'.padStart(6)}  ${n} (absent)`); continue; }
-    const c = await count(n);
-    console.log(`   ${String(c).padStart(6)}  ${n}`);
-    if (EXECUTE && c > 0) { const r = await db.collection(n).deleteMany({}); wiped += r.deletedCount; }
+  // ── KEEP (звіт) ───────────────────────────────────────────────────────────
+  console.log('✅ ЛИШАЄТЬСЯ:');
+  for (const [name, label] of KEEP) {
+    console.log(`   ${existing.has(name) ? pad(await count(name)) : '   —   '}  ${name.padEnd(22)} ${label}`);
   }
 
-  // ── DROP dead ──
-  console.log('\n💀 DROP (dead collections):');
-  for (const n of DROP_DEAD) {
-    if (!existing.has(n)) { console.log(`   ${'—'.padStart(6)}  ${n} (absent)`); continue; }
-    const c = await count(n);
-    console.log(`   ${String(c).padStart(6)}  ${n}`);
-    if (EXECUTE) { try { await db.collection(n).drop(); } catch (e) { if (e.codeName !== 'NamespaceNotFound') throw e; } }
+  // ── WIPE ──────────────────────────────────────────────────────────────────
+  console.log('\n🗑️  СТИРАЄТЬСЯ:');
+  let deleted = 0;
+  const wiped = [];
+  for (const [modelName, modelPath, label] of WIPE) {
+    const model = require(modelPath);
+    const name = model.collection.collectionName;
+    const c = await count(name);
+    console.log(`   ${existing.has(name) ? pad(c) : '   —   '}  ${name.padEnd(22)} ${label}`);
+    if (EXECUTE && c > 0) deleted += (await db.collection(name).deleteMany({})).deletedCount;
+    if (existing.has(name)) wiped.push([modelName, model, name]);
   }
 
-  // ── COUNTERS ──
-  const counterCount = await count('counters');
-  console.log(`\n🔢 COUNTERS reset: ${counterCount} docs (orderNumber/blockId/receiptNumber/session-seq) → recreated lazily; orderNumber restarts at #1`);
-  if (EXECUTE && existing.has('counters')) await db.collection('counters').deleteMany({});
+  // ── Лічильники ────────────────────────────────────────────────────────────
+  const counterDocs = existing.has('counters')
+    ? await db.collection('counters').find({}, { projection: { name: 1, seq: 1 } }).toArray()
+    : [];
+  console.log('\n🔢 ЛІЧИЛЬНИКИ (створяться наново з 1):');
+  if (!counterDocs.length) console.log('        —   немає що скидати');
+  for (const c of counterDocs) console.log(`   ${pad(c.seq)}  ${c.name}`);
+  if (EXECUTE && counterDocs.length) {
+    deleted += (await db.collection('counters').deleteMany({})).deletedCount;
+  }
 
-  // ── USERS reset (identity kept, transactional fields cleared) ──
+  // ── Користувачі: акаунти лишаються, транзакційні поля обнуляються ─────────
   const usersTotal = await count('users');
+  const usersWithCart = existing.has('users')
+    ? await db.collection('users').countDocuments({ 'cartState.orderItemIds.0': { $exists: true } })
+    : 0;
   const usersWithHistory = existing.has('users')
     ? await db.collection('users').countDocuments({ 'history.0': { $exists: true } })
     : 0;
-  console.log(`\n👤 USERS reset: cartState + miniAppState + history on ${usersTotal} users (history non-empty on ${usersWithHistory})`);
+  console.log('\n👤 КОРИСТУВАЧІ (акаунти НЕ видаляються):');
+  console.log(`   ${pad(usersTotal)}  акаунтів усього`);
+  console.log(`   ${pad(usersWithCart)}  з непорожнім кошиком → очищається`);
+  console.log(`   ${pad(usersWithHistory)}  з непорожньою історією → очищається`);
   if (EXECUTE && existing.has('users')) {
     const r = await db.collection('users').updateMany({}, {
       $set: { cartState: CART_DEFAULT, miniAppState: MINIAPP_DEFAULT, history: [] },
     });
-    console.log(`   users modified: ${r.modifiedCount}`);
+    console.log(`   змінено акаунтів: ${r.modifiedCount}`);
   }
 
-  if (EXECUTE) console.log(`\n✔ Done. Wiped ${wiped} docs across ${WIPE.length} collections.`);
-  else console.log('\nℹ️  Dry-run only — nothing was written. Re-run with --execute to apply.');
+  // ── Індекси очищених колекцій ─────────────────────────────────────────────
+  console.log('\n🧩 ІНДЕКСИ:');
+  if (!RESET_INDEXES) {
+    console.log('        —   не чіпаємо (прапорець --reset-indexes не заданий)');
+  } else if (!EXECUTE) {
+    console.log('        —   --reset-indexes працює лише разом з --execute');
+    for (const [modelName, , name] of wiped) {
+      const names = (await db.collection(name).indexes()).map((i) => i.name).filter((n) => n !== '_id_');
+      console.log(`       ${modelName.padEnd(18)} ${names.length ? names.join(', ') : '(лише _id_)'}`);
+    }
+  } else {
+    for (const [modelName, model, name] of wiped) {
+      try {
+        const before = (await db.collection(name).indexes()).map((i) => i.name).filter((n) => n !== '_id_');
+        if (before.length) await db.collection(name).dropIndexes();
+        await model.syncIndexes();
+        if (name === 'shopproducts') {
+          await require('../utils/ensureShopProductIndexes').ensureShopProductIndexes();
+        }
+        const after = (await db.collection(name).indexes()).map((i) => i.name).filter((n) => n !== '_id_');
+        console.log(`   ✔ ${modelName.padEnd(18)} ${after.length ? after.join(', ') : '(лише _id_)'}`);
+      } catch (err) {
+        console.error(`   ✖ ${modelName.padEnd(18)} ${err.message}`);
+      }
+    }
+    console.log('   Atlas $vectorSearch на productvectors не чіпався (колекції не дропались).');
+  }
+
+  console.log('');
+  if (EXECUTE) {
+    console.log(`✔ Готово. Видалено документів: ${deleted}.`);
+    console.log('   Далі: перезапустити сервер (скидає кеші в пам’яті + syncIndexes на старті).');
+  } else {
+    console.log('ℹ️  Dry-run — нічого не записано. Повторіть з --execute, щоб застосувати.');
+  }
 
   await mongoose.disconnect();
 }
