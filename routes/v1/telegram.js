@@ -17,8 +17,10 @@ const { getOrderingSchedule } = require('../../utils/getOrderingSchedule');
 const Order = require('../../models/Order');
 const { getIO } = require('../../socket');
 const { appError, asyncHandler } = require('../../utils/errors');
+const { getSupportAdmins, toPublicSupportAdmins } = require('../../utils/telegramSupportAdmins');
 const { withLock } = require('../../utils/lock');
 const { getShop, getDeliveryGroup } = require('../../utils/modelCache');
+const { isRemovedUser } = require('../../utils/userAccountState');
 
 const router = express.Router();
 const adminOnly = requireTelegramRole('admin');
@@ -285,7 +287,7 @@ router.post('/me', asyncHandler(async (req, res) => {
   if (!telegramId) throw appError('auth_telegram_id_missing');
 
   const user = await User.findOne({ telegramId }).lean();
-  if (!user) {
+  if (!user || isRemovedUser(user)) {
     const request = await RegistrationRequest.findOne({
       telegramId,
       status: { $in: ['pending', 'blocked', 'rejected'] },
@@ -587,21 +589,10 @@ router.post('/mini-app/state', asyncHandler(async (req, res) => {
   if (!updatedUser) throw appError('user_not_found');
 
   const cartState = normalizeCartState(updatedUser?.cartState);
-  const io = getIO();
-  if (io && updatedUser?.shopId) {
-    const shopDoc = await Shop.findById(updatedUser.shopId)
-      .select('deliveryGroupId')
-      .lean();
-    const groupId = shopDoc?.deliveryGroupId;
-    try {
-      if (groupId) {
-        io.to(`picking_group_${groupId}`).emit('shop_status_changed', {
-          groupId: String(groupId),
-        });
-      }
-    } catch (_) { /* non-critical */ }
-  }
 
+  // Navigation state is private UI state. Changing currentIndex/currentPage must
+  // never wake picking dashboards: no Order/Shop/session fact changed here.
+  // Real order/shop mutations emit their own domain events elsewhere.
   res.json({
     orderingSessionId: currentOrderingSessionId,
     miniAppState: normalizeMiniAppState(updatedUser?.miniAppState),
@@ -692,8 +683,10 @@ router.post('/registration-invite', asyncHandler(async (req, res) => {
   if (!telegramId) throw appError('auth_telegram_id_missing');
 
   // Already in the system → nothing to invite; the client should just re-auth.
-  const existingUser = await User.findOne({ telegramId }, '_id').lean();
-  if (existingUser) return res.json({ eligible: false, reason: 'already_registered' });
+  const existingUser = await User.findOne({ telegramId }, '_id accountState').lean();
+  if (existingUser && !isRemovedUser(existingUser)) {
+    return res.json({ eligible: false, reason: 'already_registered' });
+  }
 
   // Blocked applicants must not be handed a fresh token to retry with.
   const request = await RegistrationRequest.findOne(
@@ -702,7 +695,8 @@ router.post('/registration-invite', asyncHandler(async (req, res) => {
   if (request) return res.json({ eligible: false, reason: request.status });
 
   if (!(await isUserInAllowedGroup(telegramId))) {
-    return res.json({ eligible: false, reason: 'not_in_group' });
+    const supportAdmins = toPublicSupportAdmins(await getSupportAdmins());
+    return res.json({ eligible: false, reason: 'not_in_group', supportAdmins });
   }
 
   // The client passes back the token it already holds (from ?regToken=). If it is
@@ -758,7 +752,8 @@ router.post('/register-request', asyncHandler(async (req, res) => {
   // 1. LIVE membership: only current members of an allowed group (fail-closed —
   //    any getChatMember error counts as "not a member").
   if (!(await isUserInAllowedGroup(telegramId))) {
-    throw appError('registration_not_in_group');
+    const supportAdmins = toPublicSupportAdmins(await getSupportAdmins());
+    throw appError('registration_not_in_group', { supportAdmins });
   }
   // 2. One-time invite token, minted server-side either for THIS telegramId
   //    (personal, from the group link / bot button) or for a SHOP (an admin's
@@ -782,7 +777,7 @@ router.post('/register-request', asyncHandler(async (req, res) => {
   if (effectiveRole === 'seller' && !effectiveShopId) throw appError('registration_seller_shop_required');
 
   const existingUser = await User.findOne({ telegramId }).lean();
-  if (existingUser) throw appError('registration_user_exists');
+  if (existingUser && !isRemovedUser(existingUser)) throw appError('registration_user_exists');
 
   const existingRequest = await RegistrationRequest.findOne({
     telegramId,
@@ -827,7 +822,7 @@ router.post('/register-request', asyncHandler(async (req, res) => {
           await RegistrationRequest.deleteOne({ _id: staleRejectedId }, { session });
         }
         const existing = await User.findOne({ telegramId }).session(session).lean();
-        if (existing) throw appError('registration_user_exists');
+        if (existing && !isRemovedUser(existing)) throw appError('registration_user_exists');
         createdUser = await resolveAndCreateUser({
           session,
           telegramId,
@@ -938,7 +933,7 @@ router.post('/register-requests/:id/approve', adminOnly, asyncHandler(async (req
       if (overrideShopId) request.shopId = overrideShopId;
 
       const existing = await User.findOne({ telegramId: request.telegramId }).session(session).lean();
-      if (existing) {
+      if (existing && !isRemovedUser(existing)) {
         await RegistrationRequest.updateOne(
           { _id: request._id }, { $set: { status: 'rejected' } }, { session },
         );
@@ -946,8 +941,8 @@ router.post('/register-requests/:id/approve', adminOnly, asyncHandler(async (req
         return; // commit the rejected state; throw after the tx
       }
 
-      // Shared creation: resolves shop → group → zone and create()s the User in
-      // this transaction (E11000 on concurrent dup telegramId → caught below).
+      // Shared create/reactivate path. A soft-removed User row is intentionally
+      // reused after the normal registration gates have passed.
       createdUser = await resolveAndCreateUser({
         session,
         telegramId: request.telegramId,

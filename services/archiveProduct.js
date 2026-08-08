@@ -85,9 +85,24 @@ async function archiveProduct(productOrId, { notifyBuyers = false, bot = null, r
       // Re-read FRESH inside the session each attempt. Idempotent no-op if the
       // product vanished or was already archived by a concurrent path.
       product = await Product.findById(productId).session(session);
-      if (!product || product.status === 'archived') {
+      if (!product) {
         await session.abortTransaction();
         return { cancelledCount: 0 }; // finally ends the session
+      }
+
+      // Idempotent recovery: the product may already have been archived by the
+      // successful phase-2 write while the caller/recovery sweep still sees an
+      // unreconciled completed OOS signal. Consuming that signal is part of the
+      // archive contract; otherwise `archiveReconciled:false` lives forever and
+      // MASS/session diagnostics report a false crash-recovery orphan.
+      if (product.status === 'archived') {
+        await PickingTask.updateMany(
+          buildUnreconciledOosTaskFilter({ productId: product._id }),
+          { $set: { archiveReconciled: true } },
+          { session },
+        );
+        await session.commitTransaction();
+        return { cancelledCount: 0 }; // no duplicate emits/notifications
       }
 
       const isGroupOrderingOpen = async (deliveryGroupId) => {
@@ -186,6 +201,19 @@ async function archiveProduct(productOrId, { notifyBuyers = false, bot = null, r
       'orderingSessionId',
     ).session(session).lean();
     for (const t of oosSignals) if (t.orderingSessionId) attemptSessionIds.add(String(t.orderingSessionId));
+
+    // Successful product archival CONSUMES the crash-recovery signal in the SAME
+    // transaction. This was the missing write behind the MASS failure where all
+    // OOS products were archived correctly but 41 completed OOS tasks remained
+    // `archiveReconciled:false` forever. Restrict to the snapshot ids we just read
+    // so a later concurrent signal cannot be accidentally consumed by this tx.
+    if (oosSignals.length) {
+      await PickingTask.updateMany(
+        { _id: { $in: oosSignals.map((t) => t._id) } },
+        { $set: { archiveReconciled: true } },
+        { session },
+      );
+    }
 
     // completedExpireAt stamps the 90-day TTL so these system-closed tasks are
     // reaped like normal completions (no completedBy — excluded from ranking).

@@ -138,16 +138,25 @@ async function auditGroup(groupChatId) {
   if (!bot) return { ok: false, reason: 'bot_unavailable' };
 
   const gid = String(groupChatId);
-  const [knownMembers, sellers] = await Promise.all([
+  const [allKnownMembers, sellers] = await Promise.all([
     GroupMember.find({ groupChatId: gid, isBot: false }).lean(),
-    User.find({ role: 'seller' }, 'telegramId firstName lastName role').lean(),
+    User.find({ role: 'seller', accountState: { $ne: 'removed' } }, 'telegramId firstName lastName role').lean(),
   ]);
 
+  const hiddenIds = new Set(
+    allKnownMembers.filter((m) => m.hiddenAt).map((m) => String(m.telegramId)),
+  );
+  const knownMembers = allKnownMembers.filter((m) => !m.hiddenAt);
   const memberByTid = new Map(knownMembers.map((m) => [String(m.telegramId), m]));
-  const sellerByTid = new Map(sellers.map((u) => [String(u.telegramId), u]));
-  const ids = [...new Set([...memberByTid.keys(), ...sellerByTid.keys()])];
+  const sellerByTid = new Map(
+    sellers
+      .filter((u) => !hiddenIds.has(String(u.telegramId)))
+      .map((u) => [String(u.telegramId), u]),
+  );
+  const ids = [...new Set([...memberByTid.keys(), ...sellerByTid.keys()])]
+    .filter((tid) => !hiddenIds.has(String(tid)));
   const registeredDocs = ids.length
-    ? await User.find({ telegramId: { $in: ids } }, 'telegramId').lean()
+    ? await User.find({ telegramId: { $in: ids }, accountState: { $ne: 'removed' } }, 'telegramId').lean()
     : [];
   const registeredIds = new Set(registeredDocs.map((u) => String(u.telegramId)));
 

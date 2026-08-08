@@ -15,6 +15,7 @@ const { appError, asyncHandler } = require('../utils/errors');
 const { withLock } = require('../utils/lock');
 const { invalidateShop } = require('../utils/modelCache');
 const { getIO } = require('../socket');
+const { softRemoveUser } = require('../services/softRemoveUser');
 
 const router = express.Router();
 router.use(telegramAuth);
@@ -78,7 +79,7 @@ router.get('/', asyncHandler(async (req, res) => {
   const searchQuery    = req.query.search?.trim() || null;
   const activityFilter = req.query.activityFilter || null; // 'no_cart' | 'no_order' | 'no_visit'
 
-  const filter = {};
+  const filter = { accountState: { $ne: 'removed' } };
   if (roleFilter && roleFilter !== 'all') filter.role = roleFilter;
 
   // Група і місто — обидва властивості МАГАЗИНА, тому резолвяться одним запитом
@@ -672,50 +673,27 @@ router.patch('/:telegramId', asyncHandler(async (req, res) => {
 }));
 
 router.delete('/:telegramId', asyncHandler(async (req, res) => {
-  const user = await User.findOne({ telegramId: req.params.telegramId });
-  if (!user) throw appError('user_not_found');
+  const telegramId = String(req.params.telegramId || '').trim();
+  const existing = await User.findOne({ telegramId }).lean();
+  if (!existing) throw appError('user_not_found');
 
-  // Block deletion if user has active orders or picking tasks
-  const [activeOrders, activePickingTasks] = await Promise.all([
-    Order.countDocuments({ buyerTelegramId: user.telegramId, status: { $in: ['new', 'in_progress'] } }),
-    // PickingTask виконавця тримає поле `lockedBy` (не `assignedTo` — такого поля
-    // в моделі немає; раніше гард тихо повертав 0 і працівника складу можна було
-    // видалити просто посеред збирання). pending-задачі виконавця не мають —
-    // тільки locked, тож фільтруємо саме по них.
-    PickingTask.countDocuments({ lockedBy: String(user.telegramId), status: 'locked' }),
-  ]);
-  if (activeOrders > 0 || activePickingTasks > 0) {
-    throw appError('user_has_active_work', { activeOrders, activePickingTasks });
-  }
+  const result = await softRemoveUser({
+    telegramId,
+    actor: req.telegramUser,
+  });
 
-  const session = await mongoose.connection.startSession();
   try {
-    await session.withTransaction(async () => {
-      await User.findOneAndDelete({ telegramId: req.params.telegramId }, { session });
+    const io = getIO();
+    io?.to(`user_${telegramId}`).emit('account_removed', { telegramId });
+    io?.in(`user_${telegramId}`).disconnectSockets(true);
+  } catch (_) { /* best-effort */ }
 
-      // Update the shop's lastSeller snapshot on removal
-      if (user.shopId) {
-        await Shop.findByIdAndUpdate(
-          user.shopId,
-          {
-            lastSellerChangedAt: new Date(),
-            lastSeller: {
-              telegramId: user.telegramId,
-              firstName: user.firstName || '',
-              lastName: user.lastName || '',
-              unassignedAt: new Date(),
-            },
-          },
-          { session }
-        );
-      }
-    });
-  } finally {
-    session.endSession();
-  }
-
-  if (user.shopId) await invalidateShop(user.shopId);
-  res.json({ message: 'Користувача видалено' });
+  res.json({
+    message: 'Доступ користувача закрито. Дані збережено; повторна реєстрація дозволена.',
+    ...result,
+    removed: true,
+    canRegisterAgain: true,
+  });
 }));
 
 module.exports = router;

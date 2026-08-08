@@ -2,6 +2,7 @@ const User = require('../models/User');
 const { getTelegramAuth, getInitDataFromRequest } = require('../utils/validateTelegramInitData');
 const { verifySession, isSessionNotRevoked } = require('../utils/jwt');
 const { appError } = require('../utils/errors');
+const { isRemovedUser } = require('../utils/userAccountState');
 
 // Accepts either Telegram Mini App initData (x-telegram-initdata header) OR a
 // browser session JWT (Authorization: Bearer). Whichever path matches, the
@@ -41,7 +42,7 @@ async function telegramAuth(req, res, next) {
   }
 
   const user = await User.findOne({ telegramId }).lean();
-  if (!user) {
+  if (!user || isRemovedUser(user)) {
     return next(appError('not_registered'));
   }
   // Blocked users must not retain access via either transport.

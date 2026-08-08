@@ -41,7 +41,7 @@ async function getGroupShopIds(groupId) {
 async function getGroupSellers(groupId, projection = 'telegramId firstName lastName shopId') {
   const shopIds = await getGroupShopIds(groupId);
   if (!shopIds.length) return [];
-  return User.find({ role: 'seller', shopId: { $in: shopIds } }, projection).lean();
+  return User.find({ role: 'seller', shopId: { $in: shopIds }, accountState: { $ne: 'removed' } }, projection).lean();
 }
 
 /** Лише telegramId — те, що раніше лежало в DeliveryGroup.members. */
@@ -56,7 +56,7 @@ async function getGroupSellerIds(groupId) {
  */
 async function getSellerCountsByGroup() {
   const rows = await User.aggregate([
-    { $match: { role: 'seller', shopId: { $ne: null } } },
+    { $match: { role: 'seller', shopId: { $ne: null }, accountState: { $ne: 'removed' } } },
     { $lookup: { from: 'shops', localField: 'shopId', foreignField: '_id', as: 'shop' } },
     { $unwind: '$shop' },
     { $group: { _id: '$shop.deliveryGroupId', count: { $sum: 1 } } },

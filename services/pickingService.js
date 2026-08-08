@@ -742,8 +742,26 @@ async function archiveOrphanedOutOfStockProductsImpl(groupId, sessionId) {
   // transient transaction errors.
   for (const pid of productIds) {
     try {
-      const product = await Product.findOne({ _id: pid, status: { $ne: 'archived' } });
+      const product = await Product.findById(pid);
       if (!product) continue;
+
+      // If phase 2 actually committed but the signal-consumption write came from
+      // an older build (or a process died around that boundary), the product is
+      // already globally archived. There is nothing left to archive; consume the
+      // canonical recovery signal so it does not remain an eternal false orphan.
+      if (product.status === 'archived') {
+        const reconciled = await PickingTask.updateMany(
+          buildUnreconciledOosTaskFilter({
+            productId: product._id,
+            deliveryGroupId: groupId,
+            orderingSessionId: sessionId,
+          }),
+          { $set: { archiveReconciled: true } },
+        );
+        if ((reconciled.modifiedCount || 0) > 0) fixedCount += 1;
+        continue;
+      }
+
       const activeTask = await PickingTask.findOne({ productId: product._id, status: { $in: ['pending', 'locked'] } }).lean();
       if (activeTask) continue;
       // Re-read at archive time: a concurrent product restore-from-archive may have

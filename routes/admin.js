@@ -12,6 +12,15 @@ const { invalidateOrderingScheduleCache, getOrderingSchedule } = require('../uti
 const { isOrderingOpen, getOpenDateWarsaw } = require('../utils/orderingSchedule');
 const { pushSessionEvent } = require('../utils/sessionStatus');
 const cache = require('../utils/cache');
+const { softRemoveUser } = require('../services/softRemoveUser');
+const { getIO } = require('../socket');
+const {
+  MAX_SUPPORT_ADMINS,
+  normalizeSupportAdmin,
+  getSupportAdmins,
+  saveSupportAdmins,
+  toPublicSupportAdmins,
+} = require('../utils/telegramSupportAdmins');
 
 const router = express.Router();
 const OPENAI_MODEL_SETTING_KEY = 'openai.defaultModel';
@@ -331,6 +340,45 @@ router.delete('/telegram-groups/:groupId', telegramAuth, requireTelegramRole('ad
   }
 });
 
+// ── Telegram contacts shown to unregistered users ────────────────────────────
+router.get('/telegram-support-admins', telegramAuth, requireTelegramRole('admin'), asyncHandler(async (req, res) => {
+  res.json({ admins: toPublicSupportAdmins(await getSupportAdmins()) });
+}));
+
+router.post('/telegram-support-admins', telegramAuth, requireTelegramRole('admin'), asyncHandler(async (req, res) => {
+  const admin = normalizeSupportAdmin(req.body);
+  if (!admin) {
+    return res.status(400).json({
+      error: 'telegram_support_admin_invalid',
+      message: 'Вкажіть ім\'я та коректний Telegram username (наприклад @username).',
+    });
+  }
+
+  const current = await getSupportAdmins();
+  if (current.some((item) => item.username.toLowerCase() === admin.username.toLowerCase())) {
+    return res.status(409).json({
+      error: 'telegram_support_admin_exists',
+      message: 'Цей Telegram адміністратор уже доданий.',
+    });
+  }
+  if (current.length >= MAX_SUPPORT_ADMINS) {
+    return res.status(409).json({
+      error: 'telegram_support_admin_limit',
+      message: `Можна додати максимум ${MAX_SUPPORT_ADMINS} контактів.`,
+    });
+  }
+
+  const admins = await saveSupportAdmins([...current, admin]);
+  res.json({ admins: toPublicSupportAdmins(admins) });
+}));
+
+router.delete('/telegram-support-admins/:username', telegramAuth, requireTelegramRole('admin'), asyncHandler(async (req, res) => {
+  const username = String(req.params.username || '').replace(/^@+/, '').trim().toLowerCase();
+  const current = await getSupportAdmins();
+  const admins = await saveSupportAdmins(current.filter((item) => item.username.toLowerCase() !== username));
+  res.json({ admins: toPublicSupportAdmins(admins) });
+}));
+
 // ── Price groups (Telegram «Група ціна на товар») ─────────────────────────────
 // Separate list from TELEGRAM_GROUPS_KEY: groups that receive «Яка ціна?» photo
 // requests from the photo-search page. No env fallback — DB only.
@@ -389,6 +437,41 @@ router.get('/telegram-groups/:groupId/members', telegramAuth, requireTelegramRol
 
   const members = await getMembersWithStatus(groupId);
   res.json(members);
+}));
+
+// UI label: "Видалити". This is a SOFT account removal, not Mongo deletion.
+// The User row and GroupMember history stay in the database, but access closes
+// immediately and the identity disappears from live lists. A later legitimate
+// registration can reactivate the same User row after all normal gates pass.
+router.delete('/telegram-groups/:groupId/members/:telegramId', telegramAuth, requireTelegramRole('admin'), asyncHandler(async (req, res) => {
+  const groupId = String(req.params.groupId).trim();
+  const telegramId = String(req.params.telegramId).trim();
+  const allowedIds = await getAllowedGroupIds();
+  if (!allowedIds.includes(groupId)) return res.status(403).json({ error: 'Група не авторизована' });
+  if (!/^\d+$/.test(telegramId)) return res.status(400).json({ error: 'Некоректний Telegram ID' });
+
+  const result = await softRemoveUser({
+    telegramId,
+    actor: req.telegramUser,
+    groupChatId: groupId,
+  });
+
+  // Kill any already-open HTTP-independent session immediately. Subsequent HTTP
+  // calls are denied by accountState=removed; browser JWTs were revoked too.
+  try {
+    const io = getIO();
+    io?.to(`user_${telegramId}`).emit('account_removed', { telegramId });
+    io?.in(`user_${telegramId}`).disconnectSockets(true);
+  } catch (_) { /* best-effort */ }
+
+  res.json({
+    ...result,
+    removed: true,
+    hidden: true,
+    groupId,
+    telegramId,
+    canRegisterAgain: true,
+  });
 }));
 
 // Live-check one person. IMPORTANT: this is a notification-free admin audit.

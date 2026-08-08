@@ -18,7 +18,7 @@ function normalizeWorkerId(id) {
 }
 
 router.get('/workers', requireTelegramRoles(['admin', 'warehouse']), asyncHandler(async (req, res) => {
-  const workers = await User.find({ role: 'warehouse' }).sort({ firstName: 1, lastName: 1 }).lean();
+  const workers = await User.find({ role: 'warehouse', accountState: { $ne: 'removed' } }).sort({ firstName: 1, lastName: 1 }).lean();
   res.json(workers.map((worker) => ({
     telegramId: worker.telegramId,
     _id: worker._id,
@@ -31,7 +31,7 @@ router.get('/workers', requireTelegramRoles(['admin', 'warehouse']), asyncHandle
 }));
 
 router.get('/shift-status', requireTelegramRoles(['admin', 'warehouse']), asyncHandler(async (req, res) => {
-  const activeWorkers = await User.find({ role: 'warehouse', isOnShift: true }).lean();
+  const activeWorkers = await User.find({ role: 'warehouse', isOnShift: true, accountState: { $ne: 'removed' } }).lean();
   const activeWorkerIds = activeWorkers.map((worker) => String(worker.telegramId));
   const lockedTasks = await PickingTask.find({ status: 'locked', lockedBy: { $in: activeWorkerIds } })
     .select('lockedBy blockId positionIndex lockedAt')
@@ -72,6 +72,7 @@ router.post('/remove-from-shift', requireTelegramRoles(['admin', 'warehouse']), 
       worker = await User.findOne({
         role: 'warehouse',
         telegramId: normalizedWorkerId,
+        accountState: { $ne: 'removed' },
       }).session(session);
 
       if (!worker) throw appError('warehouse_worker_not_found');
@@ -107,7 +108,7 @@ router.post('/confirm-shift', requireTelegramRoles(['admin', 'warehouse']), asyn
   const normalizedIds = workerIds.map(normalizeWorkerId).filter(Boolean);
   if (normalizedIds.length === 0) throw appError('warehouse_workerids_invalid');
 
-  const warehouseWorkers = await User.find({ role: 'warehouse' }).lean();
+  const warehouseWorkers = await User.find({ role: 'warehouse', accountState: { $ne: 'removed' } }).lean();
   const matchedWorkers = warehouseWorkers.filter((worker) =>
     normalizedIds.includes(worker.telegramId) || normalizedIds.includes(String(worker._id))
   );

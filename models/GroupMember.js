@@ -27,6 +27,12 @@ const schema = new mongoose.Schema({
   },
   statusCheckedAt: { type: Date, default: null },
   statusCheckError: { type: String, default: '' },
+  // Soft-hide from the admin Telegram-group monitor. The row is historical and
+  // is never deleted. The admin "Видалити" action also soft-removes an existing
+  // User account; successful re-registration clears these fields automatically.
+  // Passive Telegram events keep updating the row but never unhide it by themselves.
+  hiddenAt: { type: Date, default: null },
+  hiddenByTelegramId: { type: String, default: '' },
   // The group welcome ("register here") message we posted for this member, so we
   // can delete it once they register. message_id null = none outstanding.
   // (Telegram only lets the bot delete group messages < 48h old + with rights.)

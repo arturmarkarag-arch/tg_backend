@@ -47,7 +47,7 @@ async function redeemShopInvite({ code, sellerTelegramId }) {
 
   // Only sellers may be moved. Admin/warehouse accounts are refused so a leaked
   // link can't silently re-home a staff account.
-  const seller = await User.findOne({ telegramId: tgId, role: 'seller' }).lean();
+  const seller = await User.findOne({ telegramId: tgId, role: 'seller', accountState: { $ne: 'removed' } }).lean();
   if (!seller) return { ok: false, reason: 'not_seller' };
 
   if (String(seller.shopId || '') === String(shopPreview._id)) {
@@ -75,7 +75,7 @@ async function redeemShopInvite({ code, sellerTelegramId }) {
         if (!shopFull || !shopFull.isActive) { out = { ok: false, reason: 'shop_inactive' }; return; }
 
         // Re-read the seller inside the tx/lock so we migrate from fresh state.
-        const freshSeller = await User.findOne({ telegramId: tgId, role: 'seller' }).session(session).lean();
+        const freshSeller = await User.findOne({ telegramId: tgId, role: 'seller', accountState: { $ne: 'removed' } }).session(session).lean();
         if (!freshSeller) { out = { ok: false, reason: 'not_seller' }; return; }
         if (String(freshSeller.shopId || '') === String(shopFull._id)) {
           out = { ok: false, reason: 'same_shop' }; return;

@@ -56,6 +56,7 @@ const { migrateSellerShop } = require('../services/migrateSellerShop');
 const { unassignSellerAndPark } = require('../services/unassignSeller');
 const { activeOrderShopFilter } = require('../utils/orderShopFilter');
 const { reconcileLateOrderStrict } = require('../services/lateOrderReconcile');
+const { isRemovedUser } = require('../utils/userAccountState');
 
 async function getAllDeliveryGroups() {
   let groups = await cache.get(cache.KEYS.DELIVERY_GROUPS);
@@ -716,7 +717,7 @@ async function placeOrderImpl(req, res) {
   }
 
   const buyer = await User.findOne({ telegramId }).lean();
-  if (!buyer) {
+  if (!buyer || isRemovedUser(buyer)) {
     return res.status(403).json({ error: 'not_registered', message: 'Потрібно завершити реєстрацію, перш ніж робити замовлення' });
   }
 

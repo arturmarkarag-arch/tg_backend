@@ -111,9 +111,9 @@ const ERRORS = {
                                     ? `Помилка авторизації Telegram: ${reason}`
                                     : 'Невалідні дані авторизації Telegram' },
   auth_telegram_id_missing: { status: 400, message: 'Не передано Telegram user id' },
-  auth_not_registered:      { status: 403, message: 'Користувача не зареєстровано' },
+  auth_not_registered:      { status: 403, message: 'Користувача не зареєстровано. Зверніться до менеджера або адміністратора.' },
   // Backwards-compat alias used by mini-app client code that switches on `error` value.
-  not_registered:           { status: 403, message: 'Користувача не зареєстровано' },
+  not_registered:           { status: 403, message: 'Користувача не зареєстровано. Зверніться до менеджера або адміністратора.' },
   auth_required:            { status: 401, message: 'Потрібна авторизація через Telegram' },
 
   // ── Google browser login ───────────────────────────────────────────────────
@@ -298,7 +298,7 @@ const ERRORS = {
   me_state_invalid_index:   { status: 400, message: ({ field } = {}) =>
                                 `Поле «${field || 'currentIndex'}» має бути цілим невідʼємним числом` },
   init_data_required:       { status: 400, message: 'Відсутні дані Telegram (initData)' },
-  registration_not_in_group: { status: 403, message: 'Реєстрація доступна лише учасникам робочої групи. Зверніться до адміністратора.' },
+  registration_not_in_group: { status: 403, message: 'Вас не знайдено в робочій групі «Оголошення». Для доступу ви обов’язково маєте бути учасником цієї групи. Зверніться до менеджера або адміністратора та попросіть додати вас до групи «Оголошення».' },
   registration_token_invalid: { status: 403, message: 'Посилання для реєстрації недійсне або прострочене. Відкрийте реєстрацію через бота — напишіть йому /start.' },
   registration_pending:     { status: 403, message: 'Ваша заявка на реєстрацію очікує підтвердження адміністратора' },
   registration_blocked:     { status: 403, message: 'Ваша реєстрація заблокована. Зверніться до адміністратора.' },

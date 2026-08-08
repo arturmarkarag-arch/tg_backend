@@ -7,6 +7,7 @@ const { signSession, verifySession, isSessionNotRevoked } = require('../../utils
 const { consumeGoogleLinkToken } = require('../../services/googleLinkToken');
 const { getBot } = require('../../telegramBot');
 const { buildUserProfile } = require('./telegram');
+const { isRemovedUser } = require('../../utils/userAccountState');
 
 const router = express.Router();
 
@@ -59,6 +60,7 @@ router.post('/google', asyncHandler(async (req, res) => {
 
   const user = await User.findOne({ googleSub: result.sub }).lean();
   if (!user) throw appError('google_email_not_linked', { email: result.email });
+  if (isRemovedUser(user)) await throwRegistrationState(user.telegramId);
   if (user.botBlocked) throw appError('registration_blocked');
 
   res.json({ token: signSession(user.telegramId), profile: await buildUserProfile(user) });
@@ -93,7 +95,7 @@ router.post('/google/link/complete', asyncHandler(async (req, res) => {
   }
 
   const user = await User.findOne({ telegramId }).lean();
-  if (!user) await throwRegistrationState(telegramId);
+  if (!user || isRemovedUser(user)) await throwRegistrationState(telegramId);
   if (user.botBlocked) throw appError('registration_blocked');
 
   // Changing the linked Google to a DIFFERENT account is a credential rotation →
@@ -118,7 +120,7 @@ router.get('/me', asyncHandler(async (req, res) => {
   if (!session) throw appError('auth_required');
 
   const user = await User.findOne({ telegramId: session.telegramId }).lean();
-  if (!user) await throwRegistrationState(session.telegramId);
+  if (!user || isRemovedUser(user)) await throwRegistrationState(session.telegramId);
   if (user.botBlocked) throw appError('registration_blocked');
   if (!isSessionNotRevoked(session.iat, user)) throw appError('auth_required');
 

@@ -28,6 +28,7 @@ async function sellersOfGroup(deliveryGroupId) {
       role: { $in: ['seller', 'admin'] },
       shopId: { $in: shops.map((shop) => shop._id) },
       botBlocked: { $ne: true },
+      accountState: { $ne: 'removed' },
     },
     'telegramId',
   ).lean();

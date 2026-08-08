@@ -112,11 +112,16 @@ async function setMemberPhoto(groupChatId, telegramId, fileId) {
  */
 async function getMembersWithStatus(groupChatId) {
   const gid = String(groupChatId);
-  const groupMembers = await GroupMember.find({ groupChatId: gid, isBot: false }).lean();
+  const allGroupMembers = await GroupMember.find({ groupChatId: gid, isBot: false }).lean();
+  const hiddenIds = new Set(
+    allGroupMembers.filter((m) => m.hiddenAt).map((m) => String(m.telegramId)),
+  );
+  const groupMembers = allGroupMembers.filter((m) => !m.hiddenAt);
   const observedIds = groupMembers.map((m) => String(m.telegramId));
 
   const users = await User.find(
     {
+      accountState: { $ne: 'removed' },
       $or: [
         { role: 'seller' },
         ...(observedIds.length ? [{ telegramId: { $in: observedIds } }] : []),
@@ -127,7 +132,12 @@ async function getMembersWithStatus(groupChatId) {
 
   const userByTid = new Map(users.map((u) => [String(u.telegramId), u]));
   const memberByTid = new Map(groupMembers.map((m) => [String(m.telegramId), m]));
-  const allIds = [...new Set([...memberByTid.keys(), ...users.filter((u) => u.role === 'seller').map((u) => String(u.telegramId))])];
+  const allIds = [...new Set([
+    ...memberByTid.keys(),
+    ...users
+      .filter((u) => u.role === 'seller' && !hiddenIds.has(String(u.telegramId)))
+      .map((u) => String(u.telegramId)),
+  ])].filter((tid) => !hiddenIds.has(String(tid)));
 
   const shopIds = [...new Set(users.map((u) => u.shopId).filter(Boolean).map(String))];
   const shopById = new Map();

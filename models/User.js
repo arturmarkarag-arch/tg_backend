@@ -44,6 +44,13 @@ const UserSchema = new mongoose.Schema(
       endBlock: { type: Number, default: null },
     },
     botBlocked: { type: Boolean, default: false },
+    // Soft-removal state. `removed` closes ALL application access but keeps the
+    // row as historical information. Missing field on legacy rows is treated as
+    // active for backwards compatibility; successful self-registration can
+    // reactivate the same row instead of creating a duplicate telegramId.
+    accountState: { type: String, enum: ['active', 'removed'], default: 'active' },
+    removedAt: { type: Date, default: null },
+    removedByTelegramId: { type: String, default: '' },
     // Browser-session revocation. Any JWT issued (iat) strictly before this
     // timestamp is rejected. Set by POST /v1/auth/logout so "Вийти" actually
     // invalidates every previously issued token for this account.

@@ -25,4 +25,9 @@ describe('mini-app navigation state contract', () => {
     expect(route).not.toContain('clientCartUpdatedAt');
     expect(route).not.toContain("error: 'cart_stale'");
   });
+
+  it('does not broadcast private navigation changes to picking dashboards', () => {
+    expect(route).not.toContain('shop_status_changed');
+    expect(route).not.toContain('picking_group_');
+  });
 });

@@ -1,4 +1,4 @@
-﻿const TelegramBot = require('node-telegram-bot-api');
+const TelegramBot = require('node-telegram-bot-api');
 const User = require('./models/User');
 const BotInteractionLog = require('./models/BotInteractionLog');
 const RegistrationRequest = require('./models/RegistrationRequest');
@@ -7,6 +7,8 @@ const DeliveryGroup = require('./models/DeliveryGroup');
 const Shop = require('./models/Shop');
 const GroupMember = require('./models/GroupMember');
 const { redeemShopInvite } = require('./services/redeemShopInvite');
+const { getSupportAdmins, toPublicSupportAdmins } = require('./utils/telegramSupportAdmins');
+const { isRemovedUser, activeUserFilter } = require('./utils/userAccountState');
 const { trackMemberFromMessage, handleChatMemberUpdate, setMemberPhoto } = require('./services/groupMemberSync');
 const {
   issueRegistrationToken,
@@ -55,7 +57,7 @@ async function handleMyChatMemberUpdate(update) {
     if (!chatId || !newStatus) return;
 
     const user = await User.findOne({ telegramId: chatId }).lean();
-    if (!user) {
+    if (!user || isRemovedUser(user)) {
       return;
     }
 
@@ -196,14 +198,49 @@ async function setRoleCommands(chatId, role) {
   }
 }
 
-function getUnknownUserMessage() {
-  return 'Вас не знайдено в системі. Будь ласка, зверніться до адміністратора або зареєструйтеся через веб-інтерфейс.';
-}
-
 // Sends a welcome + registration-link message to the group after 10 s.
 // Used for both chat_member and new_chat_members join paths.
 function escapeHtml(str) {
   return String(str || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+
+async function sendNotInAnnouncementsGroupMessage(chatId) {
+  let admins = [];
+  try {
+    admins = toPublicSupportAdmins(await getSupportAdmins());
+  } catch (err) {
+    console.warn('[Bot] support-admin settings read failed:', err.message);
+  }
+
+  const lines = [
+    '❗ <b>Вас не знайдено в робочій групі «Оголошення».</b>',
+    '',
+    'Для доступу до системи ви <b>обов’язково</b> маєте бути учасником цієї групи.',
+    'Попросіть менеджера або адміністратора додати вас до «Оголошення».',
+  ];
+
+  if (admins.length) {
+    lines.push('', '<b>Адміністратори для зв’язку:</b>');
+    for (const admin of admins) {
+      lines.push(`• <a href="${admin.url}">${escapeHtml(admin.name)}</a>`);
+    }
+    lines.push('', 'Натисніть на ім’я адміністратора або кнопку нижче — Telegram одразу відкриє чат.');
+  } else {
+    lines.push('', 'Після додавання поверніться до бота та натисніть /start ще раз.');
+  }
+
+  const options = { parse_mode: 'HTML', disable_web_page_preview: true };
+  if (admins.length) {
+    options.reply_markup = {
+      inline_keyboard: admins.map((admin) => ([{
+        text: `Написати: ${admin.name}`.slice(0, 64),
+        url: admin.url,
+      }])),
+    };
+  }
+
+  return bot.sendMessage(chatId, lines.join('\n'), options);
 }
 
 // In-flight de-dup: a single join can arrive via BOTH the `new_chat_members`
@@ -217,7 +254,7 @@ const pendingWelcomes = new Set();
 // Skips silently if the user is already registered. Returns true if a message
 // was sent. Shared by the auto-schedule path and the manual re-push button.
 async function postGroupWelcome(groupChatId, telegramId, from) {
-  const nowRegistered = await User.findOne({ telegramId }).lean();
+  const nowRegistered = await User.findOne(activeUserFilter({ telegramId })).lean();
   if (nowRegistered) return false;
   const me = await bot.getMe();
   const botUsername = me?.username;
@@ -290,7 +327,7 @@ async function recheckAndRepushWelcome(groupChatId, telegramId) {
     return { ok: true, status: 'left' };
   }
 
-  const registered = await User.findOne({ telegramId: tid }).lean();
+  const registered = await User.findOne(activeUserFilter({ telegramId: tid })).lean();
   if (registered) return { ok: true, status: 'registered' };
 
   // Build a fresh `from` from the live membership (best name/username available).
@@ -464,7 +501,7 @@ async function handleBotBlocked(telegramId) {
     const lines = [`Користувач заблокував бота!`, `${roleLabel}: ${name}`];
     if (shopParts.length) lines.push(`Магазин: ${shopParts.join(', ')}`);
     lines.push(`заблокував бота.`);
-    const admins = await User.find({ role: 'admin' }, 'telegramId').lean();
+    const admins = await User.find(activeUserFilter({ role: 'admin' }), 'telegramId').lean();
     const adminIds = admins.map((a) => a.telegramId).filter(Boolean);
     console.log(`[Bot] Bot blocked by ${telegramId} (${name}). Notifying admins: [${adminIds.join(', ')}]`);
     await sendAdminNotification(lines.join('\n'));
@@ -496,7 +533,7 @@ async function handleShopInvite(chatId, code, user) {
   // decides, the invite only fixes WHICH shop. Nothing is consumed here; the
   // token is burnt in the transaction that creates the user.
   if (!(await isUserInAllowedGroup(chatId))) {
-    await bot.sendMessage(chatId, 'Реєстрація доступна лише учасникам робочої групи. Зверніться до адміністратора.');
+    await sendNotInAnnouncementsGroupMessage(chatId);
     return;
   }
 
@@ -553,18 +590,22 @@ async function handleShopInviteTransfer(chatId, code) {
 async function sendRegistrationButton(chatId, regToken) {
   const regUrl = `${WEB_APP_URL}${WEB_APP_URL.includes('?') ? '&' : '?'}regToken=${encodeURIComponent(regToken)}`;
   if (WEB_APP_URL.startsWith('https://')) {
-    await bot.sendMessage(chatId, 'Натисніть кнопку, щоб зареєструватися через Mini App.', {
-      reply_markup: {
-        inline_keyboard: [[{ text: 'Реєстрація в Mini App', web_app: { url: regUrl } }]],
+    await bot.sendMessage(
+      chatId,
+      '✅ Вас знайдено в групі «Оголошення».\n\nНатисніть «Відкрити», щоб пройти реєстрацію.',
+      {
+        reply_markup: {
+          inline_keyboard: [[{ text: 'Відкрити', web_app: { url: regUrl } }]],
+        },
       },
-    });
+    );
     return;
   }
-  await bot.sendMessage(chatId, `Відкрийте Mini App: ${regUrl}`);
+  await bot.sendMessage(chatId, `✅ Вас знайдено в групі «Оголошення». Відкрийте реєстрацію: ${regUrl}`);
 }
 
 async function sendAdminNotification(text) {
-  const admins = await User.find({ role: 'admin' }, 'telegramId').lean();
+  const admins = await User.find(activeUserFilter({ role: 'admin' }), 'telegramId').lean();
   const adminIds = admins.map((a) => a.telegramId).filter(Boolean);
   for (const adminId of adminIds) {
     try {
@@ -607,7 +648,8 @@ async function initBot(token) {
       const isGroupChat = ['group', 'supergroup'].includes(msg.chat.type);
       const rawText = msg.text?.trim() || '';
       const text = (rawText.match(/^\/\S+/)?.[0] || '').split('@')[0].toLowerCase();
-      const user = await User.findOne({ telegramId: chatId });
+      const storedUser = await User.findOne({ telegramId: chatId });
+      const user = storedUser && !isRemovedUser(storedUser) ? storedUser : null;
       if (user) {
         updateUserBotActivity(chatId).catch(() => {});
       }
@@ -627,7 +669,7 @@ async function initBot(token) {
           if (newMember.is_bot) continue;
           const memberId = String(newMember.id);
           trackMemberFromMessage(chatId, newMember).catch(() => {});
-          const existing = await User.findOne({ telegramId: memberId }).lean();
+          const existing = await User.findOne(activeUserFilter({ telegramId: memberId })).lean();
           if (!existing) scheduleGroupWelcome(chatId, memberId, newMember);
         }
       }
@@ -712,6 +754,13 @@ async function initBot(token) {
               await bot.sendMessage(chatId, 'Це посилання для реєстрації недійсне або призначене не для вас. Відкрийте персональне посилання, яке бот надіслав саме вам у робочій групі.');
               return;
             }
+            // A token proves who the registration link belongs to, NOT current
+            // membership. Someone may leave «Оголошення» after receiving it, so
+            // /start still performs the same live gate before offering Open.
+            if (!(await isUserInAllowedGroup(chatId))) {
+              await sendNotInAnnouncementsGroupMessage(chatId);
+              return;
+            }
             regToken = owned.token;
           } else if (await isUserInAllowedGroup(chatId)) {
             // Plain /start (no token in the link) by a live group member → mint
@@ -721,7 +770,7 @@ async function initBot(token) {
           }
 
           if (!regToken) {
-            await bot.sendMessage(chatId, 'Реєстрація доступна лише учасникам робочої групи. Зверніться до адміністратора.');
+            await sendNotInAnnouncementsGroupMessage(chatId);
             return;
           }
 
@@ -741,7 +790,12 @@ async function initBot(token) {
 
       if (text === '/miniapp') {
         if (!user) {
-          await bot.sendMessage(chatId, getUnknownUserMessage());
+          if (await isUserInAllowedGroup(chatId)) {
+            const regToken = await issueRegistrationToken(chatId);
+            await sendRegistrationButton(chatId, regToken);
+          } else {
+            await sendNotInAnnouncementsGroupMessage(chatId);
+          }
           return;
         }
 
@@ -775,7 +829,12 @@ async function initBot(token) {
 
       if (!user) {
         if (isGroupChat) return;
-        await bot.sendMessage(chatId, getUnknownUserMessage());
+        if (await isUserInAllowedGroup(chatId)) {
+          const regToken = await issueRegistrationToken(chatId);
+          await sendRegistrationButton(chatId, regToken);
+        } else {
+          await sendNotInAnnouncementsGroupMessage(chatId);
+        }
         return;
       }
 
@@ -807,7 +866,7 @@ async function initBot(token) {
         const { telegramId, from } = joined;
 
         // Check immediately — if already registered, nothing to do
-        const existing = await User.findOne({ telegramId }).lean();
+        const existing = await User.findOne(activeUserFilter({ telegramId })).lean();
         if (existing) return;
 
         // Fetch avatar in background (non-blocking)
@@ -838,7 +897,8 @@ async function initBot(token) {
       const chatId = String(query.message.chat.id);
       const msgId = String(query.message.message_id);
       const data = String(query.data || '').trim();
-      const user = await User.findOne({ telegramId: chatId });
+      const storedCallbackUser = await User.findOne({ telegramId: chatId });
+      const user = storedCallbackUser && !isRemovedUser(storedCallbackUser) ? storedCallbackUser : null;
       if (user) {
         updateUserBotActivity(chatId).catch(() => {});
         await logBotInteraction(chatId, 'callback', data, data, {
@@ -855,6 +915,12 @@ async function initBot(token) {
 
       // ── Registration request review buttons ──
       if (data.startsWith('regreq_')) {
+        // Inline keyboards can live for days. A removed/former admin must not be
+        // able to approve an old request after their application access was closed.
+        if (!user || user.role !== 'admin') {
+          await bot.answerCallbackQuery(query.id, { text: 'Доступ закрито', show_alert: true });
+          return;
+        }
         const parts = data.split(':');
         const action = parts[0];
         const requestId = parts[1];
@@ -880,7 +946,7 @@ async function initBot(token) {
 
         if (action === 'regreq_approve') {
           const existingUser = await User.findOne({ telegramId: request.telegramId }).lean();
-          if (existingUser) {
+          if (existingUser && !isRemovedUser(existingUser)) {
             await RegistrationRequest.findByIdAndUpdate(requestId, { status: 'rejected' });
             await bot.answerCallbackQuery(query.id, { text: 'Користувач вже зареєстрований', show_alert: true });
           } else {

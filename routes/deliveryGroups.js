@@ -4,6 +4,7 @@ const { appError, asyncHandler } = require('../utils/errors');
 const DeliveryGroup = require('../models/DeliveryGroup');
 const User = require('../models/User');
 const Order = require('../models/Order');
+const Product = require('../models/Product');
 const Shop = require('../models/Shop');
 const PickingTask = require('../models/PickingTask');
 const CatalogReview = require('../models/CatalogReview');
@@ -798,6 +799,77 @@ router.get('/:groupId/shop-status', telegramAuth, requireTelegramRoles(['admin',
       createdAt: order.createdAt,
     })),
     shops: shopStatuses,
+  });
+}));
+
+
+/**
+ * GET /api/delivery-groups/:groupId/shops/:shopId/ordered-products
+ * Lazy picking-board disclosure: return ONLY the distinct products currently
+ * counted as ordered for this shop in the CURRENT ordering session.
+ *
+ * Intentionally separate from /shop-status so the normal board stays cheap:
+ * product documents/photos are fetched only after staff expands one shop row.
+ */
+router.get('/:groupId/shops/:shopId/ordered-products', telegramAuth, requireTelegramRoles(['admin', 'warehouse']), asyncHandler(async (req, res) => {
+  const group = normalizeDeliveryGroup(await DeliveryGroup.findById(req.params.groupId).lean());
+  if (!group) throw appError('group_not_found');
+
+  const shop = await Shop.findOne({
+    _id: req.params.shopId,
+    deliveryGroupId: String(group._id),
+    isActive: true,
+  }).select('_id').lean();
+  if (!shop) throw appError('shop_not_found');
+
+  const schedule = await getOrderingSchedule();
+  const currentSessionId = await getOrCreateSessionId(String(group._id), group.dayOfWeek, schedule);
+  const shopObjectId = shop._id;
+  const shopId = String(shop._id);
+
+  // Mirror /shop-status exactly: only active current-session positions that are
+  // neither warehouse-cancelled nor strict-late skipped count as "Замовлено".
+  const orders = await Order.find({
+    $or: [
+      { shopId: shopObjectId },
+      { 'buyerSnapshot.shopId': shopObjectId },
+      { 'buyerSnapshot.shopId': shopId },
+    ],
+    orderingSessionId: currentSessionId,
+    status: { $in: ['new', 'in_progress'] },
+  }).select('items').lean();
+
+  const productIds = [];
+  const seen = new Set();
+  for (const order of orders) {
+    for (const item of order.items || []) {
+      if (!item.productId || item.cancelled || item.skipped) continue;
+      const id = String(item.productId);
+      if (seen.has(id)) continue;
+      seen.add(id);
+      productIds.push(item.productId);
+    }
+  }
+
+  if (productIds.length === 0) {
+    return res.json({ items: [], total: 0 });
+  }
+
+  const products = await Product.find({ _id: { $in: productIds } })
+    .select('name brand model category imageUrls originalImageUrl localImageUrl orderNumber status')
+    .sort({ orderNumber: 1, _id: 1 })
+    .lean();
+
+  res.json({
+    items: products.map((product) => ({
+      _id: product._id,
+      name: product.name || product.brand || product.model || product.category || '',
+      imageUrls: product.imageUrls || [],
+      originalImageUrl: product.originalImageUrl || '',
+      localImageUrl: product.localImageUrl || '',
+      status: product.status || '',
+    })),
+    total: products.length,
   });
 }));
 

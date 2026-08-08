@@ -2,6 +2,7 @@ const { Server } = require('socket.io');
 const mongoose = require('mongoose');
 const Block = require('./models/Block');
 const User = require('./models/User');
+const { isRemovedUser } = require('./utils/userAccountState');
 const { validateTelegramInitData } = require('./utils/validateTelegramInitData');
 const { verifySession } = require('./utils/jwt');
 const { pubClient, subClient, isEnabled: redisEnabled } = require('./utils/redis');
@@ -110,7 +111,7 @@ function initSocket(httpServer) {
       return next(new Error('Unauthorized: Missing telegramId'));
     }
     const dbUser = await User.findOne({ telegramId }).lean();
-    if (!dbUser) {
+    if (!dbUser || isRemovedUser(dbUser)) {
       return next(new Error('Unauthorized: User not registered'));
     }
     if (dbUser.botBlocked) {
