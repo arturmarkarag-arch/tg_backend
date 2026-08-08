@@ -24,6 +24,7 @@ const { getIO } = require('../socket');
 const { getOrderingSchedule } = require('../utils/getOrderingSchedule');
 const cache = require('../utils/cache');
 const { invalidateDeliveryGroup } = require('../utils/modelCache');
+const { getTelegramUsernameMap } = require('../utils/telegramUsername');
 
 async function getAllDeliveryGroups() {
   let groups = await cache.get(cache.KEYS.DELIVERY_GROUPS);
@@ -563,6 +564,11 @@ router.get('/:groupId/shop-status', telegramAuth, requireTelegramRoles(['admin',
   const sellers = await User.find({ role: { $in: ['seller', 'admin'] }, shopId: { $in: shopIds } })
     .select('shopId firstName lastName telegramId cartState role')
     .lean();
+  const contactUsernameMap = await getTelegramUsernameMap([
+    ...sellers.map((s) => s.telegramId),
+    ...orders.map((o) => o.buyerTelegramId),
+    ...staleOrders.map((o) => o.buyerTelegramId),
+  ]);
   // Collect ALL sellers per shop with cart status
   const sellersByShop = {};
   for (const seller of sellers) {
@@ -573,6 +579,7 @@ router.get('/:groupId/shop-status', telegramAuth, requireTelegramRoles(['admin',
     sellersByShop[sid].push({
       name: [seller.firstName, seller.lastName].filter(Boolean).join(' ') || String(seller.telegramId),
       telegramId: String(seller.telegramId),
+      username: contactUsernameMap.get(String(seller.telegramId)) || '',
       role: seller.role,
       hasCart: Object.keys(itemObj).length > 0,
     });
@@ -588,6 +595,7 @@ router.get('/:groupId/shop-status', telegramAuth, requireTelegramRoles(['admin',
     buyerInfoById[String(b.telegramId)] = {
       name: [b.firstName, b.lastName].filter(Boolean).join(' ') || b.telegramId,
       role: b.role,
+      username: contactUsernameMap.get(String(b.telegramId)) || '',
     };
   }
 
@@ -607,6 +615,7 @@ router.get('/:groupId/shop-status', telegramAuth, requireTelegramRoles(['admin',
       buyerTelegramId: order.buyerTelegramId,
       buyerName: buyerInfoById[String(order.buyerTelegramId)]?.name || order.buyerTelegramId,
       buyerRole: buyerInfoById[String(order.buyerTelegramId)]?.role || 'seller',
+      buyerUsername: buyerInfoById[String(order.buyerTelegramId)]?.username || '',
       itemCount: (order.items || []).filter((i) => !i.cancelled && !i.skipped).length,
       createdAt: order.createdAt,
       wasReassigned,
@@ -792,6 +801,7 @@ router.get('/:groupId/shop-status', telegramAuth, requireTelegramRoles(['admin',
       orderNumber: order.orderNumber,
       buyerTelegramId: String(order.buyerTelegramId || ''),
       buyerName: buyerInfoById[String(order.buyerTelegramId)]?.name || order.buyerTelegramId,
+      buyerUsername: buyerInfoById[String(order.buyerTelegramId)]?.username || '',
       shopName: order.buyerSnapshot?.shopName || '—',
       shopCity: order.buyerSnapshot?.shopCity || '',
       itemCount: (order.items || []).filter((i) => !i.cancelled && !i.skipped).length,

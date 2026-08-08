@@ -16,6 +16,7 @@ const { activeOrderShopFilter } = require('../utils/orderShopFilter');
 const { isOrderingOpen } = require('../utils/orderingSchedule');
 const { getOrderingSchedule } = require('../utils/getOrderingSchedule');
 const { getOrCreateSessionId } = require('../utils/getOrCreateSession');
+const { getTelegramUsernameMap } = require('../utils/telegramUsername');
 
 const router = express.Router();
 
@@ -115,6 +116,7 @@ router.get('/', asyncHandler(async (req, res) => {
       ])
       : [];
     const lastOrderMap = new Map(lastOrders.map((o) => [o._id, o.lastOrderAt]));
+    const sellerUsernameMap = await getTelegramUsernameMap(sellerTids);
 
     const sellersByShop = {};   // shopId → full seller objects (UI cards)
     const sellerNamesByShop = {}; // shopId → display-name strings (legacy)
@@ -126,6 +128,7 @@ router.get('/', asyncHandler(async (req, res) => {
         ...s,
         cartItemCount: getCartCount(s),
         lastOrderAt: lastOrderMap.get(s.telegramId) || null,
+        telegramUsername: sellerUsernameMap.get(String(s.telegramId)) || '',
       });
       const label = [s.firstName, s.lastName].filter(Boolean).join(' ') || String(s.telegramId);
       sellerNamesByShop[sid].push(s.role === 'admin' ? `${label} (адмін)` : label);

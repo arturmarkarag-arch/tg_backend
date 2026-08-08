@@ -16,6 +16,7 @@ const { withLock } = require('../utils/lock');
 const { invalidateShop } = require('../utils/modelCache');
 const { getIO } = require('../socket');
 const { softRemoveUser } = require('../services/softRemoveUser');
+const { getTelegramUsernameMap } = require('../utils/telegramUsername');
 
 const router = express.Router();
 router.use(telegramAuth);
@@ -253,6 +254,7 @@ router.get('/', asyncHandler(async (req, res) => {
   };
 
   const telegramIds = users.map((u) => u.telegramId).filter(Boolean);
+  const telegramUsernameMap = await getTelegramUsernameMap(telegramIds);
   const lastOrders = await Order.aggregate([
     { $match: { buyerTelegramId: { $in: telegramIds } } },
     { $sort: { createdAt: -1 } },
@@ -301,6 +303,7 @@ router.get('/', asyncHandler(async (req, res) => {
       shopCity: shop?.shopCity || '',
       shopDeliveryGroupId: shop?.shopDeliveryGroupId || '',
       lastShopName: lastShopByTid.get(String(user.telegramId)) || '',
+      telegramUsername: telegramUsernameMap.get(String(user.telegramId)) || '',
     };
   });
 

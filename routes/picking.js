@@ -28,6 +28,7 @@ const SupplementRequest = require('../models/SupplementRequest');
 // Лічильник рахується ЗА ГРУПОЮ, не за сесією: хвиля дозамовлення до
 // OrderingSession не прив'язана (див. models/SupplementOffer.js).
 const { countActiveOffersForGroup } = require('../services/supplementOffers');
+const { getTelegramUsernameMap } = require('../utils/telegramUsername');
 
 const {
   findAndLockNext,
@@ -1342,6 +1343,7 @@ router.get('/shift-board', requireTelegramRoles(['admin']), async (req, res, nex
       String(u.telegramId),
       [u.firstName, u.lastName].filter(Boolean).join(' ') || String(u.telegramId),
     ]));
+    const workerUsernameMap = await getTelegramUsernameMap(allWorkerIds);
 
     const statsMap = new Map(workerStats.map((w) => [w._id, w]));
 
@@ -1350,6 +1352,7 @@ router.get('/shift-board', requireTelegramRoles(['admin']), async (req, res, nex
       return {
         telegramId: id,
         name: stat?.name || userNameMap.get(id) || id,
+        username: workerUsernameMap.get(String(id)) || '',
         tasksCompleted: stat?.tasksCompleted || 0,
         isActive: activeWorkerIds.has(id),
       };
@@ -1475,6 +1478,10 @@ router.get('/shift-board', requireTelegramRoles(['admin']), async (req, res, nex
         const marks = await CatalogReview.find(
           { groupId: dgId, sessionId }, 'telegramId userName shopId shopName at',
         ).lean();
+        const reviewUsernameMap = await getTelegramUsernameMap([
+          ...staff.map((u) => u.telegramId),
+          ...marks.map((m) => m.telegramId),
+        ]);
 
         // The roster is a UNION of two sources, not a lookup on one:
         //   • the marks themselves — historical facts, read from their own
@@ -1504,6 +1511,7 @@ router.get('/shift-board', requireTelegramRoles(['admin']), async (req, res, nex
           return {
             telegramId: tgId,
             name: m.userName || String(m.telegramId),
+            username: reviewUsernameMap.get(tgId) || '',
             // Prefer the live shop name (renames), fall back to the snapshot —
             // which is all we have if the shop left the group since.
             shopName: shop?.name || m.shopName || '—',
@@ -1518,6 +1526,7 @@ router.get('/shift-board', requireTelegramRoles(['admin']), async (req, res, nex
           sellers.push({
             telegramId: String(u.telegramId),
             name: [u.firstName, u.lastName].filter(Boolean).join(' ') || String(u.telegramId),
+            username: reviewUsernameMap.get(String(u.telegramId)) || '',
             shopName: shop?.name || '—',
             shopCity: shop?.cityId?.name || '',
             at: null,

@@ -21,6 +21,7 @@ const { getSupportAdmins, toPublicSupportAdmins } = require('../../utils/telegra
 const { withLock } = require('../../utils/lock');
 const { getShop, getDeliveryGroup } = require('../../utils/modelCache');
 const { isRemovedUser } = require('../../utils/userAccountState');
+const { getTelegramUsernameMap } = require('../../utils/telegramUsername');
 
 const router = express.Router();
 const adminOnly = requireTelegramRole('admin');
@@ -899,7 +900,11 @@ router.get('/register-requests', adminOnly, asyncHandler(async (req, res) => {
 
   const filter = status === 'all' ? {} : { status };
   const requests = await RegistrationRequest.find(filter).sort({ createdAt: -1 }).lean();
-  res.json(requests);
+  const usernameMap = await getTelegramUsernameMap(requests.map((r) => r.telegramId));
+  res.json(requests.map((r) => ({
+    ...r,
+    telegramUsername: usernameMap.get(String(r.telegramId)) || '',
+  })));
 }));
 
 router.post('/register-requests/:id/approve', adminOnly, asyncHandler(async (req, res) => {

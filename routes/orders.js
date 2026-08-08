@@ -57,6 +57,7 @@ const { unassignSellerAndPark } = require('../services/unassignSeller');
 const { activeOrderShopFilter } = require('../utils/orderShopFilter');
 const { reconcileLateOrderStrict } = require('../services/lateOrderReconcile');
 const { isRemovedUser } = require('../utils/userAccountState');
+const { getTelegramUsernameMap } = require('../utils/telegramUsername');
 
 async function getAllDeliveryGroups() {
   let groups = await cache.get(cache.KEYS.DELIVERY_GROUPS);
@@ -321,6 +322,7 @@ router.get('/conflicts', staffOnly, async (req, res) => {
   const buyers = await User.find({ telegramId: { $in: buyerTgIds } })
     .select('telegramId firstName lastName')
     .lean();
+  const buyerUsernameById = await getTelegramUsernameMap(buyerTgIds);
   const buyerNameById = {};
   for (const b of buyers) {
     buyerNameById[String(b.telegramId)] = [b.firstName, b.lastName].filter(Boolean).join(' ') || b.telegramId;
@@ -332,6 +334,7 @@ router.get('/conflicts', staffOnly, async (req, res) => {
       orderNumber: o.orderNumber,
       buyerTelegramId: o.buyerTelegramId,
       buyerName: buyerNameById[String(o.buyerTelegramId)] || o.buyerTelegramId,
+      buyerUsername: buyerUsernameById.get(String(o.buyerTelegramId)) || '',
       itemCount: (o.items || []).filter((i) => !i.cancelled && !i.skipped).length,
       createdAt: o.createdAt,
     }));
