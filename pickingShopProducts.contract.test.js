@@ -17,4 +17,12 @@ describe('picking shop ordered-products disclosure contract', () => {
     expect(source).toContain('if (seen.has(id)) continue');
     expect(source).toContain(".select('name brand model category imageUrls originalImageUrl localImageUrl orderNumber status')");
   });
+
+  it('paginates the disclosure server-side in bounded chunks', () => {
+    expect(source).toContain('req.query.limit');
+    expect(source).toContain('req.query.offset');
+    expect(source).toContain('.skip(offset)');
+    expect(source).toContain('.limit(limit)');
+    expect(source).toContain('hasMore: offset + products.length < total');
+  });
 });

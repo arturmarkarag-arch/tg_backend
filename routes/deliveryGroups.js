@@ -822,6 +822,9 @@ router.get('/:groupId/shop-status', telegramAuth, requireTelegramRoles(['admin',
  * product documents/photos are fetched only after staff expands one shop row.
  */
 router.get('/:groupId/shops/:shopId/ordered-products', telegramAuth, requireTelegramRoles(['admin', 'warehouse']), asyncHandler(async (req, res) => {
+  const limit = Math.min(48, Math.max(1, Number.parseInt(req.query.limit, 10) || 24));
+  const offset = Math.max(0, Number.parseInt(req.query.offset, 10) || 0);
+
   const group = normalizeDeliveryGroup(await DeliveryGroup.findById(req.params.groupId).lean());
   if (!group) throw appError('group_not_found');
 
@@ -862,13 +865,19 @@ router.get('/:groupId/shops/:shopId/ordered-products', telegramAuth, requireTele
   }
 
   if (productIds.length === 0) {
-    return res.json({ items: [], total: 0 });
+    return res.json({ items: [], total: 0, limit, offset, hasMore: false });
   }
 
-  const products = await Product.find({ _id: { $in: productIds } })
-    .select('name brand model category imageUrls originalImageUrl localImageUrl orderNumber status')
-    .sort({ orderNumber: 1, _id: 1 })
-    .lean();
+  const productFilter = { _id: { $in: productIds } };
+  const [total, products] = await Promise.all([
+    Product.countDocuments(productFilter),
+    Product.find(productFilter)
+      .select('name brand model category imageUrls originalImageUrl localImageUrl orderNumber status')
+      .sort({ orderNumber: 1, _id: 1 })
+      .skip(offset)
+      .limit(limit)
+      .lean(),
+  ]);
 
   res.json({
     items: products.map((product) => ({
@@ -879,7 +888,10 @@ router.get('/:groupId/shops/:shopId/ordered-products', telegramAuth, requireTele
       localImageUrl: product.localImageUrl || '',
       status: product.status || '',
     })),
-    total: products.length,
+    total,
+    limit,
+    offset,
+    hasMore: offset + products.length < total,
   });
 }));
 
