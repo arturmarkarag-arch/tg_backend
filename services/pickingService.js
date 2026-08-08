@@ -81,6 +81,27 @@ async function runOperationWithRetry(work, maxRetries = PICKING_TX_MAX_RETRIES) 
   return null;
 }
 
+// A hot product task can touch dozens or hundreds of the SAME Order documents as
+// other products being finished by other pickers. Mongo transactions are correct,
+// but document-level write conflicts make a 12-worker burst repeatedly abort the
+// losing transactions. Retrying harder only turns the warehouse click into a long
+// lottery. Physical picking stays fully parallel; only the short fulfilment COMMIT
+// lane is serialised per ordering session. The transaction remains the correctness
+// boundary, this lock is contention shaping. Redis makes it distributed; the local
+// fallback is sufficient for the supported single-process mode.
+const PICKING_FINALIZE_LOCK_TTL_MS = 120_000;
+const PICKING_FINALIZE_LOCK_WAIT_MS = 30_000;
+
+async function withPickingFinalizeLock(orderingSessionId, work) {
+  const sessionId = String(orderingSessionId || '');
+  if (!sessionId) return work();
+  return withLock(
+    `picking:finalize:${sessionId}`,
+    work,
+    { ttlMs: PICKING_FINALIZE_LOCK_TTL_MS, waitMs: PICKING_FINALIZE_LOCK_WAIT_MS },
+  );
+}
+
 // ── Core helpers ─────────────────────────────────────────────────────────────
 
 // Only produce closure diagnostics once this session's live queue is empty.
@@ -361,7 +382,7 @@ async function completePickingTask({ taskId, userTelegramId, userFirstName = '',
   const actor = { by: String(userTelegramId), byName: [userFirstName, userLastName].filter(Boolean).join(' '), byRole: userRole };
 
   let task;
-  await runTransactionWithRetry(async (session) => {
+  await withPickingFinalizeLock(pre.orderingSessionId, () => runTransactionWithRetry(async (session) => {
     // Re-read + re-verify the lock INSIDE the transaction. Between the pre-check
     // and here another worker may have force-claimed the task (lock stolen);
     // mutating a stale in-memory doc would silently overwrite their work.
@@ -423,7 +444,7 @@ async function completePickingTask({ taskId, userTelegramId, userFirstName = '',
         task.orderingSessionId, 'in_progress', { actor: { by: actor.by, byName: actor.byName } }, session,
       );
     }
-  });
+  }));
 
   // After commit: close the session if possible. If the live queue is already
   // empty but integrity still blocks closure, surface those blockers to the worker
@@ -474,11 +495,13 @@ async function outOfStockPickingTask({ taskId, userTelegramId, userFirstName = '
         { code: 'picking_oos_already_packed' },
       );
     }
-    const productForRetry = await Product.findById(task.productId);
-    if (productForRetry && productForRetry.status !== 'archived') {
-      // archiveProduct now retries transient tx errors internally.
-      await archiveProduct(productForRetry, { notifyBuyers: false, bot: null, reason: 'out_of_stock', actor });
-    }
+    await withPickingFinalizeLock(task.orderingSessionId, async () => {
+      const productForRetry = await Product.findById(task.productId);
+      if (productForRetry && productForRetry.status !== 'archived') {
+        // archiveProduct now retries transient tx errors internally.
+        await archiveProduct(productForRetry, { notifyBuyers: false, bot: null, reason: 'out_of_stock', actor });
+      }
+    });
     const closureBlockers = await finalizeSessionAndGetBlockers(
       task.orderingSessionId, task.deliveryGroupId, { by: actor.by, byName: actor.byName },
     );
@@ -511,8 +534,9 @@ async function outOfStockPickingTask({ taskId, userTelegramId, userFirstName = '
   // already in completePickingTask). Between the initial findById above and
   // here a concurrent progress-PATCH or force-claim may have mutated the task;
   // saving the stale in-memory doc would silently overwrite their work.
-  await runTransactionWithRetry(async (session) => {
-    const fresh = await PickingTask.findById(task._id).session(session);
+  await withPickingFinalizeLock(task.orderingSessionId, async () => {
+    await runTransactionWithRetry(async (session) => {
+      const fresh = await PickingTask.findById(task._id).session(session);
     if (!fresh) throw Object.assign(new Error('Task not found'), { code: 'picking_task_not_found' });
     // Finalised by a retry / other path between the findById above and here.
     // Same rule as the pre-check: only a prior OOS may fall through to phase 2,
@@ -546,19 +570,21 @@ async function outOfStockPickingTask({ taskId, userTelegramId, userFirstName = '
     await markOrderItemsPacked(fresh.items, fresh.productId, actor, session);
     task = fresh; // keep downstream block/product lookups consistent
 
-    if (fresh.orderingSessionId) {
-      await transitionPickingStatus(
-        fresh.orderingSessionId, 'in_progress', { actor: { by: actor.by, byName: actor.byName } }, session,
-      );
+      if (fresh.orderingSessionId) {
+        await transitionPickingStatus(
+          fresh.orderingSessionId, 'in_progress', { actor: { by: actor.by, byName: actor.byName } }, session,
+        );
+      }
+    });
+
+    // Phase 2 belongs to the same fulfilment commit lane. archiveProduct also
+    // rewrites Orders/Blocks/PickingTasks and must not race the next task's Order
+    // fulfilment while this session is under a hot-product burst.
+    const productDoc = await Product.findById(task.productId._id || task.productId);
+    if (productDoc && productDoc.status !== 'archived') {
+      await archiveProduct(productDoc, { notifyBuyers: false, bot: null, reason: 'out_of_stock', actor });
     }
   });
-
-  // Phase 2: archive product (idempotent on retry via completed-status guard above)
-  const productDoc = await Product.findById(task.productId._id || task.productId);
-  if (productDoc && productDoc.status !== 'archived') {
-    // archiveProduct now retries transient tx errors internally.
-    await archiveProduct(productDoc, { notifyBuyers: false, bot: null, reason: 'out_of_stock', actor });
-  }
 
   const closureBlockers = await finalizeSessionAndGetBlockers(
     task.orderingSessionId, task.deliveryGroupId, { by: actor.by, byName: actor.byName },
@@ -760,5 +786,6 @@ module.exports = {
   reconcileActiveTasksForSession,
   archiveOrphanedOutOfStockProducts,
   runTransactionWithRetry,
+  withPickingFinalizeLock,
   runOperationWithRetry,
 };

@@ -130,6 +130,10 @@ function initSocket(httpServer) {
 
   io.on('connection', (socket) => {
     socket.receiptIds = new Set();
+    // Private per-user room for targeted seller/browser events. The room name is
+    // derived only from the authenticated socket identity — never from client
+    // payload — so another user cannot subscribe to someone else's notifications.
+    socket.join(`user_${socket.telegramId}`);
     console.log(`[Socket] Client connected: ${socket.id} (telegramId=${socket.telegramId})`);
 
     const isWarehouseStaff = () => ['admin', 'warehouse'].includes(socket.userRole);

@@ -255,7 +255,15 @@ async function archiveProduct(productOrId, { notifyBuyers = false, bot = null, r
   for (const { buyerTelegramId } of orderNotifications) {
     try {
       const io = getIO();
-      io.emit('user_order_updated', { buyerTelegramId });
+      if (io) {
+        io.emit('user_order_updated', { buyerTelegramId });
+        // Target the affected buyer directly so the OOS notification does not
+        // depend on the catalog/order-count hook being mounted on the current tab.
+        io.to(`user_${buyerTelegramId}`).emit('user_product_archived', {
+          productId: String(product._id),
+          reason,
+        });
+      }
     } catch (e) {
       console.warn('[archiveProduct] socket user_order_updated failed:', e.message);
     }

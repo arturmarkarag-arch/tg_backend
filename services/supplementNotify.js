@@ -2,42 +2,15 @@
 
 // Telegram-правила: docs/supplement/readme.md#7-telegram
 
-const User = require('../models/User');
-const Shop = require('../models/Shop');
 const DeliveryGroup = require('../models/DeliveryGroup');
 const SupplementOffer = require('../models/SupplementOffer');
 const { getSupplementSettings } = require('../utils/supplementSettings');
+const { sellersOfGroup, serviceGroupChatIds } = require('../utils/groupRecipients');
 
 const NOTIFY_TYPES = ['opened', 'reminder'];
 const REMINDER_EVERY_MS = 2 * 60 * 60 * 1000;
 const SEND_GAP_MS = 40;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
-async function sellersOfGroup(deliveryGroupId) {
-  const shops = await Shop.find(
-    { deliveryGroupId: String(deliveryGroupId), isActive: true },
-    '_id',
-  ).lean();
-  if (!shops.length) return [];
-  return User.find(
-    {
-      role: { $in: ['seller', 'admin'] },
-      shopId: { $in: shops.map((shop) => shop._id) },
-      botBlocked: { $ne: true },
-    },
-    'telegramId',
-  ).lean();
-}
-
-async function serviceGroupChatIds() {
-  try {
-    const { getAllowedGroupIds } = require('../routes/admin');
-    return await getAllowedGroupIds();
-  } catch (err) {
-    console.warn('[supplement/notify] не вдалося прочитати список груп:', err.message);
-    return [];
-  }
-}
 
 function buildText(type, { groupName, appUrl }) {
   const name = groupName || 'Група доставки';

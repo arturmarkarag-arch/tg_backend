@@ -457,19 +457,28 @@ router.post('/google/unlink', asyncHandler(async (req, res) => {
   res.json({ ok: true });
 }));
 
-// POST /api/v1/telegram/mini-app/state — зберегти навігаційний стан (User) і кошик (Shop)
+// POST /api/v1/telegram/mini-app/state — зберегти навігаційний стан продавця
 // Захищено telegramAuth middleware — telegramId береться ТІЛЬКИ з req.telegramId
+//
+// Контракт конкурентності (свідомо асиметричний):
+//   orderingSessionId не збігся → HARD 409, стара сесія НІКОЛИ не перезапише нову.
+//   курсор каталогу розійшовся  → last-write-wins, без 409.
+// Цей endpoint є ТІЛЬКИ navigation-state. Legacy cartState.orderItems /
+// orderItemIds тут навмисно не читаємо і не пишемо: реальні замовлення живуть
+// в Order, а старі cart-поля ще використовуються окремими recovery/legacy
+// шляхами. Курсор каталогу — last-write-wins; оптимістичний лок по
+// cartState.updatedAt звідси прибрано: він
+// віддавав 409 (cart_stale) на кожен keepalive-save при згортанні мініаппа,
+// бо той запис рухає серверний updatedAt, а відповіді на teardown ніхто не
+// читає — клієнт лишався зі старою міткою і конфліктував сам із собою.
 router.post('/mini-app/state', asyncHandler(async (req, res) => {
   const {
     currentIndex,
     currentPage,
     productId,
     orderNumber,
-    orderItems,
-    orderItemIds,
     viewMode,
     orderingSessionId,
-    clientCartUpdatedAt,
   } = req.body || {};
   const telegramId = req.telegramId;
 
@@ -480,17 +489,6 @@ router.post('/mini-app/state', asyncHandler(async (req, res) => {
     throw appError('me_state_invalid_index', { field: 'currentPage' });
   }
 
-  const MAX_CART_ITEMS = 200;
-  const sanitizedOrderItems = typeof orderItems === 'object' && orderItems !== null
-    ? Object.fromEntries(
-        Object.entries(orderItems)
-          .slice(0, MAX_CART_ITEMS)
-          .map(([pid, qty]) => [String(pid), Math.min(1000, Math.max(0, Number(qty) || 0))]),
-      )
-    : {};
-  const sanitizedOrderItemIds = Array.isArray(orderItemIds)
-    ? orderItemIds.slice(0, MAX_CART_ITEMS).map((id) => String(id))
-    : [];
   const validViewMode = viewMode === 'grid' ? 'grid' : 'carousel';
 
   const user = await User.findOne({ telegramId }).lean();
@@ -562,27 +560,11 @@ router.post('/mini-app/state', asyncHandler(async (req, res) => {
     }
   }
 
-  const clientCartUpdatedAtDate = clientCartUpdatedAt
-    ? new Date(clientCartUpdatedAt)
-    : null;
-  const enforceLock = clientCartUpdatedAtDate
-    && !Number.isNaN(clientCartUpdatedAtDate.getTime());
-
-  const filter = { telegramId };
-  if (enforceLock) {
-    filter.$or = [
-      { 'cartState.updatedAt': null },
-      { 'cartState.updatedAt': { $exists: false } },
-      { 'cartState.updatedAt': { $lte: clientCartUpdatedAtDate } },
-    ];
-  }
-
   const now = new Date();
   const statePatch = {
     'miniAppState.viewMode': validViewMode,
     'miniAppState.updatedAt': now,
-    'cartState.orderItems': sanitizedOrderItems,
-    'cartState.orderItemIds': sanitizedOrderItemIds,
+    // Navigation-only contract: never mutate legacy cart item snapshots here.
     'cartState.lastViewedProductId': String(productId || ''),
     'cartState.lastViewedOrderNumber': Number.isFinite(Number(orderNumber))
       ? Number(orderNumber)
@@ -597,24 +579,12 @@ router.post('/mini-app/state', asyncHandler(async (req, res) => {
   }
 
   const updatedUser = await User.findOneAndUpdate(
-    filter,
+    { telegramId },
     { $set: statePatch },
     { new: true }
   ).lean();
 
-  if (!updatedUser && enforceLock) {
-    const current = await User.findOne({ telegramId }).lean();
-    if (current) {
-      return res.status(409).json({
-        error: 'cart_stale',
-        message: 'Стан було оновлено в іншій вкладці. Отримано актуальні дані.',
-        orderingSessionId: currentOrderingSessionId,
-        cartState: normalizeCartState(current.cartState),
-        miniAppState: normalizeMiniAppState(current.miniAppState),
-      });
-    }
-    throw appError('user_not_found');
-  }
+  if (!updatedUser) throw appError('user_not_found');
 
   const cartState = normalizeCartState(updatedUser?.cartState);
   const io = getIO();

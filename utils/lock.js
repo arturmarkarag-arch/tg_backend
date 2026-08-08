@@ -46,12 +46,17 @@ async function acquireLocal(key) {
   const prev = localQueues.get(key) || Promise.resolve();
   let release;
   const next = new Promise((r) => { release = r; });
-  localQueues.set(key, prev.then(() => next));
+  // Keep the exact tail promise in the map. The old implementation stored this
+  // chain but compared it with `next` during cleanup, so the entry could never
+  // be deleted. With one finalize-lane key per ordering session that would grow
+  // forever in single-process/no-Redis mode.
+  const tail = prev.then(() => next);
+  localQueues.set(key, tail);
   await prev;
   return () => {
     release();
-    // tidy up the map once no one is waiting
-    if (localQueues.get(key) === next) localQueues.delete(key);
+    // Delete only if nobody queued behind us in the meantime.
+    if (localQueues.get(key) === tail) localQueues.delete(key);
   };
 }
 

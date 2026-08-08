@@ -35,6 +35,12 @@ const OrderingSessionSchema = new mongoose.Schema(
     openDate: { type: String, required: true },
     openAt:   { type: Date },
 
+    // Коли по цій сесії розіслали «замовлення відкрито» (services/orderingOpenNotify.js).
+    // Це і є замок від дублів: планувальник тікає щохвилини, і тільки той тік,
+    // який атомарно перевів поле з null у дату, має право слати. Поле НЕ
+    // очищається при жодному іншому переході сесії — одна сесія = одна розсилка.
+    openNotifiedAt: { type: Date, default: null },
+
     // ── Picking lifecycle (single current state) ──────────────────────────────
     // pending      — session exists, picking not yet confirmed by warehouse
     // confirmed    — warehouse pressed "Розпочати збирання"; tasks built (or empty)

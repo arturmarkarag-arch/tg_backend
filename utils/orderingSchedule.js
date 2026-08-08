@@ -79,6 +79,36 @@ function fmt(h, m) {
 }
 
 /**
+ * "в середу" / "у вівторок" — Ukrainian euphony: 'у' before a word that starts
+ * with в/ф, 'в' otherwise.
+ */
+function dayPhrase(dayIndex) {
+  const name = DAY_FULL_UK[dayIndex];
+  return `${/^[вф]/i.test(name) ? 'у' : 'в'} ${name}`;
+}
+
+/**
+ * How many whole days ahead the NEXT occurrence of `targetDay` at `targetMins`
+ * is, counted from the current Warsaw day. Today counts as 0 only while that
+ * time is still ahead of us; once it passes, the next occurrence is a week out.
+ */
+function daysUntil(targetDay, targetMins, nowDOW, nowMins) {
+  const diff = (targetDay - nowDOW + 7) % 7;
+  return diff === 0 && nowMins >= targetMins ? 7 : diff;
+}
+
+/**
+ * Human label for that occurrence: "сьогодні" / "завтра" / "в четвер".
+ * `relative` is what the UI keys its emphasis off — сьогодні/завтра are the ones
+ * a seller has to react to, a plain weekday can stay quiet.
+ */
+function occurrenceLabel(targetDay, daysAhead) {
+  if (daysAhead === 0) return { label: 'сьогодні', relative: 'today' };
+  if (daysAhead === 1) return { label: 'завтра',   relative: 'tomorrow' };
+  return { label: dayPhrase(targetDay), relative: null };
+}
+
+/**
  * Checks whether ordering is currently open for a delivery group.
  *
  * openDay  = day before delivery (Sunday → shifted to Saturday).
@@ -116,17 +146,25 @@ function isOrderingOpen(deliveryDayOfWeek, schedule) {
   const openMins  = openHour  * 60 + openMinute;
   const closeMins = closeHour * 60 + closeMinute;
 
+  // Labels for the NEXT open / close moment, relative to today in Warsaw. Every
+  // message below names BOTH ends of the window: a seller who reads only
+  // "відкриються сьогодні о 16:30" still has to guess how long they have.
+  const openAhead  = occurrenceLabel(openDay,  daysUntil(openDay,  openMins,  dayOfWeek, nowMins));
+  const closeAhead = occurrenceLabel(closeDay, daysUntil(closeDay, closeMins, dayOfWeek, nowMins));
+  const opensPhrase  = `${openAhead.label} о ${fmt(openHour, openMinute)}`;
+  const closesPhrase = `${closeAhead.label} о ${fmt(closeHour, closeMinute)}`;
+
   // --- same day as OPEN day ---
   if (dayOfWeek === openDay) {
     if (nowMins >= openMins) {
       return {
         isOpen: true,
-        message: `Закривається в ${DAY_FULL_UK[closeDay]} о ${fmt(closeHour, closeMinute)}`,
+        message: `Закривається ${closesPhrase}`,
       };
     }
     return {
       isOpen: false,
-      message: `Замовлення відкриються сьогодні о ${fmt(openHour, openMinute)}`,
+      message: `Замовлення відкриються ${opensPhrase}, закриються ${closesPhrase}`,
     };
   }
 
@@ -135,12 +173,12 @@ function isOrderingOpen(deliveryDayOfWeek, schedule) {
     if (nowMins < closeMins) {
       return {
         isOpen: true,
-        message: `Закривається сьогодні о ${fmt(closeHour, closeMinute)}`,
+        message: `Закривається ${closesPhrase}`,
       };
     }
     return {
       isOpen: false,
-      message: `Замовлення закрито. Наступне вікно — ${DAY_FULL_UK[openDay]} о ${fmt(openHour, openMinute)}`,
+      message: `Замовлення закрито. Наступне вікно — ${opensPhrase}, закриється ${closesPhrase}`,
     };
   }
 
@@ -157,18 +195,25 @@ function isOrderingOpen(deliveryDayOfWeek, schedule) {
     // We're on a day strictly inside the open window
     return {
       isOpen: true,
-      message: `Закривається в ${DAY_FULL_UK[closeDay]} о ${fmt(closeHour, closeMinute)}`,
+      message: `Закривається ${closesPhrase}`,
     };
   }
 
   return {
     isOpen: false,
-    message: `Відкриються в ${DAY_FULL_UK[openDay]} о ${fmt(openHour, openMinute)}, закриються в ${DAY_FULL_UK[closeDay]} о ${fmt(closeHour, closeMinute)}`,
+    message: `Замовлення відкриються ${opensPhrase}, закриються ${closesPhrase}`,
   };
 }
 
 /**
  * Returns window times for display purposes.
+ *
+ * `openLabel`/`closeLabel` (+ their `*Relative` markers) are the same
+ * now-relative phrases isOrderingOpen builds into its message — exposed
+ * separately so the mini-app can render "відкриються **сьогодні о 16:30**"
+ * with the date emphasised instead of regex-hunting inside a sentence.
+ * They are computed at request time: a client that keeps the payload past
+ * Warsaw midnight shows a stale "сьогодні" until it refetches.
  */
 function getWindowDescription(deliveryDayOfWeek, schedule) {
   const { openHour, openMinute, closeHour, closeMinute } =
@@ -177,6 +222,12 @@ function getWindowDescription(deliveryDayOfWeek, schedule) {
   const dayBefore = (deliveryDayOfWeek - 1 + 7) % 7;
   const openDay  = dayBefore === 0 ? 6 : dayBefore;
   const closeDay = deliveryDayOfWeek;
+
+  const { dayOfWeek, hour, minute } = getWarsawNow();
+  const nowMins = hour * 60 + minute;
+  const openAhead  = occurrenceLabel(openDay,  daysUntil(openDay,  openHour  * 60 + openMinute,  dayOfWeek, nowMins));
+  const closeAhead = occurrenceLabel(closeDay, daysUntil(closeDay, closeHour * 60 + closeMinute, dayOfWeek, nowMins));
+
   return {
     openDay,
     closeDay,
@@ -186,6 +237,10 @@ function getWindowDescription(deliveryDayOfWeek, schedule) {
     closeDayName: DAY_SHORT_UK[closeDay],
     openDayNameFull:  DAY_FULL_UK[openDay],
     closeDayNameFull: DAY_FULL_UK[closeDay],
+    openLabel:     openAhead.label,
+    openRelative:  openAhead.relative,   // 'today' | 'tomorrow' | null
+    closeLabel:    closeAhead.label,
+    closeRelative: closeAhead.relative,
   };
 }
 
@@ -427,4 +482,4 @@ function isOrderingOpeningSoon(deliveryDayOfWeek, schedule, withinMinutes = 240)
   return minsUntilOpen > 0 && minsUntilOpen <= withinMinutes;
 }
 
-module.exports = { isOrderingOpen, isOrderingOpeningSoon, getWindowDescription, getWarsawNow, getOrderingWindowOpenAt, getOrderingWindowCloseAt, getPreviousOrderingCloseAt, getOpenDateWarsaw, DAY_SHORT_UK, DAY_FULL_UK };
+module.exports = { isOrderingOpen, isOrderingOpeningSoon, getWindowDescription, getWarsawNow, getOrderingWindowOpenAt, getOrderingWindowCloseAt, getPreviousOrderingCloseAt, getOpenDateWarsaw, TIMEZONE, DAY_SHORT_UK, DAY_FULL_UK };

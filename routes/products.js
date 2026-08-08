@@ -405,10 +405,23 @@ router.get('/', async (req, res) => {
     // cluster has no allowDiskUse). That weight is gone. `_block` is just the join
     // marker from the shelf filter above — drop it. `_id` is the final sort tiebreak so
     // the /:id/position endpoint can compute an offset that matches this list.
+    // Товари Складу asks for arrival order (?sort=newest) — the item that came in
+    // last sits on top. "Надходження" is `shelvedAt` (stamped when a receipt commit
+    // puts the product on a shelf); docs that predate that field fall back to
+    // createdAt. The seller catalogue keeps the shelf order (orderNumber) — its
+    // deep links resolve an offset through /:id/position, which assumes that sort.
+    const newestFirst = req.query.sort === 'newest';
+    const sortStages = newestFirst
+      ? [
+          { $addFields: { _receivedAt: { $ifNull: ['$shelvedAt', '$createdAt'] } } },
+          { $sort: { _receivedAt: -1, _id: -1 } },
+        ]
+      : [{ $sort: { orderNumber: 1, createdAt: -1, _id: 1 } }];
+
     const products = await Product.aggregate([
       ...basePipeline,
       { $project: { _block: 0 } },
-      { $sort: { orderNumber: 1, createdAt: -1, _id: 1 } },
+      ...sortStages,
       { $skip: offset },
       { $limit: limit },
     ]);
