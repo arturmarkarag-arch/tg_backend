@@ -20,6 +20,7 @@ const { ensureShopProductIndexes } = require('./utils/ensureShopProductIndexes')
 const { isEnabled: redisEnabled } = require('./utils/redis');
 const Order = require('./models/Order');
 const PickingTask = require('./models/PickingTask');
+const Block = require('./models/Block');
 const { startRetentionScheduler } = require('./services/retention');
 const { startSupplementScheduler } = require('./services/supplementScheduler');
 const { enterMaintenance, isMaintenanceActive } = require('./services/maintenanceState');
@@ -135,6 +136,19 @@ async function startServer() {
         'Виправте дублікати та перезапустіть сервер.',
       ],
       models: [Order],
+    });
+
+    await syncCritical({
+      key: 'blocks',
+      title: 'Не створився критичний індекс блоків складу',
+      whatBroke: 'Не підтверджено правило: один товар може бути тільки в одному непорожньому блоці, а порожніх блоків може бути декілька.',
+      howToFix: [
+        'Перевірте db.blocks.getIndexes().',
+        'Має існувати one_product_per_nonempty_block UNIQUE PARTIAL по productIds.0 exists.',
+        'Застарілого productIds_1 UNIQUE sparse після syncIndexes бути не повинно.',
+        'Виправте дублікати товарів між блоками або індекс і перезапустіть сервер.',
+      ],
+      models: [Block],
     });
 
     await syncCritical({

@@ -7,7 +7,12 @@
     "dev": "nodemon index.js",
     "start": "node index.js",
     "test": "vitest run",
-    "load-test": "node load-test.js"
+    "load-test": "node load-test.js",
+    "test:live:e2e:preflight": "node -r ../dev-use-test-db.js scripts/liveOrderPickingE2E.js",
+    "test:live:e2e": "node -r ../dev-use-test-db.js scripts/liveOrderPickingE2E.js --execute",
+    "test:live:e2e:cleanup": "node -r ../dev-use-test-db.js scripts/liveOrderPickingE2ECleanup.js",
+    "test:live:e2e:mass": "node -r ../dev-use-test-db.js scripts/liveOrderPickingMassE2E.js --execute",
+    "test:live:e2e:mass:preflight": "node -r ../dev-use-test-db.js scripts/liveOrderPickingMassE2E.js"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1030.0",

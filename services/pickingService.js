@@ -40,7 +40,21 @@ function isTransientTxError(err) {
   );
 }
 
-async function runTransactionWithRetry(work, maxRetries = 3) {
+const PICKING_TX_MAX_RETRIES = 6;
+const PICKING_TX_RETRY_BASE_MS = 50;
+const PICKING_TX_RETRY_CAP_MS = 800;
+
+function transientRetryDelayMs(attempt) {
+  // attempt=0 is the wait before the first retry. Exponential backoff keeps a
+  // 12-worker burst from hammering the same shared Order documents in lockstep;
+  // jitter prevents the contenders from waking up together again. The cap keeps
+  // the worst-case warehouse click latency bounded.
+  const exponential = Math.min(PICKING_TX_RETRY_CAP_MS, PICKING_TX_RETRY_BASE_MS * (2 ** attempt));
+  const jitter = Math.floor(Math.random() * Math.max(1, Math.floor(exponential / 2)));
+  return exponential + jitter;
+}
+
+async function runTransactionWithRetry(work, maxRetries = PICKING_TX_MAX_RETRIES) {
   for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
     const session = await mongoose.connection.startSession();
     try {
@@ -48,20 +62,20 @@ async function runTransactionWithRetry(work, maxRetries = 3) {
       return;
     } catch (err) {
       if (!isTransientTxError(err) || attempt >= maxRetries) throw err;
-      await new Promise((r) => setTimeout(r, 50 * (attempt + 1)));
+      await new Promise((r) => setTimeout(r, transientRetryDelayMs(attempt)));
     } finally {
       await session.endSession();
     }
   }
 }
 
-async function runOperationWithRetry(work, maxRetries = 3) {
+async function runOperationWithRetry(work, maxRetries = PICKING_TX_MAX_RETRIES) {
   for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
     try {
       return await work();
     } catch (err) {
       if (!isTransientTxError(err) || attempt >= maxRetries) throw err;
-      await new Promise((r) => setTimeout(r, 50 * (attempt + 1)));
+      await new Promise((r) => setTimeout(r, transientRetryDelayMs(attempt)));
     }
   }
   return null;

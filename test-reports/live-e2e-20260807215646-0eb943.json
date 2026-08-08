@@ -1,0 +1,228 @@
+{
+  "runId": "20260807215646-0eb943",
+  "marker": "__LIVE_E2E__20260807215646-0eb943",
+  "createdAt": "2026-08-07T21:57:03.754Z",
+  "db": "tg_manager",
+  "redisWasConfiguredButIsolated": true,
+  "execute": true,
+  "requestedScenarios": [
+    "coverage",
+    "recovery"
+  ],
+  "summary": {
+    "passedScenarios": 2,
+    "failedScenarios": 0,
+    "passedAssertions": 39,
+    "failedAssertions": 0
+  },
+  "scenarios": [
+    {
+      "name": "coverage",
+      "ok": true,
+      "durationMs": 5510
+    },
+    {
+      "name": "recovery",
+      "ok": true,
+      "durationMs": 4164
+    }
+  ],
+  "assertions": [
+    {
+      "ok": true,
+      "name": "MongoDB connection",
+      "details": "db=tg_manager host=ac-hq2xfhf-shard-00-01.epfky0s.mongodb.net"
+    },
+    {
+      "ok": true,
+      "name": "Test-cluster guard",
+      "details": "host matches epfky0s.mongodb.net"
+    },
+    {
+      "ok": true,
+      "name": "ordering.schedule exists in live DB",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "ordering.schedule loaded",
+      "details": "03:30 → 07:30"
+    },
+    {
+      "ok": true,
+      "name": "At least one synthetic delivery day is currently in ordering-open phase",
+      "details": "day=6"
+    },
+    {
+      "ok": true,
+      "name": "At least one synthetic delivery day is currently in picking-allowed phase",
+      "details": "day=0"
+    },
+    {
+      "ok": true,
+      "name": "Critical Order active uniqueness index exists",
+      "details": "value=one_active_order_per_buyer_shop_session"
+    },
+    {
+      "ok": true,
+      "name": "Critical PickingTask session-scoped uniqueness index exists",
+      "details": "value=one_active_task_per_product_group_session"
+    },
+    {
+      "ok": true,
+      "name": "OrderingSession groupId+openDate unique index exists",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "MongoDB transaction round-trip",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "No previous LIVE_E2E fixture leftovers detected",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "Live Redis is isolated from this suite",
+      "details": "REDIS_URL existed but is disabled in test process"
+    },
+    {
+      "ok": true,
+      "name": "Ephemeral real Express app is writable",
+      "details": "status=ok"
+    },
+    {
+      "ok": true,
+      "name": "coverage: HTTP order accepted",
+      "details": "status=201 error="
+    },
+    {
+      "ok": true,
+      "name": "coverage: ordering session identity survives open→closed test phase",
+      "details": "actual=\"6a7654a54567e979299a330b\" expected=\"6a7654a54567e979299a330b\""
+    },
+    {
+      "ok": true,
+      "name": "coverage: picking phase window is closed",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "coverage: missing floor location blocks picking start visibly",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "coverage: gap reason is no_block",
+      "details": "value=no_block"
+    },
+    {
+      "ok": true,
+      "name": "coverage: session remains pending while gap exists",
+      "details": "actual=\"pending\" expected=\"pending\""
+    },
+    {
+      "ok": true,
+      "name": "coverage: operator gap repair resolves coverage",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "coverage: missing product position gets terminal cancelled marker",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "coverage: missing product archived by repair",
+      "details": "actual=\"archived\" expected=\"archived\""
+    },
+    {
+      "ok": true,
+      "name": "coverage: empty-after-repair session closes cleanly",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "coverage: session completed",
+      "details": "actual=\"completed\" expected=\"completed\""
+    },
+    {
+      "ok": true,
+      "name": "coverage: pickingCompletedAt stamped",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "coverage: SCENARIO PASS",
+      "details": "5510 ms"
+    },
+    {
+      "ok": true,
+      "name": "recovery: HTTP order accepted",
+      "details": "status=201 error="
+    },
+    {
+      "ok": true,
+      "name": "recovery: ordering session identity survives open→closed test phase",
+      "details": "actual=\"6a7654ab4567e979299a330e\" expected=\"6a7654ab4567e979299a330e\""
+    },
+    {
+      "ok": true,
+      "name": "recovery: picking phase window is closed",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "recovery: picking starts",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "Task claim succeeds",
+      "details": "status=200 error="
+    },
+    {
+      "ok": true,
+      "name": "recovery: simulated crash leaves product active before sweep",
+      "details": "actual=\"active\" expected=\"active\""
+    },
+    {
+      "ok": true,
+      "name": "recovery: orphan OOS sweep repairs one product",
+      "details": "actual=1 expected=1"
+    },
+    {
+      "ok": true,
+      "name": "recovery: product archived after sweep",
+      "details": "actual=\"archived\" expected=\"archived\""
+    },
+    {
+      "ok": true,
+      "name": "recovery: live Order item cancelled by recovered archive",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "recovery: Order gets terminal cancelled status",
+      "details": "actual=\"cancelled\" expected=\"cancelled\""
+    },
+    {
+      "ok": true,
+      "name": "recovery: session completed",
+      "details": "actual=\"completed\" expected=\"completed\""
+    },
+    {
+      "ok": true,
+      "name": "recovery: pickingCompletedAt stamped",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "recovery: SCENARIO PASS",
+      "details": "4164 ms"
+    }
+  ],
+  "preserved": []
+}
