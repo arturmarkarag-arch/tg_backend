@@ -22,7 +22,6 @@ const { getGeminiStatus } = require('../geminiClient');
 const { describeImageUrl } = require('../utils/productDescribe');
 const { embedProductAsync } = require('../utils/productEmbedding');
 const { getOrCreateSessionId } = require('../utils/getOrCreateSession');
-const { getOrderingSchedule } = require('../utils/getOrderingSchedule');
 const { normalizeDeliveryGroup } = require('../utils/deliveryGroupHelpers');
 const cache = require('../utils/cache');
 
@@ -745,10 +744,8 @@ async function getActiveDeliveryGroups() {
 // GET /api/v1/products/:id/who-ordered — shops with active-session orders for this product
 router.get('/:id/who-ordered', staffOnly, asyncHandler(async (req, res) => {
   const allGroups = await getActiveDeliveryGroups();
-  const schedule = await getOrderingSchedule();
-
   const sessionIdResults = await Promise.all(
-    allGroups.map((group) => getOrCreateSessionId(String(group._id), group.dayOfWeek, schedule)),
+    allGroups.map((group) => getOrCreateSessionId(String(group._id), group.orderingSchedule)),
   );
   const currentSessionIds = new Set(sessionIdResults.filter(Boolean));
 

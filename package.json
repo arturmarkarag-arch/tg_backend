@@ -12,7 +12,12 @@
     "test:live:e2e": "node -r ../dev-use-test-db.js scripts/liveOrderPickingE2E.js --execute",
     "test:live:e2e:cleanup": "node -r ../dev-use-test-db.js scripts/liveOrderPickingE2ECleanup.js",
     "test:live:e2e:mass": "node -r ../dev-use-test-db.js scripts/liveOrderPickingMassE2E.js --execute",
-    "test:live:e2e:mass:preflight": "node -r ../dev-use-test-db.js scripts/liveOrderPickingMassE2E.js"
+    "test:live:e2e:mass:preflight": "node -r ../dev-use-test-db.js scripts/liveOrderPickingMassE2E.js",
+    "migrate:group-schedules": "node scripts/migrateDeliveryGroupSchedules.js",
+    "migrate:group-schedules:apply": "node scripts/migrateDeliveryGroupSchedules.js --apply",
+    "test:schedule": "vitest run tests/orderingSchedulePerGroup.test.js tests/perGroupSchedule.contract.test.js tests/perGroupSessionIdentity.test.js tests/deliveryGroupSchedulePreflight.test.js tests/perGroupTestSchedule.test.js",
+    "test:schedule:smoke": "node scripts/smokePerGroupSchedule.js",
+    "test:v28:regressions": "vitest run tests/sessionCoverageTerminalRepair.test.js tests/perGroupTestSchedule.test.js tests/perGroupSchedule.contract.test.js"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1030.0",

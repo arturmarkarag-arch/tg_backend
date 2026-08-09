@@ -1,21 +1,26 @@
 'use strict';
 
 const OrderingSession = require('../models/OrderingSession');
-const Order           = require('../models/Order');
-const { getOrderingWindowOpenAt, getOpenDateWarsaw } = require('./orderingSchedule');
+const Order = require('../models/Order');
+const {
+  getOpenDateWarsaw,
+  getOrderingWindowBoundsForOpenDate,
+  normalizeOrderingSchedule,
+} = require('./orderingSchedule');
 const { isMaintenanceActive } = require('../services/maintenanceState');
 
-/**
- * Race-safe find-or-create for an OrderingSession document.
- *
- * findOneAndUpdate({ upsert:true }) is NOT atomic against the unique
- * {groupId, openDate} index: when two callers concurrently miss, both try to
- * insert and the losing one throws E11000. This happens in practice both on
- * the FIRST order of a new session (many sellers click at once) and on a
- * multi-instance startup running the migration simultaneously. On E11000 the
- * document now exists — just read it back.
- */
-async function upsertSession(gid, openDate, openAt) {
+function addDaysToDateStr(dateStr, days) {
+  const [y, m, d] = String(dateStr).split('-').map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d + days));
+  const yy = dt.getUTCFullYear();
+  const mm = String(dt.getUTCMonth() + 1).padStart(2, '0');
+  const dd = String(dt.getUTCDate()).padStart(2, '0');
+  return `${yy}-${mm}-${dd}`;
+}
+
+async function upsertSession(gid, openDate, schedule) {
+  const normalizedSchedule = normalizeOrderingSchedule(schedule);
+  const { openAt, closeAt } = getOrderingWindowBoundsForOpenDate(openDate, normalizedSchedule);
   try {
     return await OrderingSession.findOneAndUpdate(
       { groupId: gid, openDate },
@@ -24,6 +29,8 @@ async function upsertSession(gid, openDate, openAt) {
           groupId: gid,
           openDate,
           openAt,
+          closeAt,
+          scheduleSnapshot: normalizedSchedule,
           pickingStatus: 'pending',
           events: [{ at: new Date(), type: 'created' }],
         },
@@ -40,109 +47,56 @@ async function upsertSession(gid, openDate, openAt) {
 }
 
 /**
- * Returns the stable MongoDB ObjectId string for the ordering session that is
- * currently active for a delivery group. Creates the session document on first
- * access so that all future calls — even after the admin changes the schedule
- * times — return the same ID (keyed on the Warsaw calendar date, not the exact
- * open timestamp).
- *
- * @param {string} groupId
- * @param {number} dayOfWeek   0=Sun … 6=Sat
- * @param {object} [schedule]
- * @returns {Promise<string>}  ObjectId as string
+ * Stable id of the current weekly cycle for a group.
+ * Session identity is {groupId, openDate}, where openDate is derived ONLY from
+ * the group's explicit orderingSchedule.start* fields.
  */
-async function getOrCreateSessionId(groupId, dayOfWeek, schedule = {}) {
-  const gid      = String(groupId);
-  const openAt   = getOrderingWindowOpenAt(dayOfWeek, schedule);
-  const openDate = getOpenDateWarsaw(dayOfWeek, schedule);
+async function getOrCreateSessionId(groupId, schedule) {
+  const gid = String(groupId);
+  const normalizedSchedule = normalizeOrderingSchedule(schedule);
+  const openDate = getOpenDateWarsaw(normalizedSchedule);
 
-  // Maintenance має бути справді read-only: навіть GET/profile не створює сесію.
-  // Див. docs/operations/maintenance-mode.md#побічні-записи-під-час-читання
   if (isMaintenanceActive()) {
     const existing = await OrderingSession.findOne({ groupId: gid, openDate }, '_id').lean();
     return existing ? String(existing._id) : null;
   }
 
-  const doc = await upsertSession(gid, openDate, openAt);
+  const doc = await upsertSession(gid, openDate, normalizedSchedule);
   return String(doc._id);
 }
 
-/**
- * Same lookup as getOrCreateSessionId, but NEVER creates the document.
- *
- * Exists for readers that legitimately have no business bringing a session into
- * being: дозамовлення (routes/supplement.js) прив'язане лише до групи і читає
- * сесію ВИКЛЮЧНО щоб показати номер коробки, якщо він уже є. Виклик
- * getOrCreateSessionId у такому місці створював сесію майбутньої доставки як
- * побічний ефект приймання товару — і ця сесія потім виглядала як справжня.
- *
- * @returns {Promise<string|null>} ObjectId as string, or null when absent.
- */
-async function findCurrentSessionId(groupId, dayOfWeek, schedule = {}) {
-  const openDate = getOpenDateWarsaw(dayOfWeek, schedule);
-  const doc = await OrderingSession.findOne(
-    { groupId: String(groupId), openDate },
-    '_id',
-  ).lean();
+async function findCurrentSessionId(groupId, schedule) {
+  const openDate = getOpenDateWarsaw(normalizeOrderingSchedule(schedule));
+  const doc = await OrderingSession.findOne({ groupId: String(groupId), openDate }, '_id').lean();
   return doc ? String(doc._id) : null;
 }
 
-/**
- * Adds whole days to a "YYYY-MM-DD" string using pure calendar math (Date.UTC as
- * a calendar, no timezone semantics). Immune to DST.
- */
-function addDaysToDateStr(dateStr, days) {
-  const [y, m, d] = String(dateStr).split('-').map(Number);
-  const dt = new Date(Date.UTC(y, m - 1, d + days));
-  const yy = dt.getUTCFullYear();
-  const mm = String(dt.getUTCMonth() + 1).padStart(2, '0');
-  const dd = String(dt.getUTCDate()).padStart(2, '0');
-  return `${yy}-${mm}-${dd}`;
-}
-
-/**
- * Returns the stable id of the NEXT ordering session (one week after the current
- * one) for a delivery group, creating its document if absent. Sessions repeat
- * weekly, so next.openDate = current.openDate + 7 days; the same id is returned
- * when that week naturally becomes current (getOrCreateSessionId computes the
- * identical openDate). Used to park an order that arrives after the current
- * session's picking already started, so it is collected next cycle instead of
- * being stranded.
- *
- * @param {string} groupId
- * @param {number} dayOfWeek   0=Sun … 6=Sat
- * @param {object} [schedule]
- * @returns {Promise<string>}  ObjectId as string
- */
-async function getOrCreateNextSessionId(groupId, dayOfWeek, schedule = {}) {
-  const gid          = String(groupId);
-  const curOpenAt    = getOrderingWindowOpenAt(dayOfWeek, schedule);
-  const curOpenDate  = getOpenDateWarsaw(dayOfWeek, schedule);
-  const nextOpenDate = addDaysToDateStr(curOpenDate, 7);
-  const nextOpenAt   = new Date(curOpenAt.getTime() + 7 * 24 * 60 * 60 * 1000);
+async function getOrCreateNextSessionId(groupId, schedule) {
+  const gid = String(groupId);
+  const normalizedSchedule = normalizeOrderingSchedule(schedule);
+  const currentOpenDate = getOpenDateWarsaw(normalizedSchedule);
+  const nextOpenDate = addDaysToDateStr(currentOpenDate, 7);
 
   if (isMaintenanceActive()) {
     const existing = await OrderingSession.findOne({ groupId: gid, openDate: nextOpenDate }, '_id').lean();
     return existing ? String(existing._id) : null;
   }
 
-  const doc = await upsertSession(gid, nextOpenDate, nextOpenAt);
+  const doc = await upsertSession(gid, nextOpenDate, normalizedSchedule);
   return String(doc._id);
 }
 
 /**
- * One-shot startup migration: converts old-format orderingSessionId strings
- * ("<24-hex-groupId>:<ISO timestamp>") on ALL existing orders to stable
- * OrderingSession ObjectId strings.  Safe to re-run — find-or-create is idempotent.
+ * One-shot legacy migration for very old orderingSessionId strings. It does not
+ * depend on current group schedules because the legacy id already contains the
+ * historical open timestamp.
  */
 async function migrateOrdersToSessionIds() {
   const OLD_FORMAT_RE = /^[0-9a-f]{24}:\d{4}-\d{2}-\d{2}T/;
-
   const oldOrders = await Order.find(
     { orderingSessionId: { $regex: '^[0-9a-f]{24}:' } },
     'orderingSessionId',
   ).lean();
-
   if (oldOrders.length === 0) return;
 
   const oldIds = new Set();
@@ -154,9 +108,9 @@ async function migrateOrdersToSessionIds() {
   let totalConverted = 0;
   for (const oldSid of oldIds) {
     const colonIdx = oldSid.indexOf(':');
-    const groupId  = oldSid.slice(0, colonIdx);
-    const isoTs    = oldSid.slice(colonIdx + 1);
-    const openAt   = new Date(isoTs);
+    const groupId = oldSid.slice(0, colonIdx);
+    const isoTs = oldSid.slice(colonIdx + 1);
+    const openAt = new Date(isoTs);
     if (isNaN(openAt.getTime())) continue;
 
     const openDate = new Intl.DateTimeFormat('en-CA', {
@@ -164,9 +118,29 @@ async function migrateOrdersToSessionIds() {
       year: 'numeric', month: '2-digit', day: '2-digit',
     }).format(openAt);
 
-    const doc = await upsertSession(groupId, openDate, openAt);
-    const newSid = String(doc._id);
+    // Historical old-format ids pre-date per-group schedules, so preserve the
+    // timestamp exactly and do not invent a schedule snapshot.
+    let doc;
+    try {
+      doc = await OrderingSession.findOneAndUpdate(
+        { groupId, openDate },
+        {
+          $setOnInsert: {
+            groupId,
+            openDate,
+            openAt,
+            pickingStatus: 'pending',
+            events: [{ at: new Date(), type: 'created' }],
+          },
+        },
+        { upsert: true, new: true },
+      );
+    } catch (err) {
+      if (err?.code !== 11000) throw err;
+      doc = await OrderingSession.findOne({ groupId, openDate });
+    }
 
+    const newSid = String(doc._id);
     const result = await Order.updateMany(
       { orderingSessionId: oldSid },
       { $set: { orderingSessionId: newSid } },

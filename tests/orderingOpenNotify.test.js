@@ -10,7 +10,10 @@ const {
 } = require('../services/orderingOpenNotify');
 const { DAY_FULL_UK } = require('../utils/orderingSchedule');
 
-const SCHEDULE = { openHour: 16, openMinute: 30, closeHour: 7, closeMinute: 30 };
+const SCHEDULE = {
+  startDay: 6, startHour: 16, startMinute: 30,
+  endDay: 1, endHour: 7, endMinute: 30,
+};
 
 describe('розсилка «замовлення відкрито»', () => {
   const appUrl = 'https://t.me/example_bot/app';
@@ -73,11 +76,12 @@ describe('розсилка «замовлення відкрито»', () => {
     });
   });
 
-  it('дата доставки — це день закриття вікна, у форматі «<день тижня>, DD.MM»', () => {
-    for (let day = 0; day <= 6; day += 1) {
-      const label = deliveryDateLabel(day, SCHEDULE);
-      expect(label.startsWith(`${DAY_FULL_UK[day]}, `)).toBe(true);
-      expect(label).toMatch(/^[^,]+, \d{2}\.\d{2}$/);
-    }
+  it('дата доставки береться з deliveryDay незалежно від дня закриття сесії', () => {
+    const now = new Date('2026-08-09T18:00:00Z'); // Sun 20:00 Warsaw, session opened Sat 08.08
+
+    // SCHEDULE closes on Monday. Physical delivery may be later in the same
+    // session cycle, as long as it is before the next Saturday start.
+    expect(deliveryDateLabel(1, SCHEDULE, now)).toBe(`${DAY_FULL_UK[1]}, 10.08`); // Monday
+    expect(deliveryDateLabel(4, SCHEDULE, now)).toBe(`${DAY_FULL_UK[4]}, 13.08`); // Thursday
   });
 });

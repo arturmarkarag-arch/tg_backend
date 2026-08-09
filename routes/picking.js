@@ -16,7 +16,6 @@ const { auditSessionClosure } = require('../services/sessionClosure');
 const { isOrderingOpen, getOrderingWindowCloseAt, getOrderingWindowOpenAt, getOpenDateWarsaw } = require('../utils/orderingSchedule');
 const { getOrCreateSessionId, findCurrentSessionId } = require('../utils/getOrCreateSession');
 const { normalizeDeliveryGroup } = require('../utils/deliveryGroupHelpers');
-const { getOrderingSchedule } = require('../utils/getOrderingSchedule');
 const { appError, asyncHandler } = require('../utils/errors');
 const { withLock } = require('../utils/lock');
 const { transitionPickingStatus, maybeCompleteSession } = require('../utils/sessionStatus');
@@ -73,10 +72,9 @@ function isTransientTx(err) {
 // upsert) so a polling GET never mutates. Best-effort — returns 0 on any failure.
 async function countOrderedPositions(deliveryGroupId) {
   try {
-    const group = await DeliveryGroup.findById(deliveryGroupId, 'dayOfWeek').lean();
+    const group = await DeliveryGroup.findById(deliveryGroupId, 'dayOfWeek orderingSchedule').lean();
     if (!group) return 0;
-    const schedule = await getOrderingSchedule();
-    const openDate = getOpenDateWarsaw(group.dayOfWeek, schedule);
+    const openDate = getOpenDateWarsaw(group.orderingSchedule);
     const session = await OrderingSession.findOne(
       { groupId: String(deliveryGroupId), openDate },
       '_id',
@@ -110,19 +108,18 @@ async function countOrderedPositions(deliveryGroupId) {
 async function resolveCurrentPickingSession(deliveryGroupId) {
   const groupId = String(deliveryGroupId || '');
   if (!groupId) return { group: null, sessionId: null, schedule: null };
-  const group = await DeliveryGroup.findById(groupId, 'dayOfWeek name').lean();
+  const group = await DeliveryGroup.findById(groupId, 'dayOfWeek name orderingSchedule').lean();
   if (!group) return { group: null, sessionId: null, schedule: null };
-  const schedule = await getOrderingSchedule();
-  const sessionId = await findCurrentSessionId(groupId, group.dayOfWeek, schedule);
-  return { group, sessionId, schedule };
+  const sessionId = await findCurrentSessionId(groupId, group.orderingSchedule);
+  return { group, sessionId, schedule: group.orderingSchedule };
 }
 
 // Derive the single UI phase for a session. Centralised so /start-session and
 // /queue-stats can never disagree. "hasWork" is order-based for live phases and
 // task-based for a completed session (its orders are already fulfilled, so an
 // active-order count would wrongly read 0 and label a real cycle as idle).
-async function computeSessionPhase({ deliveryGroupId, sessionId, pickingStatus, dayOfWeek, schedule }) {
-  const windowOpen = isOrderingOpen(dayOfWeek, schedule).isOpen;
+async function computeSessionPhase({ deliveryGroupId, sessionId, pickingStatus, orderingSchedule }) {
+  const windowOpen = isOrderingOpen(orderingSchedule).isOpen;
   let hasWork;
   if (pickingStatus === 'completed') {
     hasWork = (await PickingTask.countDocuments({ orderingSessionId: String(sessionId), status: 'completed' })) > 0;
@@ -232,10 +229,9 @@ async function buildTaskResponse(task, { isSecondChance = false } = {}) {
 router.get('/session-status', requireTelegramRoles(['warehouse', 'admin', 'seller']), asyncHandler(async (req, res) => {
   const { groupId } = req.query;
   if (!groupId) return res.json({ pickingStatus: 'pending' });
-  const group = await DeliveryGroup.findById(groupId, 'dayOfWeek').lean();
+  const group = await DeliveryGroup.findById(groupId, 'dayOfWeek orderingSchedule').lean();
   if (!group) return res.json({ pickingStatus: 'pending' });
-  const schedule = await getOrderingSchedule();
-  const sessionId = await getOrCreateSessionId(String(groupId), group.dayOfWeek, schedule);
+  const sessionId = await getOrCreateSessionId(String(groupId), group.orderingSchedule);
   const session = await OrderingSession.findById(sessionId, 'pickingStatus').lean();
   res.json({ pickingStatus: session?.pickingStatus || 'pending' });
 }));
@@ -246,13 +242,11 @@ router.get('/session-status', requireTelegramRoles(['warehouse', 'admin', 'selle
 // ---------------------------------------------------------------------------
 router.get('/schedule', requireTelegramRoles(['warehouse', 'admin']), async (req, res, next) => {
   try {
-    const schedule = await getOrderingSchedule();
-    res.json({
-      openHour: Number(schedule.openHour),
-      openMinute: Number(schedule.openMinute),
-      closeHour: Number(schedule.closeHour),
-      closeMinute: Number(schedule.closeMinute),
-    });
+    const groupId = String(req.query.groupId || '');
+    if (!groupId) return next(appError('picking_delivery_group_required'));
+    const group = await DeliveryGroup.findById(groupId, 'orderingSchedule').lean();
+    if (!group) return next(appError('group_not_found'));
+    res.json(group.orderingSchedule);
   } catch (err) {
     if (err && (err.name === 'AppError' || err.name === 'CastError' || isTransientTx(err))) return next(err);
     next(appError('picking_session_failed'));
@@ -283,13 +277,12 @@ router.post('/start-session', requireTelegramRoles(['warehouse', 'admin']), asyn
     };
 
     // 1. Ordering window — picking blocked while sellers can still place orders.
-    const group = normalizeDeliveryGroup(await DeliveryGroup.findById(deliveryGroupId, 'dayOfWeek name').lean());
+    const group = normalizeDeliveryGroup(await DeliveryGroup.findById(deliveryGroupId, 'dayOfWeek name orderingSchedule').lean());
     if (!group) throw appError('group_not_found');
 
-    const schedule = await getOrderingSchedule();
-    const { isOpen, message } = isOrderingOpen(group.dayOfWeek, schedule);
+    const { isOpen, message } = isOrderingOpen(group.orderingSchedule);
     if (isOpen) {
-      const windowCloseAt = getOrderingWindowCloseAt(group.dayOfWeek, schedule).toISOString();
+      const windowCloseAt = getOrderingWindowCloseAt(group.orderingSchedule).toISOString();
       return res.json({ windowOpen: true, message, windowCloseAt });
     }
     // Window closed → picking allowed for the whole dead-time until the next
@@ -302,7 +295,7 @@ router.post('/start-session', requireTelegramRoles(['warehouse', 'admin']), asyn
     // own locks are still swept by the >LOCK_TIMEOUT_MS age condition. Same guard as
     // block-tasks / queue-stats already use.
     await releaseWorkerAndStaleLocks(user.telegramId, deliveryGroupId, { releaseOwnLocks: false });
-    const currentSessionId = await getOrCreateSessionId(String(deliveryGroupId), group.dayOfWeek, schedule);
+    const currentSessionId = await getOrCreateSessionId(String(deliveryGroupId), group.orderingSchedule);
     await archiveOrphanedOutOfStockProducts(deliveryGroupId, currentSessionId);
     await reconcileActiveTasksForSession(deliveryGroupId, currentSessionId);
 
@@ -334,8 +327,7 @@ router.post('/start-session', requireTelegramRoles(['warehouse', 'admin']), asyn
       deliveryGroupId,
       sessionId: currentSessionId,
       pickingStatus: session?.pickingStatus || 'pending',
-      dayOfWeek: group.dayOfWeek,
-      schedule,
+      orderingSchedule: group.orderingSchedule,
     });
     const baseSummary = await buildSessionSummary(basePhase, {
       deliveryGroupId, sessionId: currentSessionId, session,
@@ -488,8 +480,7 @@ router.post('/start-session', requireTelegramRoles(['warehouse', 'admin']), asyn
           deliveryGroupId,
           sessionId: currentSessionId,
           pickingStatus: finalDoc?.pickingStatus || 'completed',
-          dayOfWeek: group.dayOfWeek,
-          schedule,
+          orderingSchedule: group.orderingSchedule,
         }),
         events: (finalDoc?.events || []).slice(-10),
         vocab: getSessionVocab(),
@@ -509,8 +500,7 @@ router.post('/start-session', requireTelegramRoles(['warehouse', 'admin']), asyn
         deliveryGroupId,
         sessionId: currentSessionId,
         pickingStatus: confirmedDoc?.pickingStatus || 'confirmed',
-        dayOfWeek: group.dayOfWeek,
-        schedule,
+        orderingSchedule: group.orderingSchedule,
       }),
       events: (confirmedDoc?.events || []).slice(-10),
       vocab: getSessionVocab(),
@@ -533,11 +523,10 @@ router.post('/cancel-start', requireTelegramRoles(['warehouse', 'admin']), async
   const { deliveryGroupId } = req.body;
   if (!deliveryGroupId) throw appError('picking_delivery_group_required');
 
-  const group = await DeliveryGroup.findById(deliveryGroupId, 'dayOfWeek name').lean();
+  const group = await DeliveryGroup.findById(deliveryGroupId, 'dayOfWeek name orderingSchedule').lean();
   if (!group) throw appError('group_not_found');
 
-  const schedule = await getOrderingSchedule();
-  const sessionId = await getOrCreateSessionId(String(deliveryGroupId), group.dayOfWeek, schedule);
+  const sessionId = await getOrCreateSessionId(String(deliveryGroupId), group.orderingSchedule);
   const session = await OrderingSession.findById(sessionId).lean();
 
   if (!session || session.pickingStatus !== 'confirmed') {
@@ -611,11 +600,10 @@ router.post('/resolve-coverage-gap', requireTelegramRoles(['warehouse', 'admin']
   const { deliveryGroupId, productId = null } = req.body;
   if (!deliveryGroupId) throw appError('picking_delivery_group_required');
 
-  const group = await DeliveryGroup.findById(deliveryGroupId, 'dayOfWeek name').lean();
+  const group = await DeliveryGroup.findById(deliveryGroupId, 'dayOfWeek name orderingSchedule').lean();
   if (!group) throw appError('group_not_found');
 
-  const schedule  = await getOrderingSchedule();
-  const sessionId = await getOrCreateSessionId(String(deliveryGroupId), group.dayOfWeek, schedule);
+  const sessionId = await getOrCreateSessionId(String(deliveryGroupId), group.orderingSchedule);
 
   const { getBot } = require('../telegramBot');
   const { cancelledCount, archived } = await resolveCoverageGap({
@@ -948,18 +936,17 @@ router.get('/queue-stats', requireTelegramRoles(['warehouse', 'admin']), async (
     // Лічильник дозамовлень оновлюється незалежно від OrderingSession.
     const supplementCount = await countActiveOffersForGroup(deliveryGroupId);
     try {
-      const groupDoc = await DeliveryGroup.findById(deliveryGroupId, 'dayOfWeek').lean();
+      const groupDoc = await DeliveryGroup.findById(deliveryGroupId, 'dayOfWeek orderingSchedule').lean();
       if (groupDoc) {
         groupDayOfWeek = groupDoc.dayOfWeek;
-        const schedule = await getOrderingSchedule();
-        // findCurrentSessionId, НЕ getOrCreate: це опитування раз на 5 секунд для
+            // findCurrentSessionId, НЕ getOrCreate: це опитування раз на 5 секунд для
         // ПОКАЗУ сторінки. Створювати сесію тут означало, що достатньо відкрити
         // «Збирання» на групі з ще відкритим вікном замовлень — і в базі
         // з'являлась порожня OrderingSession, яку ніхто не просив (сам
         // /start-session у цьому стані виходить раніше й нічого не створює).
         // Немає сесії — немає й статусу: клієнт просто не малює чип, а вхід у
         // віртуальний блок дозамовлень від сесії не залежить.
-        const sessionId = await findCurrentSessionId(String(deliveryGroupId), groupDoc.dayOfWeek, schedule);
+        const sessionId = await findCurrentSessionId(String(deliveryGroupId), groupDoc.orderingSchedule);
         const sessionDoc = sessionId
           ? await OrderingSession.findById(sessionId, 'pickingStatus events seq openDate').lean()
           : null;
@@ -970,8 +957,7 @@ router.get('/queue-stats', requireTelegramRoles(['warehouse', 'admin']), async (
             deliveryGroupId,
             sessionId,
             pickingStatus,
-            dayOfWeek: groupDoc.dayOfWeek,
-            schedule,
+            orderingSchedule: groupDoc.orderingSchedule,
           });
           sessionSummary = await buildSessionSummary(phase, {
             deliveryGroupId, sessionId, session: sessionDoc,
@@ -1282,7 +1268,7 @@ router.get('/shift-board', requireTelegramRoles(['admin']), async (req, res, nex
     const dgId = String(deliveryGroupId);
 
     // Group name + session start time
-    const group = await DeliveryGroup.findById(dgId, 'name dayOfWeek').lean();
+    const group = await DeliveryGroup.findById(dgId, 'name dayOfWeek orderingSchedule').lean();
     const groupName = group?.name || '';
 
     // Session start = when this picking session was confirmed. Lives on the
@@ -1291,8 +1277,7 @@ router.get('/shift-board', requireTelegramRoles(['admin']), async (req, res, nex
     let sessionStart = null;
     let sessionId = null;
     if (group) {
-      const schedule = await getOrderingSchedule();
-      sessionId = await getOrCreateSessionId(dgId, group.dayOfWeek, schedule);
+        sessionId = await getOrCreateSessionId(dgId, group.orderingSchedule);
       const sessionDoc = await OrderingSession.findById(sessionId, 'pickingConfirmedAt').lean();
       sessionStart = sessionDoc?.pickingConfirmedAt || null;
     }
@@ -1372,8 +1357,7 @@ router.get('/shift-board', requireTelegramRoles(['admin']), async (req, res, nex
     let unfinished = null;
     try {
       if (group && sessionId) {
-        const schedule = await getOrderingSchedule();
-        const { isOpen } = isOrderingOpen(group.dayOfWeek, schedule);
+            const { isOpen } = isOrderingOpen(group.orderingSchedule);
         const sessionMeta = await OrderingSession.findById(sessionId, 'seq openDate pickingStatus').lean();
 
         const positionsLeft = (o) => (o.items || []).filter((i) => !i.cancelled && !i.packed && !i.skipped).length;

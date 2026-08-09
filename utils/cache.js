@@ -123,7 +123,6 @@ async function invalidateAll() {
 }
 
 const KEYS = {
-  ORDERING_SCHEDULE: 'ordering_schedule',
   CITIES: 'cities',
   DELIVERY_GROUPS: 'delivery_groups',
   SUPPLEMENT_SETTINGS: 'supplement_settings',

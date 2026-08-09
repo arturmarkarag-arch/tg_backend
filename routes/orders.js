@@ -19,8 +19,6 @@ const { ensureSessionSeq } = require('../utils/sessionSeq');
 const OrderingSession = require('../models/OrderingSession');
 const { pushSessionEvent } = require('../utils/sessionStatus');
 
-const { getOrderingSchedule } = require('../utils/getOrderingSchedule');
-
 // Fields the UI actually reads off a populated order item's product (a warehouse
 // Product) — the union across OrderSummary / MyOrders / OrderHistory / CrossDocking
 // and ProductImage(productImagePath). name + price live in the item SNAPSHOT, so the
@@ -108,8 +106,7 @@ async function ensureOrderIsStale(order, session = null) {
   if (!group) return;
 
   const normalizedGroup = normalizeDeliveryGroup(group);
-  const schedule = await getOrderingSchedule();
-  const currentSessionId = await getOrCreateSessionId(String(normalizedGroup._id), normalizedGroup.dayOfWeek, schedule);
+  const currentSessionId = await getOrCreateSessionId(String(normalizedGroup._id), normalizedGroup.orderingSchedule);
   if (String(order.orderingSessionId || '') === String(currentSessionId || '')) {
     throw appError('validation_failed', { field: 'orderingSessionId', details: 'order_is_current_session' });
   }
@@ -179,8 +176,7 @@ async function requireOrderingWindowOpen(req, res, next) {
       });
     }
 
-    const schedule = await getOrderingSchedule();
-    const { isOpen, message } = isOrderingOpen(group.dayOfWeek, schedule);
+    const { isOpen, message } = isOrderingOpen(group.orderingSchedule);
     if (!isOpen) {
       return res.status(423).json({ error: 'ordering_closed', message });
     }
@@ -275,10 +271,9 @@ router.get('/conflicts', staffOnly, async (req, res) => {
   // only orders that belong to the CURRENT ordering session — stale unresolved orders
   // from previous sessions should not pollute today's picking dashboard.
   const allGroups = (await getAllDeliveryGroups()).map(normalizeDeliveryGroup);
-  const schedule = await getOrderingSchedule();
 
   const sessionIdResults = await Promise.all(
-    allGroups.map((group) => getOrCreateSessionId(String(group._id), group.dayOfWeek, schedule)),
+    allGroups.map((group) => getOrCreateSessionId(String(group._id), group.orderingSchedule)),
   );
   const currentSessionIds = new Set(sessionIdResults.filter(Boolean));
 
@@ -558,8 +553,7 @@ router.get('/current-items', sellerOnly, asyncHandler(async (req, res) => {
   const group = normalizeDeliveryGroup(await getDeliveryGroup(shop.deliveryGroupId));
   if (!group) return res.json({ orderIds: [], items: [] });
 
-  const schedule = await getOrderingSchedule();
-  const currentSessionId = await findCurrentSessionId(String(group._id), group.dayOfWeek, schedule);
+  const currentSessionId = await findCurrentSessionId(String(group._id), group.orderingSchedule);
   if (!currentSessionId) return res.json({ orderIds: [], items: [] });
 
   const orders = await Order.find({
@@ -730,7 +724,6 @@ async function placeOrderImpl(req, res) {
   // shop, group and schedule are kept in outer scope so the merge logic can use them below
   let shop = null;
   let group = null;
-  let schedule = null;
   if (!buyer.shopId) {
     return res.status(403).json({
       error: 'no_shop',
@@ -752,7 +745,6 @@ async function placeOrderImpl(req, res) {
         message: 'Групу доставки не знайдено. Зверніться до адміністратора.',
       });
     }
-    schedule = await getOrderingSchedule();
     // Seller and admin are bound by the ordering window.
     // Warehouse workers are NOT allowed to place orders at all.
     if (buyer.role === 'warehouse') {
@@ -761,7 +753,7 @@ async function placeOrderImpl(req, res) {
         message: 'Працівники складу не можуть робити замовлення.',
       });
     }
-    const { isOpen, message } = isOrderingOpen(group.dayOfWeek, schedule);
+    const { isOpen, message } = isOrderingOpen(group.orderingSchedule);
     if (!isOpen) {
       return res.status(423).json({ error: 'ordering_closed', message });
     }
@@ -838,10 +830,10 @@ async function placeOrderImpl(req, res) {
     status: { $in: ['new', 'in_progress'] },
   };
   let currentSessionId = '';
-  if (group && schedule) {
+  if (group) {
     // All roles with a delivery group: merge within the active ordering session.
     // This includes warehouse, which now also gets orderingSessionId for conflict detection.
-    currentSessionId = await getOrCreateSessionId(String(group._id), group.dayOfWeek, schedule);
+    currentSessionId = await getOrCreateSessionId(String(group._id), group.orderingSchedule);
     existingOrderQuery.buyerTelegramId = buyer.telegramId;
     existingOrderQuery['buyerSnapshot.shopId'] = buyer.shopId;
     existingOrderQuery.orderingSessionId = currentSessionId;
@@ -1153,8 +1145,7 @@ router.patch('/:id/snapshot', staffOnly, async (req, res) => {
       if (shop.deliveryGroupId) {
         const newGroup = await DeliveryGroup.findById(shop.deliveryGroupId).session(session).lean();
         if (newGroup) {
-          const schedule = await getOrderingSchedule();
-          newSessionId = await getOrCreateSessionId(String(newGroup._id), newGroup.dayOfWeek, schedule);
+          newSessionId = await getOrCreateSessionId(String(newGroup._id), newGroup.orderingSchedule);
         }
       }
 
@@ -1280,8 +1271,7 @@ router.post('/:id/stale/restore-to-cart', telegramAuth, adminOnly, asyncHandler(
       if (!deliveryGroupId) throw appError('no_delivery_group');
       const group = normalizeDeliveryGroup(await getDeliveryGroup(deliveryGroupId));
       if (!group) throw appError('delivery_group_not_found');
-      const schedule = await getOrderingSchedule();
-      const currentSessionId = await getOrCreateSessionId(String(group._id), group.dayOfWeek, schedule);
+      const currentSessionId = await getOrCreateSessionId(String(group._id), group.orderingSchedule);
 
       const actor = actorFromReq(req);
 
@@ -1496,8 +1486,7 @@ router.post('/upsert-item', telegramAuth, requireOrderingWindowOpen, asyncHandle
   const group = normalizeDeliveryGroup(await getDeliveryGroup(shop.deliveryGroupId));
   if (!group) throw appError('delivery_group_not_found');
 
-  const schedule = await getOrderingSchedule();
-  const currentSessionId = await getOrCreateSessionId(String(group._id), group.dayOfWeek, schedule);
+  const currentSessionId = await getOrCreateSessionId(String(group._id), group.orderingSchedule);
 
   const mongoSession = await mongoose.connection.startSession();
   let result;
@@ -1660,8 +1649,7 @@ router.post('/set-item-qty', telegramAuth, requireOrderingWindowOpen, asyncHandl
   const group = normalizeDeliveryGroup(await getDeliveryGroup(shop.deliveryGroupId));
   if (!group) throw appError('delivery_group_not_found');
 
-  const schedule = await getOrderingSchedule();
-  const currentSessionId = await getOrCreateSessionId(String(group._id), group.dayOfWeek, schedule);
+  const currentSessionId = await getOrCreateSessionId(String(group._id), group.orderingSchedule);
 
   // Transaction + re-read inside the session: two concurrent set-item-qty calls
   // on the same order (rapid taps, or different items in parallel) would otherwise
@@ -1718,8 +1706,7 @@ router.post('/remove-item', telegramAuth, requireOrderingWindowOpen, asyncHandle
   const group = normalizeDeliveryGroup(await getDeliveryGroup(shop.deliveryGroupId));
   if (!group) throw appError('delivery_group_not_found');
 
-  const schedule = await getOrderingSchedule();
-  const currentSessionId = await getOrCreateSessionId(String(group._id), group.dayOfWeek, schedule);
+  const currentSessionId = await getOrCreateSessionId(String(group._id), group.orderingSchedule);
 
   const session = await mongoose.connection.startSession();
   try {

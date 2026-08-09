@@ -9,12 +9,11 @@ const Shop            = require('../models/Shop');
 
 const mongoose = require('mongoose');
 
-const { getOrderingSchedule } = require('../utils/getOrderingSchedule');
 const {
   isOrderingOpen,
   getWarsawNow,
   getOpenDateWarsaw,
-  getOrderingWindowOpenAt,
+  getNextOrderingWindowOpenAt,
   getOrderingWindowCloseAt,
   getPreviousOrderingCloseAt,
   DAY_FULL_UK,
@@ -73,16 +72,17 @@ function pickingHint(session) {
 }
 
 /** Інформаційний опис групи; статус не блокує вибір. */
-async function describeGroup(group, schedule, now) {
+async function describeGroup(group, now) {
   const dayOfWeek = group.dayOfWeek;
-  const openDate = getOpenDateWarsaw(dayOfWeek, schedule);
+  const schedule = group.orderingSchedule;
+  const openDate = getOpenDateWarsaw(schedule, now);
   const session = await OrderingSession.findOne(
     { groupId: String(group._id), openDate },
     '_id pickingStatus',
   ).lean();
 
-  const windowOpen = isOrderingOpen(dayOfWeek, schedule).isOpen;
-  const todayIsDeliveryDay = getWarsawNow().dayOfWeek === dayOfWeek;
+  const windowOpen = isOrderingOpen(schedule, now).isOpen;
+  const todayIsDeliveryDay = getWarsawNow(now).dayOfWeek === dayOfWeek;
 
   const base = {
     deliveryGroupId: String(group._id),
@@ -105,7 +105,7 @@ async function describeGroup(group, schedule, now) {
 
   // ── Вікно ще відкрите ──────────────────────────────────────────────────────
   if (windowOpen) {
-    const closeAt = getOrderingWindowCloseAt(dayOfWeek, schedule);
+    const closeAt = getOrderingWindowCloseAt(schedule, now);
     return {
       ...base,
       state: 'ordering_open',
@@ -119,7 +119,7 @@ async function describeGroup(group, schedule, now) {
 
   // ── Вікно закрите, доставка СЬОГОДНІ — головний сценарій ───────────────────
   if (todayIsDeliveryDay) {
-    const closedAt = getPreviousOrderingCloseAt(dayOfWeek, schedule);
+    const closedAt = getPreviousOrderingCloseAt(schedule, now);
     const details = [
       `Замовлення закрилися ${humanDuration(now.getTime() - closedAt.getTime())} тому`,
       pickingHint(session),
@@ -140,9 +140,8 @@ async function describeGroup(group, schedule, now) {
   }
 
   // ── Вікно закрите, доставка не сьогодні ────────────────────────────────────
-  // Наступне відкриття — на тиждень від поточного (розклад тижневий).
-  const openAt = getOrderingWindowOpenAt(dayOfWeek, schedule);
-  const untilOpen = humanDuration(openAt.getTime() + 7 * DAY - now.getTime());
+  const nextOpenAt = getNextOrderingWindowOpenAt(schedule, now);
+  const untilOpen = humanDuration(nextOpenAt.getTime() - now.getTime());
 
   if (session) {
     const done = session.pickingStatus === 'completed';
@@ -173,13 +172,12 @@ async function describeGroup(group, schedule, now) {
 
 /** Усі групи з інформаційним станом. */
 async function describeSupplementTargets(now = new Date()) {
-  const schedule = await getOrderingSchedule();
-  const groups = await DeliveryGroup.find({}, 'name dayOfWeek').sort({ dayOfWeek: 1, name: 1 }).lean();
+  const groups = await DeliveryGroup.find({}, 'name dayOfWeek orderingSchedule').sort({ dayOfWeek: 1, name: 1 }).lean();
 
   const described = [];
   for (const group of groups) {
     if (!Number.isInteger(group.dayOfWeek)) continue;
-    described.push(await describeGroup(group, schedule, now));
+    described.push(await describeGroup(group, now));
   }
 
   // Жодного поділу на «доступні/недоступні»: усі коректні групи клікабельні,
@@ -195,7 +193,7 @@ async function resolveSupplementTarget(deliveryGroupId) {
   const gid = String(deliveryGroupId || '').trim();
   if (!gid || !mongoose.Types.ObjectId.isValid(gid)) throw appError('supplement_target_required');
 
-  const group = await DeliveryGroup.findById(gid, 'name dayOfWeek').lean();
+  const group = await DeliveryGroup.findById(gid, 'name dayOfWeek orderingSchedule').lean();
   if (!group) throw appError('supplement_target_not_found');
 
   // Ні сесія, ні вікно замовлень, ні кількість магазинів не блокують вибір.

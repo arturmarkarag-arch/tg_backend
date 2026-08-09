@@ -88,8 +88,8 @@ const Counter = require('../models/Counter');
 const ShopAuditLog = require('../models/ShopAuditLog');
 const AppSetting = require('../models/AppSetting');
 const cache = require('../utils/cache');
-const { getOrderingSchedule } = require('../utils/getOrderingSchedule');
-const { isOrderingOpen, getOpenDateWarsaw, getOrderingWindowOpenAt } = require('../utils/orderingSchedule');
+const { isOrderingOpen } = require('../utils/orderingSchedule');
+const { buildOpenClosedTestSchedules } = require('./helpers/perGroupTestSchedule');
 const { getOrCreateSessionId } = require('../utils/getOrCreateSession');
 const { signSession } = require('../utils/jwt');
 const { auditSessionClosure } = require('../services/sessionClosure');
@@ -230,8 +230,6 @@ async function allocBlockIds(n) {
   }
   throw new Error('Cannot allocate synthetic blockIds');
 }
-function findOpenDay(schedule) { for (let d = 0; d < 7; d += 1) if (isOrderingOpen(d, schedule).isOpen) return d; return null; }
-function findClosedDay(schedule) { for (let d = 0; d < 7; d += 1) if (!isOrderingOpen(d, schedule).isOpen) return d; return null; }
 
 async function tokenFor(user) { return signSession(str(user.telegramId)); }
 async function api(method, urlPath, user, body, label = `${method} ${urlPath.split('?')[0]}`) {
@@ -256,12 +254,17 @@ async function batchMap(items, size, fn) {
 
 async function createWorld() {
   phaseStart('fixtures');
-  const schedule = await getOrderingSchedule();
-  world.schedule = schedule;
-  const openDay = findOpenDay(schedule);
-  check(openDay != null, 'Mass: an ordering-open synthetic delivery day exists');
+  const { deliveryDay, openSchedule, closedSchedule } = buildOpenClosedTestSchedules();
+  world.schedule = openSchedule;
+  world.closedSchedule = closedSchedule;
+  check(isOrderingOpen(openSchedule).isOpen, 'Mass: synthetic per-group ordering window is open');
 
-  world.group = await DeliveryGroup.create({ name: `${MARKER}:group`, dayOfWeek: openDay, members: [] });
+  world.group = await DeliveryGroup.create({
+    name: `${MARKER}:group`,
+    dayOfWeek: deliveryDay,
+    orderingSchedule: openSchedule,
+    members: [],
+  });
   await cache.invalidate(cache.KEYS.DELIVERY_GROUPS);
 
   const shopDocs = Array.from({ length: CFG.shops }, (_, i) => ({
@@ -372,17 +375,18 @@ async function createOldSessionNoise(currentSessionId) {
 }
 
 async function moveToClosedPhase(session) {
-  const closedDay = findClosedDay(world.schedule);
-  check(closedDay != null, 'Mass: a picking-allowed closed day exists');
-  const closedOpenDate = getOpenDateWarsaw(closedDay, world.schedule);
-  const closedOpenAt = getOrderingWindowOpenAt(closedDay, world.schedule);
-  await OrderingSession.deleteMany({ groupId: str(world.group._id), openDate: closedOpenDate, _id: { $ne: session._id } });
-  await OrderingSession.updateOne({ _id: session._id }, { $set: { openDate: closedOpenDate, openAt: closedOpenAt } });
-  await DeliveryGroup.updateOne({ _id: world.group._id }, { $set: { dayOfWeek: closedDay } });
-  world.group.dayOfWeek = closedDay;
+  const closedSchedule = world.closedSchedule;
+  check(Boolean(closedSchedule), 'Mass: closed synthetic per-group schedule exists');
+  await DeliveryGroup.updateOne(
+    { _id: world.group._id },
+    { $set: { orderingSchedule: closedSchedule } },
+  );
+  world.group.orderingSchedule = closedSchedule;
+  world.schedule = closedSchedule;
   await cache.invalidate(cache.KEYS.DELIVERY_GROUPS);
-  const resolved = await getOrCreateSessionId(str(world.group._id), closedDay, world.schedule);
+  const resolved = await getOrCreateSessionId(str(world.group._id), closedSchedule);
   eq(str(resolved), str(session._id), 'Mass current OrderingSession identity survives open→closed phase');
+  check(!isOrderingOpen(closedSchedule).isOpen, 'Mass synthetic picking phase is closed');
 }
 
 async function startPicking(wh, confirm = true) {
@@ -585,9 +589,9 @@ async function preflight() {
   await mongoose.connect(process.env.MONGODB_URI, { serverSelectionTimeoutMS: 15_000 });
   assertConnectedHostAllowed(mongoose.connection.host);
   log(`DB guard OK: db=${mongoose.connection.db.databaseName} host=${mongoose.connection.host} allowed=${allowedSuffix()}`);
-  const schedule = await getOrderingSchedule();
-  check(findOpenDay(schedule) != null, 'Mass preflight has ordering-open day');
-  check(findClosedDay(schedule) != null, 'Mass preflight has picking-allowed day');
+  const synthetic = buildOpenClosedTestSchedules();
+  check(isOrderingOpen(synthetic.openSchedule).isOpen, 'Mass preflight can create an ordering-open per-group schedule');
+  check(!isOrderingOpen(synthetic.closedSchedule).isOpen, 'Mass preflight can create a picking-allowed per-group schedule');
   const [orderIdx, taskIdx, blockIdx] = await Promise.all([Order.collection.indexes(), PickingTask.collection.indexes(), Block.collection.indexes()]);
   check(orderIdx.some((i) => i.name === 'one_active_order_per_buyer_shop_session' && i.unique), 'Mass critical Order unique index exists');
   check(taskIdx.some((i) => i.name === 'one_active_task_per_product_group_session' && i.unique), 'Mass session-scoped PickingTask unique index exists');

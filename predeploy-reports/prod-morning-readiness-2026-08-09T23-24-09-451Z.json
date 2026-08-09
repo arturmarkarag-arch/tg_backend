@@ -1,0 +1,287 @@
+{
+  "generatedAt": "2026-08-09T23:24:09.449Z",
+  "durationMs": 2530,
+  "readOnly": true,
+  "serverRoot": "C:\\Users\\danza\\Downloads\\tg bot\\NEW_VERSION\\server",
+  "envPath": "C:\\Users\\danza\\Downloads\\tg bot\\NEW_VERSION\\.env",
+  "mongo": {
+    "host": "cluster0.p5rmla3.mongodb.net",
+    "db": "tg_manager"
+  },
+  "redis": {
+    "configured": true,
+    "ok": true,
+    "message": "PING=PONG",
+    "host": "localhost"
+  },
+  "legacyScheduleFound": true,
+  "legacySchedule": {
+    "openHour": 16,
+    "openMinute": 30,
+    "closeHour": 7,
+    "closeMinute": 30
+  },
+  "verdict": "GO",
+  "summary": {
+    "criticals": 0,
+    "warnings": 3,
+    "groups": 3,
+    "readyToPressStartNow": 0,
+    "waitOrderingClose": 1,
+    "readyToResumePicking": 0,
+    "alreadyCompleted": 0,
+    "blocked": 0
+  },
+  "global": {
+    "issues": [],
+    "indexChecks": {
+      "orderUnique": true,
+      "taskUnique": true,
+      "blockUnique": true,
+      "sessionUnique": true
+    },
+    "counts": {
+      "groups": 3,
+      "sessions": 4,
+      "activeOrders": 34,
+      "activeTasks": 0,
+      "orphanSessions": 0,
+      "duplicateOrders": 0,
+      "duplicateTasks": 0,
+      "duplicateBlockProducts": 0,
+      "activeOrdersMissingSessionId": 0,
+      "activeTasksMissingSessionId": 0,
+      "activeOrdersMissingSession": 0,
+      "activeTasksMissingSession": 0,
+      "activeOrderGroupMismatch": 0,
+      "activeTaskGroupMismatch": 0,
+      "terminalOrdersWithNonterminalItems": 0
+    }
+  },
+  "groups": [
+    {
+      "groupId": "69def91c35362e32bb02247e",
+      "groupName": "Вівторок Достава",
+      "dayOfWeek": 2,
+      "state": "READY_EMPTY_SESSION",
+      "issues": [
+        {
+          "severity": "warning",
+          "code": "session_without_schedule_snapshot",
+          "message": "Current session не має scheduleSnapshot (типово для старої materialized session). V28 identity працює по groupId+openDate; це не blocker."
+        }
+      ],
+      "schedule": {
+        "legacy": {
+          "startDay": 1,
+          "startHour": 16,
+          "startMinute": 30,
+          "endDay": 2,
+          "endHour": 7,
+          "endMinute": 30
+        },
+        "v28": {
+          "startDay": 1,
+          "startHour": 16,
+          "startMinute": 30,
+          "endDay": 2,
+          "endHour": 7,
+          "endMinute": 30
+        },
+        "same": true,
+        "legacyWindowOpen": false,
+        "v28WindowOpen": false,
+        "openDateLegacy": "2026-08-03",
+        "openDateV28": "2026-08-03",
+        "sessionOpenAt": "2026-08-03T14:30:00.000Z",
+        "sessionCloseAt": "2026-08-04T05:30:00.000Z",
+        "deliveryDate": "2026-08-04"
+      },
+      "session": {
+        "legacySessionId": "6a76cf570f59d3901ea20f20",
+        "v28SessionId": "6a76cf570f59d3901ea20f20",
+        "sameSession": true,
+        "seq": null,
+        "pickingStatus": "pending",
+        "pickingConfirmedAt": null,
+        "pickingStartedAt": null,
+        "pickingCompletedAt": null,
+        "openNotifiedAt": null
+      },
+      "counts": {
+        "legacySessionOrders": 0,
+        "v28SessionOrders": 0,
+        "activeOrders": 0,
+        "activeOrdersAllInSession": 0,
+        "liveOrderItems": 0,
+        "predictedDistinctTasks": 0,
+        "currentTasks": 0,
+        "pendingTasks": 0,
+        "lockedTasks": 0,
+        "completedTasks": 0,
+        "conflicts": 0,
+        "predictedCoverageGaps": 0,
+        "staleOrders": 0,
+        "staleTasks": 0,
+        "parkedOrders": 0,
+        "terminalOrdersWithBrokenLines": 0
+      }
+    },
+    {
+      "groupId": "69def1d9db8e774832fb0b7f",
+      "groupName": "Понеділок Достава",
+      "dayOfWeek": 1,
+      "state": "WAIT_ORDERING_CLOSE",
+      "issues": [
+        {
+          "severity": "warning",
+          "code": "session_without_schedule_snapshot",
+          "message": "Current session не має scheduleSnapshot (типово для старої materialized session). V28 identity працює по groupId+openDate; це не blocker."
+        }
+      ],
+      "schedule": {
+        "legacy": {
+          "startDay": 6,
+          "startHour": 16,
+          "startMinute": 30,
+          "endDay": 1,
+          "endHour": 7,
+          "endMinute": 30
+        },
+        "v28": {
+          "startDay": 6,
+          "startHour": 16,
+          "startMinute": 30,
+          "endDay": 1,
+          "endHour": 7,
+          "endMinute": 30
+        },
+        "same": true,
+        "legacyWindowOpen": true,
+        "v28WindowOpen": true,
+        "openDateLegacy": "2026-08-08",
+        "openDateV28": "2026-08-08",
+        "sessionOpenAt": "2026-08-08T14:30:00.000Z",
+        "sessionCloseAt": "2026-08-10T05:30:00.000Z",
+        "deliveryDate": "2026-08-10"
+      },
+      "session": {
+        "legacySessionId": "6a771dc40f59d3901ea2ef30",
+        "v28SessionId": "6a771dc40f59d3901ea2ef30",
+        "sameSession": true,
+        "seq": null,
+        "pickingStatus": "pending",
+        "pickingConfirmedAt": null,
+        "pickingStartedAt": null,
+        "pickingCompletedAt": null,
+        "openNotifiedAt": "2026-08-08T12:15:04.348Z"
+      },
+      "counts": {
+        "legacySessionOrders": 34,
+        "v28SessionOrders": 34,
+        "activeOrders": 34,
+        "activeOrdersAllInSession": 34,
+        "liveOrderItems": 1484,
+        "predictedDistinctTasks": 540,
+        "currentTasks": 0,
+        "pendingTasks": 0,
+        "lockedTasks": 0,
+        "completedTasks": 0,
+        "conflicts": 0,
+        "predictedCoverageGaps": 0,
+        "staleOrders": 0,
+        "staleTasks": 0,
+        "parkedOrders": 0,
+        "terminalOrdersWithBrokenLines": 0
+      }
+    },
+    {
+      "groupId": "69def93435362e32bb022486",
+      "groupName": "Четвер Достава",
+      "dayOfWeek": 4,
+      "state": "READY_EMPTY_SESSION",
+      "issues": [
+        {
+          "severity": "warning",
+          "code": "session_without_schedule_snapshot",
+          "message": "Current session не має scheduleSnapshot (типово для старої materialized session). V28 identity працює по groupId+openDate; це не blocker."
+        }
+      ],
+      "schedule": {
+        "legacy": {
+          "startDay": 3,
+          "startHour": 16,
+          "startMinute": 30,
+          "endDay": 4,
+          "endHour": 7,
+          "endMinute": 30
+        },
+        "v28": {
+          "startDay": 3,
+          "startHour": 16,
+          "startMinute": 30,
+          "endDay": 4,
+          "endHour": 7,
+          "endMinute": 30
+        },
+        "same": true,
+        "legacyWindowOpen": false,
+        "v28WindowOpen": false,
+        "openDateLegacy": "2026-08-05",
+        "openDateV28": "2026-08-05",
+        "sessionOpenAt": "2026-08-05T14:30:00.000Z",
+        "sessionCloseAt": "2026-08-06T05:30:00.000Z",
+        "deliveryDate": "2026-08-06"
+      },
+      "session": {
+        "legacySessionId": "6a76d2980f59d3901ea215df",
+        "v28SessionId": "6a76d2980f59d3901ea215df",
+        "sameSession": true,
+        "seq": null,
+        "pickingStatus": "pending",
+        "pickingConfirmedAt": null,
+        "pickingStartedAt": null,
+        "pickingCompletedAt": null,
+        "openNotifiedAt": null
+      },
+      "counts": {
+        "legacySessionOrders": 0,
+        "v28SessionOrders": 0,
+        "activeOrders": 0,
+        "activeOrdersAllInSession": 0,
+        "liveOrderItems": 0,
+        "predictedDistinctTasks": 0,
+        "currentTasks": 0,
+        "pendingTasks": 0,
+        "lockedTasks": 0,
+        "completedTasks": 0,
+        "conflicts": 0,
+        "predictedCoverageGaps": 0,
+        "staleOrders": 0,
+        "staleTasks": 0,
+        "parkedOrders": 0,
+        "terminalOrdersWithBrokenLines": 0
+      }
+    }
+  ],
+  "issues": [
+    {
+      "scope": "Вівторок Достава",
+      "severity": "warning",
+      "code": "session_without_schedule_snapshot",
+      "message": "Current session не має scheduleSnapshot (типово для старої materialized session). V28 identity працює по groupId+openDate; це не blocker."
+    },
+    {
+      "scope": "Понеділок Достава",
+      "severity": "warning",
+      "code": "session_without_schedule_snapshot",
+      "message": "Current session не має scheduleSnapshot (типово для старої materialized session). V28 identity працює по groupId+openDate; це не blocker."
+    },
+    {
+      "scope": "Четвер Достава",
+      "severity": "warning",
+      "code": "session_without_schedule_snapshot",
+      "message": "Current session не має scheduleSnapshot (типово для старої materialized session). V28 identity працює по groupId+openDate; це не blocker."
+    }
+  ]
+}

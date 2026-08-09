@@ -1,0 +1,122 @@
+{
+  "generatedAt": "2026-08-09T23:08:37.463Z",
+  "durationMs": 2214,
+  "readOnly": true,
+  "serverRoot": "C:\\Users\\danza\\Downloads\\tg bot\\NEW_VERSION\\server",
+  "envPath": "C:\\Users\\danza\\Downloads\\tg bot\\NEW_VERSION\\.env",
+  "mongo": {
+    "host": "cluster0.p5rmla3.mongodb.net",
+    "db": "tg_manager"
+  },
+  "redis": {
+    "configured": true,
+    "ok": true,
+    "message": "PING=PONG",
+    "host": "localhost"
+  },
+  "legacyScheduleFound": true,
+  "legacySchedule": {
+    "openHour": 16,
+    "openMinute": 30,
+    "closeHour": 7,
+    "closeMinute": 30
+  },
+  "verdict": "NO_GO",
+  "summary": {
+    "criticals": 3,
+    "warnings": 0,
+    "groups": 3,
+    "readyToPressStartNow": 0,
+    "waitOrderingClose": 0,
+    "readyToResumePicking": 0,
+    "alreadyCompleted": 0,
+    "blocked": 3
+  },
+  "global": {
+    "issues": [],
+    "indexChecks": {
+      "orderUnique": true,
+      "taskUnique": true,
+      "blockUnique": true,
+      "sessionUnique": true
+    },
+    "counts": {
+      "groups": 3,
+      "sessions": 4,
+      "activeOrders": 34,
+      "activeTasks": 0,
+      "orphanSessions": 0,
+      "duplicateOrders": 0,
+      "duplicateTasks": 0,
+      "duplicateBlockProducts": 0,
+      "activeOrdersMissingSessionId": 0,
+      "activeTasksMissingSessionId": 0,
+      "activeOrdersMissingSession": 0,
+      "activeTasksMissingSession": 0,
+      "activeOrderGroupMismatch": 0,
+      "activeTaskGroupMismatch": 0,
+      "terminalOrdersWithNonterminalItems": 0
+    }
+  },
+  "groups": [
+    {
+      "groupId": "69def91c35362e32bb02247e",
+      "groupName": "Вівторок Достава",
+      "dayOfWeek": 2,
+      "issues": [
+        {
+          "severity": "critical",
+          "code": "invalid_v28_schedule",
+          "message": "V28 orderingSchedule невалідний: orderingSchedule: group orderingSchedule is required"
+        }
+      ],
+      "state": "BLOCKED"
+    },
+    {
+      "groupId": "69def1d9db8e774832fb0b7f",
+      "groupName": "Понеділок Достава",
+      "dayOfWeek": 1,
+      "issues": [
+        {
+          "severity": "critical",
+          "code": "invalid_v28_schedule",
+          "message": "V28 orderingSchedule невалідний: orderingSchedule: group orderingSchedule is required"
+        }
+      ],
+      "state": "BLOCKED"
+    },
+    {
+      "groupId": "69def93435362e32bb022486",
+      "groupName": "Четвер Достава",
+      "dayOfWeek": 4,
+      "issues": [
+        {
+          "severity": "critical",
+          "code": "invalid_v28_schedule",
+          "message": "V28 orderingSchedule невалідний: orderingSchedule: group orderingSchedule is required"
+        }
+      ],
+      "state": "BLOCKED"
+    }
+  ],
+  "issues": [
+    {
+      "scope": "Вівторок Достава",
+      "severity": "critical",
+      "code": "invalid_v28_schedule",
+      "message": "V28 orderingSchedule невалідний: orderingSchedule: group orderingSchedule is required"
+    },
+    {
+      "scope": "Понеділок Достава",
+      "severity": "critical",
+      "code": "invalid_v28_schedule",
+      "message": "V28 orderingSchedule невалідний: orderingSchedule: group orderingSchedule is required"
+    },
+    {
+      "scope": "Четвер Достава",
+      "severity": "critical",
+      "code": "invalid_v28_schedule",
+      "message": "V28 orderingSchedule невалідний: orderingSchedule: group orderingSchedule is required"
+    }
+  ]
+}

@@ -11,7 +11,6 @@ const DeliveryGroup = require('../models/DeliveryGroup');
 const PickingTask = require('../models/PickingTask');
 const OrderingSession = require('../models/OrderingSession');
 const { getOrCreateSessionId, getOrCreateNextSessionId } = require('../utils/getOrCreateSession');
-const { getOrderingSchedule } = require('../utils/getOrderingSchedule');
 const { appError } = require('../utils/errors');
 const { invalidateShop } = require('../utils/modelCache');
 const { logShopTransition } = require('./shopAudit');
@@ -61,18 +60,15 @@ async function migrateSellerShop({
   // A stale cache here would compute the wrong oldSessionId and orphan the
   // active order in the previous group. Hot cache is fine for high-frequency
   // reads (buyerSnapshot, /me, bot) but not for the one-shot migration path.
-  const [oldShopFull, schedule] = await Promise.all([
-    oldShopId
-      ? Shop.findById(oldShopId).populate('cityId', 'name').session(session).lean()
-      : Promise.resolve(null),
-    getOrderingSchedule(),
-  ]);
+  const oldShopFull = oldShopId
+    ? await Shop.findById(oldShopId).populate('cityId', 'name').session(session).lean()
+    : null;
 
   let oldSessionId = null;
   if (oldShopFull?.deliveryGroupId) {
     const oldGroup = await DeliveryGroup.findById(oldShopFull.deliveryGroupId).session(session).lean();
     if (oldGroup) {
-      oldSessionId = await getOrCreateSessionId(String(oldGroup._id), oldGroup.dayOfWeek, schedule);
+      oldSessionId = await getOrCreateSessionId(String(oldGroup._id), oldGroup.orderingSchedule);
     }
   }
 
@@ -86,7 +82,7 @@ async function migrateSellerShop({
   if (newDeliveryGroupId) {
     const newGroup = await DeliveryGroup.findById(newDeliveryGroupId).session(session).lean();
     if (newGroup) {
-      newSessionId = await getOrCreateSessionId(String(newGroup._id), newGroup.dayOfWeek, schedule);
+      newSessionId = await getOrCreateSessionId(String(newGroup._id), newGroup.orderingSchedule);
       targetSessionId = newSessionId;
 
       // If the destination group's CURRENT session is already being picked, an
@@ -110,7 +106,7 @@ async function migrateSellerShop({
       const currentSessionInPicking = !!targetSessionDoc && targetSessionDoc.pickingStatus !== 'pending';
 
       if (currentSessionInPicking) {
-        targetSessionId = await getOrCreateNextSessionId(String(newGroup._id), newGroup.dayOfWeek, schedule);
+        targetSessionId = await getOrCreateNextSessionId(String(newGroup._id), newGroup.orderingSchedule);
         routedToNextSession = true;
       }
     }

@@ -11,7 +11,6 @@
  */
 const mongoose = require('mongoose');
 const Order = require('../models/Order');
-const { getOrderingSchedule } = require('../utils/getOrderingSchedule');
 const { getOrCreateSessionId } = require('../utils/getOrCreateSession');
 
 const MARK = '__MANUAL_TEST__';
@@ -34,7 +33,7 @@ async function main() {
     const orders = await Order.deleteMany({ 'history.meta.mark': MARK });
     const tasks = await db.collection('pickingtasks').deleteMany({ deliveryGroupId: String(group._id) });
     await db.collection('orderingsessions').updateOne(
-      { _id: new mongoose.Types.ObjectId(await getOrCreateSessionId(String(group._id), group.dayOfWeek, await getOrderingSchedule())) },
+      { _id: new mongoose.Types.ObjectId(await getOrCreateSessionId(String(group._id), group.orderingSchedule)) },
       { $set: { pickingStatus: 'pending' }, $unset: { pickingConfirmedAt: '', pickingStartedAt: '', pickingCompletedAt: '' } },
     );
     console.log('видалено замовлень:', orders.deletedCount, '| задач:', tasks.deletedCount, '| сесію повернуто в pending');
@@ -42,8 +41,7 @@ async function main() {
     return;
   }
 
-  const schedule = await getOrderingSchedule();
-  const sessionId = await getOrCreateSessionId(String(group._id), group.dayOfWeek, schedule);
+  const sessionId = await getOrCreateSessionId(String(group._id), group.orderingSchedule);
   console.log('group:', group.name, '| session:', sessionId);
 
   // Тільки товари, що фізично лежать у блоках — інакше taskBuilder їх пропустить

@@ -14,6 +14,11 @@ const {
   isOrderingOpen,
   getWindowDescription,
   getOrderingWindowOpenAt,
+  getOrderingWindowBoundsForOpenDate,
+  getOpenDateWarsaw,
+  getSessionDeliveryDate,
+  normalizeOrderingSchedule,
+  validateOrderingScheduleDeliveryDay,
 } = require('../utils/orderingSchedule');
 const { getOrCreateSessionId } = require('../utils/getOrCreateSession');
 const { pushSessionEvent } = require('../utils/sessionStatus');
@@ -21,7 +26,6 @@ const { normalizeDeliveryGroup } = require('../utils/deliveryGroupHelpers');
 const { deriveSessionPhase, PHASE_VOCAB } = require('../utils/sessionVocab');
 const { getIO } = require('../socket');
 
-const { getOrderingSchedule } = require('../utils/getOrderingSchedule');
 const cache = require('../utils/cache');
 const { invalidateDeliveryGroup } = require('../utils/modelCache');
 const { getTelegramUsernameMap } = require('../utils/telegramUsername');
@@ -37,19 +41,10 @@ async function getAllDeliveryGroups() {
 
 const router = express.Router();
 
-function addDaysToDateString(dateString, days) {
-  if (!dateString) return null;
-  const [year, month, day] = String(dateString).split('-').map(Number);
-  if (!year || !month || !day) return null;
-  const date = new Date(Date.UTC(year, month - 1, day + Number(days || 0)));
-  return date.toISOString().slice(0, 10);
-}
-
-function getSessionDeliveryDate(openDate, deliveryDayOfWeek) {
-  const dayBefore = (Number(deliveryDayOfWeek) - 1 + 7) % 7;
-  const openDay = dayBefore === 0 ? 6 : dayBefore;
-  const offsetDays = (Number(deliveryDayOfWeek) - openDay + 7) % 7;
-  return addDaysToDateString(openDate, offsetDays);
+function addDaysToOpenDate(openDate, days) {
+  const [year, month, day] = String(openDate).split('-').map(Number);
+  const dt = new Date(Date.UTC(year, month - 1, day + days));
+  return `${dt.getUTCFullYear()}-${String(dt.getUTCMonth() + 1).padStart(2, '0')}-${String(dt.getUTCDate()).padStart(2, '0')}`;
 }
 
 function summarizeSellerOrders(orders = []) {
@@ -175,7 +170,7 @@ function summarizeSellerOrders(orders = []) {
   return summary;
 }
 
-async function buildSellerClosedDashboard({ user, shop, group, schedule, sessionId, catalogReviewedAt }) {
+async function buildSellerClosedDashboard({ user, shop, group, sessionId, catalogReviewedAt }) {
   const session = await OrderingSession.findById(
     sessionId,
     'seq openDate pickingStatus pickingConfirmedAt pickingStartedAt pickingCompletedAt shopNumbers',
@@ -247,7 +242,7 @@ async function buildSellerClosedDashboard({ user, shop, group, schedule, session
       id: String(sessionId),
       seq: session?.seq ?? null,
       openDate: session?.openDate ?? null,
-      deliveryDate: getSessionDeliveryDate(session?.openDate, group.dayOfWeek),
+      deliveryDate: session?.openDate ? getSessionDeliveryDate(session.openDate, group.dayOfWeek, group.orderingSchedule) : null,
       pickingStatus,
       phase,
       phaseLabel,
@@ -273,7 +268,7 @@ async function buildSellerClosedDashboard({ user, shop, group, schedule, session
     delivery: {
       status: deliveryStatus,
       statusLabel: deliveryStatusLabel,
-      date: getSessionDeliveryDate(session?.openDate, group.dayOfWeek),
+      date: session?.openDate ? getSessionDeliveryDate(session.openDate, group.dayOfWeek, group.orderingSchedule) : null,
       dayOfWeek: Number(group.dayOfWeek),
       shopNumber,
       destination: [shop.cityId?.name, shop.address].filter(Boolean).join(', '),
@@ -282,11 +277,11 @@ async function buildSellerClosedDashboard({ user, shop, group, schedule, session
   };
 }
 
-async function buildDeliveryGroupSessionSummary(group, schedule, ordersByGroup) {
+async function buildDeliveryGroupSessionSummary(group, ordersByGroup) {
   const normalizedGroup = normalizeDeliveryGroup(group);
-  const status = isOrderingOpen(normalizedGroup.dayOfWeek, schedule);
-  const currentSessionId = await getOrCreateSessionId(String(normalizedGroup._id), normalizedGroup.dayOfWeek, schedule);
-  const sessionOpenAt = getOrderingWindowOpenAt(normalizedGroup.dayOfWeek, schedule);
+  const status = isOrderingOpen(normalizedGroup.orderingSchedule);
+  const currentSessionId = await getOrCreateSessionId(String(normalizedGroup._id), normalizedGroup.orderingSchedule);
+  const sessionOpenAt = getOrderingWindowOpenAt(normalizedGroup.orderingSchedule);
   const orders = ordersByGroup[String(group._id)] || [];
   const summary = orders.reduce(
     (acc, order) => {
@@ -378,17 +373,16 @@ router.get('/ordering-status', telegramAuth, async (req, res) => {
     });
   }
 
-  const schedule = await getOrderingSchedule();
-  const status = isOrderingOpen(group.dayOfWeek, schedule);
-  const window = getWindowDescription(group.dayOfWeek, schedule);
-  const sessionOpenAt = getOrderingWindowOpenAt(group.dayOfWeek, schedule).toISOString();
+  const status = isOrderingOpen(group.orderingSchedule);
+  const window = getWindowDescription(group.orderingSchedule);
+  const sessionOpenAt = getOrderingWindowOpenAt(group.orderingSchedule).toISOString();
 
   // "Я переглянув усі товари" — seed the button's state so a seller who already
   // pressed it (possibly on another device) sees the done state, not the button.
   // Best-effort: this is a cosmetic flag, it must never break the ordering window.
   let catalogReviewedAt = null;
   try {
-    const sessionId = await getOrCreateSessionId(String(group._id), group.dayOfWeek, schedule);
+    const sessionId = await getOrCreateSessionId(String(group._id), group.orderingSchedule);
     const mark = await CatalogReview.findOne(
       { sessionId, telegramId: String(user.telegramId) }, 'at',
     ).lean();
@@ -400,13 +394,12 @@ router.get('/ordering-status', telegramAuth, async (req, res) => {
   let closedDashboard = null;
   if (!status.isOpen) {
     try {
-      const sessionId = await getOrCreateSessionId(String(group._id), group.dayOfWeek, schedule);
+      const sessionId = await getOrCreateSessionId(String(group._id), group.orderingSchedule);
       closedDashboard = await buildSellerClosedDashboard({
         user,
         shop,
         group,
-        schedule,
-        sessionId,
+            sessionId,
         catalogReviewedAt,
       });
     } catch (e) {
@@ -448,8 +441,7 @@ router.post('/catalog-reviewed', telegramAuth, asyncHandler(async (req, res) => 
   const group = normalizeDeliveryGroup(await DeliveryGroup.findById(shop.deliveryGroupId).lean());
   if (!group) throw appError('group_not_found');
 
-  const schedule = await getOrderingSchedule();
-  const sessionId = await getOrCreateSessionId(String(group._id), group.dayOfWeek, schedule);
+  const sessionId = await getOrCreateSessionId(String(group._id), group.orderingSchedule);
 
   const productCount = Number(req.body?.productCount) || 0;
   const doc = {
@@ -526,9 +518,8 @@ router.get('/:groupId/shop-status', telegramAuth, requireTelegramRoles(['admin',
   const group = normalizeDeliveryGroup(await DeliveryGroup.findById(req.params.groupId).lean());
   if (!group) throw appError('group_not_found');
 
-  const schedule = await getOrderingSchedule();
-  const status = isOrderingOpen(group.dayOfWeek, schedule);
-  const currentSessionId = await getOrCreateSessionId(String(group._id), group.dayOfWeek, schedule);
+  const status = isOrderingOpen(group.orderingSchedule);
+  const currentSessionId = await getOrCreateSessionId(String(group._id), group.orderingSchedule);
 
   const shops = await Shop.find({ deliveryGroupId: String(group._id), isActive: true })
     .select('name cityId')
@@ -835,8 +826,7 @@ router.get('/:groupId/shops/:shopId/ordered-products', telegramAuth, requireTele
   }).select('_id').lean();
   if (!shop) throw appError('shop_not_found');
 
-  const schedule = await getOrderingSchedule();
-  const currentSessionId = await getOrCreateSessionId(String(group._id), group.dayOfWeek, schedule);
+  const currentSessionId = await getOrCreateSessionId(String(group._id), group.orderingSchedule);
   const shopObjectId = shop._id;
   const shopId = String(shop._id);
 
@@ -897,7 +887,6 @@ router.get('/:groupId/shops/:shopId/ordered-products', telegramAuth, requireTele
 
 router.get('/session-summaries', telegramAuth, requireTelegramRole('admin'), async (req, res) => {
   const groups = await getAllDeliveryGroups();
-  const schedule = await getOrderingSchedule();
   const groupIds = groups.map((group) => String(group._id));
 
   const orders = await Order.find({
@@ -915,7 +904,7 @@ router.get('/session-summaries', telegramAuth, requireTelegramRole('admin'), asy
     return acc;
   }, {});
 
-  const summaries = await Promise.all(groups.map((group) => buildDeliveryGroupSessionSummary(group, schedule, ordersByGroup)));
+  const summaries = await Promise.all(groups.map((group) => buildDeliveryGroupSessionSummary(group, ordersByGroup)));
   summaries.sort((a, b) => {
     const orderA = a.dayOfWeek === 0 ? 7 : a.dayOfWeek;
     const orderB = b.dayOfWeek === 0 ? 7 : b.dayOfWeek;
@@ -935,9 +924,8 @@ router.post('/:id/close-ordering-session', telegramAuth, requireTelegramRole('ad
     byName: [admin.firstName, admin.lastName].filter(Boolean).join(' '),
   };
 
-  const schedule = await getOrderingSchedule();
-  const status = isOrderingOpen(group.dayOfWeek, schedule);
-  const currentSessionId = await getOrCreateSessionId(String(group._id), group.dayOfWeek, schedule);
+  const status = isOrderingOpen(group.orderingSchedule);
+  const currentSessionId = await getOrCreateSessionId(String(group._id), group.orderingSchedule);
 
   // HARD RULE: once the warehouse has taken an order into the picking pipeline
   // (PickingTask pending/locked/completed) it is being physically packed. You
@@ -1017,14 +1005,13 @@ router.get('/', async (req, res) => {
     if (orderA !== orderB) return orderA - orderB;
     return String(a.name || '').localeCompare(String(b.name || ''));
   });
-  const schedule = await getOrderingSchedule();
 
   // Flag groups whose ordering session is currently CLOSED but still have active orders.
   // This covers any case — seller switched shop, admin moved order, whatever.
   // Orders in an OPEN session are resolved (normal or conflict), no badge needed.
   const closedGroupIds = [];
   for (const g of normalizedGroups) {
-    const { isOpen } = isOrderingOpen(g.dayOfWeek, schedule);
+    const { isOpen } = isOrderingOpen(g.orderingSchedule);
     if (!isOpen) {
       closedGroupIds.push(String(g._id));
     }
@@ -1058,7 +1045,7 @@ router.get('/', async (req, res) => {
 
   const result = normalizedGroups.map((g) => ({
     ...g,
-    isOpen: isOrderingOpen(g.dayOfWeek, schedule).isOpen,
+    isOpen: isOrderingOpen(g.orderingSchedule).isOpen,
     shopCount: shopCountMap[String(g._id)] || 0,
     sellerCount: sellerCountMap[String(g._id)] || 0,
     hasRelocatedOrders: !!problematicByGroup[String(g._id)],
@@ -1067,11 +1054,16 @@ router.get('/', async (req, res) => {
 });
 
 router.post('/', telegramAuth, requireTelegramRole('admin'), asyncHandler(async (req, res) => {
-  const { name, dayOfWeek } = req.body;
+  const { name, dayOfWeek, orderingSchedule } = req.body;
   const trimmedName = typeof name === 'string' ? name.trim() : '';
-  if (!trimmedName || dayOfWeek === undefined) throw appError('group_name_or_day_required');
+  if (!trimmedName || dayOfWeek === undefined || !orderingSchedule) {
+    throw appError('group_name_or_day_required');
+  }
+  let normalizedSchedule;
+  try { normalizedSchedule = validateOrderingScheduleDeliveryDay(orderingSchedule, dayOfWeek); }
+  catch (err) { throw appError('group_schedule_invalid', { reason: err.message }); }
 
-  const group = new DeliveryGroup({ name: trimmedName, dayOfWeek });
+  const group = new DeliveryGroup({ name: trimmedName, dayOfWeek, orderingSchedule: normalizedSchedule });
   await group.save();
   await cache.invalidate(cache.KEYS.DELIVERY_GROUPS);
   await invalidateDeliveryGroup(group._id);
@@ -1088,59 +1080,100 @@ router.patch('/:id', telegramAuth, requireTelegramRole('admin'), asyncHandler(as
     byName: [admin.firstName, admin.lastName].filter(Boolean).join(' '),
   };
 
-  const { name, dayOfWeek } = req.body;
+  const { name, dayOfWeek, orderingSchedule } = req.body;
+  const oldDayOfWeek = Number(group.dayOfWeek);
+  const requestedDayOfWeek = dayOfWeek !== undefined ? Number(dayOfWeek) : oldDayOfWeek;
+  const currentSchedule = normalizeOrderingSchedule(
+    group.orderingSchedule?.toObject ? group.orderingSchedule.toObject() : group.orderingSchedule,
+  );
+  let requestedSchedule;
+  try {
+    requestedSchedule = validateOrderingScheduleDeliveryDay(
+      orderingSchedule !== undefined ? orderingSchedule : currentSchedule,
+      requestedDayOfWeek,
+    );
+  } catch (err) {
+    throw appError('group_schedule_invalid', { reason: err.message });
+  }
+  const scheduleIsChanging = JSON.stringify(requestedSchedule) !== JSON.stringify(currentSchedule);
+  const dayIsChanging = requestedDayOfWeek !== oldDayOfWeek;
+  const timingIsChanging = dayIsChanging || scheduleIsChanging;
 
-  // Guard: dayOfWeek is the key the ordering/picking SESSION identity is derived
-  // from (getOpenDateWarsaw → OrderingSession {groupId, openDate}). Changing it
-  // mid-cycle would re-key "current session": orders placed before the change keep
-  // their old orderingSessionId and fall out of the new current session — stranded,
-  // not picked. So we refuse the change while a cycle is in progress. Changing it
-  // once the cycle is over naturally applies to the NEXT session.
-  const dayIsChanging = dayOfWeek !== undefined && Number(dayOfWeek) !== Number(group.dayOfWeek);
   let oldSessionId = null;
-  let fromDay = null;
-  let toDay = null;
-  if (dayIsChanging) {
-    const schedule = await getOrderingSchedule();
+  let emptyTargetSession = null;
+  if (timingIsChanging) {
     const groupIdStr = String(group._id);
+    const currentSessionId = await getOrCreateSessionId(groupIdStr, currentSchedule);
+    const currentOpenDate = getOpenDateWarsaw(currentSchedule);
+    const nextOpenDate = addDaysToOpenDate(currentOpenDate, 7);
+    const nextSession = await OrderingSession.findOne(
+      { groupId: groupIdStr, openDate: nextOpenDate },
+      '_id pickingStatus openNotifiedAt',
+    ).lean();
+    const protectedSessionIds = [currentSessionId, nextSession?._id ? String(nextSession._id) : null].filter(Boolean);
 
-    // 1) ordering window currently open for this group?
-    const { isOpen } = isOrderingOpen(group.dayOfWeek, schedule);
-
-    // 2) active orders in the CURRENT session, or 3) active picking tasks?
-    // "Active" must mean "has something left to strand": an order whose every
-    // position was cancelled/skipped carries nothing into the next session, so it
-    // must NOT veto the change. Status alone was the wrong test — an order the
-    // seller emptied right after placing it stayed `new` forever and blocked the
-    // day change permanently, while every board (which counts live positions)
-    // reported «Замовлень немає». /upsert-item + /remove-item now close such
-    // orders on the spot; this $elemMatch is the guard's own safety net.
-    const currentSessionId = await getOrCreateSessionId(groupIdStr, group.dayOfWeek, schedule);
-    const [activeOrder, activeTask] = await Promise.all([
-      Order.exists({
-        'buyerSnapshot.deliveryGroupId': groupIdStr,
-        orderingSessionId: currentSessionId,
-        status: { $in: ['new', 'in_progress'] },
-        items: { $elemMatch: { cancelled: { $ne: true }, skipped: { $ne: true } } },
-      }),
-      PickingTask.exists({ deliveryGroupId: groupIdStr, status: { $in: ['pending', 'locked'] } }),
+    // Clock-time alone must not freeze an empty TEST/configuration group.
+    // We block only when changing the calendar could strand REAL session data.
+    const [sessionOrder, sessionTask, currentSession] = await Promise.all([
+      Order.exists({ orderingSessionId: { $in: protectedSessionIds } }),
+      PickingTask.exists({ orderingSessionId: { $in: protectedSessionIds } }),
+      OrderingSession.findById(currentSessionId, 'pickingStatus openNotifiedAt').lean(),
     ]);
 
-    if (isOpen || activeOrder || activeTask) {
-      const reason = isOpen ? 'вікно замовлень відкрите'
-        : activeOrder ? 'є активні замовлення в поточній сесії'
-        : 'триває збирання';
+    const pickingLifecycleActive = currentSession && currentSession.pickingStatus !== 'pending';
+    if (sessionOrder || sessionTask || pickingLifecycleActive) {
+      const reason = sessionOrder ? 'у поточній або наступній сесії вже є замовлення'
+        : sessionTask ? 'у поточній або наступній сесії вже є задачі збирання'
+        : 'поточна сесія збирання вже вийшла зі стану pending';
       throw appError('group_day_change_session_active', { reason });
     }
 
-    // Resolve the soon-to-be-orphaned session BEFORE we mutate dayOfWeek — the
-    // session identity is derived from it, so reading after the save would point
-    // at the new day's session and "Перенесена" would land on the wrong doc.
-    // The guard above already materialised this session via getOrCreateSessionId,
-    // so reusing the id is free (no extra round-trip).
+    // A different start weekday can point "current" at another calendar date.
+    // Never let a schedule edit accidentally revive an old completed/used
+    // OrderingSession as the new current session. Empty pending read-created
+    // sessions are safe to discard and will be recreated with a fresh snapshot.
+    const requestedOpenDate = getOpenDateWarsaw(requestedSchedule);
+    const requestedSession = await OrderingSession.findOne(
+      { groupId: groupIdStr, openDate: requestedOpenDate },
+      '_id pickingStatus openNotifiedAt',
+    ).lean();
+    if (requestedSession) {
+      const requestedId = String(requestedSession._id);
+      const [targetOrderCount, targetTaskCount] = await Promise.all([
+        Order.countDocuments({ orderingSessionId: requestedId }),
+        PickingTask.countDocuments({ orderingSessionId: requestedId }),
+      ]);
+      const targetHasWork = targetOrderCount > 0
+        || targetTaskCount > 0
+        || requestedSession.pickingStatus !== 'pending';
+      const targetUsed = targetHasWork || Boolean(requestedSession.openNotifiedAt);
+
+      if (requestedId !== String(currentSessionId) && targetUsed) {
+        throw appError('group_day_change_session_active', {
+          reason: `новий розклад потрапляє в уже використану сесію ${requestedOpenDate}`,
+        });
+      }
+
+      // Read-only screens and the open-notification scheduler can materialise an
+      // otherwise empty pending session. If there are still no orders/tasks and
+      // picking never started, it is safe to refresh its bounds/snapshot. Keep
+      // openNotifiedAt intact: a reschedule must never duplicate an already-sent
+      // Telegram opening broadcast.
+      if (!targetHasWork) {
+        emptyTargetSession = { id: requestedId, openDate: requestedOpenDate };
+      }
+    }
+
+    // Do not reopen an already processed current cycle merely by moving the
+    // close boundary forward. New settings then wait naturally for the next
+    // weekly start instead of mixing new orders into completed picking.
+    if (isOrderingOpen(requestedSchedule).isOpen && currentSession?.pickingStatus === 'completed') {
+      throw appError('group_day_change_session_active', {
+        reason: 'новий розклад повторно відкрив би вже завершену поточну сесію',
+      });
+    }
+
     oldSessionId = currentSessionId;
-    fromDay = Number(group.dayOfWeek);
-    toDay = Number(dayOfWeek);
   }
 
   if (name !== undefined) {
@@ -1148,24 +1181,46 @@ router.patch('/:id', telegramAuth, requireTelegramRole('admin'), asyncHandler(as
     if (!trimmedName) throw appError('group_name_or_day_required');
     group.name = trimmedName;
   }
-  if (dayOfWeek !== undefined) group.dayOfWeek = dayOfWeek;
+  if (dayOfWeek !== undefined) group.dayOfWeek = requestedDayOfWeek;
+  if (orderingSchedule !== undefined || dayIsChanging) group.orderingSchedule = requestedSchedule;
 
   await group.save();
+
+  if (emptyTargetSession) {
+    const bounds = getOrderingWindowBoundsForOpenDate(emptyTargetSession.openDate, requestedSchedule);
+    await OrderingSession.updateOne(
+      { _id: emptyTargetSession.id, pickingStatus: 'pending' },
+      {
+        $set: {
+          openAt: bounds.openAt,
+          closeAt: bounds.closeAt,
+          scheduleSnapshot: requestedSchedule,
+        },
+      },
+    );
+  }
+
   await cache.invalidate(cache.KEYS.DELIVERY_GROUPS);
   await invalidateDeliveryGroup(group._id);
 
-  if (dayIsChanging && oldSessionId) {
+  if (timingIsChanging && oldSessionId) {
     try {
       await pushSessionEvent(oldSessionId, {
         type: 'rescheduled',
         ...adminActor,
-        meta: { fromDay, toDay },
+        meta: {
+          fromDay: oldDayOfWeek,
+          toDay: Number(group.dayOfWeek),
+          fromSchedule: currentSchedule,
+          toSchedule: requestedSchedule,
+        },
       });
     } catch (e) {
       console.warn('[deliveryGroups/PATCH] rescheduled event push failed:', e.message);
     }
   }
-  res.json(group);
+  const persistedGroup = await DeliveryGroup.findById(group._id).lean();
+  res.json(persistedGroup);
 }));
 
 router.delete('/:id', telegramAuth, requireTelegramRole('admin'), asyncHandler(async (req, res) => {
@@ -1189,6 +1244,39 @@ router.delete('/:id', telegramAuth, requireTelegramRole('admin'), asyncHandler(a
         status: { $in: ['new', 'in_progress'] },
       }).session(session);
       if (activeOrders > 0) throw appError('group_has_active_orders', { activeOrders });
+
+      // Session history must never become an orphan. Read-only status screens can
+      // materialise an EMPTY pending OrderingSession; those are safe to cascade
+      // when the group itself is deleted. But once a session has any order/task,
+      // catalogue-review mark, sequence number, notification, event or lifecycle
+      // progress, it is history and the group deletion is blocked instead of
+      // silently severing the reference.
+      const groupSessions = await OrderingSession.find(
+        { groupId: String(group._id) },
+        '_id seq pickingStatus openNotifiedAt events',
+      ).session(session).lean();
+      const sessionIds = groupSessions.map((row) => String(row._id));
+      if (sessionIds.length) {
+        const [hasAnyOrder, hasAnyTask, hasAnyCatalogReview] = await Promise.all([
+          Order.exists({ orderingSessionId: { $in: sessionIds } }).session(session),
+          PickingTask.exists({ orderingSessionId: { $in: sessionIds } }).session(session),
+          CatalogReview.exists({ sessionId: { $in: sessionIds } }).session(session),
+        ]);
+        const hasIntrinsicHistory = groupSessions.some((row) => (
+          row.seq != null
+          || row.pickingStatus !== 'pending'
+          || Boolean(row.openNotifiedAt)
+          || (Array.isArray(row.events) && row.events.length > 0)
+        ));
+        if (hasAnyOrder || hasAnyTask || hasAnyCatalogReview || hasIntrinsicHistory) {
+          throw appError('group_has_history', { sessions: groupSessions.length });
+        }
+
+        await OrderingSession.deleteMany(
+          { _id: { $in: groupSessions.map((row) => row._id) } },
+          { session },
+        );
+      }
 
       await DeliveryGroup.deleteOne({ _id: group._id }, { session });
       result = { message: 'Групу видалено', _groupId: String(group._id) };

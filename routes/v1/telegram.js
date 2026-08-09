@@ -13,7 +13,6 @@ const { issueGoogleLinkToken } = require('../../services/googleLinkToken');
 const { getOrderingWindowOpenAt } = require('../../utils/orderingSchedule');
 const { normalizeDeliveryGroup } = require('../../utils/deliveryGroupHelpers');
 const { getOrCreateSessionId } = require('../../utils/getOrCreateSession');
-const { getOrderingSchedule } = require('../../utils/getOrderingSchedule');
 const Order = require('../../models/Order');
 const { getIO } = require('../../socket');
 const { appError, asyncHandler } = require('../../utils/errors');
@@ -104,15 +103,10 @@ async function resolveOrderingSessionContext(user, userShop = null) {
     };
   }
 
-  const schedule = await getOrderingSchedule();
-  const sessionOpenAt = getOrderingWindowOpenAt(
-    group.dayOfWeek,
-    schedule
-  ).toISOString();
+  const sessionOpenAt = getOrderingWindowOpenAt(group.orderingSchedule).toISOString();
   const orderingSessionId = await getOrCreateSessionId(
     String(resolvedGroupId),
-    group.dayOfWeek,
-    schedule
+    group.orderingSchedule,
   );
 
   return {

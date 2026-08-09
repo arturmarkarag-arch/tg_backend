@@ -29,7 +29,6 @@ mongoose.set('autoIndex', false);
 const Order = require('../models/Order');
 const DeliveryGroup = require('../models/DeliveryGroup');
 const OrderingSession = require('../models/OrderingSession');
-const { getOrderingSchedule } = require('../utils/getOrderingSchedule');
 const { getOpenDateWarsaw } = require('../utils/orderingSchedule');
 const { getOrCreateSessionId, getOrCreateNextSessionId } = require('../utils/getOrCreateSession');
 const { roundMoney } = require('../utils/money');
@@ -86,8 +85,8 @@ async function main() {
   const group = groupId ? await DeliveryGroup.findById(groupId).lean() : null;
   if (!group) throw new Error(`Групу доставки ${groupId} не знайдено — сесію не обчислити`);
 
-  const schedule = await getOrderingSchedule();
-  const currentOpenDate = getOpenDateWarsaw(group.dayOfWeek, schedule);
+  const schedule = group.orderingSchedule;
+  const currentOpenDate = getOpenDateWarsaw(group.orderingSchedule);
   const nextOpenDate = addDays(currentOpenDate, 7);
 
   const currentSession = await OrderingSession.findOne({ groupId, openDate: currentOpenDate }).lean();
@@ -160,8 +159,8 @@ async function main() {
 
   // Створюємо цільову сесію тільки тепер — у dry-run це був би побічний запис.
   const targetSessionId = currentInPicking
-    ? await getOrCreateNextSessionId(groupId, group.dayOfWeek, schedule)
-    : await getOrCreateSessionId(groupId, group.dayOfWeek, schedule);
+    ? await getOrCreateNextSessionId(groupId, schedule)
+    : await getOrCreateSessionId(groupId, schedule);
   if (!targetSessionId) throw new Error('Не вдалося отримати цільову сесію (maintenance-режим?)');
 
   const mongoSession = await mongoose.connection.startSession();
@@ -237,7 +236,6 @@ main()
   .catch((err) => { console.error('\n❌', err.message, '\n', err.stack); process.exitCode = 1; })
   .finally(async () => {
     await mongoose.disconnect().catch(() => {});
-    // getOrderingSchedule → utils/cache → utils/redis відкриває три з'єднання.
     // Без явного quit() відкриті сокети тримають event loop і скрипт висить
     // назавжди вже ПІСЛЯ того, як усе зробив.
     try {

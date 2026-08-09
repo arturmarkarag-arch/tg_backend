@@ -7,7 +7,6 @@ const Shop = require('../models/Shop');
 const PickingTask = require('../models/PickingTask');
 const { telegramAuth, requireTelegramRole } = require('../middleware/telegramAuth');
 const { isOrderingOpen, getOrderingWindowOpenAt, isOrderingOpeningSoon } = require('../utils/orderingSchedule');
-const { getOrderingSchedule } = require('../utils/getOrderingSchedule');
 const ClearedCart = require('../models/ClearedCart');
 const { migrateSellerShop } = require('../services/migrateSellerShop');
 const { unassignSellerAndPark } = require('../services/unassignSeller');
@@ -143,10 +142,9 @@ router.get('/', asyncHandler(async (req, res) => {
       // Pass the DB-configured schedule — never let these fall back to the
       // module's hardcoded 16:00/07:30, which would compute the window status
       // against stale hours after an admin changes the schedule.
-      const schedule = await getOrderingSchedule();
-      const { isOpen } = isOrderingOpen(group.dayOfWeek, schedule);
+      const { isOpen } = isOrderingOpen(group.orderingSchedule);
       windowIsOpen = isOpen;
-      windowOpenAt = getOrderingWindowOpenAt(group.dayOfWeek, schedule);
+      windowOpenAt = getOrderingWindowOpenAt(group.orderingSchedule);
     }
   }
 
@@ -385,9 +383,8 @@ router.post('/:telegramId/cleared-carts/:cartId/restore', asyncHandler(async (re
         : null;
       if (!group) throw appError('restore_no_shop');
 
-      const schedule = await getOrderingSchedule();
-      const open = isOrderingOpen(group.dayOfWeek, schedule).isOpen;
-      const soon = isOrderingOpeningSoon(group.dayOfWeek, schedule, 240);
+      const open = isOrderingOpen(group.orderingSchedule).isOpen;
+      const soon = isOrderingOpeningSoon(group.orderingSchedule, 240);
       if (!open && !soon) throw appError('restore_window_closed');
 
       const existing = cartItemsToObject(seller.cartState?.orderItems);

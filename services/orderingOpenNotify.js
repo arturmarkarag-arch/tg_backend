@@ -20,11 +20,10 @@ const {
   isOrderingOpen,
   getWindowDescription,
   getOrderingWindowOpenAt,
-  getOrderingWindowCloseAt,
-  TIMEZONE,
+  getOpenDateWarsaw,
+  getSessionDeliveryDate,
   DAY_FULL_UK,
 } = require('../utils/orderingSchedule');
-const { getOrderingSchedule } = require('../utils/getOrderingSchedule');
 const { getOrCreateSessionId } = require('../utils/getOrCreateSession');
 const { getSupplementSettings } = require('../utils/supplementSettings');
 const { sellersOfGroup, serviceGroupChatIds } = require('../utils/groupRecipients');
@@ -79,17 +78,14 @@ async function miniAppLink() {
 }
 
 /**
- * «четвер, 13.08» — день доставки групи. День доставки і день закриття вікна —
- * це один і той самий день (див. getWindowDescription: closeDay === dayOfWeek),
- * тому дату беремо з найближчого закриття.
+ * «понеділок, 17.08» — physical delivery date for this session. The delivery
+ * weekday is independent from the ordering close weekday.
  */
-function deliveryDateLabel(dayOfWeek, schedule) {
-  const closeAt = getOrderingWindowCloseAt(dayOfWeek, schedule);
-  const parts = new Intl.DateTimeFormat('en-GB', {
-    timeZone: TIMEZONE, day: '2-digit', month: '2-digit',
-  }).formatToParts(closeAt);
-  const get = (type) => parts.find((p) => p.type === type)?.value || '';
-  return `${DAY_FULL_UK[dayOfWeek]}, ${get('day')}.${get('month')}`;
+function deliveryDateLabel(dayOfWeek, schedule, now = new Date()) {
+  const openDate = getOpenDateWarsaw(schedule, now);
+  const deliveryDate = getSessionDeliveryDate(openDate, dayOfWeek, schedule);
+  const [, month, day] = deliveryDate.split('-');
+  return `${DAY_FULL_UK[dayOfWeek]}, ${day}.${month}`;
 }
 
 /** «завтра о 07:30» / «сьогодні о 07:30» / «в четвер о 07:30». */
@@ -148,8 +144,7 @@ async function notifyOrderingOpen({ now = new Date() } = {}) {
   const { getBot, sendMessageWithRetry } = require('../telegramBot');
   if (!getBot()) return { notifiedGroups: 0, sentPrivate: 0, sentGroups: 0 };
 
-  const schedule = await getOrderingSchedule();
-  const groups = await DeliveryGroup.find({}, 'name dayOfWeek').lean();
+  const groups = await DeliveryGroup.find({}, 'name dayOfWeek orderingSchedule').lean();
 
   let notifiedGroups = 0;
   let sentPrivate = 0;
@@ -157,11 +152,11 @@ async function notifyOrderingOpen({ now = new Date() } = {}) {
   let chatIds = null; // читаємо лише якщо реально є що слати
 
   for (const group of groups) {
-    const status = isOrderingOpen(group.dayOfWeek, schedule);
+    const status = isOrderingOpen(group.orderingSchedule, now);
     if (!status.isOpen) continue;
-    if (!isFreshOpen(getOrderingWindowOpenAt(group.dayOfWeek, schedule), now)) continue;
+    if (!isFreshOpen(getOrderingWindowOpenAt(group.orderingSchedule, now), now)) continue;
 
-    const sessionId = await getOrCreateSessionId(String(group._id), group.dayOfWeek, schedule);
+    const sessionId = await getOrCreateSessionId(String(group._id), group.orderingSchedule);
     if (!sessionId) continue; // maintenance-режим: сесій не створюємо
 
     const session = await OrderingSession.findById(sessionId, 'openNotifiedAt').lean();
@@ -174,13 +169,13 @@ async function notifyOrderingOpen({ now = new Date() } = {}) {
 
     if (!await claimSession(sessionId, now)) continue;
 
-    const window = getWindowDescription(group.dayOfWeek, schedule);
+    const window = getWindowDescription(group.orderingSchedule, now);
     const appUrl = await miniAppLink();
     const closeLabel = closePhrase(window);
     const privateText = buildPrivateText({ closeLabel, appUrl });
     const groupText = buildGroupText({
       groupName: group.name,
-      deliveryLabel: deliveryDateLabel(group.dayOfWeek, schedule),
+      deliveryLabel: deliveryDateLabel(group.dayOfWeek, group.orderingSchedule, now),
       closeLabel,
       appUrl,
     });

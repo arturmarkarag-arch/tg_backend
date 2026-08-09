@@ -17,6 +17,7 @@ const { initSocket } = require('./socket');
 const AppSetting = require('./models/AppSetting');
 const { migrateOrdersToSessionIds } = require('./utils/getOrCreateSession');
 const { ensureShopProductIndexes } = require('./utils/ensureShopProductIndexes');
+const { assertDeliveryGroupSchedulesReady } = require('./utils/deliveryGroupSchedulePreflight');
 const { isEnabled: redisEnabled } = require('./utils/redis');
 const Order = require('./models/Order');
 const PickingTask = require('./models/PickingTask');
@@ -88,6 +89,8 @@ async function startServer() {
 
     await mongoose.connect(MONGODB_URI, { useNewUrlParser: true, useUnifiedTopology: true });
     console.log('Connected to MongoDB');
+    const groupScheduleReport = await assertDeliveryGroupSchedulesReady();
+    console.log(`[preflight] delivery-group schedules OK (${groupScheduleReport.total})`);
     await migrateOrdersToSessionIds();
 
     try {

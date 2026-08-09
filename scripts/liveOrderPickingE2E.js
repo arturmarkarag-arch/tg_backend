@@ -106,12 +106,8 @@ const Counter = require('../models/Counter');
 const ShopAuditLog = require('../models/ShopAuditLog');
 const AppSetting = require('../models/AppSetting');
 const cache = require('../utils/cache');
-const { getOrderingSchedule } = require('../utils/getOrderingSchedule');
-const {
-  isOrderingOpen,
-  getOpenDateWarsaw,
-  getOrderingWindowOpenAt,
-} = require('../utils/orderingSchedule');
+const { isOrderingOpen } = require('../utils/orderingSchedule');
+const { buildOpenClosedTestSchedules } = require('./helpers/perGroupTestSchedule');
 const { getOrCreateSessionId } = require('../utils/getOrCreateSession');
 const { signSession } = require('../utils/jwt');
 const { auditSessionClosure } = require('../services/sessionClosure');
@@ -258,15 +254,6 @@ async function allocBlockId() {
   throw new Error('Не вдалося виділити synthetic blockId');
 }
 
-function findOpenDeliveryDay(schedule) {
-  for (let d = 0; d < 7; d += 1) if (isOrderingOpen(d, schedule).isOpen) return d;
-  return null;
-}
-function findClosedDeliveryDay(schedule) {
-  for (let d = 0; d < 7; d += 1) if (!isOrderingOpen(d, schedule).isOpen) return d;
-  return null;
-}
-
 async function createWorld(name, {
   shops = 1,
   sellers = 1,
@@ -279,20 +266,16 @@ async function createWorld(name, {
     sessionIds: new Set(), orderIds: new Set(),
   };
   try {
-    const schedule = await getOrderingSchedule();
-    world.schedule = schedule;
-    const openDay = findOpenDeliveryDay(schedule);
-    if (openDay == null) {
-      throw new Error(
-        'Зараз немає жодного dayOfWeek з відкритим ordering window. ' +
-        'HTTP-ordering сценарії навмисно не підміняють бойовий schedule. Запусти suite у вікні замовлень.'
-      );
-    }
+    const { deliveryDay, openSchedule, closedSchedule } = buildOpenClosedTestSchedules();
+    world.schedule = openSchedule;
+    world.closedSchedule = closedSchedule;
+    check(isOrderingOpen(openSchedule).isOpen, `${name}: synthetic per-group ordering window starts open`);
 
     const token = crypto.randomBytes(3).toString('hex');
     const group = await DeliveryGroup.create({
       name: `${MARKER}:${name}:group:${token}`,
-      dayOfWeek: openDay,
+      dayOfWeek: deliveryDay,
+      orderingSchedule: openSchedule,
       members: [],
     });
     world.group = group;
@@ -459,7 +442,7 @@ async function placeOrder(world, seller, items, suffix) {
 }
 
 async function currentSession(world) {
-  const sessionId = await getOrCreateSessionId(str(world.group._id), world.group.dayOfWeek, world.schedule);
+  const sessionId = await getOrCreateSessionId(str(world.group._id), world.schedule);
   world.sessionIds.add(str(sessionId));
   await updateWorldManifest(world);
   return OrderingSession.findById(sessionId);
@@ -467,33 +450,22 @@ async function currentSession(world) {
 
 async function moveWorldToClosedPhase(world) {
   const session = await currentSession(world);
-  const closedDay = findClosedDeliveryDay(world.schedule);
-  if (closedDay == null) throw new Error('Не знайдено закритого delivery day для тестового переходу');
+  const closedSchedule = world.closedSchedule;
+  check(Boolean(closedSchedule), `${world.name}: closed synthetic schedule exists`);
 
-  // We are simulating time advancing, but only on synthetic data. Keep the SAME
-  // OrderingSession._id referenced by all test Orders: retag its test-only
-  // calendar identity to the closed day's current openDate, then switch the
-  // synthetic group day. No global schedule and no real group is changed.
-  const closedOpenDate = getOpenDateWarsaw(closedDay, world.schedule);
-  const closedOpenAt = getOrderingWindowOpenAt(closedDay, world.schedule);
-  // Production readers should not normally know this synthetic group, but if one
-  // happened to discover it during the few seconds of the run and pre-created a
-  // session for the closed calendar date, it is still TEST-OWNED data. Remove that
-  // empty competing identity before retagging our actual test session.
-  await OrderingSession.deleteMany({
-    groupId: str(world.group._id), openDate: closedOpenDate, _id: { $ne: session._id },
-  });
-  await OrderingSession.updateOne(
-    { _id: session._id },
-    { $set: { openDate: closedOpenDate, openAt: closedOpenAt } },
+  // Same start boundary => same {groupId, openDate}. Only the synthetic group's
+  // end boundary moves to the already-passed quarter, simulating time advance.
+  await DeliveryGroup.updateOne(
+    { _id: world.group._id },
+    { $set: { orderingSchedule: closedSchedule } },
   );
-  await DeliveryGroup.updateOne({ _id: world.group._id }, { $set: { dayOfWeek: closedDay } });
-  world.group.dayOfWeek = closedDay;
+  world.group.orderingSchedule = closedSchedule;
+  world.schedule = closedSchedule;
   await cache.invalidate(cache.KEYS.DELIVERY_GROUPS);
 
-  const resolved = await getOrCreateSessionId(str(world.group._id), closedDay, world.schedule);
+  const resolved = await getOrCreateSessionId(str(world.group._id), closedSchedule);
   eq(str(resolved), str(session._id), `${world.name}: ordering session identity survives open→closed test phase`);
-  check(!isOrderingOpen(closedDay, world.schedule).isOpen, `${world.name}: picking phase window is closed`);
+  check(!isOrderingOpen(closedSchedule).isOpen, `${world.name}: picking phase window is closed`);
   return OrderingSession.findById(session._id);
 }
 
@@ -1211,15 +1183,9 @@ async function preflight() {
   assertConnectedHostAllowed(mongoose.connection.host);
   pass('MongoDB connection', `db=${mongoose.connection.db.databaseName} host=${mongoose.connection.host} allowed=${allowedSuffix()}`);
 
-  const scheduleDoc = await AppSetting.findOne({ key: 'ordering.schedule' }).lean();
-  check(Boolean(scheduleDoc?.value), 'ordering.schedule exists in live DB');
-  const schedule = await getOrderingSchedule();
-  pass('ordering.schedule loaded', `${String(schedule.openHour).padStart(2, '0')}:${String(schedule.openMinute).padStart(2, '0')} → ${String(schedule.closeHour).padStart(2, '0')}:${String(schedule.closeMinute).padStart(2, '0')}`);
-
-  const openDay = findOpenDeliveryDay(schedule);
-  const closedDay = findClosedDeliveryDay(schedule);
-  check(openDay != null, 'At least one synthetic delivery day is currently in ordering-open phase', `day=${openDay}`);
-  check(closedDay != null, 'At least one synthetic delivery day is currently in picking-allowed phase', `day=${closedDay}`);
+  const synthetic = buildOpenClosedTestSchedules();
+  check(isOrderingOpen(synthetic.openSchedule).isOpen, 'Synthetic per-group schedule can represent ordering-open phase');
+  check(!isOrderingOpen(synthetic.closedSchedule).isOpen, 'Synthetic per-group schedule can represent picking-allowed phase');
 
   const [orderIndexes, taskIndexes, sessionIndexes, blockIndexes] = await Promise.all([
     Order.collection.indexes(), PickingTask.collection.indexes(), OrderingSession.collection.indexes(), Block.collection.indexes(),

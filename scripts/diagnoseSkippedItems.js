@@ -67,27 +67,31 @@ async function main() {
   const products = db.collection('products');
   const groups   = db.collection('deliverygroups');
   const blocks   = db.collection('blocks');
-  const settings = db.collection('appsettings');
 
   console.log('\n🔍 READ-ONLY діагностика «Пропущено» (item.skipped)');
   console.log(`   база: ${db.databaseName}   host: ${mongoose.connection.host}\n`);
 
-  // ── 0. Розклад вікна замовлень ──────────────────────────────────────────────
-  // Зламаний/розтягнутий розклад — одна з робочих гіпотез: якщо вікно фактично
-  // відкрите цілодобово, продавці далі пишуть у сесію, збір якої вже стартував,
-  // і КОЖНА нова позиція автоматично стає «пізньою».
-  const sched = await settings.findOne({ key: 'ordering.schedule' });
-  if (!sched?.value) {
-    console.log('⚠️  ordering.schedule ВІДСУТНІЙ у appsettings — сервер має падати на getOrderingSchedule()\n');
-  } else {
-    const v = sched.value;
-    const openM  = v.openHour * 60 + v.openMinute;
-    const closeM = v.closeHour * 60 + v.closeMinute;
-    console.log(`⏰ Вікно замовлень: відкриття ${String(v.openHour).padStart(2, '0')}:${String(v.openMinute).padStart(2, '0')}`
-      + ` → закриття ${String(v.closeHour).padStart(2, '0')}:${String(v.closeMinute).padStart(2, '0')} (день доставки)`);
-    if (openM === closeM) console.log('   ⚠️  openTime === closeTime — вироджене вікно');
-    console.log(`   оновлено: ${T(sched.updatedAt)}\n`);
+  // ── 0. Індивідуальні розклади груп ──────────────────────────────────────────
+  // З v24 сервер не читає глобальний ordering.schedule. Розклад є частиною
+  // DeliveryGroup, тому діагностика виводить конфігурацію всіх груп окремо.
+  const groupSchedules = await groups
+    .find({}, { projection: { name: 1, dayOfWeek: 1, orderingSchedule: 1 } })
+    .sort({ name: 1 })
+    .toArray();
+  const dayLabels = ['Нд', 'Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб'];
+  const fmtHm = (h, m) => `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+  console.log('⏰ Індивідуальні вікна замовлень по групах:');
+  for (const g of groupSchedules) {
+    const v = g.orderingSchedule;
+    if (!v) {
+      console.log(`   ⚠️  ${g.name || g._id}: orderingSchedule ВІДСУТНІЙ`);
+      continue;
+    }
+    console.log(`   • ${g.name || g._id}: ${dayLabels[v.startDay] ?? v.startDay} ${fmtHm(v.startHour, v.startMinute)}`
+      + ` → ${dayLabels[v.endDay] ?? v.endDay} ${fmtHm(v.endHour, v.endMinute)}`
+      + `; фізична доставка: ${dayLabels[g.dayOfWeek] ?? g.dayOfWeek}`);
   }
+  console.log('');
 
   // ── 1. Вибірка замовлень ────────────────────────────────────────────────────
   const query = { 'items.skipped': true };

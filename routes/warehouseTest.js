@@ -11,42 +11,51 @@ const Product = require('../models/Product');
 const Block = require('../models/Block');
 const Order = require('../models/Order');
 const PickingTask = require('../models/PickingTask');
-const AppSetting = require('../models/AppSetting');
 const { buildPickingTasksFromOrders } = require('../services/taskBuilder');
 const { findAndLockNext, releaseWorkerAndStaleLocks, completePickingTask } = require('../services/pickingService');
 const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
 const { buildImageVariants } = require('../utils/imageService');
-const { getWarsawNow, isOrderingOpen, getOrderingWindowOpenAt } = require('../utils/orderingSchedule');
+const { getWarsawNow, isOrderingOpen, normalizeOrderingSchedule } = require('../utils/orderingSchedule');
 const { getOrCreateSessionId } = require('../utils/getOrCreateSession');
-const { getOrderingSchedule, invalidateOrderingScheduleCache, ORDERING_SCHEDULE_KEY } = require('../utils/getOrderingSchedule');
 const ShopTransferRequest = require('../models/ShopTransferRequest');
 const cache = require('../utils/cache');
 const { getIO } = require('../socket');
 
-// Picks a dayOfWeek such that the test group's ordering window is CURRENTLY
-// OPEN — sellers can submit orders in the real flow, and the dashboard shows
-// "session active". After demo orders are placed, "Відкрити сесію збирання"
-// builds picking tasks. This matches the natural app flow.
-async function pickActiveOrderingDayOfWeek() {
-  const schedule = await getOrderingSchedule();
-  for (let day = 0; day < 7; day += 1) {
-    if (isOrderingOpen(day, schedule).isOpen) return day;
-  }
-  return null;
+// Test-only schedule helpers. They operate on the synthetic DeliveryGroup only;
+// production AppSetting('ordering.schedule') is never touched.
+const TEST_DAY_MINUTES = 24 * 60;
+const TEST_WEEK_MINUTES = 7 * TEST_DAY_MINUTES;
+
+function splitWeekMinute(total) {
+  const normalized = ((total % TEST_WEEK_MINUTES) + TEST_WEEK_MINUTES) % TEST_WEEK_MINUTES;
+  const day = Math.floor(normalized / TEST_DAY_MINUTES);
+  const dayMinute = normalized % TEST_DAY_MINUTES;
+  return { day, hour: Math.floor(dayMinute / 60), minute: dayMinute % 60 };
 }
 
-// Alternative: pick a day where we're past the closing time but still in the
-// "current session" window (picking phase). Used when caller explicitly wants
-// orders that immediately enter the picking phase.
-async function pickPickingPhaseDayOfWeek() {
-  const schedule = await getOrderingSchedule();
-  const now = Date.now();
-  for (let day = 0; day < 7; day += 1) {
-    if (isOrderingOpen(day, schedule).isOpen) continue;
-    const openAt = getOrderingWindowOpenAt(day, schedule);
-    if (openAt.getTime() < now) return day;
-  }
-  return null;
+function shiftScheduleDays(schedule, deltaDays) {
+  const value = normalizeOrderingSchedule(schedule);
+  const shift = Number(deltaDays || 0);
+  return {
+    ...value,
+    startDay: (value.startDay + shift + 7) % 7,
+    endDay: (value.endDay + shift + 7) % 7,
+  };
+}
+
+function buildAutoTestSchedule(minMinutes = 15) {
+  const now = getWarsawNow();
+  const current = now.dayOfWeek * TEST_DAY_MINUTES + now.hour * 60 + now.minute;
+  const start = Math.floor(current / 15) * 15;
+  const requestedEnd = current + Math.max(15, Number(minMinutes) || 15);
+  let end = Math.ceil(requestedEnd / 15) * 15;
+  if (end <= start) end = start + 15;
+  const a = splitWeekMinute(start);
+  const b = splitWeekMinute(end);
+  return normalizeOrderingSchedule({
+    startDay: a.day, startHour: a.hour, startMinute: a.minute,
+    endDay: b.day, endHour: b.hour, endMinute: b.minute,
+  });
 }
 
 // ── R2 helpers (mirrors products.js — test route has no auth so can't reuse that router) ──
@@ -198,24 +207,7 @@ router.post('/cleanup', asyncHandler(async (req, res) => {
     getIO()?.emit?.('delivery_groups_updated');
   } catch { /* non-critical */ }
 
-  // If a temporary test ordering schedule was left behind, restore the original
-  // schedule now that the test data is removed.
-  let scheduleRestored = false;
-  try {
-    const backupRow = await AppSetting.findOne({ key: `${ORDERING_SCHEDULE_KEY}.backup` }).lean();
-    if (backupRow?.value) {
-      await AppSetting.updateOne(
-        { key: ORDERING_SCHEDULE_KEY },
-        { $set: { value: backupRow.value } },
-        { upsert: true },
-      );
-      await AppSetting.deleteOne({ key: `${ORDERING_SCHEDULE_KEY}.backup` });
-      await invalidateOrderingScheduleCache();
-      scheduleRestored = true;
-    }
-  } catch {
-    scheduleRestored = false;
-  }
+  const scheduleRestored = false; // per-group schedule: no global state to restore
 
   // Scrub any remaining dangling productIds from real blocks (catches partial/crashed cleanups)
   const { scrubBlockProductIds } = require('../utils/scrubBlocks');
@@ -251,30 +243,13 @@ router.post('/run', asyncHandler(async (req, res) => {
   // productCount still controls how many product IDs go into the test block
   // (i.e. how many distinct SKUs workers will pick). 0 = use all from real blocks.
   const productCount = Math.max(0, Math.min(500, Number(req.body.productCount) || 0));
-  // deliveryDay = -1 → auto-pick day with currently ACTIVE ordering session
-  // deliveryDay = -2 → auto-pick day in picking phase (window already closed)
+  // -1/-2 are legacy test-UI sentinel values. With per-group calendars we
+  // copy the source group's schedule unless autoScheduleMinutes creates an
+  // isolated test schedule.
   const rawAutoMinutes = Math.max(0, Math.min(60, Number(req.body.autoScheduleMinutes) || 0));
-  let dayOfWeek;
-  if (deliveryDay === -1) {
-    if (rawAutoMinutes > 0) {
-      // autoSchedule will open its own window — no need to find an already-open one.
-      dayOfWeek = getWarsawNow().dayOfWeek;
-    } else {
-      dayOfWeek = await pickActiveOrderingDayOfWeek();
-      if (dayOfWeek === null) {
-        return res.status(400).json({ error: 'no_active_day_available', message: 'Зараз жодна група не має активного вікна замовлень — оберіть день вручну або змініть розклад.' });
-      }
-    }
-  } else if (deliveryDay === -2) {
-    dayOfWeek = await pickPickingPhaseDayOfWeek();
-    if (dayOfWeek === null) {
-      return res.status(400).json({ error: 'no_picking_phase_day_available', message: 'Жодна група зараз не в picking-фазі.' });
-    }
-  } else {
-    dayOfWeek = Number.isInteger(deliveryDay) && deliveryDay >= 0 && deliveryDay <= 6
-      ? deliveryDay
-      : getWarsawNow().dayOfWeek;
-  }
+  let dayOfWeek = Number.isInteger(deliveryDay) && deliveryDay >= 0 && deliveryDay <= 6
+    ? deliveryDay
+    : null;
   // When true, fixtures stay in DB after the run so the operator can inspect
   // the group on the picking page. Cleanup is then triggered manually.
   const keepData = req.body.keepData === true;
@@ -285,9 +260,9 @@ router.post('/run', asyncHandler(async (req, res) => {
   // Range of items per order. Each seller picks a random count in [min, max].
   const itemsPerOrderMin = Math.max(1, Number(req.body.itemsPerOrderMin) || 5);
   const itemsPerOrderMax = Math.max(itemsPerOrderMin, Number(req.body.itemsPerOrderMax) || 20);
-  // autoScheduleMinutes > 0: temporarily override ordering schedule so the
-  // window opens RIGHT NOW and closes in N minutes. Restored in finally.
-  // 0 = no override (default — use current schedule as-is).
+  // autoScheduleMinutes > 0: configure ONLY the synthetic group to be open now
+  // and close on a valid quarter-hour. No production group/global setting changes.
+  // 0 = copy/shift the source group's individual schedule.
   // Minimum safe value = ceil(staggerSeconds / 60) + 1, otherwise the window
   // may close before all orders are placed and they land in the wrong session.
   const minSafeMinutes = rawAutoMinutes > 0 ? Math.ceil(staggerSeconds / 60) + 1 : 0;
@@ -312,56 +287,15 @@ router.post('/run', asyncHandler(async (req, res) => {
   jobs.set(jobId, job);
 
   (async () => {
-    let originalSchedule = null;
+    let testOrderingSchedule = null;
+    let autoCloseDay = null;
     let autoCloseHour = null;
     let autoCloseMinute = null;
     try {
       job.status = 'running';
       appendLog(job, '=== START warehouse flow test ===');
 
-      // Load the TRUE original schedule. If a previous test crashed (server
-      // restarted mid-run before `finally`), the live key still holds a test
-      // schedule. The `ordering.schedule.backup` key holds the last clean value
-      // captured before any override — use it to break the corruption cascade.
-      {
-        const liveSchedule = (await AppSetting.findOne({ key: ORDERING_SCHEDULE_KEY }).lean())?.value || null;
-        const backupRow = await AppSetting.findOne({ key: `${ORDERING_SCHEDULE_KEY}.backup` }).lean();
-        if (backupRow?.value) {
-          // A backup exists → a prior test set it. Live key may be corrupt; trust backup.
-          originalSchedule = backupRow.value;
-          appendLog(job, `Оригінальний розклад взято з backup: ${JSON.stringify(originalSchedule)}`);
-        } else {
-          // No backup yet → live key is clean. Capture it as the immutable baseline.
-          originalSchedule = liveSchedule;
-          if (originalSchedule) {
-            await AppSetting.updateOne(
-              { key: `${ORDERING_SCHEDULE_KEY}.backup` },
-              { $set: { value: originalSchedule } },
-              { upsert: true },
-            );
-          }
-        }
-      }
-      if (!originalSchedule) appendLog(job, 'УВАГА: налаштування розкладу відсутні в БД — sessionId буде з дефолтами (16:00)');
-
-      if (autoScheduleMinutes > 0) {
-        const now = getWarsawNow();
-        const closeMinuteTotal = now.minute + autoScheduleMinutes + 1;
-        autoCloseHour = (now.hour + Math.floor(closeMinuteTotal / 60)) % 24;
-        autoCloseMinute = closeMinuteTotal % 60;
-        const openMinuteTotal = now.minute > 0 ? now.minute - 1 : 59;
-        const openHour = now.minute > 0 ? now.hour : (now.hour - 1 + 24) % 24;
-        const testSchedule = { openHour, openMinute: openMinuteTotal, closeHour: autoCloseHour, closeMinute: autoCloseMinute };
-        await AppSetting.updateOne(
-          { key: ORDERING_SCHEDULE_KEY },
-          { $set: { value: testSchedule } },
-          { upsert: true },
-        );
-        await invalidateOrderingScheduleCache();
-        appendLog(job, `Розклад: відкрито ${openHour}:${String(openMinuteTotal).padStart(2,'0')} → закрито ${autoCloseHour}:${String(autoCloseMinute).padStart(2,'0')} Warsaw`);
-        dayOfWeek = getWarsawNow().dayOfWeek;
-        appendLog(job, `dayOfWeek = сьогодні (${dayOfWeek}) — кнопка "Розпочати збирання" з'явиться о ${autoCloseHour}:${String(autoCloseMinute).padStart(2,'0')}`);
-      }
+      // Per-group schedule is resolved after the source group is loaded.
 
       // Step 1: collect product IDs from real blocks (blockId < TEST_BLOCK_BASE).
       // "Active" products in this system are those that live in a real block —
@@ -388,22 +322,32 @@ router.post('/run', asyncHandler(async (req, res) => {
       if (!sourceGroup) {
         sourceGroup = await DeliveryGroup.find(
           { name: { $not: new RegExp(TEST_MARKER) } },
-          'name dayOfWeek members',
+          'name dayOfWeek orderingSchedule members',
         ).lean().then((gs) => gs.sort((a, b) => (b.members?.length || 0) - (a.members?.length || 0))[0] || null);
       }
       if (!sourceGroup) throw new Error('Не знайдено реальних груп доставки — створіть хоча б одну групу');
       appendLog(job, `Джерело: "${sourceGroup.name}" (${sourceGroup.members?.length || 0} продавців)`);
 
-      // Use source group's dayOfWeek unless overridden by deliveryDay param.
-      // If deliveryDay was already resolved above (auto-pick), keep it.
-      // If deliveryDay = 0–6 explicit, use it. Otherwise fall back to source group.
-      const effectiveDayOfWeek = (deliveryDay >= 0 && deliveryDay <= 6) ? deliveryDay
-        : (dayOfWeek !== undefined && dayOfWeek !== null) ? dayOfWeek
-        : sourceGroup.dayOfWeek;
+      let effectiveDayOfWeek = dayOfWeek !== null ? dayOfWeek : Number(sourceGroup.dayOfWeek);
+      if (autoScheduleMinutes > 0) {
+        testOrderingSchedule = buildAutoTestSchedule(autoScheduleMinutes);
+        // Synthetic auto schedule chooses its own close weekday; by contract
+        // that weekday is also the synthetic delivery day.
+        effectiveDayOfWeek = Number(testOrderingSchedule.endDay);
+      } else {
+        const sourceSchedule = normalizeOrderingSchedule(sourceGroup.orderingSchedule);
+        const dayShift = (effectiveDayOfWeek - Number(sourceGroup.dayOfWeek) + 7) % 7;
+        testOrderingSchedule = shiftScheduleDays(sourceSchedule, dayShift);
+      }
+      autoCloseDay = testOrderingSchedule.endDay;
+      autoCloseHour = testOrderingSchedule.endHour;
+      autoCloseMinute = testOrderingSchedule.endMinute;
+      appendLog(job, `Тестовий розклад: ${JSON.stringify(testOrderingSchedule)}`);
 
       const deliveryGroup = await DeliveryGroup.create({
         name: `WT${idSuffix}`,
         dayOfWeek: effectiveDayOfWeek,
+        orderingSchedule: testOrderingSchedule,
         members: [],
       });
       appendLog(job, `DeliveryGroup: ${deliveryGroup._id} (day ${effectiveDayOfWeek})`);
@@ -511,10 +455,7 @@ router.post('/run', asyncHandler(async (req, res) => {
       // the deprecated getCurrentOrderingSessionId (keyed on exact timestamp).
       // This means multiple test runs on the same day share the same session — no "old orders"
       // when the schedule is overridden or restored between runs.
-      const activeScheduleForSession = autoScheduleMinutes > 0
-        ? ((await AppSetting.findOne({ key: ORDERING_SCHEDULE_KEY }).lean())?.value || originalSchedule || {})
-        : (originalSchedule || {});
-      let sessionId = await getOrCreateSessionId(String(deliveryGroup._id), effectiveDayOfWeek, activeScheduleForSession);
+      let sessionId = await getOrCreateSessionId(String(deliveryGroup._id), testOrderingSchedule);
       appendLog(job, `sessionId: ${sessionId}`);
       job.cleanup.sessionId = sessionId;
 
@@ -611,10 +552,10 @@ router.post('/run', asyncHandler(async (req, res) => {
       if (autoScheduleMinutes > 0) {
         // Calculate ms until autoCloseHour:autoCloseMinute in Warsaw time.
         const nowForWait = getWarsawNow();
-        const closeTotalMinutes = autoCloseHour * 60 + autoCloseMinute;
-        const nowTotalMinutes = nowForWait.hour * 60 + nowForWait.minute;
-        let waitMs = (closeTotalMinutes - nowTotalMinutes) * 60 * 1000;
-        if (waitMs < 0) waitMs = 0; // already past close time
+        const closeWeekMinutes = autoCloseDay * TEST_DAY_MINUTES + autoCloseHour * 60 + autoCloseMinute;
+        const nowWeekMinutes = nowForWait.dayOfWeek * TEST_DAY_MINUTES + nowForWait.hour * 60 + nowForWait.minute;
+        const waitMinutes = (closeWeekMinutes - nowWeekMinutes + TEST_WEEK_MINUTES) % TEST_WEEK_MINUTES;
+        let waitMs = waitMinutes * 60 * 1000;
         if (waitMs > 0) {
           const waitSec = Math.ceil(waitMs / 1000);
           job.progress = { step: 4, total: 6, label: `Очікування закриття вікна (${waitSec}s)` };
@@ -781,27 +722,7 @@ router.post('/run', asyncHandler(async (req, res) => {
       job.error = err?.message || String(err);
       appendLog(job, `FATAL: ${job.error}`);
     } finally {
-      // Restore ordering schedule if we overrode it and the operator did not
-      // request to keep the test data alive. When keepData=true, preserve the
-      // temporary test schedule so the group can be inspected / started manually.
-      if (originalSchedule && !keepData) {
-        try {
-          await AppSetting.updateOne(
-            { key: ORDERING_SCHEDULE_KEY },
-            { $set: { value: originalSchedule } },
-            { upsert: true },
-          );
-          await invalidateOrderingScheduleCache();
-          // Restore succeeded → drop the crash-recovery backup so a future
-          // legitimate admin schedule change becomes the new baseline.
-          await AppSetting.deleteOne({ key: `${ORDERING_SCHEDULE_KEY}.backup` });
-          appendLog(job, 'Розклад замовлень відновлено до оригінального значення.');
-        } catch (e) {
-          appendLog(job, `Не вдалось відновити розклад: ${e.message || e}`);
-        }
-      } else if (originalSchedule && keepData) {
-        appendLog(job, 'keepData=true — тимчасовий тестовий розклад залишено в БД для ручного запуску. Оригінальний розклад відновлюється при очищенні тесту.');
-      }
+      // No global schedule restoration: the synthetic group owns its schedule.
       if (keepData) {
         appendLog(job, '⏸ keepData=true — тестові дані ЗАЛИШЕНО в БД. Очистіть вручну кнопкою "Очистити тестові дані".');
       } else {
@@ -897,14 +818,11 @@ router.post('/seed-conflicts', asyncHandler(async (req, res) => {
   ]);
 
   // group2 is auxiliary — only used as the SOURCE side of scenario D.
-  const group2 = await DeliveryGroup.create({ name: `WT-CFaux${suffix}`, dayOfWeek, members: [] });
-  // Use the real DB schedule so conflict orders land in the SAME ordering
-  // session the app considers current — otherwise they default to 16:00 and
-  // immediately look stale on the picking board.
-  const cfSchedule = await getOrderingSchedule().catch(() => undefined);
+  const group2 = await DeliveryGroup.create({ name: `WT-CFaux${suffix}`, dayOfWeek, orderingSchedule: group1.orderingSchedule, members: [] });
+  const cfSchedule = normalizeOrderingSchedule(group1.orderingSchedule);
   const [sessionId1, sessionId2] = await Promise.all([
-    getOrCreateSessionId(String(group1._id), dayOfWeek, cfSchedule),
-    getOrCreateSessionId(String(group2._id), dayOfWeek, cfSchedule),
+    getOrCreateSessionId(String(group1._id), cfSchedule),
+    getOrCreateSessionId(String(group2._id), cfSchedule),
   ]);
 
   // Each scenario gets its OWN shops so they don't share sellers/conflicts.

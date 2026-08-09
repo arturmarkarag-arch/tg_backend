@@ -18,6 +18,7 @@
 
 require('dotenv').config({ path: require('path').join(__dirname, '..', '..', '.env') });
 const mongoose = require('mongoose');
+const { validateOrderingScheduleDeliveryDay } = require('../utils/orderingSchedule');
 
 function id(v) { return v == null ? '' : String(v); }
 
@@ -37,7 +38,14 @@ async function main() {
   console.log('Режим: READ-ONLY\n');
 
   const shopDocs = await shops.find({}, { projection: { name: 1, deliveryGroupId: 1, isActive: 1 } }).toArray();
-  const groupIds = new Set((await groups.find({}, { projection: { _id: 1 } }).toArray()).map((g) => id(g._id)));
+  const groupDocs = await groups.find({}, { projection: { name: 1, dayOfWeek: 1, orderingSchedule: 1 } }).toArray();
+  const groupIds = new Set(groupDocs.map((g) => id(g._id)));
+  const invalidGroupSchedules = [];
+  for (const group of groupDocs) {
+    try {
+      validateOrderingScheduleDeliveryDay(group.orderingSchedule, group.dayOfWeek);
+    } catch (err) { invalidGroupSchedules.push({ id: id(group._id), name: group.name || '', reason: err.message }); }
+  }
   const shopById = new Map(shopDocs.map((s) => [id(s._id), s]));
 
   const shopsWithoutGroup = shopDocs.filter((s) => !s.deliveryGroupId || !groupIds.has(id(s.deliveryGroupId)));
@@ -112,6 +120,7 @@ async function main() {
   ]).toArray();
 
   console.log('=== CONTRACT AUDIT ===');
+  console.log(`DeliveryGroup з невалідним orderingSchedule: ${invalidGroupSchedules.length}`);
   console.log(`Shops: ${shopDocs.length}; без валідної deliveryGroup: ${shopsWithoutGroup.length}`);
   console.log(`Sellers з shopId: ${sellers.length}; магазини з 2+ seller: ${multiSellerShops.length}`);
   console.log(`Активні Orders, що порушують target (1 shop + 1 session): ${duplicateShopSessionOrders.length}`);
@@ -145,7 +154,13 @@ async function main() {
     console.log('');
   }
 
-  const hardForSessionIsolation = shopsWithoutGroup.length + duplicateTaskKeys.length + duplicateSessions.length;
+  if (invalidGroupSchedules.length) {
+    console.log('--- DeliveryGroup без валідного індивідуального schedule ---');
+    for (const row of invalidGroupSchedules) console.log(`• ${row.name || row.id} [${row.id}]: ${row.reason}`);
+    console.log('');
+  }
+
+  const hardForSessionIsolation = invalidGroupSchedules.length + shopsWithoutGroup.length + duplicateTaskKeys.length + duplicateSessions.length;
   console.log(hardForSessionIsolation === 0
     ? '✓ Сесійна ізоляція не має DB-конфліктів, які треба виправити перед деплоєм.'
     : `✗ Знайдено ${hardForSessionIsolation} блокуючих порушень базових session-invariants.`);

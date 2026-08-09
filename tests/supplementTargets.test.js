@@ -13,9 +13,16 @@ const MIN = 60 * 1000;
 const HOUR = 60 * MIN;
 const DAY = 24 * HOUR;
 
-// Живий розклад проєкту: вікно відкривається напередодні о 16:30 і закривається
-// в день доставки о 07:30.
-const SCHEDULE = { openHour: 16, openMinute: 30, closeHour: 7, closeMinute: 30 };
+// Для tripwire-тестів будуємо явний розклад конкретної групи.
+// Runtime v24 більше не виводить його з dayOfWeek і не читає global setting.
+const scheduleForEndDay = (endDay) => ({
+  startDay: (endDay - 1 + 7) % 7,
+  startHour: 16,
+  startMinute: 30,
+  endDay,
+  endHour: 7,
+  endMinute: 30,
+});
 
 describe('TRIPWIRE: сервер не вирішує за працівника', () => {
   // Тест захищає ручний вибір групи від повторного eligibility-гейта.
@@ -38,15 +45,17 @@ describe('getPreviousOrderingCloseAt — «замовлення закрилис
 
   for (let dayOfWeek = 0; dayOfWeek <= 6; dayOfWeek += 1) {
     it(`день ${dayOfWeek}: попереднє закриття в минулому, наступне в майбутньому`, () => {
-      const prev = getPreviousOrderingCloseAt(dayOfWeek, SCHEDULE);
-      const next = getOrderingWindowCloseAt(dayOfWeek, SCHEDULE);
+      const schedule = scheduleForEndDay(dayOfWeek);
+      const prev = getPreviousOrderingCloseAt(schedule);
+      const next = getOrderingWindowCloseAt(schedule);
       expect(prev.getTime()).toBeLessThanOrEqual(now);
       expect(next.getTime()).toBeGreaterThan(now);
     });
 
     it(`день ${dayOfWeek}: між сусідніми закриттями рівно тиждень (± година на DST)`, () => {
-      const prev = getPreviousOrderingCloseAt(dayOfWeek, SCHEDULE);
-      const next = getOrderingWindowCloseAt(dayOfWeek, SCHEDULE);
+      const schedule = scheduleForEndDay(dayOfWeek);
+      const prev = getPreviousOrderingCloseAt(schedule);
+      const next = getOrderingWindowCloseAt(schedule);
       const gap = next.getTime() - prev.getTime();
       // Саме через цю годину значення НЕ рахується як «наступне − 7 днів»:
       // на переході DST така арифметика показала б «закрилося 4 години тому»
@@ -60,7 +69,7 @@ describe('getPreviousOrderingCloseAt — «замовлення закрилис
     const beforeClose = hour * 60 + minute < 7 * 60 + 30;
     if (!beforeClose) return; // тест має сенс лише вранці — інакше просто пропускаємо
 
-    const prev = getPreviousOrderingCloseAt(dayOfWeek, SCHEDULE);
+    const prev = getPreviousOrderingCloseAt(scheduleForEndDay(dayOfWeek));
     expect(Date.now() - prev.getTime()).toBeGreaterThan(6 * DAY);
   });
 });

@@ -27,7 +27,6 @@ const Block = require('../models/Block');
 const DeliveryGroup = require('../models/DeliveryGroup');
 const { isOrderingOpen } = require('../utils/orderingSchedule');
 const { resolveOrderStatusAfterCancel } = require('../utils/orderStatus');
-const { getOrderingSchedule } = require('../utils/getOrderingSchedule');
 const { getIO } = require('../socket');
 const { buildUnreconciledOosTaskFilter } = require('../utils/pickingOosRecovery');
 
@@ -76,8 +75,6 @@ async function archiveProduct(productOrId, { notifyBuyers = false, bot = null, r
     let oldOrderNumber;
     let attemptBlockIds = [];
     const groupOpenCache = new Map();
-    let cachedSchedule = null;
-    let scheduleLoaded = false;
 
     const session = await mongoose.connection.startSession();
     session.startTransaction();
@@ -110,28 +107,18 @@ async function archiveProduct(productOrId, { notifyBuyers = false, bot = null, r
       if (!key) return false;
       if (groupOpenCache.has(key)) return groupOpenCache.get(key);
 
-      if (!scheduleLoaded) {
-        try {
-          cachedSchedule = await getOrderingSchedule();
-        } catch {
-          cachedSchedule = null;
-        }
-        scheduleLoaded = true;
-      }
-
-      // Fail-safe: if schedule is unavailable, freeze status transitions.
-      if (!cachedSchedule) {
-        groupOpenCache.set(key, true);
-        return true;
-      }
-
-      const group = await DeliveryGroup.findById(key, 'dayOfWeek').session(session).lean();
+      const group = await DeliveryGroup.findById(key, 'orderingSchedule').session(session).lean();
       if (!group) {
         groupOpenCache.set(key, true);
         return true;
       }
 
-      const { isOpen } = isOrderingOpen(group.dayOfWeek, cachedSchedule);
+      // Fail-safe: a corrupted group schedule must freeze order-status finalisation
+      // instead of guessing that ordering is closed. Startup preflight should make
+      // this unreachable in normal operation, but raw DB edits must not turn OOS
+      // reconciliation into a destructive transition.
+      let isOpen = true;
+      try { isOpen = isOrderingOpen(group.orderingSchedule).isOpen; } catch { isOpen = true; }
       groupOpenCache.set(key, isOpen);
       return isOpen;
     };

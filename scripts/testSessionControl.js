@@ -85,7 +85,6 @@ const Order = require('../models/Order');
 const AppSetting = require('../models/AppSetting');
 const OrderingSession = require('../models/OrderingSession');
 const cache = require('../utils/cache');
-const { getOrderingSchedule } = require('../utils/getOrderingSchedule');
 const {
   isOrderingOpen,
   getOpenDateWarsaw,
@@ -125,9 +124,9 @@ async function findGroup(args) {
 
 async function describe(group, schedule) {
   const gid = String(group._id);
-  const status = isOrderingOpen(Number(group.dayOfWeek), schedule);
-  const openDate = getOpenDateWarsaw(Number(group.dayOfWeek), schedule);
-  const sessionId = await getOrCreateSessionId(gid, Number(group.dayOfWeek), schedule);
+  const status = isOrderingOpen(schedule);
+  const openDate = getOpenDateWarsaw(schedule);
+  const sessionId = await getOrCreateSessionId(gid, schedule);
   const session = await OrderingSession.findById(sessionId).lean();
   const activeOrders = await Order.countDocuments({
     'buyerSnapshot.deliveryGroupId': gid,
@@ -141,7 +140,7 @@ async function describe(group, schedule) {
     isOpen: status.isOpen,
     message: status.message,
     openDate,
-    openAt: getOrderingWindowOpenAt(Number(group.dayOfWeek), schedule).toISOString(),
+    openAt: getOrderingWindowOpenAt(schedule).toISOString(),
     sessionId,
     pickingStatus: session?.pickingStatus || 'pending',
     activeOrders,
@@ -182,34 +181,38 @@ async function commandClose(group, schedule) {
     );
   }
 
-  // Find a CLOSED day that resolves to the exact same session openDate.
-  // This preserves the stable OrderingSession ID and all existing orders.
+  // Find an explicit CLOSE boundary (quarter-hour) that is already passed
+  // while keeping the exact same START boundary/openDate. That guarantees the
+  // current OrderingSession ID is preserved.
   const candidates = [];
-  for (let day = 0; day < 7; day += 1) {
-    const candidateStatus = isOrderingOpen(day, schedule);
-    const candidateOpenDate = getOpenDateWarsaw(day, schedule);
-    if (!candidateStatus.isOpen && candidateOpenDate === before.openDate) {
-      candidates.push({ day, message: candidateStatus.message });
+  for (let endDay = 0; endDay < 7; endDay += 1) {
+    for (let endHour = 0; endHour < 24; endHour += 1) {
+      for (const endMinute of [0, 15, 30, 45]) {
+        const candidateSchedule = { ...schedule, endDay, endHour, endMinute };
+        try {
+          if (!isOrderingOpen(candidateSchedule).isOpen
+              && getOpenDateWarsaw(candidateSchedule) === before.openDate) {
+            candidates.push(candidateSchedule);
+          }
+        } catch { /* start=end or invalid candidate */ }
+      }
     }
   }
 
   if (candidates.length === 0) {
     throw new Error(
-      'Не знайдено безпечного тимчасового дня, який уже закритий і має той самий openDate. ' +
-      'Скрипт нічого не змінив. У цьому випадку потрібен повноцінний manual-close override у коді.',
+      'Не знайдено безпечного quarter-hour close boundary із тим самим openDate. ' +
+      'Скрипт нічого не змінив; зачекай щонайменше до наступної чверті години після старту вікна.',
     );
   }
-
-  // Prefer today's/nearest semantic candidate by choosing the first. The hard
-  // invariant is same openDate; we verify session ID after the DB update.
   const candidate = candidates[0];
 
   const backup = {
     createdAt: new Date().toISOString(),
     groupId: gid,
     groupName: group.name,
-    originalDayOfWeek: Number(group.dayOfWeek),
-    temporaryDayOfWeek: candidate.day,
+    originalSchedule: schedule,
+    temporarySchedule: candidate,
     originalOpenDate: before.openDate,
     originalSessionId: before.sessionId,
     activeOrdersAtClose: before.activeOrders,
@@ -224,8 +227,8 @@ async function commandClose(group, schedule) {
         { upsert: true, session: mongoSession },
       );
       await DeliveryGroup.updateOne(
-        { _id: group._id, dayOfWeek: Number(group.dayOfWeek) },
-        { $set: { dayOfWeek: candidate.day } },
+        { _id: group._id },
+        { $set: { orderingSchedule: candidate } },
         { session: mongoSession },
       );
     });
@@ -236,11 +239,11 @@ async function commandClose(group, schedule) {
   await invalidateGroupCaches();
 
   const updated = await DeliveryGroup.findById(group._id);
-  const after = await describe(updated, schedule);
+  const after = await describe(updated, updated.orderingSchedule);
 
   if (after.sessionId !== before.sessionId || after.openDate !== before.openDate || after.isOpen) {
     // Roll back immediately if the invariant failed.
-    await DeliveryGroup.updateOne({ _id: group._id }, { $set: { dayOfWeek: backup.originalDayOfWeek } });
+    await DeliveryGroup.updateOne({ _id: group._id }, { $set: { orderingSchedule: backup.originalSchedule } });
     await AppSetting.deleteOne({ key: backupKey(gid) });
     await invalidateGroupCaches();
     throw new Error(
@@ -268,14 +271,14 @@ async function commandRestore(group, schedule) {
 
   await DeliveryGroup.updateOne(
     { _id: group._id },
-    { $set: { dayOfWeek: Number(backup.originalDayOfWeek) } },
+    { $set: { orderingSchedule: backup.originalSchedule } },
   );
   await AppSetting.deleteOne({ key: backupKey(gid) });
   await invalidateGroupCaches();
 
   const restored = await DeliveryGroup.findById(group._id);
-  const info = await describe(restored, schedule);
-  console.log('✅ Оригінальний день групи відновлено.');
+  const info = await describe(restored, restored.orderingSchedule);
+  console.log('✅ Оригінальний розклад групи відновлено.');
   console.log(JSON.stringify({ restored: info, backup }, null, 2));
 
   if (info.isOpen && info.pickingStatus !== 'completed') {
@@ -301,7 +304,7 @@ async function main() {
   const group = await findGroup(args);
   if (!group) throw new Error('Групу доставки не знайдено.');
 
-  const schedule = await getOrderingSchedule();
+  const schedule = group.orderingSchedule;
 
   if (args.action === 'status') await commandStatus(group, schedule);
   if (args.action === 'close') await commandClose(group, schedule);

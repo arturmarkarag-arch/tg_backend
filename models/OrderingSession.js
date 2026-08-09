@@ -34,6 +34,13 @@ const OrderingSessionSchema = new mongoose.Schema(
     // placed before the schedule change stay associated with the same session.
     openDate: { type: String, required: true },
     openAt:   { type: Date },
+    closeAt:  { type: Date },
+    // Exact per-group schedule used when this session was materialised. Historical
+    // sessions therefore remain explainable after the group schedule changes.
+    scheduleSnapshot: {
+      startDay: Number, startHour: Number, startMinute: Number,
+      endDay: Number, endHour: Number, endMinute: Number,
+    },
 
     // Коли по цій сесії розіслали «замовлення відкрито» (services/orderingOpenNotify.js).
     // Це і є замок від дублів: планувальник тікає щохвилини, і тільки той тік,

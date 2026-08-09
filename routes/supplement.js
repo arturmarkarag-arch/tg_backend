@@ -15,7 +15,6 @@ const SupplementRequest = require('../models/SupplementRequest');
 
 const { requireTelegramRoles } = require('../middleware/telegramAuth');
 const { appError, asyncHandler } = require('../utils/errors');
-const { getOrderingSchedule } = require('../utils/getOrderingSchedule');
 const { findCurrentSessionId } = require('../utils/getOrCreateSession');
 const { assignLateShopNumber, buildShopNumberLookup } = require('../utils/shopNumbering');
 const { getIO } = require('../socket');
@@ -66,7 +65,7 @@ async function sellerContext(user) {
   if (!user?.shopId) throw appError('no_shop');
   const shop = await Shop.findById(user.shopId).lean();
   if (!shop?.deliveryGroupId) throw appError('no_delivery_group');
-  const group = await DeliveryGroup.findById(shop.deliveryGroupId, 'name dayOfWeek').lean();
+  const group = await DeliveryGroup.findById(shop.deliveryGroupId, 'name dayOfWeek orderingSchedule').lean();
   if (!group) throw appError('delivery_group_not_found');
 
   return {
@@ -74,6 +73,7 @@ async function sellerContext(user) {
     shopName: shop.name || '',
     deliveryGroupId: String(group._id),
     groupDayOfWeek: group.dayOfWeek,
+    groupOrderingSchedule: group.orderingSchedule,
     groupName: group.name || '',
   };
 }
@@ -97,11 +97,10 @@ async function loadOfferForSeller(offerId, ctx) {
  *
  * @returns {Promise<string|null>}
  */
-async function boxNumberSessionId(deliveryGroupId, dayOfWeek) {
-  if (!Number.isInteger(dayOfWeek)) return null;
+async function boxNumberSessionId(deliveryGroupId, orderingSchedule) {
+  if (!orderingSchedule) return null;
   try {
-    const schedule = await getOrderingSchedule();
-    return await findCurrentSessionId(deliveryGroupId, dayOfWeek, schedule);
+    return await findCurrentSessionId(deliveryGroupId, orderingSchedule);
   } catch (err) {
     console.warn('[supplement] пошук сесії для номера коробки не вдався:', err?.message);
     return null;
@@ -225,7 +224,7 @@ router.post('/:offerId/request', sellerRoles, asyncHandler(async (req, res) => {
   if (action === 'noop') return res.json({ ok: true, quantity, action: 'noop' });
 
   // Якщо поточна сесія вже має нумерацію, новий магазин отримує номер у хвіст.
-  const sessionId = await boxNumberSessionId(ctx.deliveryGroupId, ctx.groupDayOfWeek);
+  const sessionId = await boxNumberSessionId(ctx.deliveryGroupId, ctx.groupOrderingSchedule);
   if (sessionId) {
     try {
       await assignLateShopNumber(sessionId, ctx.shopId, ctx.shopName);
@@ -477,8 +476,8 @@ router.get('/group/:deliveryGroupId', warehouseRoles, asyncHandler(async (req, r
  * робочий стан, а не збій: пакувати можна і в коробку з назвою магазину.
  */
 async function buildOfferCard(offer, me = '') {
-  const group = await DeliveryGroup.findById(offer.deliveryGroupId, 'dayOfWeek').lean();
-  const sessionId = group ? await boxNumberSessionId(offer.deliveryGroupId, group.dayOfWeek) : null;
+  const group = await DeliveryGroup.findById(offer.deliveryGroupId, 'orderingSchedule').lean();
+  const sessionId = group ? await boxNumberSessionId(offer.deliveryGroupId, group.orderingSchedule) : null;
 
   const [requests, locations, productMap, session] = await Promise.all([
     SupplementRequest.find({ offerId: offer._id }).lean(),

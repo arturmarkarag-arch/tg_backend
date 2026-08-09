@@ -29,7 +29,6 @@ const { getShippingBlockPositions } = require('./taskBuilder');
 const { archiveProduct, getProductTitle } = require('./archiveProduct');
 const { resolveOrderStatusAfterCancel } = require('../utils/orderStatus');
 const { isOrderingOpen } = require('../utils/orderingSchedule');
-const { getOrderingSchedule } = require('../utils/getOrderingSchedule');
 const { roundMoney } = require('../utils/money');
 
 /**
@@ -59,7 +58,11 @@ async function auditSessionCoverage({ deliveryGroupId, orderingSessionId }) {
   const orders = await Order.find(
     {
       'buyerSnapshot.deliveryGroupId': groupId,
-      status: { $in: ['new', 'in_progress'] },
+      // Closure correctness is about THIS session, not only active order status.
+      // A fulfilled/confirmed/cancelled order with a non-terminal line is damaged
+      // data and must still surface as a repairable coverage gap. `expired` is the
+      // only order-level terminal state intentionally outside the delivery cycle.
+      status: { $ne: 'expired' },
       orderingSessionId: sessionId,
     },
     '_id orderNumber buyerSnapshot buyerTelegramId items',
@@ -157,36 +160,25 @@ async function auditSessionCoverage({ deliveryGroupId, orderingSessionId }) {
  *
  * @returns {Promise<{ cancelledCount: number, archived: boolean }>}
  */
-async function resolveCoverageGap({ deliveryGroupId, orderingSessionId, productId, bot = null }) {
-  const groupId   = String(deliveryGroupId  || '');
+async function cancelDanglingSessionItems({
+  deliveryGroupId,
+  orderingSessionId,
+  productId,
+  productTitle = null,
+  orderingOpenNow = true,
+}) {
+  const groupId = String(deliveryGroupId || '');
   const sessionId = String(orderingSessionId || '');
-  const pid       = productId ? String(productId) : null;
-  if (!groupId || !sessionId) {
-    throw Object.assign(new Error('Missing group/session'), { code: 'picking_delivery_group_required' });
-  }
+  const pid = productId ? String(productId) : null;
 
-  if (pid && mongoose.Types.ObjectId.isValid(pid)) {
-    const product = await Product.findById(pid);
-    if (product && product.status !== 'archived') {
-      const { cancelledCount } = await archiveProduct(product, { notifyBuyers: Boolean(bot), bot, reason: 'system_archive' });
-      return { cancelledCount, archived: true };
-    }
-  }
-
-  // Fallback path: no product document (or it is already archived), so only the
-  // dangling order lines are left to clean up.
-  const schedule = await getOrderingSchedule().catch(() => null);
-  const group = await DeliveryGroup.findById(groupId, 'dayOfWeek').lean();
-  // Fail-safe mirrors archiveProduct: unknown schedule/group ⇒ treat the window as
-  // open ⇒ freeze the status instead of guessing a terminal one.
-  const orderingOpenNow = (!schedule || !group)
-    ? true
-    : isOrderingOpen(group.dayOfWeek, schedule).isOpen;
-
+  // IMPORTANT: this is deliberately SESSION-SCOPED. We must repair a damaged
+  // terminal Order in the current session, but we must never rewrite historical
+  // fulfilled orders from older sessions merely because the product is archived
+  // globally today.
   const orders = await Order.find({
     'buyerSnapshot.deliveryGroupId': groupId,
-    status: { $in: ['new', 'in_progress'] },
     orderingSessionId: sessionId,
+    status: { $ne: 'expired' },
   });
 
   let cancelledCount = 0;
@@ -197,25 +189,106 @@ async function resolveCoverageGap({ deliveryGroupId, orderingSessionId, productI
     });
     if (!matching.length) continue;
 
+    const originalStatus = order.status;
     for (const item of matching) {
-      order.totalPrice = Math.max(0, roundMoney(order.totalPrice - (item.price || 0) * (item.quantity || 0)));
+      order.totalPrice = Math.max(0, roundMoney(
+        order.totalPrice - (Number(item.price) || 0) * (Number(item.quantity) || 0),
+      ));
       item.cancelled = true;
       cancelledCount += 1;
     }
-    order.status = resolveOrderStatusAfterCancel(order, orderingOpenNow);
+
+    order.history.push({
+      at: new Date(),
+      by: 'system',
+      byName: '',
+      byRole: 'system',
+      action: 'items_cancelled_coverage_repair',
+      meta: {
+        reason: 'system_archive',
+        productId: pid || '',
+        productTitle: productTitle || '',
+        cancelled: matching.length,
+        quantity: matching.reduce((sum, item) => sum + (Number(item.quantity) || 0), 0),
+      },
+    });
+
+    if (['new', 'in_progress'].includes(originalStatus)) {
+      order.status = resolveOrderStatusAfterCancel(order, orderingOpenNow);
+    } else {
+      // `fulfilled|confirmed|cancelled` are already terminal order-level history.
+      // Repair only the broken line; do NOT rewind or reinterpret a completed
+      // business outcome. Line flags are the source of truth for what arrived.
+      order.status = originalStatus;
+    }
     await order.save();
   }
 
-  // Direct fallback bypasses archiveProduct, so it would otherwise have no
-  // lifecycle trigger to re-check whether this was the final closure blocker.
+  return cancelledCount;
+}
+
+async function resolveCoverageGap({ deliveryGroupId, orderingSessionId, productId, bot = null }) {
+  const groupId   = String(deliveryGroupId  || '');
+  const sessionId = String(orderingSessionId || '');
+  const pid       = productId ? String(productId) : null;
+  if (!groupId || !sessionId) {
+    throw Object.assign(new Error('Missing group/session'), { code: 'picking_delivery_group_required' });
+  }
+
+  // Resolve schedule once for the direct/session-scoped reconciliation below.
+  // If configuration is corrupt, fail safe by keeping active order statuses open
+  // rather than guessing a terminal transition.
+  const group = await DeliveryGroup.findById(groupId, 'orderingSchedule').lean();
+  let orderingOpenNow = true;
+  if (group?.orderingSchedule) {
+    try { orderingOpenNow = isOrderingOpen(group.orderingSchedule).isOpen; } catch { orderingOpenNow = true; }
+  }
+
+  let product = null;
+  let archivedNow = false;
+  let archivedCancelledCount = 0;
+  if (pid && mongoose.Types.ObjectId.isValid(pid)) {
+    product = await Product.findById(pid);
+    if (product && product.status !== 'archived') {
+      const archiveResult = await archiveProduct(product, {
+        notifyBuyers: Boolean(bot),
+        bot,
+        reason: 'system_archive',
+      });
+      archivedCancelledCount = Number(archiveResult?.cancelledCount) || 0;
+      archivedNow = true;
+    }
+  }
+
+  // archiveProduct intentionally reconciles ACTIVE orders globally. That is the
+  // correct behaviour for normal archival, but closure repair must additionally
+  // handle damaged TERMINAL orders in this exact session. Run this scoped pass
+  // after archival so fulfilled/confirmed/cancelled lines cannot remain forever
+  // non-terminal and keep `unterminated_items` blocked.
+  const scopedCancelledCount = await cancelDanglingSessionItems({
+    deliveryGroupId: groupId,
+    orderingSessionId: sessionId,
+    productId: pid,
+    productTitle: product ? getProductTitle(product) : null,
+    orderingOpenNow,
+  });
+
+  const cancelledCount = archivedCancelledCount + scopedCancelledCount;
+
+  // Re-check lifecycle after BOTH paths. archiveProduct may have checked once
+  // before the terminal-line repair; this second pass is what lets the session
+  // close when that dangling terminal line was the final blocker.
   if (cancelledCount > 0) {
     const { maybeCompleteSession } = require('../utils/sessionStatus');
     await maybeCompleteSession(sessionId).catch((err) =>
-      console.warn('[sessionCoverage] maybeCompleteSession after fallback failed:', err?.message || err),
+      console.warn('[sessionCoverage] maybeCompleteSession after repair failed:', err?.message || err),
     );
   }
 
-  return { cancelledCount, archived: false };
+  return {
+    cancelledCount,
+    archived: archivedNow || Boolean(product?.status === 'archived'),
+  };
 }
 
 module.exports = { auditSessionCoverage, resolveCoverageGap, GAP_REASONS };

@@ -235,12 +235,18 @@ async function main() {
   console.log(`   ${pad(archivedSinceTests)}  товарів у статусі archived від початку тестів`);
   console.log('            → якщо це тестові списання, поверніть їх через «Архів» у мініапці');
   console.log('              (штатний restore кладе товар у «Надходження»)');
-  const schedule = existing.has('appsettings')
-    ? await db.collection('appsettings').findOne({ key: 'ordering.schedule' })
-    : null;
-  if (schedule) {
-    console.log(`   графік вікна замовлень (ordering.schedule): ${JSON.stringify(schedule.value)}`);
-    console.log('            → якщо ганяли E2E-харнес, перевірте, що значення бойове');
+  if (existing.has('deliverygroups')) {
+    const scheduleGroups = await db.collection('deliverygroups')
+      .find({}, { projection: { name: 1, orderingSchedule: 1 } })
+      .sort({ name: 1 })
+      .toArray();
+    if (scheduleGroups.length) {
+      console.log('   індивідуальні графіки груп (DeliveryGroup.orderingSchedule):');
+      for (const group of scheduleGroups) {
+        console.log(`            • ${group.name || group._id}: ${JSON.stringify(group.orderingSchedule || null)}`);
+      }
+      console.log('            → E2E v24 змінює тільки synthetic test group, бойові графіки не чіпає');
+    }
   }
   console.log('');
 

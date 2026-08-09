@@ -14,7 +14,6 @@ const { migrateSellerShop } = require('../services/migrateSellerShop');
 const { unassignSellerAndPark } = require('../services/unassignSeller');
 const { activeOrderShopFilter } = require('../utils/orderShopFilter');
 const { isOrderingOpen } = require('../utils/orderingSchedule');
-const { getOrderingSchedule } = require('../utils/getOrderingSchedule');
 const { getOrCreateSessionId } = require('../utils/getOrCreateSession');
 const { getTelegramUsernameMap } = require('../utils/telegramUsername');
 
@@ -369,9 +368,8 @@ router.patch('/:id', telegramAuth, requireTelegramRole('admin'), asyncHandler(as
     if (newGroupIdRaw !== prevDeliveryGroupId && prevDeliveryGroupId) {
       const prevGroup = await DeliveryGroup.findById(prevDeliveryGroupId).lean();
       if (prevGroup) {
-        const schedule = await getOrderingSchedule();
-        const { isOpen } = isOrderingOpen(prevGroup.dayOfWeek, schedule);
-        const prevSessionId = await getOrCreateSessionId(prevDeliveryGroupId, prevGroup.dayOfWeek, schedule);
+        const { isOpen } = isOrderingOpen(prevGroup.orderingSchedule);
+        const prevSessionId = await getOrCreateSessionId(prevDeliveryGroupId, prevGroup.orderingSchedule);
         const shopActiveOrderIds = (await Order.find(
           { ...activeOrderShopFilter(shop._id), orderingSessionId: prevSessionId },
           '_id',

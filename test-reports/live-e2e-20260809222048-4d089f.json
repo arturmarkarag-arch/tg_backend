@@ -1,7 +1,7 @@
 {
-  "runId": "20260807215713-0fb5a3",
-  "marker": "__LIVE_E2E__20260807215713-0fb5a3",
-  "createdAt": "2026-08-07T21:58:44.591Z",
+  "runId": "20260809222048-4d089f",
+  "marker": "__LIVE_E2E__20260809222048-4d089f",
+  "createdAt": "2026-08-09T22:22:13.020Z",
   "db": "tg_manager",
   "redisWasConfiguredButIsolated": true,
   "execute": true,
@@ -9,111 +9,96 @@
   "summary": {
     "passedScenarios": 14,
     "failedScenarios": 0,
-    "passedAssertions": 221,
+    "passedAssertions": 250,
     "failedAssertions": 0
   },
   "scenarios": [
     {
       "name": "happy",
       "ok": true,
-      "durationMs": 7036
+      "durationMs": 7076
     },
     {
       "name": "remove_last",
       "ok": true,
-      "durationMs": 1527
+      "durationMs": 1565
     },
     {
       "name": "conflict_move",
       "ok": true,
-      "durationMs": 6406
+      "durationMs": 6098
     },
     {
       "name": "conflict_relocate",
       "ok": true,
-      "durationMs": 7636
+      "durationMs": 7310
     },
     {
       "name": "conflict_unassign",
       "ok": true,
-      "durationMs": 5646
+      "durationMs": 5627
     },
     {
       "name": "coverage",
       "ok": true,
-      "durationMs": 5058
+      "durationMs": 5132
     },
     {
       "name": "isolation",
       "ok": true,
-      "durationMs": 4531
+      "durationMs": 4494
     },
     {
       "name": "barrier",
       "ok": true,
-      "durationMs": 4990
+      "durationMs": 4710
     },
     {
       "name": "short_pick",
       "ok": true,
-      "durationMs": 3884
+      "durationMs": 3593
     },
     {
       "name": "oos",
       "ok": true,
-      "durationMs": 6502
+      "durationMs": 6182
     },
     {
       "name": "late_order",
       "ok": true,
-      "durationMs": 4687
+      "durationMs": 4321
     },
     {
       "name": "recovery",
       "ok": true,
-      "durationMs": 4569
+      "durationMs": 4161
     },
     {
       "name": "hidden_item",
       "ok": true,
-      "durationMs": 6136
+      "durationMs": 6115
     },
     {
       "name": "group_mismatch",
       "ok": true,
-      "durationMs": 4513
+      "durationMs": 4432
     }
   ],
   "assertions": [
     {
       "ok": true,
       "name": "MongoDB connection",
-      "details": "db=tg_manager host=ac-hq2xfhf-shard-00-01.epfky0s.mongodb.net"
+      "details": "db=tg_manager host=ac-hq2xfhf-shard-00-01.epfky0s.mongodb.net allowed=epfky0s.mongodb.net"
     },
     {
       "ok": true,
-      "name": "Test-cluster guard",
-      "details": "host matches epfky0s.mongodb.net"
-    },
-    {
-      "ok": true,
-      "name": "ordering.schedule exists in live DB",
+      "name": "Synthetic per-group schedule can represent ordering-open phase",
       "details": ""
     },
     {
       "ok": true,
-      "name": "ordering.schedule loaded",
-      "details": "03:30 → 07:30"
-    },
-    {
-      "ok": true,
-      "name": "At least one synthetic delivery day is currently in ordering-open phase",
-      "details": "day=6"
-    },
-    {
-      "ok": true,
-      "name": "At least one synthetic delivery day is currently in picking-allowed phase",
-      "details": "day=0"
+      "name": "Synthetic per-group schedule can represent picking-allowed phase",
+      "details": ""
     },
     {
       "ok": true,
@@ -128,6 +113,11 @@
     {
       "ok": true,
       "name": "OrderingSession groupId+openDate unique index exists",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "Critical Block partial unique index exists",
       "details": ""
     },
     {
@@ -152,6 +142,11 @@
     },
     {
       "ok": true,
+      "name": "happy: synthetic per-group ordering window starts open",
+      "details": ""
+    },
+    {
+      "ok": true,
       "name": "happy: HTTP order accepted",
       "details": "status=201 error="
     },
@@ -163,7 +158,7 @@
     {
       "ok": true,
       "name": "happy: repeated seller submit merges into the SAME Order",
-      "details": "actual=\"6a7654c28492df62698fb598\" expected=\"6a7654c28492df62698fb598\""
+      "details": "actual=\"6a78fd45aa6147ba06287b6d\" expected=\"6a78fd45aa6147ba06287b6d\""
     },
     {
       "ok": true,
@@ -177,13 +172,38 @@
     },
     {
       "ok": true,
+      "name": "happy: navigation state accepts legacy payload without cart_stale",
+      "details": "actual=200 expected=200"
+    },
+    {
+      "ok": true,
+      "name": "happy: navigation save does not erase legacy cartState.orderItems",
+      "details": "actual=7 expected=7"
+    },
+    {
+      "ok": true,
+      "name": "happy: navigation save does not erase legacy cartState.orderItemIds",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "happy: repeated navigation save is last-write-wins (no stale revision 409)",
+      "details": "actual=200 expected=200"
+    },
+    {
+      "ok": true,
       "name": "happy: LIVE Mongo unique index rejects second active Order for same seller+shop+session",
       "details": ""
     },
     {
       "ok": true,
+      "name": "happy: closed synthetic schedule exists",
+      "details": ""
+    },
+    {
+      "ok": true,
       "name": "happy: ordering session identity survives open→closed test phase",
-      "details": "actual=\"6a7654c24567e979299a3316\" expected=\"6a7654c24567e979299a3316\""
+      "details": "actual=\"6a78fd454567e979299c200d\" expected=\"6a78fd454567e979299c200d\""
     },
     {
       "ok": true,
@@ -273,7 +293,12 @@
     {
       "ok": true,
       "name": "happy: SCENARIO PASS",
-      "details": "7036 ms"
+      "details": "7076 ms"
+    },
+    {
+      "ok": true,
+      "name": "remove_last: synthetic per-group ordering window starts open",
+      "details": ""
     },
     {
       "ok": true,
@@ -293,7 +318,12 @@
     {
       "ok": true,
       "name": "remove_last: SCENARIO PASS",
-      "details": "1527 ms"
+      "details": "1565 ms"
+    },
+    {
+      "ok": true,
+      "name": "conflict_move: synthetic per-group ordering window starts open",
+      "details": ""
     },
     {
       "ok": true,
@@ -304,11 +334,16 @@
       "ok": true,
       "name": "conflict_move: HTTP order accepted",
       "details": "status=201 error="
+    },
+    {
+      "ok": true,
+      "name": "conflict_move: closed synthetic schedule exists",
+      "details": ""
     },
     {
       "ok": true,
       "name": "conflict_move: ordering session identity survives open→closed test phase",
-      "details": "actual=\"6a7654cc4567e979299a331a\" expected=\"6a7654cc4567e979299a331a\""
+      "details": "actual=\"6a78fd4f4567e979299c2013\" expected=\"6a78fd4f4567e979299c2013\""
     },
     {
       "ok": true,
@@ -333,7 +368,7 @@
     {
       "ok": true,
       "name": "conflict_move: seller assignment moved",
-      "details": "actual=\"6a7654cb8492df62698fb6a1\" expected=\"6a7654cb8492df62698fb6a1\""
+      "details": "actual=\"6a78fd4eaa6147ba06287c7e\" expected=\"6a78fd4eaa6147ba06287c7e\""
     },
     {
       "ok": true,
@@ -368,7 +403,12 @@
     {
       "ok": true,
       "name": "conflict_move: SCENARIO PASS",
-      "details": "6406 ms"
+      "details": "6098 ms"
+    },
+    {
+      "ok": true,
+      "name": "conflict_relocate: synthetic per-group ordering window starts open",
+      "details": ""
     },
     {
       "ok": true,
@@ -384,11 +424,16 @@
       "ok": true,
       "name": "conflict_relocate: HTTP order accepted",
       "details": "status=201 error="
+    },
+    {
+      "ok": true,
+      "name": "conflict_relocate: closed synthetic schedule exists",
+      "details": ""
     },
     {
       "ok": true,
       "name": "conflict_relocate: ordering session identity survives open→closed test phase",
-      "details": "actual=\"6a7654d34567e979299a331c\" expected=\"6a7654d34567e979299a331c\""
+      "details": "actual=\"6a78fd564567e979299c2015\" expected=\"6a78fd564567e979299c2015\""
     },
     {
       "ok": true,
@@ -413,7 +458,7 @@
     {
       "ok": true,
       "name": "conflict_relocate: target shop is reported as the new conflict",
-      "details": "value=__LIVE_E2E__20260807215713-0fb5a3:conflict_relocate:shop:2"
+      "details": "value=__LIVE_E2E__20260809222048-4d089f:conflict_relocate:shop:2"
     },
     {
       "ok": true,
@@ -448,7 +493,12 @@
     {
       "ok": true,
       "name": "conflict_relocate: SCENARIO PASS",
-      "details": "7636 ms"
+      "details": "7310 ms"
+    },
+    {
+      "ok": true,
+      "name": "conflict_unassign: synthetic per-group ordering window starts open",
+      "details": ""
     },
     {
       "ok": true,
@@ -459,11 +509,16 @@
       "ok": true,
       "name": "conflict_unassign: HTTP order accepted",
       "details": "status=201 error="
+    },
+    {
+      "ok": true,
+      "name": "conflict_unassign: closed synthetic schedule exists",
+      "details": ""
     },
     {
       "ok": true,
       "name": "conflict_unassign: ordering session identity survives open→closed test phase",
-      "details": "actual=\"6a7654db4567e979299a331f\" expected=\"6a7654db4567e979299a331f\""
+      "details": "actual=\"6a78fd5e4567e979299c201a\" expected=\"6a78fd5e4567e979299c201a\""
     },
     {
       "ok": true,
@@ -528,7 +583,12 @@
     {
       "ok": true,
       "name": "conflict_unassign: SCENARIO PASS",
-      "details": "5646 ms"
+      "details": "5627 ms"
+    },
+    {
+      "ok": true,
+      "name": "coverage: synthetic per-group ordering window starts open",
+      "details": ""
     },
     {
       "ok": true,
@@ -537,8 +597,13 @@
     },
     {
       "ok": true,
+      "name": "coverage: closed synthetic schedule exists",
+      "details": ""
+    },
+    {
+      "ok": true,
       "name": "coverage: ordering session identity survives open→closed test phase",
-      "details": "actual=\"6a7654e14567e979299a3321\" expected=\"6a7654e14567e979299a3321\""
+      "details": "actual=\"6a78fd644567e979299c201f\" expected=\"6a78fd644567e979299c201f\""
     },
     {
       "ok": true,
@@ -593,7 +658,12 @@
     {
       "ok": true,
       "name": "coverage: SCENARIO PASS",
-      "details": "5058 ms"
+      "details": "5132 ms"
+    },
+    {
+      "ok": true,
+      "name": "isolation: synthetic per-group ordering window starts open",
+      "details": ""
     },
     {
       "ok": true,
@@ -602,8 +672,13 @@
     },
     {
       "ok": true,
+      "name": "isolation: closed synthetic schedule exists",
+      "details": ""
+    },
+    {
+      "ok": true,
       "name": "isolation: ordering session identity survives open→closed test phase",
-      "details": "actual=\"6a7654e74567e979299a3325\" expected=\"6a7654e74567e979299a3325\""
+      "details": "actual=\"6a78fd6a4567e979299c2022\" expected=\"6a78fd6a4567e979299c2022\""
     },
     {
       "ok": true,
@@ -673,7 +748,12 @@
     {
       "ok": true,
       "name": "isolation: SCENARIO PASS",
-      "details": "4531 ms"
+      "details": "4494 ms"
+    },
+    {
+      "ok": true,
+      "name": "barrier: synthetic per-group ordering window starts open",
+      "details": ""
     },
     {
       "ok": true,
@@ -682,8 +762,13 @@
     },
     {
       "ok": true,
+      "name": "barrier: closed synthetic schedule exists",
+      "details": ""
+    },
+    {
+      "ok": true,
       "name": "barrier: ordering session identity survives open→closed test phase",
-      "details": "actual=\"6a7654ec4567e979299a3329\" expected=\"6a7654ec4567e979299a3329\""
+      "details": "actual=\"6a78fd6f4567e979299c2025\" expected=\"6a78fd6f4567e979299c2025\""
     },
     {
       "ok": true,
@@ -748,7 +833,12 @@
     {
       "ok": true,
       "name": "barrier: SCENARIO PASS",
-      "details": "4990 ms"
+      "details": "4710 ms"
+    },
+    {
+      "ok": true,
+      "name": "short_pick: synthetic per-group ordering window starts open",
+      "details": ""
     },
     {
       "ok": true,
@@ -757,8 +847,13 @@
     },
     {
       "ok": true,
+      "name": "short_pick: closed synthetic schedule exists",
+      "details": ""
+    },
+    {
+      "ok": true,
       "name": "short_pick: ordering session identity survives open→closed test phase",
-      "details": "actual=\"6a7654f24567e979299a332e\" expected=\"6a7654f24567e979299a332e\""
+      "details": "actual=\"6a78fd754567e979299c2027\" expected=\"6a78fd754567e979299c2027\""
     },
     {
       "ok": true,
@@ -813,7 +908,12 @@
     {
       "ok": true,
       "name": "short_pick: SCENARIO PASS",
-      "details": "3884 ms"
+      "details": "3593 ms"
+    },
+    {
+      "ok": true,
+      "name": "oos: synthetic per-group ordering window starts open",
+      "details": ""
     },
     {
       "ok": true,
@@ -824,11 +924,16 @@
       "ok": true,
       "name": "oos: HTTP order accepted",
       "details": "status=201 error="
+    },
+    {
+      "ok": true,
+      "name": "oos: closed synthetic schedule exists",
+      "details": ""
     },
     {
       "ok": true,
       "name": "oos: ordering session identity survives open→closed test phase",
-      "details": "actual=\"6a7654f74567e979299a3330\" expected=\"6a7654f74567e979299a3330\""
+      "details": "actual=\"6a78fd794567e979299c2029\" expected=\"6a78fd794567e979299c2029\""
     },
     {
       "ok": true,
@@ -898,7 +1003,12 @@
     {
       "ok": true,
       "name": "oos: SCENARIO PASS",
-      "details": "6502 ms"
+      "details": "6182 ms"
+    },
+    {
+      "ok": true,
+      "name": "late_order: synthetic per-group ordering window starts open",
+      "details": ""
     },
     {
       "ok": true,
@@ -907,8 +1017,13 @@
     },
     {
       "ok": true,
+      "name": "late_order: closed synthetic schedule exists",
+      "details": ""
+    },
+    {
+      "ok": true,
       "name": "late_order: ordering session identity survives open→closed test phase",
-      "details": "actual=\"6a7654fe4567e979299a3332\" expected=\"6a7654fe4567e979299a3332\""
+      "details": "actual=\"6a78fd804567e979299c202c\" expected=\"6a78fd804567e979299c202c\""
     },
     {
       "ok": true,
@@ -973,7 +1088,12 @@
     {
       "ok": true,
       "name": "late_order: SCENARIO PASS",
-      "details": "4687 ms"
+      "details": "4321 ms"
+    },
+    {
+      "ok": true,
+      "name": "recovery: synthetic per-group ordering window starts open",
+      "details": ""
     },
     {
       "ok": true,
@@ -982,8 +1102,13 @@
     },
     {
       "ok": true,
+      "name": "recovery: closed synthetic schedule exists",
+      "details": ""
+    },
+    {
+      "ok": true,
       "name": "recovery: ordering session identity survives open→closed test phase",
-      "details": "actual=\"6a7655044567e979299a3335\" expected=\"6a7655044567e979299a3335\""
+      "details": "actual=\"6a78fd854567e979299c202e\" expected=\"6a78fd854567e979299c202e\""
     },
     {
       "ok": true,
@@ -1038,7 +1163,12 @@
     {
       "ok": true,
       "name": "recovery: SCENARIO PASS",
-      "details": "4569 ms"
+      "details": "4161 ms"
+    },
+    {
+      "ok": true,
+      "name": "hidden_item: synthetic per-group ordering window starts open",
+      "details": ""
     },
     {
       "ok": true,
@@ -1047,8 +1177,13 @@
     },
     {
       "ok": true,
+      "name": "hidden_item: closed synthetic schedule exists",
+      "details": ""
+    },
+    {
+      "ok": true,
       "name": "hidden_item: ordering session identity survives open→closed test phase",
-      "details": "actual=\"6a7655094567e979299a3337\" expected=\"6a7655094567e979299a3337\""
+      "details": "actual=\"6a78fd8a4567e979299c2031\" expected=\"6a78fd8a4567e979299c2031\""
     },
     {
       "ok": true,
@@ -1118,7 +1253,12 @@
     {
       "ok": true,
       "name": "hidden_item: SCENARIO PASS",
-      "details": "6136 ms"
+      "details": "6115 ms"
+    },
+    {
+      "ok": true,
+      "name": "group_mismatch: synthetic per-group ordering window starts open",
+      "details": ""
     },
     {
       "ok": true,
@@ -1127,8 +1267,13 @@
     },
     {
       "ok": true,
+      "name": "group_mismatch: closed synthetic schedule exists",
+      "details": ""
+    },
+    {
+      "ok": true,
       "name": "group_mismatch: ordering session identity survives open→closed test phase",
-      "details": "actual=\"6a7655104567e979299a3339\" expected=\"6a7655104567e979299a3339\""
+      "details": "actual=\"6a78fd914567e979299c2036\" expected=\"6a78fd914567e979299c2036\""
     },
     {
       "ok": true,
@@ -1188,7 +1333,7 @@
     {
       "ok": true,
       "name": "group_mismatch: SCENARIO PASS",
-      "details": "4513 ms"
+      "details": "4432 ms"
     }
   ],
   "preserved": []
