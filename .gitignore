@@ -1,9 +1,8 @@
 ﻿node_modules/
+docs/
+test/
 .env
 .env.*
 .DS_Store
 npm-debug.log*
-
-arturmarkarag-db-user.env
-
 arturmarkarag-db-user.env
