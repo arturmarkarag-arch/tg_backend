@@ -17,7 +17,12 @@
     "migrate:group-schedules:apply": "node scripts/migrateDeliveryGroupSchedules.js --apply",
     "test:schedule": "vitest run tests/orderingSchedulePerGroup.test.js tests/perGroupSchedule.contract.test.js tests/perGroupSessionIdentity.test.js tests/deliveryGroupSchedulePreflight.test.js tests/perGroupTestSchedule.test.js",
     "test:schedule:smoke": "node scripts/smokePerGroupSchedule.js",
-    "test:v28:regressions": "vitest run tests/sessionCoverageTerminalRepair.test.js tests/perGroupTestSchedule.test.js tests/perGroupSchedule.contract.test.js"
+    "test:v28:regressions": "vitest run tests/sessionCoverageTerminalRepair.test.js tests/perGroupTestSchedule.test.js tests/perGroupSchedule.contract.test.js",
+    "migrate:voided-items": "node scripts/backfillVoidedItems.js",
+    "migrate:voided-items:apply": "node scripts/backfillVoidedItems.js --execute",
+    "migrate:session-seq": "node scripts/backfillSessionSeq.js",
+    "migrate:session-seq:apply": "node scripts/backfillSessionSeq.js --execute",
+    "test:v30:hardening": "node scripts/checkV30DataHardening.js"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1030.0",

@@ -131,7 +131,7 @@ async function archiveProduct(productOrId, { notifyBuyers = false, bot = null, r
 
     for (const order of activeOrders) {
       const matchingItems = order.items.filter(
-        (i) => String(i.productId) === String(product._id) && !i.packed && !i.cancelled && !i.skipped
+        (i) => String(i.productId) === String(product._id) && !i.packed && !i.cancelled && !i.skipped && !i.voided
       );
       if (!matchingItems.length) continue;
 
@@ -214,6 +214,10 @@ async function archiveProduct(productOrId, { notifyBuyers = false, bot = null, r
     oldOrderNumber = product.orderNumber;
     product.status = 'archived';
     product.archivedAt = new Date();
+    product.archivedBy = String(actor?.by || '');
+    product.archivedByName = String(actor?.byName || (reason === 'system_archive' ? 'Система' : ''));
+    product.archivedByRole = String(actor?.byRole || (reason === 'system_archive' ? 'system' : ''));
+    product.archiveReason = String(reason || 'manual_archive');
     product.originalOrderNumber = oldOrderNumber;
     product.orderNumber = 0;
     await product.save({ session });

@@ -22,6 +22,7 @@ const {
 } = require('../utils/orderingSchedule');
 const { getOrCreateSessionId } = require('../utils/getOrCreateSession');
 const { pushSessionEvent } = require('../utils/sessionStatus');
+const { openItemArrayFilter } = require('../utils/orderItemState');
 const { normalizeDeliveryGroup } = require('../utils/deliveryGroupHelpers');
 const { deriveSessionPhase, PHASE_VOCAB } = require('../utils/sessionVocab');
 const { getIO } = require('../socket');
@@ -607,7 +608,7 @@ router.get('/:groupId/shop-status', telegramAuth, requireTelegramRoles(['admin',
       buyerName: buyerInfoById[String(order.buyerTelegramId)]?.name || order.buyerTelegramId,
       buyerRole: buyerInfoById[String(order.buyerTelegramId)]?.role || 'seller',
       buyerUsername: buyerInfoById[String(order.buyerTelegramId)]?.username || '',
-      itemCount: (order.items || []).filter((i) => !i.cancelled && !i.skipped).length,
+      itemCount: (order.items || []).filter((i) => !i.cancelled && !i.skipped && !i.voided).length,
       createdAt: order.createdAt,
       wasReassigned,
       fromShopName: wasReassigned ? (reassignEntry?.meta?.from?.shopName || null) : null,
@@ -618,7 +619,7 @@ router.get('/:groupId/shop-status', telegramAuth, requireTelegramRoles(['admin',
     });
     if (!orderedByShop[shopId]) orderedByShop[shopId] = new Set();
     for (const item of order.items || []) {
-      if (item.productId && !item.cancelled && !item.skipped) orderedByShop[shopId].add(String(item.productId));
+      if (item.productId && !item.cancelled && !item.skipped && !item.voided) orderedByShop[shopId].add(String(item.productId));
     }
   }
 
@@ -795,7 +796,7 @@ router.get('/:groupId/shop-status', telegramAuth, requireTelegramRoles(['admin',
       buyerUsername: buyerInfoById[String(order.buyerTelegramId)]?.username || '',
       shopName: order.buyerSnapshot?.shopName || '—',
       shopCity: order.buyerSnapshot?.shopCity || '',
-      itemCount: (order.items || []).filter((i) => !i.cancelled && !i.skipped).length,
+      itemCount: (order.items || []).filter((i) => !i.cancelled && !i.skipped && !i.voided).length,
       orderingSessionId: order.orderingSessionId || '',
       createdAt: order.createdAt,
     })),
@@ -846,7 +847,7 @@ router.get('/:groupId/shops/:shopId/ordered-products', telegramAuth, requireTele
   const seen = new Set();
   for (const order of orders) {
     for (const item of order.items || []) {
-      if (!item.productId || item.cancelled || item.skipped) continue;
+      if (!item.productId || item.cancelled || item.skipped || item.voided) continue;
       const id = String(item.productId);
       if (seen.has(id)) continue;
       seen.add(id);
@@ -962,8 +963,18 @@ router.post('/:id/close-ordering-session', telegramAuth, requireTelegramRole('ad
   const session = await mongoose.connection.startSession();
   try {
     await session.withTransaction(async () => {
+      const expiredAt = new Date();
       const result = await Order.updateMany(
-        staleOrderFilter, { status: 'expired' }, { session },
+        staleOrderFilter,
+        {
+          $set: {
+            status: 'expired',
+            'items.$[open].voided': true,
+            'items.$[open].voidReason': 'order_expired',
+            'items.$[open].voidedAt': expiredAt,
+          },
+        },
+        { session, arrayFilters: [openItemArrayFilter('open')] },
       );
       expiredCount = result.modifiedCount ?? result.nModified ?? 0;
     });

@@ -14,9 +14,10 @@ const PickingTask = require('../models/PickingTask');
 const OrderingSession = require('../models/OrderingSession');
 const Product = require('../models/Product');
 const { auditSessionCoverage } = require('./sessionCoverage');
+const { isTerminalOrderItem } = require('../utils/orderItemState');
 
 const str = (v) => (v == null ? '' : String(v));
-const terminalItem = (i) => Boolean(i?.packed || i?.cancelled || i?.skipped);
+const terminalItem = isTerminalOrderItem;
 
 function issue(code, items, extra = {}) {
   return { code, count: Array.isArray(items) ? items.length : 0, items: items || [], ...extra };

@@ -3,10 +3,10 @@
 /**
  * Session coverage audit — the invariant that keeps ordered goods from vanishing.
  *
- * For every LIVE item of a session's orders (not packed, not cancelled, not
- * skipped) exactly one of two things must be true:
- *   1. it is terminal (packed / cancelled / skipped), or
- *   2. it is represented in exactly one active PickingTask.
+ * For every item of a session's non-expired orders exactly one of the lifecycle
+ * outcomes must hold: it is already terminal (packed / cancelled / skipped /
+ * voided), or—while still live—it is represented in exactly one active
+ * PickingTask.
  *
  * Nothing enforced that before. `taskBuilder` silently `continue`s past an item
  * whose product has no block position, was archived, or no longer exists, and
@@ -30,6 +30,7 @@ const { archiveProduct, getProductTitle } = require('./archiveProduct');
 const { resolveOrderStatusAfterCancel } = require('../utils/orderStatus');
 const { isOrderingOpen } = require('../utils/orderingSchedule');
 const { roundMoney } = require('../utils/money');
+const { isTerminalOrderItem } = require('../utils/orderItemState');
 
 /**
  * Why an item could not be turned into picking work. Order matters — the first
@@ -72,7 +73,7 @@ async function auditSessionCoverage({ deliveryGroupId, orderingSessionId }) {
   const liveItems = [];
   for (const order of orders) {
     for (const item of order.items || []) {
-      if (item.packed || item.cancelled || item.skipped) continue;
+      if (isTerminalOrderItem(item)) continue;
       liveItems.push({ order, item, productId: item.productId ? String(item.productId) : null });
     }
   }
@@ -184,7 +185,7 @@ async function cancelDanglingSessionItems({
   let cancelledCount = 0;
   for (const order of orders) {
     const matching = (order.items || []).filter((i) => {
-      if (i.packed || i.cancelled || i.skipped) return false;
+      if (isTerminalOrderItem(i)) return false;
       return pid ? String(i.productId) === pid : !i.productId;
     });
     if (!matching.length) continue;

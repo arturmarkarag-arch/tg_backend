@@ -1,6 +1,7 @@
 'use strict';
 
 const OrderingSession = require('../models/OrderingSession');
+const Order = require('../models/Order');
 const Counter = require('../models/Counter');
 const { withLock } = require('./lock');
 
@@ -38,8 +39,31 @@ async function ensureSessionSeq(sessionId, groupId) {
     async () => {
       // Re-read under the lock — a concurrent first-order may have assigned it
       // between our check above and acquiring the lock.
-      const fresh = await OrderingSession.findById(sid, 'seq').lean();
+      const fresh = await OrderingSession.findById(sid, 'seq groupId openDate').lean();
       if (fresh && fresh.seq != null) return fresh.seq;
+      if (!fresh) return null;
+
+      // Bootstrap guard for the 2026-08-10 rollout: never let a newly deployed
+      // runtime call the CURRENT session "№1" while older content-bearing sessions
+      // still have seq=null. The backfill numbers those historical sessions first.
+      // This check runs only at the first-number boundary (once per weekly session),
+      // so the extra reads are negligible and protect chronological numbering even
+      // if someone deploys before running scripts/backfillSessionSeq.js.
+      const olderUnnumbered = await OrderingSession.find(
+        { groupId: gid, openDate: { $lt: fresh.openDate }, seq: null },
+        '_id',
+      ).lean();
+      if (olderUnnumbered.length) {
+        const olderHasOrders = await Order.exists({
+          orderingSessionId: { $in: olderUnnumbered.map((row) => String(row._id)) },
+        });
+        if (olderHasOrders) {
+          console.warn(
+            `[sessionSeq] ${sid} left unnumbered: older content-bearing sessions in group ${gid} need backfill first`,
+          );
+          return null;
+        }
+      }
 
       const counter = await Counter.findOneAndUpdate(
         { name: `session-seq:${gid}` },

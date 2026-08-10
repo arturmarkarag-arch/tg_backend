@@ -37,6 +37,13 @@ const OrderItemSchema = new mongoose.Schema({
   // this session: excluded from picking, totals and "left to pick" counts, but
   // NOT delivered. See services/lateOrderReconcile.js.
   skipped: { type: Boolean, default: false },
+  // ORDER-LEVEL retirement: the whole order left this delivery cycle (expired).
+  // Distinct from `cancelled` (warehouse/OOS) and `skipped` (strict late-order).
+  // Keeps historical ordered-vs-delivered analytics explicit instead of leaving
+  // forever-open rows hidden behind Order.status='expired'.
+  voided: { type: Boolean, default: false },
+  voidReason: { type: String, default: '' },
+  voidedAt: { type: Date, default: null },
 });
 
 const BuyerSnapshotSchema = new mongoose.Schema({
@@ -126,6 +133,9 @@ function normalizeOrderItems(items = []) {
         packed: Boolean(item.packed),
         cancelled: Boolean(item.cancelled),
         skipped: Boolean(item.skipped),
+        voided: Boolean(item.voided),
+        voidReason: item.voidReason || '',
+        voidedAt: item.voidedAt || null,
         // Fulfilment fields must be carried through: this normaliser REPLACES
         // `items` wholesale, so anything omitted here is silently erased from a
         // merged order — which would quietly destroy the ordered-vs-delivered
@@ -141,6 +151,9 @@ function normalizeOrderItems(items = []) {
       existing.packed = existing.packed || Boolean(item.packed);
       existing.cancelled = existing.cancelled || Boolean(item.cancelled);
       existing.skipped = existing.skipped || Boolean(item.skipped);
+      existing.voided = existing.voided || Boolean(item.voided);
+      existing.voidReason = existing.voidReason || item.voidReason || '';
+      existing.voidedAt = existing.voidedAt || item.voidedAt || null;
       // Delivered units add up the same way ordered units do; null + null stays
       // null so an untouched merge is not turned into a "0 delivered" record.
       if (item.packedQuantity != null || existing.packedQuantity != null) {

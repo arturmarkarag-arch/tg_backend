@@ -18,7 +18,7 @@ const { buildUnreconciledOosTaskFilter } = require('../utils/pickingOosRecovery'
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
-const LOCK_TIMEOUT_MS      = 15 * 60 * 1000;            // 15 min — stale worker lock
+const LOCK_TIMEOUT_MS      =  5 * 60 * 1000;            //  5 min — stale worker lock
 const FORCE_CLAIM_AFTER_MS =  3 * 60 * 1000;            //  3 min — force-claim guard
 const COMPLETED_TTL_MS     = 90 * 24 * 60 * 60 * 1000;  // 90 days — completed-task retention (TTL)
 
@@ -144,7 +144,7 @@ async function finalizeSessionAndGetBlockers(orderingSessionId, deliveryGroupId,
 
 /**
  * Mark Order items as packed for a given product and auto-fulfil the Order
- * when every non-cancelled item is packed.
+ * when every item is terminal (packed / cancelled / skipped / voided).
  */
 async function markOrderItemsPacked(taskItems, productId, actor = { by: 'system', byName: '', byRole: 'system' }, session = null) {
   const opts    = session ? { session } : {};
@@ -188,7 +188,7 @@ async function markOrderItemsPacked(taskItems, productId, actor = { by: 'system'
           status: { $in: ['new', 'in_progress'] },
           // A `skipped` item (late, strict-missed) is terminal and must NOT keep an
           // order from auto-fulfilling — treat it like packed/cancelled here.
-          items: { $not: { $elemMatch: { packed: false, cancelled: false, skipped: { $ne: true } } } },
+          items: { $not: { $elemMatch: { packed: false, cancelled: false, skipped: { $ne: true }, voided: { $ne: true } } } },
         },
         {
           $set: { status: 'fulfilled' },
@@ -356,6 +356,78 @@ async function releaseOtherLocksOfWorker(userTelegramId, keepTaskId) {
 
   await PickingTask.updateMany(filter, { $set: { status: 'pending', lockedBy: null, lockedAt: null } });
   return stray.map((t) => String(t._id));
+}
+
+/**
+ * Explicitly release the CURRENT task back to the queue without completing it.
+ *
+ * This is the intentional "I need to leave" path. Partial packed progress is
+ * preserved, and the task becomes immediately claimable by another worker.
+ * Only the worker who currently owns the lock may release it.
+ *
+ * packedOrderIds is accepted as the final authoritative checkbox snapshot so
+ * the last UI state and the unlock can commit in one compare-and-swap.
+ */
+async function releasePickingTask({ taskId, userTelegramId, packedOrderIds = null }) {
+  const uid = String(userTelegramId || '');
+  const task = await PickingTask.findById(taskId);
+  if (!task) throw Object.assign(new Error('Task not found'), { code: 'picking_task_not_found' });
+
+  if (task.status === 'pending') {
+    return { released: false, alreadyReleased: true, task: task.toObject() };
+  }
+  if (task.status !== 'locked') {
+    throw Object.assign(new Error('Task unavailable'), { code: 'picking_release_unavailable' });
+  }
+  if (String(task.lockedBy || '') !== uid) {
+    throw Object.assign(new Error('Lock expired'), { code: 'expired_lock' });
+  }
+
+  let items = task.items.map((it) => (typeof it.toObject === 'function' ? it.toObject() : { ...it }));
+  if (Array.isArray(packedOrderIds)) {
+    const packedSet = new Set(packedOrderIds.map(String));
+    items = items.map((it) => ({ ...it, packed: packedSet.has(String(it.orderId)) }));
+  }
+
+  const released = await PickingTask.findOneAndUpdate(
+    {
+      _id: task._id,
+      status: 'locked',
+      lockedBy: uid,
+      __v: task.__v,
+    },
+    {
+      $set: {
+        items,
+        status: 'pending',
+        lockedBy: null,
+        lockedAt: null,
+      },
+      $inc: { __v: 1 },
+    },
+    { new: true },
+  );
+
+  if (!released) {
+    const current = await PickingTask.findById(task._id).lean();
+    if (current?.status === 'pending') {
+      return { released: false, alreadyReleased: true, task: current };
+    }
+    throw Object.assign(new Error('Lock expired'), { code: 'expired_lock' });
+  }
+
+  try {
+    const io = getIO();
+    io?.emit('picking_task_released', {
+      taskId: String(released._id),
+      deliveryGroupId: String(released.deliveryGroupId || ''),
+      orderingSessionId: String(released.orderingSessionId || ''),
+      blockId: released.blockId,
+      positionIndex: released.positionIndex,
+    });
+  } catch { /* socket is non-critical / absent in tests */ }
+
+  return { released: true, alreadyReleased: false, task: released.toObject() };
 }
 
 /**
@@ -796,6 +868,7 @@ module.exports = {
   findAndLockNext,
   releaseWorkerAndStaleLocks,
   releaseOtherLocksOfWorker,
+  releasePickingTask,
   markSessionInProgress,
   completePickingTask,
   outOfStockPickingTask,

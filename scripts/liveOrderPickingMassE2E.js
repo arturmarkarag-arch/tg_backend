@@ -155,7 +155,7 @@ function tid(task) {
   return str(task?.taskId || task?._id);
 }
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
-function terminal(i) { return Boolean(i?.packed || i?.cancelled || i?.skipped); }
+function terminal(i) { return Boolean(i?.packed || i?.cancelled || i?.skipped || i?.voided); }
 function log(s = '') { console.log(s); }
 function section(t) { log(`\n${'═'.repeat(90)}\n${t}\n${'═'.repeat(90)}`); }
 function check(cond, name, details = '') {
@@ -824,7 +824,25 @@ async function runMass() {
 
   section('REPAIR FINAL POISON');
   await PickingTask.deleteOne({ _id: poisonTask._id });
-  await Order.updateOne({ _id: poisonOrder._id }, { $set: { status: 'expired' } });
+  await Order.updateOne(
+    { _id: poisonOrder._id },
+    {
+      $set: {
+        status: 'expired',
+        'items.$[open].voided': true,
+        'items.$[open].voidReason': 'order_expired',
+        'items.$[open].voidedAt': new Date(),
+      },
+    },
+    {
+      arrayFilters: [{
+        'open.packed': { $ne: true },
+        'open.cancelled': { $ne: true },
+        'open.skipped': { $ne: true },
+        'open.voided': { $ne: true },
+      }],
+    },
+  );
   const repair = await api('POST', '/api/picking/resolve-coverage-gap', wh0, {
     deliveryGroupId: str(world.group._id), productId: str(hiddenProduct._id),
   }, 'POST coverage-repair');

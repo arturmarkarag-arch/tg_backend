@@ -3,7 +3,7 @@
  * closeEmptyOrders — one-off cleanup for "ghost" orders.
  *
  * A ghost is an order still in `new`/`in_progress` whose every position is
- * cancelled or skipped: nothing to pick, nothing to deliver, invisible on every
+ * cancelled, skipped, or voided: nothing to pick, nothing to deliver, invisible on every
  * board (they count live positions) — but visible to any guard that reads the
  * status alone. That is what blocked the Четвер group's delivery-day change:
  * order #1 (Швіднік), placed 29.07.2026 and emptied by the seller 13 seconds later.
@@ -32,7 +32,7 @@ const EXECUTE = process.argv.includes('--execute');
   // Active status, and NO position that is still live.
   const ghosts = await Order.find({
     status: { $in: ['new', 'in_progress'] },
-    items: { $not: { $elemMatch: { cancelled: { $ne: true }, skipped: { $ne: true } } } },
+    items: { $not: { $elemMatch: { cancelled: { $ne: true }, skipped: { $ne: true }, voided: { $ne: true } } } },
   }).lean();
 
   console.log(`[closeEmptyOrders] found ${ghosts.length} empty active order(s)`);
@@ -59,7 +59,7 @@ const EXECUTE = process.argv.includes('--execute');
         // find() above and this update the seller may have added a position back
         // (the ordering window can be open while this runs). Without the guard the
         // script would cancel a live order behind their back.
-        items: { $not: { $elemMatch: { cancelled: { $ne: true }, skipped: { $ne: true } } } },
+        items: { $not: { $elemMatch: { cancelled: { $ne: true }, skipped: { $ne: true }, voided: { $ne: true } } } },
       },
       {
         $set: { status: 'cancelled' },

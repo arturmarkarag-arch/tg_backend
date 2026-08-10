@@ -19,6 +19,13 @@ function addDaysToDateStr(dateStr, days) {
 }
 
 async function upsertSession(gid, openDate, schedule) {
+  // Hot/read path first: polling an already-materialised session must be a READ,
+  // not a findOneAndUpdate. With Mongoose timestamps the old $setOnInsert upsert
+  // still bumped updatedAt on every poll even when nothing changed.
+  const existing = await OrderingSession.findOne({ groupId: gid, openDate });
+  if (existing) return existing;
+
+  // Only a genuinely missing session reaches the race-safe upsert below.
   const normalizedSchedule = normalizeOrderingSchedule(schedule);
   const { openAt, closeAt } = getOrderingWindowBoundsForOpenDate(openDate, normalizedSchedule);
   try {

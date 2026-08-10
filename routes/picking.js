@@ -15,6 +15,7 @@ const { auditSessionCoverage, resolveCoverageGap } = require('../services/sessio
 const { auditSessionClosure } = require('../services/sessionClosure');
 const { isOrderingOpen, getOrderingWindowCloseAt, getOrderingWindowOpenAt, getOpenDateWarsaw } = require('../utils/orderingSchedule');
 const { getOrCreateSessionId, findCurrentSessionId } = require('../utils/getOrCreateSession');
+const { ensureSessionSeq } = require('../utils/sessionSeq');
 const { normalizeDeliveryGroup } = require('../utils/deliveryGroupHelpers');
 const { appError, asyncHandler } = require('../utils/errors');
 const { withLock } = require('../utils/lock');
@@ -38,6 +39,7 @@ const {
   reconcileActiveTasksForSession,
   archiveOrphanedOutOfStockProducts,
   releaseOtherLocksOfWorker,
+  releasePickingTask,
   markSessionInProgress,
   FORCE_CLAIM_AFTER_MS,
 } = require('../services/pickingService');
@@ -86,12 +88,12 @@ async function countOrderedPositions(deliveryGroupId) {
         status: { $in: ['new', 'in_progress'] },
         orderingSessionId: String(session._id),
       },
-      'items.productId items.packed items.cancelled items.skipped',
+      'items.productId items.packed items.cancelled items.skipped items.voided',
     ).lean();
     const products = new Set();
     for (const o of orders) {
       for (const it of o.items || []) {
-        if (it.packed || it.cancelled || it.skipped || !it.productId) continue;
+        if (it.packed || it.cancelled || it.skipped || it.voided || !it.productId) continue;
         products.add(String(it.productId));
       }
     }
@@ -404,6 +406,18 @@ router.post('/start-session', requireTelegramRoles(['warehouse', 'admin']), asyn
         }
       }
       return res.json({ unresolved: true, conflicts, ...baseEnvelope });
+    }
+
+    // Safety-net numbering: any path that moved/created an Order in this session
+    // must result in a visible seq before warehouse confirmation. Normal MiniApp
+    // ordering assigns it earlier, but this heals admin/migration edge paths too.
+    if (sessionActiveOrders.length > 0) {
+      try {
+        await ensureSessionSeq(currentSessionId, String(deliveryGroupId));
+        session = await OrderingSession.findById(currentSessionId).lean();
+      } catch (e) {
+        console.warn('[picking/start-session] ensureSessionSeq failed:', e?.message || e);
+      }
     }
 
     // 6. Stale-order warnings (informational; don't block start).
@@ -1058,6 +1072,37 @@ router.patch('/tasks/:taskId/progress', requireTelegramRoles(['warehouse', 'admi
 });
 
 // ---------------------------------------------------------------------------
+// POST /api/picking/tasks/:taskId/release
+// Body: { packedOrderIds?: string[] }
+// Explicit "leave this task" action. Preserves progress and unlocks immediately.
+// ---------------------------------------------------------------------------
+router.post('/tasks/:taskId/release', requireTelegramRoles(['warehouse', 'admin']), async (req, res, next) => {
+  try {
+    const user = req.telegramUser;
+    const packedOrderIds = Array.isArray(req.body?.packedOrderIds) ? req.body.packedOrderIds : null;
+    const result = await releasePickingTask({
+      taskId: req.params.taskId,
+      userTelegramId: user.telegramId,
+      packedOrderIds,
+    });
+    res.json({
+      ok: true,
+      released: Boolean(result?.released),
+      alreadyReleased: Boolean(result?.alreadyReleased),
+    });
+  } catch (err) {
+    if (err?.code === 'picking_task_not_found') return next(appError('picking_task_not_found'));
+    if (err?.code === 'expired_lock') return next(appError('expired_lock'));
+    if (err?.code === 'picking_release_unavailable') {
+      return res.status(409).json({ code: 'picking_release_unavailable', message: 'Це завдання вже завершене і його не можна повернути в чергу.' });
+    }
+    if (err && (err.name === 'AppError' || err.name === 'CastError' || isTransientTx(err))) return next(err);
+    console.error('[picking/release]', err);
+    next(appError('picking_progress_failed'));
+  }
+});
+
+// ---------------------------------------------------------------------------
 // POST /api/picking/tasks/:taskId/heartbeat
 // "I still have this product in my hands." Refreshes lockedAt only.
 //
@@ -1360,7 +1405,7 @@ router.get('/shift-board', requireTelegramRoles(['admin']), async (req, res, nex
             const { isOpen } = isOrderingOpen(group.orderingSchedule);
         const sessionMeta = await OrderingSession.findById(sessionId, 'seq openDate pickingStatus').lean();
 
-        const positionsLeft = (o) => (o.items || []).filter((i) => !i.cancelled && !i.packed && !i.skipped).length;
+        const positionsLeft = (o) => (o.items || []).filter((i) => !i.cancelled && !i.packed && !i.skipped && !i.voided).length;
         const mapOrder = (o) => ({
           orderId: String(o._id),
           orderNumber: o.orderNumber,

@@ -120,10 +120,10 @@ async function main() {
   }
 
   if (clash) {
-    // Жива позиція = не cancelled і не skipped (те саме визначення, що в
+    // Жива позиція = не cancelled / skipped / voided (те саме визначення, що в
     // closeOrderIfNoLiveItems у routes/orders.js). Замовлення з живими позиціями
     // не чіпаємо НІКОЛИ — воно справжнє, і рішення про нього не за скриптом.
-    const clashLive = (clash.items || []).filter((i) => !i.cancelled && !i.skipped);
+    const clashLive = (clash.items || []).filter((i) => !i.cancelled && !i.skipped && !i.voided);
     console.log(`\n  КОНФЛІКТ: у цільовій сесії вже стоїть активне замовлення #${clash.orderNumber} (_id=${clash._id})`);
     console.log(`    статус: ${clash.status}   позицій: ${(clash.items || []).length}   з них живих: ${clashLive.length}`);
 
@@ -140,7 +140,7 @@ async function main() {
   }
 
   const newTotal = roundMoney((order.items || [])
-    .filter((i) => !i.cancelled)
+    .filter((i) => !i.cancelled && !i.voided)
     .reduce((s, i) => s + Number(i.price || 0) * Number(i.quantity || 0), 0));
 
   console.log('\n  ПЛАН ЗМІН:');
@@ -171,7 +171,7 @@ async function main() {
       if (clash) {
         const clashFresh = await Order.findById(clash._id).session(mongoSession);
         if (!clashFresh) throw new Error('Конфліктне замовлення зникло між читанням і записом');
-        const stillLive = (clashFresh.items || []).filter((i) => !i.cancelled && !i.skipped);
+        const stillLive = (clashFresh.items || []).filter((i) => !i.cancelled && !i.skipped && !i.voided);
         if (stillLive.length > 0) throw new Error(`У #${clashFresh.orderNumber} з'явилися живі позиції — перервано`);
         clashFresh.status = 'cancelled';
         clashFresh.history.push({
@@ -197,7 +197,7 @@ async function main() {
       }
 
       fresh.totalPrice = roundMoney(fresh.items
-        .filter((i) => !i.cancelled)
+        .filter((i) => !i.cancelled && !i.voided)
         .reduce((s, i) => s + Number(i.price || 0) * Number(i.quantity || 0), 0));
       fresh.status = 'new';
       fresh.orderingSessionId = String(targetSessionId);

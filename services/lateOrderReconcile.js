@@ -83,7 +83,7 @@ async function reconcileLateOrderStrict(orderId, { maxRetries = 3 } = {}) {
         let appended = 0;
         let skipped = 0;
         for (const item of order.items) {
-          if (item.packed || item.cancelled || item.skipped || !item.productId) continue;
+          if (item.packed || item.cancelled || item.skipped || item.voided || !item.productId) continue;
           const pid = String(item.productId);
           if (alreadyTasked.has(`${order._id}_${pid}`)) continue; // on-time, already in a task
 
@@ -123,12 +123,12 @@ async function reconcileLateOrderStrict(orderId, { maxRetries = 3 } = {}) {
         // Totals exclude skipped (+cancelled): a skipped position is not charged.
         order.totalPrice = roundMoney(
           order.items
-            .filter((i) => !i.cancelled && !i.skipped)
+            .filter((i) => !i.cancelled && !i.skipped && !i.voided)
             .reduce((s, i) => s + Number(i.price || 0) * Number(i.quantity || 0), 0),
         );
 
         let statusChanged = false;
-        const noActiveLeft = !order.items.some((i) => !i.cancelled && !i.skipped && !i.packed);
+        const noActiveLeft = !order.items.some((i) => !i.cancelled && !i.skipped && !i.voided && !i.packed);
         const anyPacked = order.items.some((i) => i.packed);
         if (skipped > 0 && noActiveLeft && !anyPacked) {
           // Whole order missed this delivery — terminal. Reuse 'cancelled' (in enum,
@@ -204,7 +204,7 @@ async function reconcileLateOrdersForSession(deliveryGroupId, orderingSessionId)
 
   const orders = await Order.find(
     { 'buyerSnapshot.deliveryGroupId': groupId, orderingSessionId: sessionId, status: { $in: ['new', 'in_progress'] } },
-    '_id items.productId items.packed items.cancelled items.skipped',
+    '_id items.productId items.packed items.cancelled items.skipped items.voided',
   ).lean();
 
   let appended = 0;
@@ -212,7 +212,7 @@ async function reconcileLateOrdersForSession(deliveryGroupId, orderingSessionId)
   let touched = 0;
   for (const o of orders) {
     const hasUntasked = (o.items || []).some(
-      (i) => !i.packed && !i.cancelled && !i.skipped && i.productId && !tasked.has(`${o._id}_${i.productId}`),
+      (i) => !i.packed && !i.cancelled && !i.skipped && !i.voided && i.productId && !tasked.has(`${o._id}_${i.productId}`),
     );
     if (!hasUntasked) continue;
     touched += 1;

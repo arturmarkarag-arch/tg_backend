@@ -16,6 +16,7 @@ const { getIO } = require('../socket');
 const { isOrderingOpen, getOrderingWindowOpenAt } = require('../utils/orderingSchedule');
 const { getOrCreateSessionId, findCurrentSessionId } = require('../utils/getOrCreateSession');
 const { ensureSessionSeq } = require('../utils/sessionSeq');
+const { voidOpenOrderItems } = require('../utils/orderItemState');
 const OrderingSession = require('../models/OrderingSession');
 const { pushSessionEvent } = require('../utils/sessionStatus');
 
@@ -217,7 +218,7 @@ function buildProductLabel(product) {
  */
 async function closeOrderIfNoLiveItems(order, actor, session) {
   if (!order || !['new', 'in_progress'].includes(order.status)) return false;
-  const liveItems = (order.items || []).filter((i) => !i.cancelled && !i.skipped).length;
+  const liveItems = (order.items || []).filter((i) => !i.cancelled && !i.skipped && !i.voided).length;
   if (liveItems > 0) return false;
 
   if (await orderNeverLived(order, session)) {
@@ -330,7 +331,7 @@ router.get('/conflicts', staffOnly, async (req, res) => {
       buyerTelegramId: o.buyerTelegramId,
       buyerName: buyerNameById[String(o.buyerTelegramId)] || o.buyerTelegramId,
       buyerUsername: buyerUsernameById.get(String(o.buyerTelegramId)) || '',
-      itemCount: (o.items || []).filter((i) => !i.cancelled && !i.skipped).length,
+      itemCount: (o.items || []).filter((i) => !i.cancelled && !i.skipped && !i.voided).length,
       createdAt: o.createdAt,
     }));
     return {
@@ -569,7 +570,7 @@ router.get('/current-items', sellerOnly, asyncHandler(async (req, res) => {
   const items = [];
   for (const order of orders) {
     for (const item of order.items || []) {
-      if (item.cancelled || item.skipped || Number(item.quantity || 0) <= 0) continue;
+      if (item.cancelled || item.skipped || item.voided || Number(item.quantity || 0) <= 0) continue;
       const product = item.productId && typeof item.productId === 'object' ? item.productId : null;
       const productId = String(product?._id || item.productId || '');
       if (!productId) continue;
@@ -922,7 +923,7 @@ async function placeOrderImpl(req, res) {
         action: 'items_merged',
         meta: {
           addedItems: validItems.map((i) => ({ name: i.name, qty: i.quantity })),
-          totalItems: txExisting.items.filter((i) => !i.cancelled).length,
+          totalItems: txExisting.items.filter((i) => !i.cancelled && !i.skipped && !i.voided).length,
         },
       });
       await txExisting.save({ session: mongoSession });
@@ -958,7 +959,7 @@ async function placeOrderImpl(req, res) {
     // замовлення вже існує, але кошик ще «повний» — і клієнт може повторно
     // оформити те саме. Тепер або обидві дії проходять, або жодна.
     {
-      const activePositions = (order.items || []).filter((i) => !i.cancelled).length;
+      const activePositions = (order.items || []).filter((i) => !i.cancelled && !i.skipped && !i.voided).length;
       await User.updateOne(
         { telegramId: buyer.telegramId },
         {
@@ -1255,7 +1256,7 @@ router.post('/:id/stale/restore-to-cart', telegramAuth, adminOnly, asyncHandler(
       const buyer = await User.findOne({ telegramId: buyerTelegramId }).session(mongoSession);
       if (!buyer) throw appError('user_not_found');
 
-      const activeItems = (staleOrder.items || []).filter((i) => !i.cancelled && Number(i.quantity) > 0);
+      const activeItems = (staleOrder.items || []).filter((i) => !i.cancelled && !i.skipped && !i.voided && Number(i.quantity) > 0);
       if (activeItems.length === 0) throw appError('validation_failed', { field: 'items' });
 
       // Resolve current ordering session for the buyer's delivery group.
@@ -1304,13 +1305,17 @@ router.post('/:id/stale/restore-to-cart', telegramAuth, adminOnly, asyncHandler(
         // Merge items into existing order — add missing, sum quantities for existing.
         for (const srcItem of activeItems) {
           const pid = String(srcItem.productId);
-          const existing = newOrder.items.find((i) => String(i.productId) === pid && !i.cancelled);
+          const existing = newOrder.items.find((i) => String(i.productId) === pid && !i.cancelled && !i.skipped && !i.voided);
           if (existing) {
             existing.quantity += Number(srcItem.quantity);
           } else {
             const cancelled = newOrder.items.find((i) => String(i.productId) === pid && i.cancelled);
             if (cancelled) {
               cancelled.cancelled = false;
+              cancelled.skipped = false;
+              cancelled.voided = false;
+              cancelled.voidReason = '';
+              cancelled.voidedAt = null;
               cancelled.quantity = Number(srcItem.quantity);
               cancelled.price = srcItem.price;
             } else {
@@ -1319,13 +1324,13 @@ router.post('/:id/stale/restore-to-cart', telegramAuth, adminOnly, asyncHandler(
           }
         }
         newOrder.totalPrice = roundMoney(newOrder.items
-          .filter((i) => !i.cancelled)
+          .filter((i) => !i.cancelled && !i.skipped && !i.voided)
           .reduce((s, i) => s + Number(i.price || 0) * Number(i.quantity || 0), 0));
         newOrder.history.push({ ...actor, action: 'items_restored', meta: { restoredFromOrderId: String(staleOrder._id) } });
       }
       await newOrder.save({ session: mongoSession });
 
-      const restoredPositions = newOrder.items.filter((i) => !i.cancelled).length;
+      const restoredPositions = newOrder.items.filter((i) => !i.cancelled && !i.skipped && !i.voided).length;
 
       // Update cartState to reflect position count (orderItems remains empty — no cart).
       await User.updateOne(
@@ -1336,11 +1341,12 @@ router.post('/:id/stale/restore-to-cart', telegramAuth, adminOnly, asyncHandler(
 
       await detachOrderFromPendingTasks(staleOrder._id, mongoSession);
 
+      const voidedCount = voidOpenOrderItems(staleOrder, { reason: 'order_expired', at: new Date() });
       staleOrder.status = 'expired';
       staleOrder.history.push({
         ...actor,
         action: 'stale_order_restored_to_cart',
-        meta: { restoredPositions, deliveryGroupId, fromSessionId: staleOrder.orderingSessionId || '', newOrderId: String(newOrder._id) },
+        meta: { restoredPositions, voidedCount, deliveryGroupId, fromSessionId: staleOrder.orderingSessionId || '', newOrderId: String(newOrder._id) },
       });
       await staleOrder.save({ session: mongoSession });
 
@@ -1382,6 +1388,14 @@ router.post('/:id/stale/restore-to-cart', telegramAuth, adminOnly, asyncHandler(
     });
   } finally {
     mongoSession.endSession();
+  }
+
+  // Restoring a stale order may be the FIRST real content of the destination
+  // session, so it has the same numbering obligation as normal order placement.
+  if (result?.currentSessionId && result?.deliveryGroupId) {
+    ensureSessionSeq(result.currentSessionId, result.deliveryGroupId).catch((e) =>
+      console.warn('[orders/stale/restore] ensureSessionSeq failed:', e?.message || e),
+    );
   }
 
   pushOrderAddedEventIfStarted(
@@ -1426,6 +1440,7 @@ router.post('/:id/stale/expire', telegramAuth, adminOnly, asyncHandler(async (re
       await ensureOrderNotInPickingPipeline(order._id, session);
       await detachOrderFromPendingTasks(order._id, session);
 
+      const voidedCount = voidOpenOrderItems(order, { reason: 'order_expired', at: new Date() });
       order.status = 'expired';
       order.history.push({
         ...actorFromReq(req),
@@ -1433,6 +1448,7 @@ router.post('/:id/stale/expire', telegramAuth, adminOnly, asyncHandler(async (re
         meta: {
           deliveryGroupId: order.buyerSnapshot?.deliveryGroupId || '',
           fromSessionId: order.orderingSessionId || '',
+          voidedCount,
         },
       });
       await order.save({ session });
@@ -1547,7 +1563,7 @@ router.post('/upsert-item', telegramAuth, requireOrderingWindowOpen, asyncHandle
       }
 
       // Order exists — find the live position for this product.
-      const itemIndex = order.items.findIndex((i) => String(i.productId) === productId && !i.cancelled && !i.skipped);
+      const itemIndex = order.items.findIndex((i) => String(i.productId) === productId && !i.cancelled && !i.skipped && !i.voided);
       const activeItem = itemIndex >= 0 ? order.items[itemIndex] : null;
 
       if (newQty === 0) {
@@ -1583,6 +1599,9 @@ router.post('/upsert-item', telegramAuth, requireOrderingWindowOpen, asyncHandle
           stale.packed = false;
           stale.cancelled = false;
           stale.skipped = false;
+          stale.voided = false;
+          stale.voidReason = '';
+          stale.voidedAt = null;
         } else {
           order.items.push({ productId: product._id, name: buildProductLabel(product), price, quantity: newQty, packed: false, cancelled: false });
         }
@@ -1594,7 +1613,7 @@ router.post('/upsert-item', telegramAuth, requireOrderingWindowOpen, asyncHandle
       }
 
       order.totalPrice = roundMoney(order.items
-        .filter((i) => !i.cancelled)
+        .filter((i) => !i.cancelled && !i.skipped && !i.voided)
         .reduce((sum, i) => sum + Number(i.price || 0) * Number(i.quantity || 0), 0));
 
       // Removing the LAST position retires the order instead of leaving an empty
@@ -1607,7 +1626,7 @@ router.post('/upsert-item', telegramAuth, requireOrderingWindowOpen, asyncHandle
       // A deleted order must NOT be saved — save() on a removed doc re-inserts it.
       if (closed !== 'deleted') await order.save({ session: mongoSession });
 
-      const activePositions = order.items.filter((i) => !i.cancelled).length;
+      const activePositions = order.items.filter((i) => !i.cancelled && !i.skipped && !i.voided).length;
       await User.updateOne(
         { telegramId: user.telegramId },
         { $set: { 'cartState.lastOrderPositions': activePositions, 'cartState.orderItems': {}, 'cartState.orderItemIds': [], 'cartState.updatedAt': new Date() } },
@@ -1618,6 +1637,15 @@ router.post('/upsert-item', telegramAuth, requireOrderingWindowOpen, asyncHandle
     });
   } finally {
     mongoSession.endSession();
+  }
+
+  // The MiniApp's canonical order path is /upsert-item (not legacy POST /orders).
+  // Assign/retry the per-group session number whenever this request touched a real
+  // order. Fire-and-forget, same resilience contract as placeOrderImpl.
+  if (currentSessionId && result?.orderId) {
+    ensureSessionSeq(currentSessionId, String(group._id)).catch((e) =>
+      console.warn('[orders/upsert-item] ensureSessionSeq failed:', e?.message || e),
+    );
   }
 
   try {
@@ -1665,13 +1693,13 @@ router.post('/set-item-qty', telegramAuth, requireOrderingWindowOpen, asyncHandl
       }).session(session);
       if (!order) throw appError('order_not_found');
 
-      const item = order.items.find((i) => String(i.productId) === productId && !i.cancelled);
+      const item = order.items.find((i) => String(i.productId) === productId && !i.cancelled && !i.skipped && !i.voided);
       if (!item) throw appError('order_not_found');
 
       const oldQty = item.quantity;
       item.quantity = newQty;
       order.totalPrice = roundMoney(order.items
-        .filter((i) => !i.cancelled)
+        .filter((i) => !i.cancelled && !i.skipped && !i.voided)
         .reduce((sum, i) => sum + Number(i.price || 0) * Number(i.quantity || 0), 0));
 
       order.history.push({
@@ -1718,7 +1746,7 @@ router.post('/remove-item', telegramAuth, requireOrderingWindowOpen, asyncHandle
       }).session(session);
       if (!order) throw appError('order_not_found');
 
-      const itemIndex = order.items.findIndex((i) => String(i.productId) === productId && !i.cancelled && !i.skipped);
+      const itemIndex = order.items.findIndex((i) => String(i.productId) === productId && !i.cancelled && !i.skipped && !i.voided);
       if (itemIndex < 0) {
         // Already gone — idempotent success, nothing to write.
         return;
@@ -1731,7 +1759,7 @@ router.post('/remove-item', telegramAuth, requireOrderingWindowOpen, asyncHandle
       const removedQty = order.items[itemIndex].quantity;
       order.items.splice(itemIndex, 1);
       order.totalPrice = roundMoney(order.items
-        .filter((i) => !i.cancelled)
+        .filter((i) => !i.cancelled && !i.skipped && !i.voided)
         .reduce((sum, i) => sum + Number(i.price || 0) * Number(i.quantity || 0), 0));
 
       const actor = {

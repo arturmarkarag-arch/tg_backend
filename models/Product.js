@@ -27,6 +27,12 @@ const ProductSchema = new mongoose.Schema(
     originalImageUrl: { type: String, default: '' },
     labelPositions: { type: mongoose.Schema.Types.Mixed, default: {} },
     archivedAt: { type: Date, default: null },
+    // Audit snapshot for the latest archive action. Older archived products may
+    // legitimately have these empty because the fields did not exist yet.
+    archivedBy: { type: String, default: '' },
+    archivedByName: { type: String, default: '' },
+    archivedByRole: { type: String, default: '' },
+    archiveReason: { type: String, default: '' },
     // Set once when a product that stayed archived for 30+ days is "handed over" to
     // the shop catalogue: its ShopProduct mirror is detached into a standalone
     // shop-OWNED product (or one is created) so the item remains findable in "Товари

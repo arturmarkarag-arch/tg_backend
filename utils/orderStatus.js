@@ -1,7 +1,9 @@
 'use strict';
 
+const { isTerminalOrderItem } = require('./orderItemState');
+
 /**
- * Order status recomputation after some of its items were cancelled/skipped.
+ * Order status recomputation after some of its items were cancelled/skipped/voided.
  *
  * Shared by every path that removes an item from a live order (product archive,
  * coverage-gap resolution) so the rules exist exactly once.
@@ -17,11 +19,11 @@
 function resolveOrderStatusAfterCancel(order, orderingOpenNow) {
   if (orderingOpenNow) return order.status;
 
-  const isFullyProcessed = order.items.every((i) => i.packed || i.cancelled || i.skipped);
+  const isFullyProcessed = order.items.every(isTerminalOrderItem);
   if (!isFullyProcessed) return 'in_progress';
 
-  // "Nothing delivered" = every item is cancelled or skipped (none packed).
-  const allUndelivered = order.items.every((i) => i.cancelled || i.skipped);
+  // "Nothing delivered" = every item is cancelled, skipped, or voided (none packed).
+  const allUndelivered = order.items.every((i) => i.cancelled || i.skipped || i.voided);
   return allUndelivered ? 'cancelled' : 'confirmed';
 }
 

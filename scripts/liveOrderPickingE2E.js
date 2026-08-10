@@ -197,7 +197,7 @@ async function finishRunManifest({ preserve = false } = {}) {
 function nowMs() { return Date.now(); }
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 function str(v) { return v == null ? '' : String(v); }
-function terminalItem(i) { return Boolean(i?.packed || i?.cancelled || i?.skipped); }
+function terminalItem(i) { return Boolean(i?.packed || i?.cancelled || i?.skipped || i?.voided); }
 
 function log(msg = '') { console.log(msg); }
 function section(title) {

@@ -1268,7 +1268,16 @@ router.delete('/:id', staffOnly, asyncHandler(async (req, res) => {
   if (!product) throw appError('product_not_found');
 
   const { archiveProduct } = require('../services/archiveProduct');
-  await archiveProduct(product, { notifyBuyers: false });
+  const u = req.telegramUser || {};
+  await archiveProduct(product, {
+    notifyBuyers: false,
+    reason: 'manual_archive',
+    actor: {
+      by: String(u.telegramId || ''),
+      byName: [u.firstName, u.lastName].filter(Boolean).join(' '),
+      byRole: String(u.role || ''),
+    },
+  });
 
   res.json({ message: 'Product archived' });
 }));
