@@ -41,8 +41,8 @@ const readPos = getOrCreate.indexOf('const existing = await OrderingSession.find
 const updatePos = getOrCreate.indexOf('return await OrderingSession.findOneAndUpdate', readPos);
 must('existing session is read before race-safe upsert', readPos >= 0 && updatePos > readPos);
 
-must('picking stale lock is 5 minutes', has('services/pickingService.js', 'const LOCK_TIMEOUT_MS      =  5 * 60 * 1000'));
-must('force claim remains 3 minutes', has('services/pickingService.js', 'const FORCE_CLAIM_AFTER_MS =  3 * 60 * 1000'));
+must('picking stale lock is 5 minutes', has('services/pickingService.js', 'const LOCK_TIMEOUT_MS      = 5 * 60 * 1000'));
+must('force claim uses the same 5-minute lease boundary', has('services/pickingService.js', 'const FORCE_CLAIM_AFTER_MS = LOCK_TIMEOUT_MS'));
 must('manual release endpoint remains installed', has('routes/picking.js', "router.post('/tasks/:taskId/release'"));
 
 must('voided backfill is dry-run by default', has('scripts/backfillVoidedItems.js', "const EXECUTE = process.argv.includes('--execute')"));

@@ -43,6 +43,7 @@ const {
   releasePickingTask,
   markSessionInProgress,
   FORCE_CLAIM_AFTER_MS,
+  LOCK_TIMEOUT_MS,
 } = require('../services/pickingService');
 
 /** Session-timeline actor built from the authenticated Telegram user. */
@@ -160,6 +161,9 @@ async function buildTaskResponse(task, { isSecondChance = false } = {}) {
         quantity: item.quantity,
         packedQuantity: item.packedQuantity ?? null,
         packed: item.packed,
+        packedBy: item.packedBy || null,
+        packedByName: item.packedByName || '',
+        packedAt: item.packedAt || null,
       }))
       // Sort by the stable box number so the packing list order matches the digits
       // on the boxes. Items without a resolved number (edge/fallback) sink to the
@@ -994,9 +998,27 @@ router.patch('/tasks/:taskId/progress', requireTelegramRoles(['warehouse', 'admi
     if (String(task.lockedBy || '') !== String(user.telegramId || '')) return next(appError('expired_lock'));
 
     const packedSet = new Set(packedOrderIds.map(String));
+    const actor = actorOf(user);
+    const packedAt = new Date();
     const newItems = task.items.map((it) => {
       const plain = typeof it.toObject === 'function' ? it.toObject() : { ...it };
-      plain.packed = packedSet.has(String(it.orderId));
+      const wasPacked = Boolean(plain.packed);
+      const shouldBePacked = packedSet.has(String(it.orderId));
+
+      plain.packed = shouldBePacked;
+      if (shouldBePacked && !wasPacked) {
+        // Attribute only the FALSE -> TRUE transition. Re-saving a snapshot must
+        // never steal authorship from the worker who originally ticked the box.
+        plain.packedBy = actor.by || null;
+        plain.packedByName = actor.byName || '';
+        plain.packedAt = packedAt;
+      } else if (!shouldBePacked) {
+        // Unticking means the physical fact is being revoked; its old author is
+        // no longer meaningful and must not reappear if somebody checks it later.
+        plain.packedBy = null;
+        plain.packedByName = '';
+        plain.packedAt = null;
+      }
       return plain;
     });
 
@@ -1037,6 +1059,8 @@ router.post('/tasks/:taskId/release', requireTelegramRoles(['warehouse', 'admin'
     const result = await releasePickingTask({
       taskId: req.params.taskId,
       userTelegramId: user.telegramId,
+      userFirstName: user.firstName,
+      userLastName: user.lastName,
       packedOrderIds,
     });
     res.json({
@@ -1058,26 +1082,91 @@ router.post('/tasks/:taskId/release', requireTelegramRoles(['warehouse', 'admin'
 
 // ---------------------------------------------------------------------------
 // POST /api/picking/tasks/:taskId/heartbeat
-// "I still have this product in my hands." Refreshes lockedAt only.
+// "I still have this product in my hands." Refreshes lockedAt only while the
+// worker still owns a FRESH lease. A Mini App frozen in the background must not
+// wake up after 10 minutes and silently resurrect a lease that already expired.
 //
-// Separate from /progress on purpose: progress says WHICH shops are done and
-// rewrites the items array, a heartbeat says the worker is still alive and must
-// keep flowing even when nothing changed. Without it a picker who spends four
-// minutes on one bulky product looks abandoned and gets force-claimed (the guard
-// is 3 min) — previously only a checkbox tap refreshed the lock.
+// When the lease is gone, return a precise state so the resumed client can
+// reconcile the stale card immediately instead of waiting for the next action to
+// fail with expired_lock.
 // ---------------------------------------------------------------------------
 router.post('/tasks/:taskId/heartbeat', requireTelegramRoles(['warehouse', 'admin']), asyncHandler(async (req, res) => {
   const user = req.telegramUser;
+  const uid = String(user.telegramId || '');
+  const taskId = String(req.params.taskId);
+  const now = new Date();
+  const freshAfter = new Date(now.getTime() - LOCK_TIMEOUT_MS);
 
-  const result = await PickingTask.updateOne(
-    { _id: req.params.taskId, status: 'locked', lockedBy: String(user.telegramId || '') },
-    { $set: { lockedAt: new Date() } },
-  );
+  // Refresh only a still-valid lease. This makes the 5-minute timeout a real
+  // boundary rather than an opportunistic cleanup performed only by queue polls.
+  const refreshed = await PickingTask.findOneAndUpdate(
+    {
+      _id: taskId,
+      status: 'locked',
+      lockedBy: uid,
+      lockedAt: { $gte: freshAfter },
+    },
+    { $set: { lockedAt: now } },
+    { new: true },
+  ).lean();
 
-  // matchedCount 0 = the lock is no longer ours (force-claimed, released, or the
-  // task was completed elsewhere). Reported as data, not an error: the client
-  // uses it to warn the worker rather than to retry.
-  res.json({ ok: true, held: result.matchedCount > 0 });
+  if (refreshed) return res.json({ ok: true, held: true, state: 'mine' });
+
+  let current = await PickingTask.findById(
+    taskId,
+    '_id status lockedBy lockedAt deliveryGroupId orderingSessionId',
+  ).lean();
+
+  if (!current) return res.json({ ok: true, held: false, state: 'missing' });
+
+  // If this device still owns the row but its heartbeat gap exceeded the lease,
+  // release only THIS exact stale lock. The compare on lockedAt prevents us from
+  // undoing a concurrent re-claim/heartbeat that happened after the read.
+  if (current.status === 'locked' && String(current.lockedBy || '') === uid) {
+    const staleAt = current.lockedAt ? new Date(current.lockedAt) : null;
+    if (!staleAt || staleAt < freshAfter) {
+      const released = await PickingTask.findOneAndUpdate(
+        {
+          _id: current._id,
+          status: 'locked',
+          lockedBy: uid,
+          lockedAt: current.lockedAt || null,
+        },
+        { $set: { status: 'pending', lockedBy: null, lockedAt: null } },
+        { new: true },
+      ).lean();
+      current = released || await PickingTask.findById(
+        taskId,
+        '_id status lockedBy lockedAt deliveryGroupId orderingSessionId',
+      ).lean();
+    }
+  }
+
+  if (!current) return res.json({ ok: true, held: false, state: 'missing' });
+  if (current.status === 'completed') return res.json({ ok: true, held: false, state: 'completed' });
+  if (current.status === 'locked') {
+    if (String(current.lockedBy || '') === uid) {
+      // Rare race: ownership became ours again between the guarded refresh and
+      // the follow-up read. Refresh once more and keep the card.
+      await PickingTask.updateOne(
+        { _id: current._id, status: 'locked', lockedBy: uid },
+        { $set: { lockedAt: now } },
+      );
+      return res.json({ ok: true, held: true, state: 'mine' });
+    }
+    return res.json({ ok: true, held: false, state: 'other_worker' });
+  }
+
+  if (current.status === 'pending') {
+    // Do not offer automatic resume into a task from an old ordering cycle.
+    const { sessionId } = await resolveCurrentPickingSession(current.deliveryGroupId);
+    if (!sessionId || String(current.orderingSessionId || '') !== String(sessionId)) {
+      return res.json({ ok: true, held: false, state: 'session_changed' });
+    }
+    return res.json({ ok: true, held: false, state: 'available' });
+  }
+
+  return res.json({ ok: true, held: false, state: 'missing' });
 }));
 
 // ---------------------------------------------------------------------------
@@ -1342,6 +1431,83 @@ router.get('/shift-board', requireTelegramRoles(['admin']), async (req, res, nex
       };
     }).sort((a, b) => b.tasksCompleted - a.tasksCompleted || (b.isActive ? 1 : 0) - (a.isActive ? 1 : 0));
 
+    // ── Історія збирання ПОТОЧНОЇ сесії ────────────────────────────────────
+    // Це навмисно НЕ окремий довічний audit-log. PickingTask уже є джерелом
+    // правди про роботу складу: sessionId + block/position + completedBy +
+    // per-checkbox packedBy. Тому «Зміна» просто проєктує задачі CURRENT session.
+    // Коли для цієї групи починається нова OrderingSession, sessionScope міняється
+    // і історія на екрані природно стартує з нуля — старий цикл сюди не протікає.
+    let pickingHistory = [];
+    try {
+      if (sessionId) {
+        const historyTasks = await PickingTask.find(
+          { orderingSessionId: sessionId, deliveryGroupId: dgId },
+          'productId blockId positionIndex status lockedBy lockedAt items completedBy completedByName completionReason updatedAt',
+        ).sort({ blockId: 1, positionIndex: 1 }).lean();
+
+        const productIds = [...new Set(historyTasks.map((t) => String(t.productId || '')).filter(Boolean))];
+        const products = productIds.length
+          ? await Product.find({ _id: { $in: productIds } }, '_id brand model category orderNumber').lean()
+          : [];
+        const productTitleMap = new Map(products.map((p) => [String(p._id), getProductTitle(p)]));
+
+        pickingHistory = historyTasks
+          .map((t) => {
+            const byWorker = new Map();
+            for (const item of t.items || []) {
+              if (!item.packed || !item.packedBy) continue;
+              const workerId = String(item.packedBy);
+              if (!byWorker.has(workerId)) {
+                byWorker.set(workerId, {
+                  telegramId: workerId,
+                  name: item.packedByName || userNameMap.get(workerId) || workerId,
+                  packedCount: 0,
+                  shops: [],
+                  lastAt: item.packedAt || null,
+                });
+              }
+              const row = byWorker.get(workerId);
+              row.packedCount += 1;
+              row.shops.push({
+                orderId: String(item.orderId || ''),
+                shopName: item.shopName || '—',
+                quantity: Number(item.packedQuantity ?? item.quantity ?? 0),
+                at: item.packedAt || null,
+              });
+              if (item.packedAt && (!row.lastAt || new Date(item.packedAt) > new Date(row.lastAt))) row.lastAt = item.packedAt;
+            }
+
+            const packedCount = (t.items || []).filter((i) => i.packed).length;
+            const hasHumanWork = packedCount > 0 || Boolean(t.completedBy) || (t.status === 'locked' && Boolean(t.lockedBy));
+            if (!hasHumanWork) return null;
+
+            return {
+              taskId: String(t._id),
+              productId: String(t.productId || ''),
+              productTitle: productTitleMap.get(String(t.productId || '')) || `Товар ${String(t.productId || '')}`,
+              blockId: t.blockId,
+              positionIndex: t.positionIndex,
+              status: t.status,
+              completionReason: t.completionReason || null,
+              completedBy: t.completedBy ? String(t.completedBy) : null,
+              completedByName: t.completedByName || (t.completedBy ? userNameMap.get(String(t.completedBy)) || String(t.completedBy) : ''),
+              activeWorker: t.status === 'locked' && t.lockedBy ? {
+                telegramId: String(t.lockedBy),
+                name: userNameMap.get(String(t.lockedBy)) || String(t.lockedBy),
+              } : null,
+              packedCount,
+              itemCount: (t.items || []).length,
+              workers: [...byWorker.values()],
+              at: t.status === 'completed' ? t.updatedAt : (t.lockedAt || t.updatedAt),
+            };
+          })
+          .filter(Boolean)
+          .sort((a, b) => new Date(b.at || 0) - new Date(a.at || 0));
+      }
+    } catch (e) {
+      console.warn('[picking/shift-board] picking history aggregation failed:', e.message);
+    }
+
     // ── Order-level "не завершено" aggregation (read-only data for the Зміна card) ──
     // Three views the operator wants visibility into, NO actions attached:
     //   A. currentSession — active orders of THIS session with unpacked positions
@@ -1533,7 +1699,7 @@ router.get('/shift-board', requireTelegramRoles(['admin']), async (req, res, nex
       console.warn('[picking/shift-board] catalog review aggregation failed:', e.message);
     }
 
-    res.json({ groupName, sessionStart, lastActivity, workers, totalCompleted, totalPending, unfinished, sessionClosure, catalogReview });
+    res.json({ groupName, sessionStart, lastActivity, workers, totalCompleted, totalPending, pickingHistory, unfinished, sessionClosure, catalogReview });
   } catch (err) {
     if (err && (err.name === 'AppError' || err.name === 'CastError' || isTransientTx(err))) return next(err);
     console.error('[picking/shift-board]', err);
@@ -1568,7 +1734,7 @@ router.post('/tasks/:taskId/force-claim', requireTelegramRoles(['warehouse', 'ad
     if (err.code === 'picking_claim_too_soon') {
       return res.status(409).json({
         code: 'picking_claim_too_soon',
-        message: `Задача заблокована ${Math.round((err.lockedAgo || 0) / 1000)} с тому. Перехоплення доступне після 3 хвилин.`,
+        message: `Задача заблокована ${Math.round((err.lockedAgo || 0) / 1000)} с тому. Перехоплення доступне після ${Math.ceil(FORCE_CLAIM_AFTER_MS / 60000)} хвилин.`,
       });
     }
     if (err && (err.name === 'AppError' || err.name === 'CastError' || isTransientTx(err))) return next(err);

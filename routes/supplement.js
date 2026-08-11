@@ -541,7 +541,7 @@ router.get('/offers/:offerId', warehouseRoles, asyncHandler(async (req, res) => 
  * База такого дубля не бачить у принципі — тому не пускаємо його фізично.
  *
  * Ідемпотентно для власника (повторне відкриття = heartbeat). Прострочений
- * чужий замок (>3 хв без активності) перехоплюється автоматично.
+ * чужий замок (>5 хв без активності) перехоплюється автоматично.
  */
 router.post('/offers/:offerId/claim', warehouseRoles, asyncHandler(async (req, res) => {
   if (!mongoose.Types.ObjectId.isValid(req.params.offerId)) throw appError('supplement_offer_not_found');

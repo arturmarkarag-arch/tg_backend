@@ -254,7 +254,7 @@ function withOfferLock(offerId, fn) {
 
 // Скільки пропозиція може «висіти» за складником, який пішов і не закрив картку.
 // Той самий поріг, що й для перехоплення звичайної задачі (pickingService).
-const LOCK_TIMEOUT_MS = 3 * 60 * 1000;
+const LOCK_TIMEOUT_MS = 5 * 60 * 1000;
 
 /** Взяти пропозицію в роботу. @returns {{ ok: boolean, offer?: object, lockedBy?: string }} */
 async function claimOffer(offerId, telegramId, now = new Date()) {

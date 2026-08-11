@@ -18,8 +18,8 @@ const { buildUnreconciledOosTaskFilter } = require('../utils/pickingOosRecovery'
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
-const LOCK_TIMEOUT_MS      =  5 * 60 * 1000;            //  5 min — stale worker lock
-const FORCE_CLAIM_AFTER_MS =  3 * 60 * 1000;            //  3 min — force-claim guard
+const LOCK_TIMEOUT_MS      = 5 * 60 * 1000;             // 5 min — stale worker lock
+const FORCE_CLAIM_AFTER_MS = LOCK_TIMEOUT_MS;            // one lease boundary everywhere
 const COMPLETED_TTL_MS     = 90 * 24 * 60 * 60 * 1000;  // 90 days — completed-task retention (TTL)
 
 // ── Retry helpers ────────────────────────────────────────────────────────────
@@ -368,8 +368,9 @@ async function releaseOtherLocksOfWorker(userTelegramId, keepTaskId) {
  * packedOrderIds is accepted as the final authoritative checkbox snapshot so
  * the last UI state and the unlock can commit in one compare-and-swap.
  */
-async function releasePickingTask({ taskId, userTelegramId, packedOrderIds = null }) {
+async function releasePickingTask({ taskId, userTelegramId, userFirstName = '', userLastName = '', packedOrderIds = null }) {
   const uid = String(userTelegramId || '');
+  const actorName = [userFirstName, userLastName].filter(Boolean).join(' ');
   const task = await PickingTask.findById(taskId);
   if (!task) throw Object.assign(new Error('Task not found'), { code: 'picking_task_not_found' });
 
@@ -386,7 +387,22 @@ async function releasePickingTask({ taskId, userTelegramId, packedOrderIds = nul
   let items = task.items.map((it) => (typeof it.toObject === 'function' ? it.toObject() : { ...it }));
   if (Array.isArray(packedOrderIds)) {
     const packedSet = new Set(packedOrderIds.map(String));
-    items = items.map((it) => ({ ...it, packed: packedSet.has(String(it.orderId)) }));
+    const packedAt = new Date();
+    items = items.map((it) => {
+      const wasPacked = Boolean(it.packed);
+      const shouldBePacked = packedSet.has(String(it.orderId));
+      const next = { ...it, packed: shouldBePacked };
+      if (shouldBePacked && !wasPacked) {
+        next.packedBy = uid || null;
+        next.packedByName = actorName;
+        next.packedAt = packedAt;
+      } else if (!shouldBePacked) {
+        next.packedBy = null;
+        next.packedByName = '';
+        next.packedAt = null;
+      }
+      return next;
+    });
   }
 
   const released = await PickingTask.findOneAndUpdate(
@@ -480,7 +496,9 @@ async function completePickingTask({ taskId, userTelegramId, userFirstName = '',
     }
 
     // Apply actual packed quantities
+    const packedAt = new Date();
     for (const taskItem of task.items) {
+      const wasPacked = Boolean(taskItem.packed);
       const input = items.find((i) => String(i.orderId) === String(taskItem.orderId));
       if (input !== undefined) {
         // Clamp to [0, ordered]: a picker can pack fewer (partial / out of
@@ -493,6 +511,15 @@ async function completePickingTask({ taskId, userTelegramId, userFirstName = '',
         taskItem.packedQuantity = taskItem.quantity;
       }
       taskItem.packed = taskItem.packedQuantity > 0;
+      if (taskItem.packed && !wasPacked) {
+        taskItem.packedBy = actor.by || null;
+        taskItem.packedByName = actor.byName || '';
+        taskItem.packedAt = packedAt;
+      } else if (!taskItem.packed) {
+        taskItem.packedBy = null;
+        taskItem.packedByName = '';
+        taskItem.packedAt = null;
+      }
     }
 
     task.status   = 'completed';
@@ -624,10 +651,21 @@ async function outOfStockPickingTask({ taskId, userTelegramId, userFirstName = '
     if (String(fresh.lockedBy || '') !== String(userTelegramId)) {
       throw Object.assign(new Error('Lock expired'), { code: 'expired_lock' });
     }
+    const packedAt = new Date();
     for (const item of fresh.items) {
-      const wasPacked = packedSet.has(String(item.orderId));
-      item.packedQuantity = wasPacked ? item.quantity : 0;
-      item.packed = wasPacked;
+      const wasAlreadyPacked = Boolean(item.packed);
+      const shouldBePacked = packedSet.has(String(item.orderId));
+      item.packedQuantity = shouldBePacked ? item.quantity : 0;
+      item.packed = shouldBePacked;
+      if (shouldBePacked && !wasAlreadyPacked) {
+        item.packedBy = actor.by || null;
+        item.packedByName = actor.byName || '';
+        item.packedAt = packedAt;
+      } else if (!shouldBePacked) {
+        item.packedBy = null;
+        item.packedByName = '';
+        item.packedAt = null;
+      }
     }
     fresh.status   = 'completed';
     fresh.lockedBy = null;
@@ -697,7 +735,7 @@ async function forceClaimPickingTask({ taskId, userTelegramId }) {
     throw tooSoonErr;
   }
 
-  // Pin lockedBy + lockedAt to the doc we evaluated the 3-min guard against.
+  // Pin lockedBy + lockedAt to the doc we evaluated the lease guard against.
   // Without this the update matches on `status:'locked'` alone, so:
   //   - two workers can both pass the guard and both findOneAndUpdate → the
   //     second silently re-steals, yet BOTH clients receive a task they think

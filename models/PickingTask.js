@@ -48,6 +48,12 @@ const PickingTaskSchema = new mongoose.Schema(
         quantity: { type: Number, default: 0 },
         packedQuantity: { type: Number, default: null },
         packed: { type: Boolean, default: false },
+        // Per-checkbox authorship. Partial progress survives a lease hand-off, so
+        // the next worker must be able to see WHO physically put this product in
+        // the shop's box instead of a vague "previous worker" label.
+        packedBy: { type: String, default: null },
+        packedByName: { type: String, default: '' },
+        packedAt: { type: Date, default: null },
       },
     ],
     // A completed task with completionReason:'out_of_stock' is the orphan-archive
