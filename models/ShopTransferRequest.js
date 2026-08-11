@@ -3,11 +3,11 @@ const mongoose = require('mongoose');
 
 // Snapshot of conflict state captured at request creation time
 const ConflictSnapshotSchema = new mongoose.Schema({
-  // Target shop occupancy
+  // Target shop seller snapshot (informational; multi-seller shops are valid)
   targetShopHasSeller: { type: Boolean, default: false },
   targetShopSellerName: { type: String, default: '' },
   targetShopSellerTelegramId: { type: String, default: '' },
-  // Displaced seller's state (captured at submission)
+  // First existing target seller's state (legacy snapshot fields; informational only)
   targetSellerCartHasItems: { type: Boolean, default: false },
   targetSellerCartItemCount: { type: Number, default: 0 },
   targetSellerHasActiveOrder: { type: Boolean, default: false },
@@ -15,7 +15,8 @@ const ConflictSnapshotSchema = new mongoose.Schema({
   // Requesting seller's cart
   cartHasItems: { type: Boolean, default: false },
   cartItemCount: { type: Number, default: 0 },
-  // Requesting seller's current shop active order (will follow seller to new shop via migrateSellerShop)
+  // Requesting seller's current shop active order. It may follow the seller only
+  // while ordering is still open; after freeze it remains owned by the old shop.
   sourceShopHasActiveOrder: { type: Boolean, default: false },
   sourceShopActiveOrderId: { type: mongoose.Schema.Types.ObjectId, ref: 'Order', default: null },
   // Admin(s) assigned to the target shop at submission time (display only — they are NOT displaced)
@@ -63,8 +64,8 @@ const ShopTransferRequestSchema = new mongoose.Schema({
   // Admin decision on requesting seller's cart: 'clear' | 'keep' | null
   cartDecision: { type: String, enum: ['clear', 'keep', null], default: null },
 
-  // Admin decision on displaced seller (only when targetShopHasSeller):
-  // 'clear_cart' — wipe displaced seller's cart; 'keep_cart' — leave their cart as-is
+  // Deprecated legacy displacement fields. Kept only so historical request docs
+  // remain readable; current approval never removes an existing target seller.
   displacedSellerDecision: { type: String, enum: ['clear_cart', 'keep_cart', null], default: null },
   displacedSellerTelegramId: { type: String, default: '' },
 

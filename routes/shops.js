@@ -483,8 +483,9 @@ router.patch('/:id/sellers', telegramAuth, requireTelegramRole('admin'), asyncHa
   if (!shop) throw appError('shop_not_found');
 
   const newSellers = Array.isArray(req.body.sellers)
-    ? req.body.sellers.map((id) => String(id).trim()).filter(Boolean)
+    ? [...new Set(req.body.sellers.map((id) => String(id).trim()).filter(Boolean))]
     : [];
+
 
   const shopIdStr = String(shop._id);
 

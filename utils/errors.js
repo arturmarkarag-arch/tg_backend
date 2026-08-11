@@ -38,10 +38,6 @@ const ERRORS = {
   receipt_already_completed:{ status: 409, message: 'Накладну вже проведено' },
   receipt_no_items:         { status: 400, message: 'У накладній немає позицій' },
   receipt_items_incomplete: { status: 400, message: 'Не всі товари повністю описані' },
-  receipt_item_pending:     { status: 422, message: ({ name } = {}) =>
-                                `Позиція "${name || 'без назви'}" ще не прив'язана до складу. Знайдіть товар або оформіть як новий.` },
-  receipt_item_orphan_transit: { status: 422, message: ({ name, transitQty } = {}) =>
-                                `Позиція "${name || 'без назви'}" має транзит ${transitQty} шт, але групи доставки не вказані` },
   receipt_completed_locked: { status: 409, message: 'Накладну вже проведено — редагування неможливе' },
   receipt_completed_no_delete: { status: 409, message: 'Не можна видаляти позиції з проведеної накладної' },
   receipt_item_not_found:   { status: 404, message: 'Позицію не знайдено' },
@@ -167,17 +163,6 @@ const ERRORS = {
   search_no_existing_request:     { status: 404, message: 'Запит для цього штрихкоду не знайдено' },
   search_resend_rate_limited:     { status: 429, message: 'Забагато повторних запитів для цього штрихкоду. Спробуйте пізніше' },
   search_resend_failed:           { status: 500, message: 'Не вдалося повторно надіслати запит' },
-  // ── Warehouse / Shifts ─────────────────────────────────────────────────────
-  warehouse_worker_id_required:   { status: 400, message: 'workerId є обовʼязковим' },
-  warehouse_worker_not_found:     { status: 404, message: 'Складського працівника не знайдено' },
-  warehouse_remove_failed:        { status: 500, message: 'Не вдалося зняти працівника зі зміни' },
-  warehouse_only_manager_confirm: { status: 403, message: 'Підтверджувати зміну можуть лише менеджери складу або адмін' },
-  warehouse_workerids_required:   { status: 400, message: 'workerIds має бути непорожнім масивом' },
-  warehouse_workerids_invalid:    { status: 400, message: 'Невірні workerIds' },
-  warehouse_no_matching_workers:  { status: 404, message: 'Не знайдено жодного складського працівника' },
-  warehouse_no_blocks:            { status: 400, message: 'Не визначено жодного блока на складі' },
-  warehouse_insufficient_blocks:  { status: 400, message: 'Недостатньо блоків для розподілу між обраними працівниками' },
-  warehouse_only_manager_close:   { status: 403, message: 'Закривати зміну можуть лише менеджери складу або адмін' },
   // ── Picking ────────────────────────────────────────────────────────────────
   picking_task_not_found:         { status: 404, message: 'Завдання не знайдено' },
   picking_product_not_found:      { status: 404, message: 'Товар для збирання не знайдено (можливо, архівований або видалений)' },
@@ -244,11 +229,9 @@ const ERRORS = {
   receipt_photo_required:   { status: 400, message: 'Потрібно прикріпити фото для нового товару' },
   receipt_add_item_failed:  { status: 500, message: 'Не вдалося додати позицію' },
   receipt_items_fetch_failed:{ status: 500, message: 'Не вдалося отримати позиції накладної' },
-  receipt_item_link_failed: { status: 500, message: 'Не вдалося прив\u02bcязати позицію' },
   receipt_log_fetch_failed: { status: 500, message: 'Не вдалося отримати журнал' },
   receipt_log_failed:       { status: 500, message: 'Не вдалося записати лог' },
   receipt_qty_invalid:      { status: 400, message: 'Загальна кількість має бути додатнім цілим числом' },
-  receipt_transit_exceeds_total: { status: 400, message: 'Кількість в магазини не може перевищувати загальну' },
   receipt_log_action_required: { status: 400, message: 'Поле action обовʼязкове' },
 
   // ── Receipts (multi-worker) ────────────────────────────────────────────────
@@ -260,13 +243,10 @@ const ERRORS = {
   receipt_item_not_confirmed_yet: { status: 409, message: 'Позиція ще не підтверджена' },
   receipt_items_not_all_confirmed: { status: 409, message: ({ pending } = {}) =>
                                 `Не всі позиції підтверджені (${pending ?? '?'} без підпису). Кожен працівник має підтвердити свої позиції перед проведенням.` },
-  receipt_structure_invalid: { status: 400, message: 'Невалідна розбивка кількості (палети/коробки/шт мають бути додатними цілими)' },
-  receipt_expected_qty_required: { status: 400, message: 'Вкажіть очікувану кількість (скільки мало приїхати)' },
   receipt_item_incomplete: { status: 422, message: ({ fields } = {}) =>
                                 `Щоб підтвердити позицію, заповніть: ${fields || 'усі обовʼязкові поля'}. ` +
                                 'Прийняти товар можна й без них, але для підтвердження ціна та кількість в упаковці обовʼязкові.' },
   receipt_destination_required: { status: 400, message: 'Вкажіть призначення: «Склад» або «Магазини»' },
-  receipt_shops_groups_required: { status: 400, message: 'Для призначення «Магазини» потрібно вибрати хоча б одну групу доставки' },
 
   // ── Тип накладної (звичайна / дозамовлення) ────────────────────────────────
   receipt_type_invalid:     { status: 400, message: 'Невідомий тип накладної' },

@@ -24,9 +24,13 @@
     "migrate:session-seq:apply": "node scripts/backfillSessionSeq.js --execute",
     "test:v30:hardening": "node scripts/checkV30DataHardening.js",
     "diagnose:session": "node scripts/diagnoseSessionState.js --all",
-    "test:v35:session": "vitest run tests/sessionPresentation.test.js tests/sessionStatusUi.contract.test.js tests/perGroupSchedule.contract.test.js tests/perGroupSessionIdentity.test.js tests/lateOrderReconcileStatus.test.js",
+    "test:v35:session": "vitest run tests/sessionPresentation.test.js tests/sessionStatusUi.contract.test.js tests/pickingUpcomingReadiness.contract.test.js tests/perGroupSchedule.contract.test.js tests/perGroupSessionIdentity.test.js tests/lateOrderReconcileStatus.test.js",
     "test:v35:guard:preflight": "node -r ../dev-use-test-db.js scripts/liveScheduleGuardE2E.js",
-    "test:v35:guard": "node -r ../dev-use-test-db.js scripts/liveScheduleGuardE2E.js --execute"
+    "test:v35:guard": "node -r ../dev-use-test-db.js scripts/liveScheduleGuardE2E.js --execute",
+    "migrate:receipt-contract-cleanup": "node scripts/cleanupReceiptContractLegacyFields.js",
+    "migrate:receipt-contract-cleanup:apply": "node scripts/cleanupReceiptContractLegacyFields.js --apply",
+    "test:live:contracts:preflight": "node -r ../dev-use-test-db.js scripts/liveOrderPickingE2E.js --scenario=multi_seller_single_order,ownership_freeze,checkbox_handoff,session_rollover,isolation,barrier,coverage,oos,hidden_item",
+    "test:live:contracts": "node -r ../dev-use-test-db.js scripts/liveOrderPickingE2E.js --execute --scenario=multi_seller_single_order,ownership_freeze,checkbox_handoff,session_rollover,isolation,barrier,coverage,oos,hidden_item"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1030.0",

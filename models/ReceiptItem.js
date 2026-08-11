@@ -1,104 +1,67 @@
 const mongoose = require('mongoose');
 
-// structure.type — how the arrived quantity is described:
-//   'direct'             → totalQty entered manually
-//   'pallets_boxes_items'→ totalQty = pallets * boxesPerPallet * itemsPerBox
-//   'pallets_items'      → totalQty = pallets * itemsPerPallet
-const ReceiptItemStructureSchema = new mongoose.Schema(
-  {
-    type: {
-      type: String,
-      enum: ['direct', 'pallets_boxes_items', 'pallets_items'],
-      default: 'direct',
-    },
-    pallets: { type: Number, default: null },
-    boxesPerPallet: { type: Number, default: null },
-    itemsPerBox: { type: Number, default: null },
-    itemsPerPallet: { type: Number, default: null },
-  },
-  { _id: false },
-);
-
 const ReceiptItemSchema = new mongoose.Schema(
   {
     receiptId: { type: mongoose.Schema.Types.ObjectId, ref: 'Receipt', required: true },
 
-    // Multi-worker ownership: only this user (or admin) may edit quantity /
-    // structure / destination and delete the item. Required for new items;
-    // legacy rows created before this field existed simply have it unset.
+    // Multi-worker ownership: only this user (or admin) may edit owner-only
+    // receiving fields and delete the item. Required for new items; legacy rows
+    // created before this field existed simply have it unset.
     createdBy: { type: String, default: '' },
 
     // Per-item confirmation. A receipt can only be committed once every
     // (non-deleted) item is 'confirmed' by its owner.
     status: { type: String, enum: ['draft', 'confirmed'], default: 'draft' },
 
-    // True once this item's shelfQty has been applied to Product stock (at
-    // confirm time). The commit step MUST NOT re-apply it — confirm is
-    // mandatory before commit, so without this guard every receipt silently
-    // doubled received stock.
+    // True once this item's warehouse quantity has been applied to Product stock.
+    // `destination` + `totalQty` are the source of truth.
     stockApplied: { type: Boolean, default: false },
 
-    // UI abstraction over the existing shelfQty/transitQty split. Mutually
-    // exclusive — the item goes EITHER to the warehouse incoming strip
-    // ('shelf') OR straight to shops via transit ('shops'). The route layer
-    // derives shelfQty/transitQty from this so commit logic stays unchanged.
+    // Current routing contract is mutually exclusive: either warehouse or shops.
+    // A future split (warehouse + shops at once) is deliberately NOT encoded yet.
     destination: { type: String, enum: ['shelf', 'shops'], default: 'shelf' },
 
     // ПРИМІТКА: поля `supplementOffer` тут БІЛЬШЕ НЕМАЄ. Дозамовлення тепер —
     // властивість усієї накладної (Receipt.type='supplement'), а не окремої
     // позиції. Позиція в такій накладній завжди має destination='shelf'.
 
-    structure: { type: ReceiptItemStructureSchema, default: () => ({ type: 'direct' }) },
-
     photoUrl: { type: String, default: '' },
     photoName: { type: String, default: '' },
     // Clean, un-annotated capture. Kept so that editing price/qty later can
-    // re-render the overlay from scratch instead of stacking labels on top of
-    // an already-annotated image.
+    // re-render the overlay from scratch instead of stacking labels.
     originalPhotoUrl: { type: String, default: '' },
-    // Overlay state needed to faithfully re-draw the annotation on edit
-    // (price/qty come from the item fields themselves).
     photoMeta: {
       comment: { type: String, default: '' },
       commentPos: {
         x: { type: Number, default: 0.5 },
         y: { type: Number, default: 0.5 },
       },
-      // Positions of the price / qty labels on the photo (normalized 0..1) so
-      // the same overlay layout can be reproduced on the warehouse + shop docs.
       pricePos: { type: mongoose.Schema.Types.Mixed, default: null },
       qtyPos:   { type: mongoose.Schema.Types.Mixed, default: null },
     },
+
+    // Physical quantity received. This is intentionally stored directly — no
+    // pallet/box structure and no derived shelf/transit quantity copies.
     totalQty: { type: Number, required: true, min: 1 },
-    // What the worker EXPECTED to arrive (for reconciling shortages/defects).
-    expectedQty: { type: Number, default: null },
-    // Free-text note about this delivery line: defects count, what didn't
-    // arrive, etc. (distinct from photoMeta.comment which is drawn on the photo).
-    notes: { type: String, default: '' },
-    // Optional defect evidence photos (max 3) — stored in a separate R2
-    // "defects/" folder so they don't mix with catalogue product images.
-    defectPhotoUrls: [{ type: String }],
-    transitQty: { type: Number, default: 0 },
+
+    // Routing details kept for the current shops workflow. They are not used to
+    // derive a second quantity copy; totalQty remains the only received quantity.
     deliveryGroupIds: [{ type: String }],
     qtyPerShop: { type: Number, default: 0 },
-    shelfQty: { type: Number, required: true },
+
+    // Internal/background identity generated from the photo. There is no manual
+    // "Назва товару" field in the receipt form; AI may populate this later.
     name: { type: String, default: '' },
-    // Human-friendly Ukrainian description generated on demand during receiving
-    // (staff presses "Згенерувати" from the item photo). Copied into the warehouse
-    // Product / ShopProduct created when this item is confirmed, so it's described
-    // once and available everywhere downstream.
     aiDescription: { type: String, default: '' },
+
     price: { type: Number, default: null },
     qtyPerPackage: { type: Number, default: 1 },
-    barcode: { type: String, default: '' },
-    existingProductId: { type: mongoose.Schema.Types.ObjectId, ref: 'Product', default: null },
+
+    // Product created by this receipt item.
     createdProductId: { type: mongoose.Schema.Types.ObjectId, ref: 'Product', default: null },
     // For `destination: 'shops'` brand-new items: the shop-OWNED ShopProduct this
-    // item created (linkedProductId: null). Tracked for idempotency (re-confirm /
-    // commit don't duplicate) and cleanup on unconfirm. Null for shelf items —
-    // those create a warehouse Product + a mirror keyed by linkedProductId instead.
+    // item created (linkedProductId: null). Tracked for idempotency + unconfirm.
     createdShopProductId: { type: mongoose.Schema.Types.ObjectId, ref: 'ShopProduct', default: null },
-    warehousePending: { type: Boolean, default: false },
   },
   { timestamps: true }
 );

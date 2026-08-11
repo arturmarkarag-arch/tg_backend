@@ -23,11 +23,15 @@
 `RegistrationRequest.deliveryGroupId`: це історичні знімки, вони canonical для
 свого документа і залишаються.
 
-### Стара логіка зміни складу
+### Стара логіка зміни складу — ЗАКРИТО (11.08.2026)
 
-У моделях і маршрутах лишилися `isOnShift`, `shiftZone`, `isWarehouseManager`, `confirm-shift`, `close-shift`, `remove-from-shift`. Поточний бізнес-процес не керує працівниками через зміну: кожен складник сам обирає доступну задачу.
+Legacy-модель `isOnShift` / `shiftZone` / `isWarehouseManager` і endpoints
+`/api/warehouse/{shift-status,confirm-shift,close-shift,remove-from-shift}` видалені.
+Вони могли глобально відпускати `PickingTask` без `orderingSessionId` і тому суперечили
+session-isolation контракту.
 
-Перед будь-якою доробкою складу потрібно окремо перевіряти, чи старі shift-поля або endpoints впливають на доступ, locks або масове звільнення задач. Не розширювати цю логіку, доки не буде прийнято рішення: видалити її чи повернути як реальний контроль.
+Актуальна сторінка «Зміна» НЕ є цією legacy-моделлю: вона працює через
+`/api/picking/shift-board` і залишається чинною.
 
 ### Дозамовлення
 

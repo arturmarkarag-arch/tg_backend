@@ -244,9 +244,6 @@ async function buildUserProfile(user) {
     shopCity: userShop?.cityId?.name || '',
     deliveryGroupId: resolvedGroupId,
     warehouseZone: await resolveWarehouseZone(user),
-    isWarehouseManager: user.isWarehouseManager || false,
-    isOnShift: user.isOnShift || false,
-    shiftZone: user.shiftZone || { startBlock: null, endBlock: null },
     sessionOpenAt,
     lastAppOpenedAt: appOpenedAt,
     miniAppState: normalizeMiniAppState(user.miniAppState || {

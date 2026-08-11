@@ -427,7 +427,6 @@ router.post('/run', asyncHandler(async (req, res) => {
           role: 'warehouse',
           firstName: `${w.firstName || 'Worker'}${TEST_MARKER}`,
           lastName: `${w.lastName || 'Warehouse'}${TEST_MARKER}`,
-          isWarehouseManager: w.isWarehouseManager || false,
         })))
         : await User.insertMany(Array.from({ length: activeWorkersCount }, (_, i) => ({
           telegramId: `wt_worker_${i + 1}${idSuffix}`,

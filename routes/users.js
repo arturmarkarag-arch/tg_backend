@@ -53,19 +53,6 @@ async function sanitizeUserPayload(payload, existing = null) {
     data.shopNumber = '';
   }
 
-  // Warehouse-specific fields
-  if (role === 'warehouse') {
-    if (payload.isWarehouseManager !== undefined) data.isWarehouseManager = Boolean(payload.isWarehouseManager);
-  } else if (role !== 'seller') {
-    data.isWarehouseManager = false;
-    data.isOnShift = false;
-    data.shiftZone = { startBlock: null, endBlock: null };
-  } else {
-    // role === 'seller' — clear warehouse-only flags
-    data.isWarehouseManager = false;
-    data.isOnShift = false;
-    data.shiftZone = { startBlock: null, endBlock: null };
-  }
 
   return data;
 }
@@ -547,7 +534,10 @@ router.patch('/:telegramId/shop', asyncHandler(async (req, res) => {
   });
 
   const io = getIO();
-  if (result.movedOrder) {
+  // Realtime notifications are best-effort. The HTTP/Mongo operation above is
+  // authoritative and must not turn into a 500 when Socket.IO is unavailable
+  // (for example in integration-test harnesses or during socket startup).
+  if (result.movedOrder && io) {
     if (result.prevGroupId) io.to(`picking_group_${result.prevGroupId}`).emit('shop_status_changed', { groupId: result.prevGroupId });
     if (result.newGroupId && result.newGroupId !== result.prevGroupId) {
       io.to(`picking_group_${result.newGroupId}`).emit('shop_status_changed', { groupId: result.newGroupId });
@@ -606,7 +596,10 @@ router.patch('/:telegramId', asyncHandler(async (req, res) => {
     });
 
     const io = getIO();
-    if (result.movedOrder) {
+    // Same best-effort rule as the dedicated shop-assignment endpoint: a
+    // missing Socket.IO instance must never roll a successful HTTP/Mongo move
+    // into a 500 after the transaction has already committed.
+    if (result.movedOrder && io) {
       if (result.prevGroupId) io.to(`picking_group_${result.prevGroupId}`).emit('shop_status_changed', { groupId: result.prevGroupId });
       if (result.newGroupId && result.newGroupId !== result.prevGroupId) {
         io.to(`picking_group_${result.newGroupId}`).emit('shop_status_changed', { groupId: result.newGroupId });

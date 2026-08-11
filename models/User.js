@@ -36,13 +36,6 @@ const UserSchema = new mongoose.Schema(
     // використання; API-контракт (профіль /v1/telegram, список користувачів) віддає
     // їх так само, як раніше.
     shopId: { type: mongoose.Schema.Types.ObjectId, ref: 'Shop', default: null },
-    // Legacy shift-модель: docs/architecture/technical-debt.md#стара-логіка-зміни-складу
-    isWarehouseManager: { type: Boolean, default: false },
-    isOnShift: { type: Boolean, default: false },
-    shiftZone: {
-      startBlock: { type: Number, default: null },
-      endBlock: { type: Number, default: null },
-    },
     botBlocked: { type: Boolean, default: false },
     // Soft-removal state. `removed` closes ALL application access but keeps the
     // row as historical information. Missing field on legacy rows is treated as

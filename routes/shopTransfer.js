@@ -8,7 +8,6 @@ const ShopTransferRequest = require('../models/ShopTransferRequest');
 const Shop  = require('../models/Shop');
 const User  = require('../models/User');
 const Order = require('../models/Order');
-const PickingTask = require('../models/PickingTask');
 const { migrateSellerShop } = require('../services/migrateSellerShop');
 const { invalidateShop } = require('../utils/modelCache');
 const { computeTargetShopState } = require('../utils/shopConflict');
@@ -51,7 +50,7 @@ async function buildConflictSnapshot(toShopId, fromShopId) {
 
   const targetSeller = sellers[0] || null;
 
-  // Admins assigned to the target shop — they are NOT displaced, shown for info only
+  // Admins assigned to the target shop — display/audit info only
   const targetAdmins = await User.find(
     { shopId: String(toShopId), role: 'admin' },
     'firstName lastName',
@@ -70,7 +69,7 @@ async function buildConflictSnapshot(toShopId, fromShopId) {
   if (targetSeller) {
     // Filter to orders placed BY THIS specific seller, not any order on the shop.
     // A shop can have orders from an admin or other staff — attributing those
-    // to the displaced seller produces a false-positive "has active order" warning.
+    // to another seller would produce a false-positive "has active order" note.
     const sellerOrders = activeOrders.filter(
       (o) => String(o.buyerTelegramId) === String(targetSeller.telegramId),
     );
@@ -196,42 +195,16 @@ router.post('/:id/approve', telegramAuth, requireTelegramRole('admin'), asyncHan
     if (!overrideShop || !overrideShop.isActive) throw appError('transfer_target_not_found');
   }
 
-  // ДІРКА 3+4 (варіант B): refuse to push a seller into a shop that is ALREADY in a
-  // conflict (2+ other sellers, or active orders from 2+ distinct buyers). Displacing
-  // a single seller is fine — that is the normal path. A pre-existing conflict must be
-  // resolved in the conflicts view first, otherwise approving here silently grows it.
-  if (!requestDoc.isProfileOnly && effectiveToShopId) {
-    const targetState = await computeTargetShopState(effectiveToShopId, requestDoc.sellerTelegramId);
-    if (targetState.hasConflict) {
-      throw appError('transfer_target_in_conflict', {
-        sellerCount: targetState.sellers.length,
-        buyerCount: targetState.distinctBuyerCount,
-      });
-    }
-  }
-
-  // Identify the displaced seller (if the target shop is currently occupied) BEFORE
-  // taking locks, so we can serialise this approve against that seller's own
-  // concurrent actions too — not just the incoming seller's. This read is only for
-  // lock scoping; the authoritative re-read happens inside the transaction below.
-  let displacedSellerId = '';
-  if (!requestDoc.isProfileOnly && effectiveToShopId) {
-    const occupant = await User.findOne({
-      shopId: String(effectiveToShopId),
-      role: 'seller',
-      telegramId: { $ne: requestDoc.sellerTelegramId },
-    }, 'telegramId').lean();
-    if (occupant) displacedSellerId = String(occupant.telegramId);
-  }
+  // Multiple sellers may share one shop. Seller presence is not a conflict,
+  // and approval must never evict an existing seller. Active-order conflicts are
+  // handled by the dedicated current-session picking conflict flow.
 
   let migrationResult = null;
   let resolvedRequest = null;
 
-  // Hold the shop locks for BOTH the incoming seller and the displaced seller
-  // (if any) for the whole transaction. Previously the approve held no seller
-  // lock at all, so a displaced seller's parking ($set shopId:null + order park)
-  // could interleave with that seller placing/editing an order on another worker.
-  await withSellerLocks([requestDoc.sellerTelegramId, displacedSellerId], async () => {
+  // Only the incoming seller is mutated. Existing sellers on the destination
+  // remain assigned there, so no second account lock is needed.
+  await withSellerLocks([requestDoc.sellerTelegramId], async () => {
   const session = await mongoose.connection.startSession();
   try {
     await session.withTransaction(async () => {
@@ -272,88 +245,8 @@ router.post('/:id/approve', telegramAuth, requireTelegramRole('admin'), asyncHan
       const toShop = await Shop.findById(effectiveToShopId).populate('cityId', 'name').session(session);
       if (!toShop || !toShop.isActive) throw appError('transfer_target_not_found');
 
-      // In-tx re-check closes the TOCTOU window: a concurrent assignment could have
-      // pushed a second seller onto the target between the pre-tx guard and here.
-      const targetStateTx = await computeTargetShopState(
-        effectiveToShopId, request.sellerTelegramId, session,
-      );
-      if (targetStateTx.hasConflict) {
-        throw appError('transfer_target_in_conflict', {
-          sellerCount: targetStateTx.sellers.length,
-          buyerCount: targetStateTx.distinctBuyerCount,
-        });
-      }
-
-      // Handle displaced seller (if target shop is occupied)
-      const targetCurrentSeller = await User.findOne({
-        shopId: String(effectiveToShopId),
-        role: 'seller',
-        telegramId: { $ne: request.sellerTelegramId },
-      }).session(session);
-
-      if (targetCurrentSeller) {
-        // Знімаємо лише магазин — група/зона похідні від нього.
-        const displacedPatch = { shopId: null };
-
-        await User.updateOne(
-          { telegramId: targetCurrentSeller.telegramId },
-          { $set: displacedPatch },
-          { session }
-        );
-
-        // Якщо замовлення витісненого продавця вже в PickingTask (склад взяв в роботу) —
-        // воно вже "знято" зі snapshot магазину і нікуди не рухається. Не чіпаємо.
-        // Якщо ще не в pipeline — паркуємо: відв'язуємо від магазину, щоб замовлення
-        // пішло за продавцем після наступного призначення через migrateSellerShop.
-        const displacedActiveOrder = await Order.findOne(
-          activeOrderShopFilter(effectiveToShopId, { buyerTelegramId: targetCurrentSeller.telegramId }),
-          '_id',
-        ).session(session).lean();
-
-        if (displacedActiveOrder) {
-          const inPipeline = await PickingTask.exists({
-            'items.orderId': displacedActiveOrder._id,
-            status: { $in: ['pending', 'locked', 'completed'] },
-          }).session(session);
-
-          if (!inPipeline) {
-            // Не в роботі складу — паркуємо, щоб migrateSellerShop підхопив при наступному призначенні
-            await Order.updateOne(
-              { _id: displacedActiveOrder._id },
-              {
-                $set: {
-                  shopId: null,
-                  'buyerSnapshot.shopId': null,
-                  'buyerSnapshot.shopName': '',
-                  'buyerSnapshot.shopCity': '',
-                  // Drop the delivery-group ref too — otherwise the parked order
-                  // still matches the OLD group's filter in taskBuilder and shows
-                  // up in picking as "невідомий магазин". The displaced seller's
-                  // order must follow them; the new seller's shop must not inherit
-                  // it via the picking pool.
-                  'buyerSnapshot.deliveryGroupId': '',
-                },
-                $push: {
-                  history: {
-                    at: new Date(),
-                    by: String(admin.telegramId),
-                    byName: [admin.firstName, admin.lastName].filter(Boolean).join(' '),
-                    byRole: admin.role,
-                    action: 'seller_displaced_order_parked',
-                    meta: {
-                      fromShop: toShop.name || '',
-                      reason: `shop_transfer_approved:${String(request._id)}`,
-                      incomingSeller: request.sellerName || '',
-                    },
-                  },
-                },
-              },
-              { session },
-            );
-          }
-          // Якщо inPipeline — замовлення залишається на магазині, склад доробляє його як є
-        }
-      }
+      // Do not evict or rewrite any seller already assigned to this shop.
+      // Multiple sellers are a supported assignment state.
 
       // Apply profile updates if seller requested them
       const { profileUpdate } = request;
@@ -408,7 +301,7 @@ router.post('/:id/approve', telegramAuth, requireTelegramRole('admin'), asyncHan
       request.resolvedAt = new Date();
       request.resolvedBy = admin.telegramId;
       request.resolvedByName = [admin.firstName, admin.lastName].filter(Boolean).join(' ');
-      request.displacedSellerTelegramId = targetCurrentSeller?.telegramId || '';
+      request.displacedSellerTelegramId = '';
       await request.save({ session });
 
       resolvedRequest = request.toObject();
@@ -440,11 +333,6 @@ router.post('/:id/approve', telegramAuth, requireTelegramRole('admin'), asyncHan
       }
       // Notify the approved seller that their shop changed
       io.emit('user_shop_changed', { telegramId: requestDoc.sellerTelegramId });
-      // Notify displaced seller (if any) that they were removed from their shop
-      const displacedId = resolvedRequest?.displacedSellerTelegramId;
-      if (displacedId) {
-        io.emit('user_shop_changed', { telegramId: displacedId });
-      }
     }
   } catch (e) {
     console.warn('[shopTransfer approve] socket emit failed:', e?.message);

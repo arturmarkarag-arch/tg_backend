@@ -15,6 +15,7 @@ const { appError } = require('../utils/errors');
 const { invalidateShop } = require('../utils/modelCache');
 const { logShopTransition } = require('./shopAudit');
 const { activeOrderShopFilter } = require('../utils/orderShopFilter');
+const { getOrderOwnershipState } = require('../utils/orderOwnership');
 
 async function ensureOrderNotInPickingPipeline(orderId, session) {
   const exists = await PickingTask.exists({
@@ -46,11 +47,13 @@ async function migrateSellerShop({
   resetCartNavigation = false,
   pushHistory = true,
   updateLastSeller = true,
+  allowFrozenOrderTransfer = false,
 }) {
   const oldShopId = existingUser.shopId ? String(existingUser.shopId) : '';
   const newShopId = String(newShopFull._id);
   const newShopName = newShopFull.name || '';
   const newShopCity = newShopFull.cityId?.name || '';
+  const newShopAddress = newShopFull.address || '';
   const newDeliveryGroupId = newShopFull.deliveryGroupId
     ? String(newShopFull.deliveryGroupId)
     : '';
@@ -114,6 +117,7 @@ async function migrateSellerShop({
 
   // 1. Migrate active order FIRST so a downstream write failure aborts the whole tx
   let movedOrder = null;
+  let shopOwnedOrder = null;
   let prevGroupId = null;
 
   if (oldShopId !== newShopId) {
@@ -151,45 +155,53 @@ async function migrateSellerShop({
     }
 
     if (activeOrder) {
-      await ensureOrderNotInPickingPipeline(activeOrder._id, session);
+      const ownership = await getOrderOwnershipState(activeOrder, { session });
 
-      prevGroupId = activeOrder.buyerSnapshot?.deliveryGroupId
-        ? String(activeOrder.buyerSnapshot.deliveryGroupId)
-        : null;
+      // Once ordering closes, the seller is only the author. The Order belongs
+      // to the shop/session snapshot and MUST NOT follow an ordinary User.shopId
+      // change. Conflict repair is the only explicit opt-out: staff is then
+      // deliberately repairing Order ownership before picking, not merely moving
+      // a user profile.
+      if (ownership.frozen && !allowFrozenOrderTransfer) {
+        shopOwnedOrder = activeOrder;
+      } else {
+        await ensureOrderNotInPickingPipeline(activeOrder._id, session);
 
-      activeOrder.shopId = newShopFull._id;
-      if (!activeOrder.buyerSnapshot) activeOrder.buyerSnapshot = {};
-      activeOrder.buyerSnapshot.shopId = newShopId;
-      activeOrder.buyerSnapshot.shopName = newShopName;
-      activeOrder.buyerSnapshot.shopCity = newShopCity;
-      activeOrder.buyerSnapshot.deliveryGroupId = newDeliveryGroupId;
-      if (targetSessionId) activeOrder.orderingSessionId = targetSessionId;
-      activeOrder.markModified('buyerSnapshot');
-      activeOrder.history.push({
-        by: String(actor.telegramId),
-        byName: [actor.firstName, actor.lastName].filter(Boolean).join(' '),
-        byRole: actor.role,
-        action: 'shop_reassigned',
-        meta: {
-          from: { shopName: oldShopFull?.name || '', deliveryGroupId: oldShopFull?.deliveryGroupId || '' },
-          to:   { shopName: newShopName, shopCity: newShopCity, deliveryGroupId: newDeliveryGroupId },
-          reason,
-          // True when the destination's current session was already being picked,
-          // so this order was parked in the NEXT session (collected next cycle).
-          routedToNextSession,
-        },
-      });
-      await activeOrder.save({ session });
-      movedOrder = activeOrder;
+        prevGroupId = activeOrder.buyerSnapshot?.deliveryGroupId
+          ? String(activeOrder.buyerSnapshot.deliveryGroupId)
+          : null;
 
-      // Sync shopName in any active PickingTask items referencing this order.
-      // NB: failure here MUST abort the transaction — picking workers would otherwise
-      // see a stale shop name on items they're packing.
-      await PickingTask.updateMany(
-        { 'items.orderId': activeOrder._id, status: { $in: ['pending', 'locked'] } },
-        { $set: { 'items.$[elem].shopName': newShopName } },
-        { arrayFilters: [{ 'elem.orderId': activeOrder._id }], session },
-      );
+        activeOrder.shopId = newShopFull._id;
+        if (!activeOrder.buyerSnapshot) activeOrder.buyerSnapshot = {};
+        activeOrder.buyerSnapshot.shopId = newShopId;
+        activeOrder.buyerSnapshot.shopName = newShopName;
+        activeOrder.buyerSnapshot.shopCity = newShopCity;
+        activeOrder.buyerSnapshot.shopAddress = newShopAddress;
+        activeOrder.buyerSnapshot.deliveryGroupId = newDeliveryGroupId;
+        if (targetSessionId) activeOrder.orderingSessionId = targetSessionId;
+        activeOrder.markModified('buyerSnapshot');
+        activeOrder.history.push({
+          by: String(actor.telegramId),
+          byName: [actor.firstName, actor.lastName].filter(Boolean).join(' '),
+          byRole: actor.role,
+          action: 'shop_reassigned',
+          meta: {
+            from: { shopName: oldShopFull?.name || '', deliveryGroupId: oldShopFull?.deliveryGroupId || '' },
+            to:   { shopName: newShopName, shopCity: newShopCity, deliveryGroupId: newDeliveryGroupId },
+            reason,
+            routedToNextSession,
+            ownershipRepair: Boolean(ownership.frozen && allowFrozenOrderTransfer),
+          },
+        });
+        await activeOrder.save({ session });
+        movedOrder = activeOrder;
+
+        await PickingTask.updateMany(
+          { 'items.orderId': activeOrder._id, status: { $in: ['pending', 'locked'] } },
+          { $set: { 'items.$[elem].shopName': newShopName } },
+          { arrayFilters: [{ 'elem.orderId': activeOrder._id }], session },
+        );
+      }
     }
   }
 
@@ -235,6 +247,7 @@ async function migrateSellerShop({
                 toShop: newShopName || null,
                 reason,
                 orderMoved: !!movedOrder,
+                orderStayedWithShop: !!shopOwnedOrder,
               },
             }],
             $slice: -20,
@@ -285,10 +298,10 @@ async function migrateSellerShop({
     toShopName: newShopName,
     reason,
     source: 'migrate',
-    orderAction: movedOrder ? 'moved' : 'none',
-    orderId: movedOrder ? String(movedOrder._id) : '',
-    orderShopBefore: movedOrder ? oldShopId : '',
-    orderShopAfter: movedOrder ? newShopId : '',
+    orderAction: movedOrder ? 'moved' : (shopOwnedOrder ? 'stayed_with_shop' : 'none'),
+    orderId: movedOrder ? String(movedOrder._id) : (shopOwnedOrder ? String(shopOwnedOrder._id) : ''),
+    orderShopBefore: (movedOrder || shopOwnedOrder) ? oldShopId : '',
+    orderShopAfter: movedOrder ? newShopId : (shopOwnedOrder ? oldShopId : ''),
   });
 
   // IMPORTANT: cache invalidation is intentionally NOT done here.
@@ -299,6 +312,7 @@ async function migrateSellerShop({
   return {
     updatedUser,
     movedOrder,
+    shopOwnedOrder,
     prevGroupId,
     newGroupId: newDeliveryGroupId || null,
     invalidate: async () => {

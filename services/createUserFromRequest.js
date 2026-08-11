@@ -77,9 +77,6 @@ async function resolveAndCreateUser({
     // historical Google link, but clear stale runtime/account flags.
     existing.botBlocked = false;
     existing.isOnline = false;
-    existing.isWarehouseManager = false;
-    existing.isOnShift = false;
-    existing.shiftZone = { startBlock: null, endBlock: null };
     existing.miniAppState = {
       lastViewedProductId: '', currentIndex: 0, currentPage: 0,
       viewMode: 'carousel', updatedAt: null,

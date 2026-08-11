@@ -1,20 +1,15 @@
 const express = require('express');
-const crypto = require('crypto');
 const mongoose = require('mongoose');
 const Busboy = require('busboy');
-const { S3Client, PutObjectCommand, HeadBucketCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3');
-const { buildImageVariants } = require('../utils/imageService');
+const { S3Client, HeadBucketCommand } = require('@aws-sdk/client-s3');
 const { requireTelegramRoles } = require('../middleware/telegramAuth');
 const Receipt = require('../models/Receipt');
 const ReceiptItem = require('../models/ReceiptItem');
 const Product = require('../models/Product');
 const ShopProduct = require('../models/ShopProduct');
-const User = require('../models/User');
-const Order = require('../models/Order');
 const Block = require('../models/Block');
 const ReceiptItemLog = require('../models/ReceiptItemLog');
 const DeliveryGroup = require('../models/DeliveryGroup');
-const Shop = require('../models/Shop');
 const Counter = require('../models/Counter');
 const { getIO } = require('../socket');
 const { upsertShopOwnedFromReceiptItem, syncMirror } = require('../utils/upsertShopProduct');
@@ -28,78 +23,37 @@ const {
   assertCanDeleteItem,
   assertCanConfirmItem,
   assertItemReadyToConfirm,
-  resolveStructure,
-  deriveSplit,
 } = require('../utils/receiptPermissions');
 
 const staffOnly = requireTelegramRoles(['admin', 'warehouse']);
 
 const FIELD_LABELS = {
-  name: 'Назва',
   totalQty: 'Загальна к-сть',
-  transitQty: 'В магазини',
-  shelfQty: 'На склад',
+  destination: 'Куди',
   price: 'Ціна',
   qtyPerPackage: 'В упаковці',
   qtyPerShop: 'На магазин',
-  barcode: 'Штрихкод',
   photoUrl: 'Фото',
 };
 
 async function ensureReceiptItemProduct(item, session) {
-  // `destination: 'shops'` goods never hit the warehouse, so they create NO
-  // warehouse Product and apply NO shelf stock. Their shop-catalog routing
-  // (shop-owned ShopProduct for new items, or transit marker for items linked
-  // to an existing warehouse product) is handled by the confirm/commit caller,
-  // outside the stock transaction. Returning null here keeps stock untouched.
+  // Shop-routed goods never touch warehouse stock.
   if ((item.destination || 'shelf') === 'shops') return null;
 
   let product = null;
-  if (item.existingProductId) {
-    product = await Product.findById(item.existingProductId).session(session);
-    if (product) {
-      if (item.shelfQty > 0 && !item.stockApplied) {
-        product.quantity += item.shelfQty;
-      }
-      if (item.price !== null) {
-        product.price = item.price;
-      }
-      if (item.qtyPerPackage) {
-        product.quantityPerPackage = item.qtyPerPackage;
-      }
-      // INVARIANT: status follows BLOCK membership, not receipt confirm. A received
-      // product stays 'pending' (in Надходження) until it is physically placed into
-      // a block — only then does block-add flip it to 'active'. shelvedAt still
-      // records the receive moment for the "Нові товари" recency split.
-      if (item.shelfQty > 0 && !product.shelvedAt) product.shelvedAt = new Date();
-      await product.save({ session });
-      if (item.shelfQty > 0 && !item.stockApplied) {
-        item.stockApplied = true;
-        await item.save({ session });
-      }
-      return product;
-    }
-  }
 
+  // Idempotency: once this receipt item created a warehouse Product, reuse it.
   if (item.createdProductId) {
     product = await Product.findById(item.createdProductId).session(session);
     if (product) {
-      if (item.shelfQty > 0 && !item.stockApplied) {
-        product.quantity = item.shelfQty;
+      if (!item.stockApplied) {
+        product.quantity = item.totalQty;
       }
-      if (item.price !== null) {
-        product.price = item.price;
-      }
-      if (item.qtyPerPackage) {
-        product.quantityPerPackage = item.qtyPerPackage;
-      }
-      // INVARIANT: status follows BLOCK membership, not receipt confirm. A received
-      // product stays 'pending' (in Надходження) until it is physically placed into
-      // a block — only then does block-add flip it to 'active'. shelvedAt still
-      // records the receive moment for the "Нові товари" recency split.
-      if (item.shelfQty > 0 && !product.shelvedAt) product.shelvedAt = new Date();
+      if (item.price !== null) product.price = item.price;
+      if (item.qtyPerPackage) product.quantityPerPackage = item.qtyPerPackage;
+      if (!product.shelvedAt) product.shelvedAt = new Date();
       await product.save({ session });
-      if (item.shelfQty > 0 && !item.stockApplied) {
+      if (!item.stockApplied) {
         item.stockApplied = true;
         await item.save({ session });
       }
@@ -107,10 +61,10 @@ async function ensureReceiptItemProduct(item, session) {
     }
   }
 
-  // Filter archived products: they keep orderNumber:0 (archiveProduct), so excluding
-  // them matches the other allocation paths (products.js add/receive) and guards
-  // against any future archived doc that retains a high number poisoning the max.
-  const maxProduct = await Product.findOne({ status: { $ne: 'archived' } }, 'orderNumber').sort({ orderNumber: -1 }).session(session).lean();
+  const maxProduct = await Product.findOne(
+    { status: { $ne: 'archived' } },
+    'orderNumber',
+  ).sort({ orderNumber: -1 }).session(session).lean();
   const nextOrderNumber = (maxProduct?.orderNumber ?? 0) + 1;
   const pm = item.photoMeta || {};
   const labelPositions = {};
@@ -121,22 +75,19 @@ async function ensureReceiptItemProduct(item, session) {
   product = new Product({
     orderNumber: nextOrderNumber,
     price: item.price ?? 0,
-    quantity: item.shelfQty,
+    quantity: item.totalQty,
     warehouse: '',
     category: '',
     name: item.name || '',
     brand: item.name || '',
     model: '',
-    // New receipt product is NOT in a block yet → 'pending' (Надходження). It
-    // becomes 'active' only when placed into a block. shelvedAt records receive time.
     status: 'pending',
-    shelvedAt: item.shelfQty > 0 ? new Date() : null,
+    shelvedAt: new Date(),
     source: 'receipt',
     imageUrls: [item.photoUrl],
     imageNames: [item.photoName],
     originalImageUrl: item.originalPhotoUrl || '',
     labelPositions,
-    barcode: item.barcode || '',
     quantityPerPackage: item.qtyPerPackage || 0,
     aiDescription: item.aiDescription || '',
   });
@@ -144,19 +95,14 @@ async function ensureReceiptItemProduct(item, session) {
   try {
     await product.save({ session });
   } catch (err) {
-    if (err.code === 11000) {
-      if (err.keyPattern?.barcode) throw appError('product_barcode_duplicate');
-      // Two concurrent confirms both read the same max orderNumber and raced for
-      // max+1. E11000 is NOT a TransientTransactionError, so withTransaction does
-      // NOT auto-retry it — surface a clear "try again" instead of the generic
-      // duplicate_key the central handler would otherwise emit.
-      if (err.keyPattern?.orderNumber) throw appError('product_order_number_conflict');
+    if (err.code === 11000 && err.keyPattern?.orderNumber) {
+      throw appError('product_order_number_conflict');
     }
     throw err;
   }
+
   item.createdProductId = product._id;
-  // Stock is applied here via the new product's initial `quantity`.
-  if (item.shelfQty > 0) item.stockApplied = true;
+  item.stockApplied = true;
   await item.save({ session });
   return product;
 }
@@ -219,29 +165,6 @@ function parseMultipart(req) {
   });
 }
 
-// Single image processing path — sharp normalises orientation, produces main
-// (<folder>/<uuid>.jpg) and a 240px thumbnail (thumbs/<uuid>.jpg) in one call.
-// The `filename` and `contentType` parameters are kept for backwards-compatible
-// call sites but are now ignored (sharp always outputs JPEG with a fresh UUID).
-async function uploadToR2(fileBuffer, _filename, _contentType, folder = 'products') {
-  const { filename, main, thumb } = await buildImageVariants(fileBuffer);
-  await Promise.all([
-    s3Client.send(new PutObjectCommand({
-      Bucket: process.env.R2_BUCKET_NAME,
-      Key: `${folder}/${filename}`,
-      Body: main,
-      ContentType: 'image/jpeg',
-    })),
-    s3Client.send(new PutObjectCommand({
-      Bucket: process.env.R2_BUCKET_NAME,
-      Key: `thumbs/${filename}`,
-      Body: thumb,
-      ContentType: 'image/jpeg',
-    })),
-  ]);
-  return filename;
-}
-
 /** Build the public URL for an uploaded object in the given folder. */
 function r2Url(folder, filename) {
   return `${process.env.R2_PUBLIC_URL.replace(/\/$/, '')}/${folder}/${filename}`;
@@ -252,27 +175,6 @@ function r2Url(folder, filename) {
 function safeUploadName(v) {
   const s = String(v || '').trim();
   return /^[a-zA-Z0-9._-]+\.(jpg|jpeg|png|webp)$/i.test(s) ? s : '';
-}
-
-/** Upload up to `max` defect-evidence photos to the defects/ folder. */
-async function uploadDefectPhotos(parsedFiles, max = 3) {
-  const defectFiles = (parsedFiles || []).filter((f) => f.field === 'defectPhoto').slice(0, max);
-  const urls = [];
-  for (const f of defectFiles) {
-    const fn = await uploadToR2(f.buffer, f.originalname, f.mimetype, 'defects');
-    urls.push(r2Url('defects', fn));
-  }
-  return urls;
-}
-
-/**
- * Build defects/ public URLs from client-supplied filenames. Defect photos are
- * now uploaded straight to R2 by the browser (defects/<f> + thumbs/<f>); only
- * their sanitized filenames reach us. Bad/forged names are dropped.
- */
-function defectUrlsFromFilenames(rawField, max = 3) {
-  const names = safeParseArray(rawField) || [];
-  return names.map(safeUploadName).filter(Boolean).slice(0, max).map((fn) => r2Url('defects', fn));
 }
 
 /** Parses a form-field string to a safe non-negative integer. Returns fallback on NaN/negative/missing. */
@@ -291,24 +193,6 @@ function parseNumberField(val, fieldName) {
   const n = Number(val);
   if (!Number.isFinite(n)) throw appError('validation_failed', { field: fieldName });
   return n;
-}
-
-/**
- * Best-effort R2 cleanup for defect photos that were uploaded before a
- * transaction that subsequently failed. Deletes both the defects/ object
- * and its thumbs/ companion (created by buildImageVariants).  Never throws.
- */
-async function cleanupDefectPhotos(urls) {
-  if (!urls || urls.length === 0) return;
-  const base = (process.env.R2_PUBLIC_URL || '').replace(/\/$/, '') + '/';
-  const keys = urls.flatMap((url) => {
-    const key = url.startsWith(base) ? url.slice(base.length) : null;
-    if (!key) return [];
-    return [key, key.replace(/^defects\//, 'thumbs/')];
-  });
-  await Promise.allSettled(
-    keys.map((k) => s3Client.send(new DeleteObjectCommand({ Bucket: process.env.R2_BUCKET_NAME, Key: k }))),
-  ).catch(() => {});
 }
 
 /** Parses a JSON array field. Returns [] when absent, string[] on success, null on bad JSON. */
@@ -540,12 +424,10 @@ router.post('/:id/items', staffOnly, asyncHandler(async (req, res) => {
 
   const parsed = await parseMultipart(req);
   // Main photo + clean original are uploaded straight to R2 by the browser; only
-  // their filenames arrive here. (Defect photos still come as multipart files.)
+  // their sanitized filenames arrive here.
   const photoFilename    = safeUploadName(parsed.fields.photoFilename);
   const originalFilename = safeUploadName(parsed.fields.originalFilename);
   const photoMeta = safeParseObject(parsed.fields.photoMeta) || null;
-  const existingProductId = parsed.fields.existingProductId ? String(parsed.fields.existingProductId).trim() : null;
-  const isWarehousePending = parsed.fields.warehousePending === 'true';
   const deliveryGroupIds = safeParseArray(parsed.fields.deliveryGroupIds);
   if (deliveryGroupIds === null) throw appError('receipt_invalid_delivery_groups');
   if (deliveryGroupIds.length > 0) {
@@ -554,58 +436,25 @@ router.post('/:id/items', staffOnly, asyncHandler(async (req, res) => {
   }
   const qtyPerShop = parseIntField(parsed.fields.qtyPerShop);
 
-  if (!photoFilename && !existingProductId) throw appError('receipt_photo_required');
+  if (!photoFilename) throw appError('receipt_photo_required');
 
-  // Destination is the UI-level choice; it derives the shelf/transit split.
   const destination = String(parsed.fields.destination || 'shelf');
   if (!['shelf', 'shops'].includes(destination)) throw appError('receipt_destination_required');
-  // NOTE: destination is currently just a bookkeeping marker — the delivery-group
-  // / transit UI was removed for now, so we no longer hard-require groups here.
 
   // КРИТИЧНЕ ПРАВИЛО: у накладній-дозамовленні кожна позиція йде НА СКЛАД.
-  // Товар, що їде повз склад прямо в магазини, дозамовляти нікому — його там
-  // фізично не буде, коли склад пакуватиме коробки. Перевірка серверна, бо
-  // старий клієнт або ручний POST не мають змоги її обійти.
   if (receipt.type === 'supplement' && destination !== 'shelf') {
     throw appError('receipt_supplement_shelf_only');
   }
 
-  // Quantity: either a manual total ('direct') or computed from a structure.
-  const rawStructure = safeParseObject(parsed.fields.structure);
-  if (rawStructure === undefined) throw appError('receipt_structure_invalid');
-  const manualTotalQty = parseIntField(parsed.fields.totalQty);
-  const { totalQty, structure } = resolveStructure(rawStructure, manualTotalQty);
+  // Єдине поле фізичної кількості в накладній.
+  const totalQty = parseIntField(parsed.fields.totalQty);
+  if (!Number.isInteger(totalQty) || totalQty < 1) throw appError('receipt_qty_invalid');
 
-  const { shelfQty, transitQty } = deriveSplit(destination, totalQty);
-
-  let photoUrl;
-  let photoName;
+  let photoUrl = r2Url('products', photoFilename);
+  let photoName = photoFilename;
   let originalPhotoUrl = '';
-  if (photoFilename) {
-    photoUrl  = r2Url('products', photoFilename);
-    photoName = photoFilename;
-  }
   if (originalFilename) {
-    // CLEAN original lives in originals/ — it's the embedding/describe source and
-    // must never be the price/quantity-labelled photo (which is in products/).
     originalPhotoUrl = r2Url('originals', originalFilename);
-  }
-  // Prefer client-direct R2 filenames; fall back to legacy multipart bytes.
-  const defectFilenameUrls = defectUrlsFromFilenames(parsed.fields.defectFilenames);
-  const defectPhotoUrls = defectFilenameUrls.length
-    ? defectFilenameUrls
-    : await uploadDefectPhotos(parsed.files);
-  // SAVE-tier rule: a line can be parked with just photo + arrived qty (no
-  // price yet). Price / qtyPerPackage are only required later to CONFIRM.
-  const notes = String(parsed.fields.notes || '').trim();
-
-  // Pull photo from existingProduct if item has no photo
-  if (!photoUrl && existingProductId) {
-    const existingProduct = await Product.findById(existingProductId).lean();
-    if (existingProduct) {
-      photoUrl = existingProduct.imageUrls?.[0] || existingProduct.localImageUrl || '';
-      photoName = existingProduct.imageNames?.[0] || existingProduct.imageUrls?.[0] || 'photo.jpg';
-    }
   }
 
   const receiptItem = new ReceiptItem({
@@ -613,9 +462,8 @@ router.post('/:id/items', staffOnly, asyncHandler(async (req, res) => {
     createdBy: String(req.user.telegramId),
     status: 'draft',
     destination,
-    structure,
-    photoUrl: photoUrl || '',
-    photoName: photoName || '',
+    photoUrl,
+    photoName,
     originalPhotoUrl,
     photoMeta: photoMeta && typeof photoMeta === 'object'
       ? {
@@ -629,18 +477,10 @@ router.post('/:id/items', staffOnly, asyncHandler(async (req, res) => {
         }
       : undefined,
     totalQty,
-    notes,
-    defectPhotoUrls,
-    transitQty: transitQty || 0,
     deliveryGroupIds: Array.isArray(deliveryGroupIds) ? deliveryGroupIds : [],
     qtyPerShop,
-    shelfQty,
-    name: String(parsed.fields.name || '').trim(),
     price: parseNumberField(parsed.fields.price, 'price'),
     qtyPerPackage: parseNumberField(parsed.fields.qtyPerPackage, 'qtyPerPackage'),
-    barcode: String(parsed.fields.barcode || '').trim(),
-    existingProductId: existingProductId || null,
-    warehousePending: isWarehousePending,
   });
 
   // Save item AND re-check receipt.status='draft' in the SAME transaction so that
@@ -658,8 +498,6 @@ router.post('/:id/items', staffOnly, asyncHandler(async (req, res) => {
       await receiptItem.save({ session: addItemSession });
     });
   } catch (txErr) {
-    // Transaction failed after defect photos were already uploaded — clean them up.
-    cleanupDefectPhotos(defectPhotoUrls).catch(() => {});
     throw txErr;
   } finally {
     addItemSession.endSession();
@@ -689,13 +527,13 @@ router.get('/:id/items', staffOnly, asyncHandler(async (req, res) => {
   const items = await ReceiptItem.find({ receiptId: receipt._id }).sort({ createdAt: -1 }).lean();
 
   // Enrich each item with currentLocation (block + product status) and productCurrentQty
-  const productIds = items.map((i) => i.existingProductId || i.createdProductId).filter(Boolean);
+  const productIds = items.map((i) => i.createdProductId).filter(Boolean);
   let productMap = {};
   let blockMap = {};
 
   if (productIds.length > 0) {
     const [products, blocks] = await Promise.all([
-      Product.find({ _id: { $in: productIds } }, 'quantity status barcodeChecked barcode').lean(),
+      Product.find({ _id: { $in: productIds } }, 'quantity status').lean(),
       Block.find({ productIds: { $in: productIds } }, 'blockId productIds').lean(),
     ]);
     productMap = Object.fromEntries(products.map((p) => [String(p._id), p]));
@@ -707,14 +545,13 @@ router.get('/:id/items', staffOnly, asyncHandler(async (req, res) => {
   }
 
   const enrichedItems = items.map((item) => {
-    const productId = item.existingProductId || item.createdProductId;
+    const productId = item.createdProductId;
     const product = productId ? productMap[String(productId)] : null;
     const blockId = productId ? (blockMap[String(productId)] ?? null) : null;
     return {
       ...item,
       currentLocation: { blockId, status: product?.status ?? null },
       productCurrentQty: product?.quantity ?? null,
-      barcodeChecked: product?.barcodeChecked ?? false,
     };
   });
 
@@ -734,270 +571,177 @@ router.patch('/:id/items/:itemId', staffOnly, asyncHandler(async (req, res) => {
   ]);
   if (!item) throw appError('receipt_item_not_found');
   if (!receipt) throw appError('receipt_not_found');
-  // A COMMITTED receipt is a frozen acceptance record — fully read-only.
-  // Post-commit edits to price/qty/photo are gone: those now happen at the
-  // product's OWNER (warehouse Product or shop ShopProduct), never on the
-  // invoice. The freeze is enforced below, once we know what actually changed.
 
   const parsed = await parseMultipart(req);
-
-  const existingProductId = parsed.fields.existingProductId ? String(parsed.fields.existingProductId).trim() : null;
-  if (existingProductId) {
-    const exists = await Product.exists({ _id: existingProductId });
-    if (!exists) throw appError('validation_failed', { field: 'existingProductId' });
-  }
-  const deliveryGroupIds = safeParseArray(parsed.fields.deliveryGroupIds);
-  if (deliveryGroupIds === null) {
-    throw appError('validation_failed', { field: 'deliveryGroupIds' });
-  }
-  if (deliveryGroupIds.length > 0) {
-    const existingCount = await DeliveryGroup.countDocuments({ _id: { $in: deliveryGroupIds } });
-    if (existingCount !== deliveryGroupIds.length) {
-      throw appError('validation_failed', { field: 'deliveryGroupIds' });
-    }
-  }
-  const qtyPerShop = parseIntField(parsed.fields.qtyPerShop);
-
-  // ── Resolve destination + structure → derived shelf/transit split ──────────
-  const prevStructure = item.structure && item.structure.toObject
-    ? item.structure.toObject()
-    : (item.structure || { type: 'direct' });
 
   let nextDestination = item.destination || 'shelf';
   if (parsed.fields.destination !== undefined) {
     nextDestination = String(parsed.fields.destination);
-    if (!['shelf', 'shops'].includes(nextDestination)) throw appError('receipt_destination_required');
+    if (!['shelf', 'shops'].includes(nextDestination)) {
+      throw appError('receipt_destination_required');
+    }
   }
-  // Той самий гард, що й при створенні: у накладній-дозамовленні позиція не може
-  // з'їхати «на магазини» пізнішим редагуванням.
+  // Накладна-дозамовлення за поточним контрактом завжди приходить на склад.
   if (receipt.type === 'supplement' && nextDestination !== 'shelf') {
     throw appError('receipt_supplement_shelf_only');
   }
-  // Groups intentionally not required — destination is a marker for now.
 
-  let nextStructure = prevStructure;
   let totalQty = item.totalQty;
-  if (parsed.fields.structure !== undefined) {
-    const rawStructure = safeParseObject(parsed.fields.structure);
-    if (rawStructure === undefined) throw appError('receipt_structure_invalid');
-    const manual = parsed.fields.totalQty !== undefined
-      ? parseIntField(parsed.fields.totalQty, item.totalQty)
-      : item.totalQty;
-    const resolved = resolveStructure(rawStructure || { type: 'direct' }, manual);
-    nextStructure = resolved.structure;
-    totalQty = resolved.totalQty;
-  } else if (parsed.fields.totalQty !== undefined) {
+  if (parsed.fields.totalQty !== undefined) {
     totalQty = parseIntField(parsed.fields.totalQty, item.totalQty);
     if (!Number.isInteger(totalQty) || totalQty < 1) throw appError('receipt_qty_invalid');
   }
 
-  // Only re-derive the shelf/transit split when a split-relevant input was
-  // actually submitted. Otherwise preserve the stored values — this protects
-  // legacy items (no destination field) from being silently zeroed when a
-  // non-owner edits only price/qtyPerPackage.
-  const splitInputsChanged =
-    parsed.fields.destination !== undefined ||
-    parsed.fields.structure !== undefined ||
-    parsed.fields.totalQty !== undefined;
-  const { shelfQty, transitQty } = splitInputsChanged
-    ? deriveSplit(nextDestination, totalQty)
-    : { shelfQty: item.shelfQty, transitQty: item.transitQty };
+  // Не стираємо групи/qtyPerShop при редагуванні іншого поля: якщо поле не
+  // прийшло у multipart, зберігаємо поточне значення.
+  let deliveryGroupIds = item.deliveryGroupIds || [];
+  if (parsed.fields.deliveryGroupIds !== undefined) {
+    deliveryGroupIds = safeParseArray(parsed.fields.deliveryGroupIds);
+    if (deliveryGroupIds === null) {
+      throw appError('validation_failed', { field: 'deliveryGroupIds' });
+    }
+    if (deliveryGroupIds.length > 0) {
+      const existingCount = await DeliveryGroup.countDocuments({ _id: { $in: deliveryGroupIds } });
+      if (existingCount !== deliveryGroupIds.length) {
+        throw appError('validation_failed', { field: 'deliveryGroupIds' });
+      }
+    }
+  }
 
-  // ── Build the set of fields this request actually changes, then enforce
-  // the multi-worker ownership rules (also blocks edits to confirmed items).
+  let qtyPerShop = item.qtyPerShop || 0;
+  if (parsed.fields.qtyPerShop !== undefined) {
+    qtyPerShop = parseIntField(parsed.fields.qtyPerShop, item.qtyPerShop || 0);
+    if (!Number.isInteger(qtyPerShop) || qtyPerShop < 0) {
+      throw appError('validation_failed', { field: 'qtyPerShop' });
+    }
+  }
+
   const arraysEqual = (a = [], b = []) =>
     a.length === b.length && a.every((v, i) => String(v) === String(b[i]));
   const changedFields = [];
-  if (parsed.fields.name !== undefined && String(parsed.fields.name).trim() !== (item.name || '')) changedFields.push('name');
+
   if (parsed.fields.price !== undefined) {
-    const np = parsed.fields.price !== '' ? Number(parsed.fields.price) : null;
-    if (np !== item.price) changedFields.push('price');
+    const nextPrice = parsed.fields.price !== '' ? Number(parsed.fields.price) : null;
+    if (nextPrice !== item.price) changedFields.push('price');
   }
-  if (parsed.fields.qtyPerPackage !== undefined
-      && (parsed.fields.qtyPerPackage !== '' ? Number(parsed.fields.qtyPerPackage) : null) !== item.qtyPerPackage) changedFields.push('qtyPerPackage');
-  if (parsed.fields.barcode !== undefined && String(parsed.fields.barcode).trim() !== (item.barcode || '')) changedFields.push('barcode');
+  if (parsed.fields.qtyPerPackage !== undefined) {
+    const nextQtyPerPackage = parsed.fields.qtyPerPackage !== '' ? Number(parsed.fields.qtyPerPackage) : null;
+    if (nextQtyPerPackage !== item.qtyPerPackage) changedFields.push('qtyPerPackage');
+  }
   if (nextDestination !== (item.destination || 'shelf')) changedFields.push('destination');
   if (totalQty !== item.totalQty) changedFields.push('totalQty');
-  if (JSON.stringify(nextStructure) !== JSON.stringify(prevStructure)) changedFields.push('structure');
-  if (parsed.fields.deliveryGroupIds !== undefined && !arraysEqual(deliveryGroupIds, item.deliveryGroupIds || [])) changedFields.push('deliveryGroupIds');
+  if (parsed.fields.deliveryGroupIds !== undefined
+      && !arraysEqual(deliveryGroupIds, item.deliveryGroupIds || [])) changedFields.push('deliveryGroupIds');
   if (parsed.fields.qtyPerShop !== undefined && qtyPerShop !== (item.qtyPerShop || 0)) changedFields.push('qtyPerShop');
-  if (parsed.fields.notes !== undefined && String(parsed.fields.notes).trim() !== (item.notes || '')) changedFields.push('notes');
-  const newDefectUrls = defectUrlsFromFilenames(parsed.fields.defectFilenames);
-  const hasMultipartDefect = (parsed.files || []).some((f) => f.field === 'defectPhoto');
-  const hasNewDefectPhotos = newDefectUrls.length > 0 || hasMultipartDefect;
-  // keptDefectPhotoUrls = the subset of EXISTING defect photos the client wants
-  // to keep (lets the UI delete individual photos). Absent => keep all existing.
-  const keptDefectUrls = parsed.fields.keptDefectPhotoUrls !== undefined
-    ? (safeParseArray(parsed.fields.keptDefectPhotoUrls) || [])
-    : null;
-  const defectsTouched = hasNewDefectPhotos
-    || (keptDefectUrls !== null
-        && JSON.stringify(keptDefectUrls) !== JSON.stringify(item.defectPhotoUrls || []));
-  if (defectsTouched) changedFields.push('defectPhotoUrls');
-  const hasNewMainPhoto = (parsed.files || []).some(
-    (f) => f.field === 'photo' || !f.field, // legacy callers send the photo with no field name
-  );
-  if (hasNewMainPhoto) changedFields.push('photoUrl');
-  if (parsed.fields.existingProductId !== undefined &&
-      (existingProductId || null) !== (item.existingProductId ? String(item.existingProductId) : null)) {
-    changedFields.push('existingProductId');
-  }
 
-  // Detect changes to the photo overlay metadata (comment + position).
-  // If the client sent `photoMeta`, normalize and compare to the stored
-  // value and mark it as changed when different.
+  const hasNewMainPhoto = (parsed.files || []).some(
+    (f) => f.field === 'photo' || !f.field,
+  );
+  if (hasNewMainPhoto || safeUploadName(parsed.fields.photoFilename)) changedFields.push('photoUrl');
+
+  let normalizedPhotoMeta = null;
   if (parsed.fields.photoMeta !== undefined) {
     const rawPhotoMeta = safeParseObject(parsed.fields.photoMeta);
     if (rawPhotoMeta === undefined) throw appError('validation_failed', { field: 'photoMeta' });
     if (rawPhotoMeta && typeof rawPhotoMeta === 'object') {
-      const prevMeta = item.photoMeta || { comment: '', commentPos: { x: 0.5, y: 0.5 } };
-      const newMeta = {
+      normalizedPhotoMeta = {
         comment: String(rawPhotoMeta.comment || ''),
         commentPos: {
           x: Number(rawPhotoMeta?.commentPos?.x) || 0.5,
           y: Number(rawPhotoMeta?.commentPos?.y) || 0.5,
         },
+        pricePos: rawPhotoMeta.pricePos || null,
+        qtyPos: rawPhotoMeta.qtyPos || null,
       };
-      if (newMeta.comment !== (prevMeta.comment || '')
-          || newMeta.commentPos.x !== (prevMeta.commentPos?.x || 0.5)
-          || newMeta.commentPos.y !== (prevMeta.commentPos?.y || 0.5)) {
+      const prevMeta = item.photoMeta || { comment: '', commentPos: { x: 0.5, y: 0.5 } };
+      if (normalizedPhotoMeta.comment !== (prevMeta.comment || '')
+          || normalizedPhotoMeta.commentPos.x !== (prevMeta.commentPos?.x || 0.5)
+          || normalizedPhotoMeta.commentPos.y !== (prevMeta.commentPos?.y || 0.5)
+          || JSON.stringify(normalizedPhotoMeta.pricePos) !== JSON.stringify(prevMeta.pricePos || null)
+          || JSON.stringify(normalizedPhotoMeta.qtyPos) !== JSON.stringify(prevMeta.qtyPos || null)) {
         changedFields.push('photoMeta');
       }
     }
   }
 
-  // Freeze: a committed receipt accepts NO field changes. Edit the product at
-  // its owner (warehouse / shop), not on the invoice.
+  // Завершена накладна — read-only. Поведінку confirmed-позицій окремо не
+  // змінюємо в цій задачі; тут лише зберігаємо існуючий receipt-level freeze.
   if (receipt.status === 'completed' && changedFields.length > 0) {
     throw appError('receipt_completed_locked');
   }
 
   assertCanEditItem(req.user, item, changedFields);
 
-  // Capture values before changes for diff
-  const _oldSnapshot = {
-    name: item.name,
+  const oldSnapshot = {
     totalQty: item.totalQty,
-    transitQty: item.transitQty,
-    shelfQty: item.shelfQty,
+    destination: item.destination,
     price: item.price,
     qtyPerPackage: item.qtyPerPackage,
     qtyPerShop: item.qtyPerShop,
-    barcode: item.barcode,
     photoUrl: item.photoUrl,
   };
 
   item.totalQty = totalQty;
-  item.transitQty = transitQty;
-  item.shelfQty = shelfQty;
   item.destination = nextDestination;
-  item.structure = nextStructure;
   item.deliveryGroupIds = deliveryGroupIds;
   item.qtyPerShop = qtyPerShop;
-  if (parsed.fields.name !== undefined) item.name = String(parsed.fields.name).trim();
   if (parsed.fields.price !== undefined) item.price = parseNumberField(parsed.fields.price, 'price');
-  if (parsed.fields.qtyPerPackage !== undefined) item.qtyPerPackage = parseNumberField(parsed.fields.qtyPerPackage, 'qtyPerPackage');
-  if (parsed.fields.barcode !== undefined) item.barcode = String(parsed.fields.barcode).trim();
-  item.existingProductId = existingProductId || null;
-  if (parsed.fields.notes !== undefined) item.notes = String(parsed.fields.notes).trim();
-  let uploadedDefectUrls = [];
-  if (defectsTouched) {
-    const kept = keptDefectUrls !== null ? keptDefectUrls : (item.defectPhotoUrls || []);
-    uploadedDefectUrls = newDefectUrls.length
-      ? newDefectUrls
-      : (hasMultipartDefect ? await uploadDefectPhotos(parsed.files) : []);
-    item.defectPhotoUrls = [...kept, ...uploadedDefectUrls].slice(0, 3);
+  if (parsed.fields.qtyPerPackage !== undefined) {
+    item.qtyPerPackage = parseNumberField(parsed.fields.qtyPerPackage, 'qtyPerPackage');
   }
-
-  // Re-rendered overlay metadata (comment + its position). Owner-only when it
-  // changes; a non-owner price edit re-sends the SAME meta so it won't trip.
-  const photoMeta = safeParseObject(parsed.fields.photoMeta) || null;
-  if (photoMeta && typeof photoMeta === 'object') {
-    item.photoMeta = {
-      comment: String(photoMeta.comment || ''),
-      commentPos: {
-        x: Number(photoMeta?.commentPos?.x) || 0.5,
-        y: Number(photoMeta?.commentPos?.y) || 0.5,
-      },
-      pricePos: photoMeta.pricePos || null,
-      qtyPos:   photoMeta.qtyPos || null,
-    };
-  }
+  if (normalizedPhotoMeta) item.photoMeta = normalizedPhotoMeta;
 
   const originalFilename = safeUploadName(parsed.fields.originalFilename);
-  if (originalFilename) {
-    // CLEAN original → originals/ (see create path); never the labelled photo.
-    item.originalPhotoUrl = r2Url('originals', originalFilename);
-  }
+  if (originalFilename) item.originalPhotoUrl = r2Url('originals', originalFilename);
 
   const photoFilename = safeUploadName(parsed.fields.photoFilename);
   if (photoFilename) {
     item.photoUrl = r2Url('products', photoFilename);
     item.photoName = photoFilename;
-  } else if (!item.photoUrl && existingProductId) {
-    const existingProduct = await Product.findById(existingProductId).lean();
-    if (existingProduct) {
-      item.photoUrl = existingProduct.imageUrls?.[0] || existingProduct.localImageUrl || item.photoUrl;
-      item.photoName = existingProduct.imageNames?.[0] || existingProduct.imageUrls?.[0] || item.photoName;
-    }
   }
 
-  // Save item AND re-check receipt.status='draft' in the SAME transaction so
-  // that a concurrent commit (which CAS-flips status to 'completed') will
-  // either run before us (we abort with 409) or run after us (it sees our
-  // changes). Без цього вікно між початковою перевіркою і item.save() могло
-  // дати «змінив позицію вже завершеної накладної».
+  // Re-check draft status in the SAME transaction as item.save(). This closes
+  // the race where commit could flip the receipt after the initial read but
+  // before the item update was persisted.
   const txSession = await mongoose.connection.startSession();
   try {
     await txSession.withTransaction(async () => {
       const liveReceipt = await Receipt.findOne(
-        { _id: req.params.id },
+        { _id: req.params.id, status: 'draft' },
         '_id status',
       ).session(txSession);
-      if (!liveReceipt) throw appError('receipt_not_found');
+      if (!liveReceipt) throw appError('receipt_completed_locked');
       await item.save({ session: txSession });
     });
-  } catch (txErr) {
-    // Transaction failed after defect photos were already uploaded — clean them up.
-    cleanupDefectPhotos(uploadedDefectUrls).catch(() => {});
-    throw txErr;
   } finally {
     txSession.endSession();
   }
 
-  // Log: which fields changed and who changed them
-  const _newSnapshot = {
-    name: item.name,
+  const newSnapshot = {
     totalQty: item.totalQty,
-    transitQty: item.transitQty,
-    shelfQty: item.shelfQty,
+    destination: item.destination,
     price: item.price,
     qtyPerPackage: item.qtyPerPackage,
     qtyPerShop: item.qtyPerShop,
-    barcode: item.barcode,
     photoUrl: item.photoUrl,
   };
-  const _logChanges = Object.entries(_oldSnapshot)
-    .filter(([field]) => String(_oldSnapshot[field] ?? '') !== String(_newSnapshot[field] ?? ''))
-    .map(([field]) => ({ field, label: FIELD_LABELS[field] || field, from: _oldSnapshot[field], to: _newSnapshot[field] }));
-  if (_logChanges.length > 0) {
+  const logChanges = Object.entries(oldSnapshot)
+    .filter(([field]) => String(oldSnapshot[field] ?? '') !== String(newSnapshot[field] ?? ''))
+    .map(([field]) => ({
+      field,
+      label: FIELD_LABELS[field] || field,
+      from: oldSnapshot[field],
+      to: newSnapshot[field],
+    }));
+  if (logChanges.length > 0) {
     ReceiptItemLog.create({
       receiptId: receipt._id,
       itemId: item._id,
       itemName: item.name,
       action: 'update',
       actor: getActor(req),
-      changes: _logChanges,
+      changes: logChanges,
     }).catch((e) => console.error('[ReceiptItemLog] update error:', e));
-  }
-
-  // If barcode was explicitly submitted and there's a linked existing product, enrich the Product record.
-  // We also set barcodeChecked: true when the field is empty — that means the user confirmed "no barcode".
-  if (parsed.fields.barcode !== undefined && item.existingProductId) {
-    const newBarcode = String(parsed.fields.barcode).trim();
-    const update = { barcodeChecked: true };
-    if (newBarcode) update.barcode = newBarcode;
-    await Product.findByIdAndUpdate(item.existingProductId, { $set: update });
   }
 
   const io = getIO();
@@ -1050,7 +794,6 @@ router.delete('/:id/items/:itemId', staffOnly, asyncHandler(async (req, res) => 
       action: 'delete',
       actor: getActor(req),
       changes: [
-        { field: 'name', label: FIELD_LABELS.name, from: deletedItem.name, to: null },
         { field: 'totalQty', label: FIELD_LABELS.totalQty, from: deletedItem.totalQty, to: null },
         { field: 'price', label: FIELD_LABELS.price, from: deletedItem.price, to: null },
       ],
@@ -1072,7 +815,6 @@ router.post('/:id/items/:itemId/confirm', staffOnly, asyncHandler(async (req, re
   const session = await mongoose.connection.startSession();
   try {
     let confirmedItem = null;
-    let confirmedProduct = null;
     // ShopProducts that need (re)embedding — scheduled AFTER commit so we never
     // embed a doc that could still roll back. Reset on every transaction attempt.
     let embedTargets = [];
@@ -1092,7 +834,6 @@ router.post('/:id/items/:itemId/confirm', staffOnly, asyncHandler(async (req, re
       }
 
       const product = await ensureReceiptItemProduct(item, session);
-      confirmedProduct = product;
 
       // Shop-catalog routing by destination — now INSIDE the stock transaction so
       // a warehouse Product can NEVER commit without its ShopProduct mirror, and a
@@ -1114,9 +855,8 @@ router.post('/:id/items/:itemId/confirm', staffOnly, asyncHandler(async (req, re
         if (product.originalImageUrl || product.imageUrls?.[0]) {
           embedTargets.push(['warehouse', product, 'receipt-confirm-warehouse']);
         }
-      } else if ((item.destination || 'shelf') === 'shops' && !item.existingProductId) {
-        // brand-new shops item → shop-OWNED ShopProduct (no warehouse product).
-        // (shops + existingProductId is a pure transit marker → nothing to create.)
+      } else if ((item.destination || 'shelf') === 'shops') {
+        // Shops item → shop-OWNED ShopProduct (no warehouse Product/stock).
         const sp = await upsertShopOwnedFromReceiptItem(item.toObject(), { session });
         if (sp && String(sp._id) !== String(item.createdShopProductId || '')) {
           item.createdShopProductId = sp._id;
@@ -1131,7 +871,6 @@ router.post('/:id/items/:itemId/confirm', staffOnly, asyncHandler(async (req, re
         status: product?.status ?? null,
       };
       confirmedItem.productCurrentQty = product?.quantity ?? null;
-      confirmedItem.barcodeChecked = product?.barcodeChecked ?? false;
     });
     // Audit log AFTER commit (not inside the callback): withTransaction re-runs the
     // callback on a WriteConflict, so an in-callback create would write one log row
@@ -1187,15 +926,6 @@ router.post('/:id/items/:itemId/unconfirm', staffOnly, asyncHandler(async (req, 
           if (item.createdShopProductId) {
             await ShopProduct.deleteOne({ _id: item.createdShopProductId, linkedProductId: null }).session(session);
             item.createdShopProductId = null;
-          }
-        } else if (item.existingProductId) {
-          const product = await Product.findById(item.existingProductId).session(session);
-          if (product) {
-            product.quantity = Math.max(0, product.quantity - item.shelfQty);
-            if (product.quantity === 0) {
-              product.status = 'pending';
-            }
-            await product.save({ session });
           }
         } else if (item.createdProductId) {
           const product = await Product.findById(item.createdProductId).session(session);
@@ -1328,102 +1058,57 @@ router.post('/:id/commit', staffOnly, asyncHandler(async (req, res) => {
       throw appError('receipt_items_not_all_confirmed', { pending: pendingConfirm });
     }
 
-    // Receiving needs only a photo + arrived quantity. Name/price are optional
-    // shop-data filled separately later — a *confirmed* item has already passed
-    // the worker's sign-off, so we don't re-validate name/price here.
+    // Every item is already confirmed at this point, so the item-level
+    // completeness contract (photo + totalQty + price + qtyPerPackage) has
+    // already been enforced. Commit consumes that signed-off state.
 
-    const pendingItem = items.find((item) => item.warehousePending);
-    if (pendingItem) throw appError('receipt_item_pending', { name: pendingItem.name });
-
-    // Items may be marked `destination='shops'` without delivery groups.
-    // Keep `transitQty` as a bookkeeping/operational marker but do not
-    // require deliveryGroupIds here — distribution to sellers is handled
-    // by a separate process/worker and **must not** be created during commit.
+    // destination='shops' may exist without delivery groups; distribution to
+    // sellers is a separate workflow and commit must not allocate automatically.
 
     const createdProducts = [];
 
-    // 4.1: Pre-determine how many NEW products will be created (no existingProductId or not found),
-    // then do ONE bulk shiftUp instead of one per new product.
-    // shops items create NO warehouse product, so they are EXCLUDED from this
-    // count — including them would over-shift every orderNumber (silent bug).
+    // Pre-determine how many warehouse Products still need a fallback create.
+    // Normally confirm already created the Product; this keeps commit robust and
+    // idempotent without any pre-existing-product matching path.
     const shelfItems = items.filter((i) => (i.destination || 'shelf') !== 'shops');
-    const existingIdSet = new Set(
-      shelfItems
-        .map((i) => i.existingProductId || i.createdProductId)
-        .filter(Boolean)
-        .map(String)
+    const createdIdSet = new Set(
+      shelfItems.map((i) => i.createdProductId).filter(Boolean).map(String),
     );
-    let resolvedExistingCount = 0;
-    if (existingIdSet.size > 0) {
-      resolvedExistingCount = await Product.countDocuments({
-        _id: { $in: [...existingIdSet] },
+    let resolvedCreatedCount = 0;
+    if (createdIdSet.size > 0) {
+      resolvedCreatedCount = await Product.countDocuments({
+        _id: { $in: [...createdIdSet] },
       }).session(session);
     }
-    const newProductCount = shelfItems.length - resolvedExistingCount;
+    const newProductCount = shelfItems.length - resolvedCreatedCount;
     if (newProductCount > 0) {
       await Product.updateMany(
         { orderNumber: { $gte: 1 } },
         { $inc: { orderNumber: newProductCount } },
-        { session }
+        { session },
       );
     }
     let nextOrderNumber = 1;
 
-    // 4.2: Track already-updated existingProductIds to prevent double-increment if two items share the same product.
-    const usedExistingProductIds = new Set();
-
     for (const item of items) {
-      // shops items never create/update a warehouse product — their shop-catalog
-      // routing (shop-owned entry or transit marker) was handled at confirm time.
+      // Shops items never create/update warehouse stock. Their shop-owned
+      // catalog entry was handled at confirm time.
       if ((item.destination || 'shelf') === 'shops') continue;
 
-      let currentProduct;
-
-      // `item.stockApplied` is the SINGLE source of truth. It is set
-      // idempotently by ensureReceiptItemProduct() at confirm time whenever
-      // stock is actually added (shelfQty > 0). The old extra
-      // `|| item.status === 'confirmed'` clause was wrong in BOTH directions:
-      //   • item confirmed while shelfQty===0 (destination=shops, no stock
-      //     applied, stockApplied=false) then edited to shelfQty>0 → the
-      //     'confirmed' clause made commit skip it → SILENT STOCK LOSS;
-      //   • it was also redundant for double-apply (stockApplied already
-      //     covers that). Drive strictly off the flag.
+      let currentProduct = null;
       const stockAlreadyApplied = !!item.stockApplied;
 
-      // 1. Update or create the product
-      if (
-        item.existingProductId &&
-        !item.createdProductId &&
-        !usedExistingProductIds.has(String(item.existingProductId))
-      ) {
-        usedExistingProductIds.add(String(item.existingProductId));
-        currentProduct = await Product.findById(item.existingProductId).session(session);
-        if (currentProduct) {
-          if (item.shelfQty > 0 && !stockAlreadyApplied) {
-            currentProduct.quantity += item.shelfQty;
-          }
-          if (item.price !== null) currentProduct.price = item.price;
-          if (item.qtyPerPackage) currentProduct.quantityPerPackage = item.qtyPerPackage;
-          // Проведення лишає товар у «Надходженнях»; active задає фізичний блок.
-          // Див. docs/receipt/readme.md.
-          await currentProduct.save({ session });
-          item.createdProductId = currentProduct._id;
-          if (item.shelfQty > 0) item.stockApplied = true;
-          await item.save({ session });
-        }
-      }
-
-      if (!currentProduct && item.createdProductId) {
+      if (item.createdProductId) {
         currentProduct = await Product.findById(item.createdProductId).session(session);
         if (currentProduct) {
           if (item.price !== null) currentProduct.price = item.price;
           if (item.qtyPerPackage) currentProduct.quantityPerPackage = item.qtyPerPackage;
-          // Лише кількість (ідемпотентно через stockApplied). Статус лишається
-          // 'pending' — active тільки при розкладанні в блок (див. інваріант вище).
-          if (item.shelfQty > 0 && !stockAlreadyApplied) {
-            currentProduct.quantity = item.shelfQty;
-          }
+          if (!stockAlreadyApplied) currentProduct.quantity = item.totalQty;
           await currentProduct.save({ session });
+          if (!stockAlreadyApplied) {
+            item.stockApplied = true;
+            await item.save({ session });
+          }
         }
       }
 
@@ -1431,36 +1116,28 @@ router.post('/:id/commit', staffOnly, asyncHandler(async (req, res) => {
         currentProduct = new Product({
           orderNumber: nextOrderNumber++,
           price: item.price ?? 0,
-          quantity: item.shelfQty,
+          quantity: item.totalQty,
           warehouse: '',
           category: '',
           name: item.name || '',
           brand: item.name || '',
           model: '',
-          // Ніколи не active автоматично: новий товар ще не в блоці → 'pending'
-          // (Надходження), доки його не розкладуть. (Дістається лише якщо confirm
-          // чомусь не створив товар; лишаємо коректним про всяк випадок.)
           status: 'pending',
           source: 'receipt',
           imageUrls: [item.photoUrl],
           imageNames: [item.photoName],
-          barcode: item.barcode || '',
+          originalImageUrl: item.originalPhotoUrl || '',
           quantityPerPackage: item.qtyPerPackage || 0,
           aiDescription: item.aiDescription || '',
         });
 
         await currentProduct.save({ session });
         item.createdProductId = currentProduct._id;
+        item.stockApplied = true;
         await item.save({ session });
       }
 
       createdProducts.push(currentProduct);
-
-      // 2. Transit allocation
-      // Automatic distribution to sellers (creating `direct_allocation` orders)
-      // has been intentionally disabled. `transitQty` remains a marker so
-      // the operations team can later process shipments to shops without
-      // the commit step performing allocations.
     }
 
     await session.commitTransaction();
@@ -1544,75 +1221,6 @@ router.post('/:id/commit', staffOnly, asyncHandler(async (req, res) => {
     console.error('[receipts.commit] Error:', err);
     throw appError('receipt_commit_failed');
   }
-}));
-
-// ── RESOLVE WAREHOUSE-PENDING ─────────────────────────────────────────────
-// Link a warehousePending item to an existing product, or mark it as a brand-new product.
-router.patch('/:id/items/:itemId/link', staffOnly, asyncHandler(async (req, res) => {
-  const { existingProductId, markAsNew, keepNewPhoto } = req.body || {};
-  const receipt = await Receipt.findById(req.params.id).lean();
-  if (!receipt) throw appError('receipt_not_found');
-  if (receipt.status === 'completed') throw appError('receipt_completed_locked');
-
-  const item = await ReceiptItem.findOne({ _id: req.params.itemId, receiptId: req.params.id });
-  if (!item) throw appError('receipt_item_not_found');
-
-  if (existingProductId) {
-    item.existingProductId = existingProductId;
-    const prod = await Product.findById(existingProductId);
-    if (prod) {
-      if (item.photoUrl && keepNewPhoto === true) {
-        // User chose the NEW photo — update the product record so it shows everywhere
-        prod.imageUrls = [item.photoUrl, ...(prod.imageUrls || []).filter((u) => u !== item.photoUrl)];
-        if (item.photoName) {
-          prod.imageNames = [item.photoName, ...(prod.imageNames || []).filter((n) => n !== item.photoName)];
-        }
-        await prod.save();
-      } else if (!item.photoUrl || keepNewPhoto === false) {
-        // User chose the OLD photo (or item had no photo) — pull from product
-        item.photoUrl = prod.imageUrls?.[0] || prod.localImageUrl || '';
-        item.photoName = prod.imageNames?.[0] || '';
-      }
-      if (!item.name || item.name === 'Без назви') {
-        item.name = prod.brand || prod.model || item.name;
-      }
-      if (item.price == null && prod.price != null) {
-        item.price = prod.price;
-      }
-    }
-  }
-  item.warehousePending = false;
-  await item.save();
-
-  ReceiptItemLog.create({
-    receiptId: req.params.id,
-    itemId: item._id,
-    itemName: item.name,
-    action: 'resolve_pending',
-    actor: getActor(req),
-    meta: { existingProductId: existingProductId || null, markAsNew: !!markAsNew },
-  }).catch((e) => console.error('[ReceiptItemLog] resolve_pending error:', e));
-
-  // Return enriched item (same as GET /:id/items enrichment)
-  const productId = item.existingProductId || item.createdProductId;
-  let enriched = item.toObject();
-  if (productId) {
-    const [prod, block] = await Promise.all([
-      Product.findById(productId, 'quantity status barcodeChecked barcode price').lean(),
-      Block.findOne({ productIds: productId }, 'blockId').lean(),
-    ]);
-    enriched.currentLocation = { blockId: block?.blockId ?? null, status: prod?.status ?? null };
-    enriched.productCurrentQty = prod?.quantity ?? null;
-    enriched.barcodeChecked = prod?.barcodeChecked ?? false;
-  } else {
-    enriched.currentLocation = { blockId: null, status: null };
-    enriched.productCurrentQty = null;
-  }
-
-  const io = getIO();
-  if (io) io.to(`receipt_${req.params.id}`).emit('receipt_item_updated', enriched);
-
-  res.json(enriched);
 }));
 
 // ── POST /:id/items/:itemId/describe — generate + cache the item description ──

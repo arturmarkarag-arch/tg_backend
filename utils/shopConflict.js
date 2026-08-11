@@ -3,10 +3,11 @@ const User = require('../models/User');
 const Order = require('../models/Order');
 const { activeOrderShopFilter } = require('./orderShopFilter');
 
-// Computes the conflict state of a shop from FRESH reads: every seller assigned to
-// it and every active order on it (by distinct buyer). `excludeTelegramId` lets the
-// caller ignore an incoming seller so a transfer that merely displaces ONE seller
-// is not mistaken for a pre-existing conflict.
+// Computes the conflict state of a shop from FRESH reads. Multiple assigned
+// sellers are legal and NEVER constitute a conflict by themselves. The only
+// conflict represented here is CURRENT active Orders from 2+ distinct buyers.
+// `excludeTelegramId` is kept for callers that want to inspect the target state
+// without counting the incoming seller's own order.
 async function computeTargetShopState(toShopId, excludeTelegramId = '', session = null) {
   const sellerFilter = { shopId: String(toShopId), role: 'seller' };
   if (excludeTelegramId) sellerFilter.telegramId = { $ne: String(excludeTelegramId) };
@@ -25,9 +26,9 @@ async function computeTargetShopState(toShopId, excludeTelegramId = '', session 
       .filter((b) => b && b !== String(excludeTelegramId)),
   );
 
-  // A shop is "in conflict" when it cannot be cleanly resolved by displacing a
-  // single seller: 2+ other sellers, or active orders from 2+ distinct buyers.
-  const hasConflict = sellers.length > 1 || distinctBuyers.size > 1;
+  // Seller presence alone is valid. Only competing active Order authors create
+  // the pre-picking conflict.
+  const hasConflict = distinctBuyers.size > 1;
 
   return { sellers, activeOrders, distinctBuyerCount: distinctBuyers.size, hasConflict };
 }

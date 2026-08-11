@@ -14,6 +14,7 @@ const {
   isOrderingOpen,
   getWindowDescription,
   getOrderingWindowOpenAt,
+  getNextOrderingWindowOpenAt,
   getOrderingWindowBoundsForOpenDate,
   getOpenDateWarsaw,
   getSessionDeliveryDate,
@@ -524,7 +525,7 @@ router.get('/:groupId/shop-status', telegramAuth, requireTelegramRoles(['admin',
   if (!group) throw appError('group_not_found');
 
   const status = isOrderingOpen(group.orderingSchedule);
-  const currentSessionId = await getOrCreateSessionId(String(group._id), group.orderingSchedule);
+  const readinessOnly = req.query.view === 'readiness';
 
   const shops = await Shop.find({ deliveryGroupId: String(group._id), isActive: true })
     .select('name cityId')
@@ -532,6 +533,66 @@ router.get('/:groupId/shop-status', telegramAuth, requireTelegramRoles(['admin',
     .lean();
 
   const shopIds = shops.map((s) => s._id);
+
+  // 24h preflight board: read ONLY the live shop/seller assignment topology.
+  // Do not materialise or reuse an OrderingSession here — the previous completed
+  // session remains historical, and the future session must not be created just
+  // because an admin opened a readiness screen. Session-specific order/review
+  // fields are intentionally zeroed so last cycle cannot bleed into next-cycle
+  // preparation.
+  if (readinessOnly) {
+    const sellers = await User.find({ role: { $in: ['seller', 'admin'] }, shopId: { $in: shopIds } })
+      .select('shopId firstName lastName telegramId role')
+      .lean();
+    const contactUsernameMap = await getTelegramUsernameMap(sellers.map((s) => s.telegramId));
+    const sellersByShop = {};
+    for (const seller of sellers) {
+      const sid = String(seller.shopId);
+      if (!sellersByShop[sid]) sellersByShop[sid] = [];
+      sellersByShop[sid].push({
+        name: [seller.firstName, seller.lastName].filter(Boolean).join(' ') || String(seller.telegramId),
+        telegramId: String(seller.telegramId),
+        username: contactUsernameMap.get(String(seller.telegramId)) || '',
+        role: seller.role,
+        hasCart: false,
+        hasOrder: false,
+        catalogReviewedAt: null,
+      });
+    }
+
+    const shopStatuses = shops.map((shop) => {
+      const shopId = String(shop._id);
+      const assignedStaff = sellersByShop[shopId] || [];
+      return {
+        shopId,
+        shopName: shop.name,
+        shopCity: shop.cityId?.name || '',
+        sellers: assignedStaff,
+        sellerName: assignedStaff.length > 0 ? assignedStaff.map((s) => s.name).join(', ') : null,
+        sellerCount: assignedStaff.length,
+        cartItemCount: 0,
+        orderedItemCount: 0,
+        orders: [],
+        hasConflict: false,
+        hasMultipleSellers: assignedStaff.length > 1,
+      };
+    });
+    shopStatuses.sort((a, b) => String(a.shopName || '').localeCompare(String(b.shopName || ''), 'uk'));
+
+    return res.json({
+      groupId: String(group._id),
+      groupName: group.name,
+      isOpen: status.isOpen,
+      view: 'readiness',
+      currentSessionId: null,
+      viewerRole: req.telegramUser?.role || '',
+      staleOrderCount: 0,
+      staleOrders: [],
+      shops: shopStatuses,
+    });
+  }
+
+  const currentSessionId = await getOrCreateSessionId(String(group._id), group.orderingSchedule);
   // buyerSnapshot.shopId is stored as ObjectId in some paths and as a String in
   // others — match both forms so direct-add orders (null top-level shopId) are
   // counted. Without this, pre-start showed "0 orders" while the task builder
@@ -747,12 +808,9 @@ router.get('/:groupId/shop-status', telegramAuth, requireTelegramRoles(['admin',
       hasOrder: orderedBuyers.has(s.telegramId),
       catalogReviewedAt: markBySeller.get(String(s.telegramId))?.at || null,
     }));
-    // hasConflict: 2+ separate buyers placed orders in this shop this session
-    // hasMultipleSellers: 2+ seller/admin users are assigned to this shop.
-    // hasSellerOrderMismatch: multiple assigned users but only some placed orders.
+    // hasConflict: 2+ separate buyers placed active Orders in this shop this session.
+    // hasMultipleSellers is informational only — multi-seller assignment is valid.
     const hasMultipleSellers = assignedStaff.length > 1;
-    const sellersWithOrder = assignedStaff.filter((s) => orderedBuyers.has(s.telegramId));
-    const hasSellerOrderMismatch = hasMultipleSellers && shopOrders.length > 0 && sellersWithOrder.length !== assignedStaff.length;
     return {
       shopId,
       shopName: shop.name,
@@ -765,7 +823,6 @@ router.get('/:groupId/shop-status', telegramAuth, requireTelegramRoles(['admin',
       orders: shopOrders,
       hasConflict: uniqueBuyers.size > 1,
       hasMultipleSellers,
-      hasSellerOrderMismatch,
     };
   });
 
@@ -1076,6 +1133,10 @@ router.get('/', async (req, res) => {
     phaseLabel: presentations[index]?.phase
       ? (PHASE_VOCAB[presentations[index].phase]?.label || presentations[index].phase)
       : null,
+    // Server-calculated timestamp keeps the 24h preflight boundary DST-safe and
+    // avoids duplicating weekly timezone math in React. It is presentation data
+    // only; it does not create the next OrderingSession.
+    nextOrderingOpenAt: getNextOrderingWindowOpenAt(g.orderingSchedule).toISOString(),
   }));
   res.json(result);
 });

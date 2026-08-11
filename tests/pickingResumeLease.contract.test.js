@@ -1,6 +1,5 @@
 const fs = require('fs');
 const path = require('path');
-const { describe, it, expect } = require('vitest');
 
 const root = path.resolve(__dirname, '..');
 const read = (rel) => fs.readFileSync(path.join(root, rel), 'utf8');

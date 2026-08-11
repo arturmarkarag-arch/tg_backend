@@ -4,18 +4,21 @@ const User = require('../models/User');
 const PickingTask = require('../models/PickingTask');
 const { logShopTransition } = require('./shopAudit');
 const { activeOrderShopFilter } = require('../utils/orderShopFilter');
+const { getOrderOwnershipState } = require('../utils/orderOwnership');
 
-// Unassign a seller from their shop and PARK their active orders that the
-// warehouse has not started picking yet (shopId=null so the order follows the
-// seller on the next assignment via migrateSellerShop). Orders already in the
-// picking pipeline stay on the shop — the warehouse owns them.
+// Unassign a seller from their shop. While ordering is still open, an active
+// Order may be PARKED so it can follow the seller on a later assignment. Once
+// ordering closes (or picking starts), the seller is only the author: the Order
+// stays owned by its shop/session and User.shopId changes independently.
+// Dedicated conflict-repair code may explicitly opt into parking a frozen Order.
 //
 // All writes are scoped to the passed Mongo session.
-async function unassignSellerAndPark({ session, seller, fromShopId, actor, reason }) {
+async function unassignSellerAndPark({ session, seller, fromShopId, actor, reason, allowFrozenOrderPark = false }) {
   const shopIdStr = fromShopId ? String(fromShopId) : (seller.shopId ? String(seller.shopId) : '');
 
   const parkedIds = [];
   const leftInPipelineIds = [];
+  const shopOwnedIds = [];
 
   if (shopIdStr) {
     // Match by BOTH shopId and buyerSnapshot.shopId (ObjectId + string forms).
@@ -26,6 +29,12 @@ async function unassignSellerAndPark({ session, seller, fromShopId, actor, reaso
     ).session(session);
 
     for (const ord of activeOrders) {
+      const ownership = await getOrderOwnershipState(ord, { session });
+      if (ownership.frozen && !allowFrozenOrderPark) {
+        shopOwnedIds.push(String(ord._id));
+        continue;
+      }
+
       const inPipeline = await PickingTask.exists({
         'items.orderId': ord._id,
         status: { $in: ['pending', 'locked', 'completed'] },
@@ -52,7 +61,11 @@ async function unassignSellerAndPark({ session, seller, fromShopId, actor, reaso
         byName: [actor?.firstName, actor?.lastName].filter(Boolean).join(' '),
         byRole: actor?.role || 'system',
         action: 'seller_unassigned_order_parked',
-        meta: { fromShopId: shopIdStr, reason: reason || 'seller_unassigned' },
+        meta: {
+          fromShopId: shopIdStr,
+          reason: reason || 'seller_unassigned',
+          ownershipRepair: Boolean(ownership.frozen && allowFrozenOrderPark),
+        },
       });
       await ord.save({ session });
     }
@@ -84,6 +97,7 @@ async function unassignSellerAndPark({ session, seller, fromShopId, actor, reaso
     note: [
       parkedIds.length ? `parked=[${parkedIds.join(',')}]` : '',
       leftInPipelineIds.length ? `inPipelineStayed=[${leftInPipelineIds.join(',')}]` : '',
+      shopOwnedIds.length ? `shopOwnedStayed=[${shopOwnedIds.join(',')}]` : '',
     ].filter(Boolean).join(' '),
   });
 }

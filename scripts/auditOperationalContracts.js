@@ -7,8 +7,9 @@
  * before we harden them with unique indexes / repair actions:
  *
  *   Shop -> one delivery group
- *   Shop -> at most one seller
- *   Shop + OrderingSession -> at most one active order (target contract)
+ *   Shop -> multiple sellers allowed
+ *   Seller + Shop + OrderingSession -> at most one active order
+ *   Shop conflict -> 2+ active Orders from distinct buyers in SAME session
  *   PickingTask -> one active product task per group + session
  *   Historical sessions may remain dirty, but may not consume current-session slots.
  *
@@ -50,7 +51,7 @@ async function main() {
 
   const shopsWithoutGroup = shopDocs.filter((s) => !s.deliveryGroupId || !groupIds.has(id(s.deliveryGroupId)));
 
-  // Contract candidate: one SELLER per shop. Admin/warehouse assignments are not counted.
+  // Multi-seller shops are a supported state. Count them for visibility only.
   const sellers = await users.find(
     { role: 'seller', shopId: { $ne: null } },
     { projection: { telegramId: 1, firstName: 1, lastName: 1, shopId: 1 } },
@@ -66,9 +67,9 @@ async function main() {
     .filter(([, list]) => list.length > 1)
     .map(([shopId, list]) => ({ shopId, shop: shopById.get(shopId)?.name || '—', sellers: list }));
 
-  // Current DB invariant is buyer+shop+session. This audit shows where the stricter
-  // desired shop+session invariant would currently fail.
-  const duplicateShopSessionOrders = await orders.aggregate([
+  // Current DB invariant is buyer+shop+session. Multiple Orders for one shop are
+  // allowed; only 2+ DISTINCT buyers in the same shop+session are a pre-picking conflict.
+  const shopSessionOrderGroups = await orders.aggregate([
     { $match: {
       status: { $in: ['new', 'in_progress'] },
       shopId: { $type: 'objectId' },
@@ -80,7 +81,7 @@ async function main() {
       buyers: { $addToSet: '$buyerTelegramId' },
       orderIds: { $push: '$_id' },
     } },
-    { $match: { count: { $gt: 1 } } },
+    { $match: { 'buyers.1': { $exists: true } } },
     { $sort: { count: -1 } },
   ]).toArray();
 
@@ -122,15 +123,15 @@ async function main() {
   console.log('=== CONTRACT AUDIT ===');
   console.log(`DeliveryGroup з невалідним orderingSchedule: ${invalidGroupSchedules.length}`);
   console.log(`Shops: ${shopDocs.length}; без валідної deliveryGroup: ${shopsWithoutGroup.length}`);
-  console.log(`Sellers з shopId: ${sellers.length}; магазини з 2+ seller: ${multiSellerShops.length}`);
-  console.log(`Активні Orders, що порушують target (1 shop + 1 session): ${duplicateShopSessionOrders.length}`);
+  console.log(`Sellers з shopId: ${sellers.length}; магазини з 2+ seller (ДОЗВОЛЕНО): ${multiSellerShops.length}`);
+  console.log(`Поточні shop+session конфлікти (2+ distinct buyers): ${shopSessionOrderGroups.length}`);
   console.log(`Активні PickingTask без orderingSessionId: ${activeTasksWithoutSession.length}`);
   console.log(`Дублікати active task у SAME product+group+session: ${duplicateTaskKeys.length}`);
   console.log(`Product+group з active tasks у РІЗНИХ sessions (дозволено, visibility only): ${crossSessionActiveTasks.length}`);
   console.log(`Дублікати OrderingSession group+openDate: ${duplicateSessions.length}\n`);
 
   if (multiSellerShops.length) {
-    console.log('--- Магазини з кількома продавцями (потрібен repair перед unique) ---');
+    console.log('--- Магазини з кількома продавцями (ДОЗВОЛЕНО, visibility only) ---');
     for (const row of multiSellerShops.slice(0, 100)) {
       console.log(`• ${row.shop} [${row.shopId}]`);
       for (const u of row.sellers) console.log(`    - ${u.telegramId}: ${[u.firstName, u.lastName].filter(Boolean).join(' ') || '—'}`);
@@ -138,9 +139,9 @@ async function main() {
     console.log('');
   }
 
-  if (duplicateShopSessionOrders.length) {
+  if (shopSessionOrderGroups.length) {
     console.log('--- 2+ активних Orders одного магазину в одній сесії ---');
-    for (const row of duplicateShopSessionOrders.slice(0, 100)) {
+    for (const row of shopSessionOrderGroups.slice(0, 100)) {
       console.log(`• shop=${id(row._id.shopId)} session=${row._id.orderingSessionId} count=${row.count} buyers=${row.buyers.join(',')}`);
     }
     console.log('');
@@ -165,8 +166,8 @@ async function main() {
     ? '✓ Сесійна ізоляція не має DB-конфліктів, які треба виправити перед деплоєм.'
     : `✗ Знайдено ${hardForSessionIsolation} блокуючих порушень базових session-invariants.`);
 
-  if (multiSellerShops.length || duplicateShopSessionOrders.length) {
-    console.log('! Строгий контракт 1 shop = 1 seller = 1 active order/session ще НЕ можна цементувати unique-індексом без repair цих записів.');
+  if (shopSessionOrderGroups.length) {
+    console.log('! Є current-session конфлікти активних Orders різних авторів. Вони мають блокувати тільки старт picking цієї сесії.');
   }
 }
 

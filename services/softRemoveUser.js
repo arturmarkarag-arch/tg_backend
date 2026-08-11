@@ -114,9 +114,6 @@ async function softRemoveUser({ telegramId, actor = null, groupChatId = '' }) {
               removedByTelegramId: String(actor?.telegramId || ''),
               sessionsValidFrom: now,
               isOnline: false,
-              isOnShift: false,
-              isWarehouseManager: false,
-              shiftZone: { startBlock: null, endBlock: null },
               // unassignSellerAndPark already clears this for seller/admin; set it
               // here too so every role has zero operational ownership after removal.
               shopId: null,

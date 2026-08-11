@@ -379,6 +379,10 @@ router.post('/conflicts/resolve', staffOnly, asyncHandler(async (req, res) => {
           fromShopId: String(shopId),
           actor,
           reason: 'conflict_resolution',
+          // Explicit pre-picking ownership repair. Ordinary User.shopId changes
+          // never park a closed-session Order; this endpoint is the deliberate
+          // exception used to resolve a current-session conflict before picking.
+          allowFrozenOrderPark: true,
         });
         invalidateFns.push(() => invalidateShop(String(shopId)));
         return;
@@ -403,6 +407,9 @@ router.post('/conflicts/resolve', staffOnly, asyncHandler(async (req, res) => {
         resetCartNavigation: false,
         pushHistory: true,
         updateLastSeller: true,
+        // Explicit pre-picking ownership repair; normal seller moves do not
+        // rewrite a closed-session Order that already belongs to its shop.
+        allowFrozenOrderTransfer: true,
       });
       movedGroups = { prevGroupId: result.prevGroupId, newGroupId: result.newGroupId };
       if (result.invalidate) invalidateFns.push(result.invalidate);

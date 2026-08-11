@@ -108,7 +108,8 @@ const AppSetting = require('../models/AppSetting');
 const cache = require('../utils/cache');
 const { isOrderingOpen } = require('../utils/orderingSchedule');
 const { buildOpenClosedTestSchedules } = require('./helpers/perGroupTestSchedule');
-const { getOrCreateSessionId } = require('../utils/getOrCreateSession');
+const { getOrCreateSessionId, getOrCreateNextSessionId } = require('../utils/getOrCreateSession');
+const { buildPickingTasksFromOrders } = require('../services/taskBuilder');
 const { signSession } = require('../utils/jwt');
 const { auditSessionClosure } = require('../services/sessionClosure');
 const { archiveOrphanedOutOfStockProducts } = require('../services/pickingService');
@@ -258,11 +259,12 @@ async function createWorld(name, {
   shops = 1,
   sellers = 1,
   warehouse = 2,
+  admins = 0,
   products = 1,
   sellerShopIndexes = null,
 } = {}) {
   const world = {
-    name, schedule: null, group: null, shops: [], sellers: [], warehouses: [], users: [], products: [], block: null,
+    name, schedule: null, group: null, shops: [], sellers: [], warehouses: [], admins: [], users: [], products: [], block: null,
     sessionIds: new Set(), orderIds: new Set(),
   };
   try {
@@ -313,6 +315,17 @@ async function createWorld(name, {
         lastName: RUN_ID,
       });
       world.warehouses.push(u);
+      world.users.push(u);
+      await updateWorldManifest(world, { phase: 'users_creating' });
+    }
+    for (let i = 0; i < admins; i += 1) {
+      const u = await User.create({
+        telegramId: makeTelegramId(200 + i),
+        role: 'admin',
+        firstName: `E2E_${name}_A${i + 1}`,
+        lastName: RUN_ID,
+      });
+      world.admins.push(u);
       world.users.push(u);
       await updateWorldManifest(world, { phase: 'users_creating' });
     }
@@ -626,6 +639,308 @@ async function scenarioHappy() {
     check(doneOrder.items.every((i) => i.packed && i.packedQuantity === i.quantity), 'happy: every order item has real packed quantity');
     const closure = await auditSessionClosure({ deliveryGroupId: str(world.group._id), orderingSessionId: str(session._id) });
     check(closure.ok, 'happy: closure audit is clean');
+    return world;
+  } catch (e) { e.world = world; throw e; }
+}
+
+
+async function scenarioMultiSellerSingleOrder() {
+  const world = await createWorld('multi_seller_single_order', {
+    shops: 1, sellers: 3, warehouse: 1, products: 1,
+    sellerShopIndexes: [0, 0, 0],
+  });
+  try {
+    const [orderingSeller, silentSellerA, silentSellerB] = world.sellers;
+    const wh = world.warehouses[0];
+
+    const assigned = await User.countDocuments({
+      telegramId: { $in: world.sellers.map((u) => String(u.telegramId)) },
+      shopId: world.shops[0]._id,
+    });
+    eq(assigned, 3, 'multi_seller_single_order: three sellers may be assigned to one shop');
+
+    const order = await placeOrder(world, orderingSeller, [{ product: world.products[0], quantity: 2 }], 'only-author');
+    eq(await Order.countDocuments({ orderingSessionId: str(order.orderingSessionId), shopId: world.shops[0]._id }), 1,
+      'multi_seller_single_order: only the seller who ordered creates an Order');
+    check(!await Order.exists({ buyerTelegramId: { $in: [String(silentSellerA.telegramId), String(silentSellerB.telegramId)] } }),
+      'multi_seller_single_order: assigned silent sellers do not create phantom Orders');
+
+    await moveWorldToClosedPhase(world);
+    const start = await startPicking(world, wh, true);
+    check(start.status === 200 && start.data?.started === true,
+      'multi_seller_single_order: multiple assigned sellers alone do NOT block picking start');
+    check(start.data?.unresolved !== true,
+      'multi_seller_single_order: no conflict is reported when only one buyer has an active Order');
+
+    const task = await PickingTask.findOne({ orderingSessionId: str(order.orderingSessionId), status: 'pending' }).lean();
+    check(Boolean(task), 'multi_seller_single_order: task is built normally');
+    eq(task.items.length, 1, 'multi_seller_single_order: task contains only the real seller-authored Order');
+    eq(str(task.items[0].orderId), str(order._id), 'multi_seller_single_order: task references the real Order');
+
+    await claimTask(wh, task._id);
+    const fresh = await PickingTask.findById(task._id).lean();
+    await completeTask(wh, task._id, fresh.items.map((i) => ({ orderId: str(i.orderId), actualQty: i.quantity })));
+    await assertSessionCompleted(order.orderingSessionId, 'multi_seller_single_order');
+    return world;
+  } catch (e) { e.world = world; throw e; }
+}
+
+async function scenarioOwnershipFreeze() {
+  const world = await createWorld('ownership_freeze', {
+    shops: 3, sellers: 3, warehouse: 1, admins: 1, products: 1,
+    sellerShopIndexes: [0, 0, 1],
+  });
+  try {
+    const [frozenMover, openWindowMover, frozenUnassign] = world.sellers;
+    const admin = world.admins[0];
+    const wh = world.warehouses[0];
+
+    const frozenMoveOrder = await placeOrder(world, frozenMover, [{ product: world.products[0], quantity: 2 }], 'frozen-move');
+    const openMoveOrder = await placeOrder(world, openWindowMover, [{ product: world.products[0], quantity: 1 }], 'open-move');
+    const frozenUnassignOrder = await placeOrder(world, frozenUnassign, [{ product: world.products[0], quantity: 3 }], 'frozen-unassign');
+    eq(str(frozenMoveOrder.orderingSessionId), str(openMoveOrder.orderingSessionId),
+      'ownership_freeze: same group/window uses one OrderingSession');
+    eq(str(frozenMoveOrder.orderingSessionId), str(frozenUnassignOrder.orderingSessionId),
+      'ownership_freeze: all seller-authored Orders share that OrderingSession');
+
+    // BEFORE closeAt: the Order is still seller-controlled and follows the seller.
+    const openMoveResp = await api('PATCH', `/api/users/${encodeURIComponent(String(openWindowMover.telegramId))}/shop`, admin, {
+      shopId: str(world.shops[2]._id),
+    });
+    eq(openMoveResp.status, 200, 'ownership_freeze: ordinary seller move succeeds while ordering is still open');
+    const openMoveAfter = await Order.findById(openMoveOrder._id).lean();
+    eq(str(openMoveAfter.shopId), str(world.shops[2]._id),
+      'ownership_freeze: BEFORE closeAt active Order follows seller to new shop');
+    eq(str(openMoveAfter.buyerSnapshot?.shopId), str(world.shops[2]._id),
+      'ownership_freeze: BEFORE closeAt buyerSnapshot follows seller too');
+    eq(str(openMoveAfter.orderingSessionId), str(openMoveOrder.orderingSessionId),
+      'ownership_freeze: open-window move does not invent a second session inside same group cycle');
+
+    await moveWorldToClosedPhase(world);
+    const sessionId = str(frozenMoveOrder.orderingSessionId);
+    // The synthetic harness changes the group's schedule to simulate time passing,
+    // while OrderingSession intentionally keeps its materialised snapshot. Make the
+    // ownership boundary explicit here: the contract under test is closeAt itself.
+    await OrderingSession.updateOne(
+      { _id: sessionId },
+      { $set: { closeAt: new Date(Date.now() - 60_000) } },
+    );
+
+    const originalFrozenMove = await Order.findById(frozenMoveOrder._id).lean();
+    const originalFrozenUnassign = await Order.findById(frozenUnassignOrder._id).lean();
+
+    // AFTER closeAt: User assignment may change, but Order ownership is frozen.
+    // Target shop already has openWindowMover + an active Order. Multi-seller is
+    // legal; this must not evict anybody and must not move frozenMoveOrder there.
+    const frozenMoveResp = await api('PATCH', `/api/users/${encodeURIComponent(String(frozenMover.telegramId))}/shop`, admin, {
+      shopId: str(world.shops[2]._id),
+    });
+    eq(frozenMoveResp.status, 200, 'ownership_freeze: seller profile may move after ordering close');
+
+    const frozenUnassignResp = await api('PATCH', `/api/users/${encodeURIComponent(String(frozenUnassign.telegramId))}/shop`, admin, {
+      shopId: null,
+    });
+    eq(frozenUnassignResp.status, 200, 'ownership_freeze: seller profile may be unassigned after ordering close');
+
+    const [frozenMoverUserAfter, openMoverUserAfter, unassignedUserAfter, frozenMoveOrderAfter, frozenUnassignOrderAfter] = await Promise.all([
+      User.findOne({ telegramId: String(frozenMover.telegramId) }).lean(),
+      User.findOne({ telegramId: String(openWindowMover.telegramId) }).lean(),
+      User.findOne({ telegramId: String(frozenUnassign.telegramId) }).lean(),
+      Order.findById(frozenMoveOrder._id).lean(),
+      Order.findById(frozenUnassignOrder._id).lean(),
+    ]);
+
+    eq(str(frozenMoverUserAfter.shopId), str(world.shops[2]._id),
+      'ownership_freeze: frozen seller User.shopId moves to target shop');
+    eq(str(openMoverUserAfter.shopId), str(world.shops[2]._id),
+      'ownership_freeze: existing seller remains assigned to target shop (multi-seller preserved)');
+    eq(str(unassignedUserAfter.shopId), '',
+      'ownership_freeze: frozen seller User.shopId can be cleared');
+
+    for (const [label, before, after] of [
+      ['moved-after-close', originalFrozenMove, frozenMoveOrderAfter],
+      ['unassigned-after-close', originalFrozenUnassign, frozenUnassignOrderAfter],
+    ]) {
+      eq(str(after.buyerTelegramId), str(before.buyerTelegramId), `ownership_freeze: ${label} seller remains Order author`);
+      eq(str(after.shopId), str(before.shopId), `ownership_freeze: ${label} Order.shopId remains owned by original shop`);
+      eq(str(after.buyerSnapshot?.shopId), str(before.buyerSnapshot?.shopId), `ownership_freeze: ${label} buyerSnapshot.shopId is immutable`);
+      eq(str(after.buyerSnapshot?.deliveryGroupId), str(before.buyerSnapshot?.deliveryGroupId), `ownership_freeze: ${label} delivery-group snapshot is immutable`);
+      eq(str(after.orderingSessionId), str(before.orderingSessionId), `ownership_freeze: ${label} orderingSessionId is immutable`);
+    }
+
+    const start = await startPicking(world, wh, true);
+    check(start.status === 200 && start.data?.started === true,
+      'ownership_freeze: picking starts from shop-owned Orders after seller profile changes');
+    check(start.data?.unresolved !== true,
+      'ownership_freeze: moving a seller profile after closeAt does not create a phantom Order conflict');
+    const task = await PickingTask.findOne({ orderingSessionId: sessionId, status: 'pending' }).lean();
+    check(Boolean(task), 'ownership_freeze: task is built from frozen Orders');
+    const taskShopIds = new Set(task.items.map((i) => str(i.shopId)));
+    check(taskShopIds.has(str(world.shops[0]._id)) && taskShopIds.has(str(world.shops[1]._id)) && taskShopIds.has(str(world.shops[2]._id)),
+      'ownership_freeze: picking sees the three Order-owned shops from their correct lifecycle moments');
+    eq(task.items.length, 3, 'ownership_freeze: all three seller-authored Orders survive into picking exactly once');
+
+    const frozenTaskItem = task.items.find((i) => str(i.orderId) === str(frozenMoveOrder._id));
+    const openTaskItem = task.items.find((i) => str(i.orderId) === str(openMoveOrder._id));
+    const unassignedTaskItem = task.items.find((i) => str(i.orderId) === str(frozenUnassignOrder._id));
+    eq(str(frozenTaskItem?.shopId), str(world.shops[0]._id),
+      'ownership_freeze: post-close seller move does NOT move historical Order from shop 1');
+    eq(str(openTaskItem?.shopId), str(world.shops[2]._id),
+      'ownership_freeze: pre-close seller move DID move active Order to shop 3');
+    eq(str(unassignedTaskItem?.shopId), str(world.shops[1]._id),
+      'ownership_freeze: post-close unassign does NOT park historical Order');
+
+    await claimTask(wh, task._id);
+    const fresh = await PickingTask.findById(task._id).lean();
+    await completeTask(wh, task._id, fresh.items.map((i) => ({ orderId: str(i.orderId), actualQty: i.quantity })));
+    await assertSessionCompleted(sessionId, 'ownership_freeze');
+    return world;
+  } catch (e) { e.world = world; throw e; }
+}
+
+async function scenarioCheckboxHandoff() {
+  const world = await createWorld('checkbox_handoff', {
+    shops: 2, sellers: 2, warehouse: 2, products: 1,
+    sellerShopIndexes: [0, 1],
+  });
+  try {
+    const [sellerA, sellerB] = world.sellers;
+    const [workerA, workerB] = world.warehouses;
+    const orderA = await placeOrder(world, sellerA, [{ product: world.products[0], quantity: 2 }], 'a');
+    const orderB = await placeOrder(world, sellerB, [{ product: world.products[0], quantity: 3 }], 'b');
+    await moveWorldToClosedPhase(world);
+    const start = await startPicking(world, workerA, true);
+    check(start.status === 200 && start.data?.started === true, 'checkbox_handoff: picking starts');
+
+    const task = await PickingTask.findOne({ orderingSessionId: str(orderA.orderingSessionId), status: 'pending' }).lean();
+    check(Boolean(task) && task.items.length === 2, 'checkbox_handoff: one product task contains two shops');
+    await claimTask(workerA, task._id);
+
+    const saveA = await api('PATCH', `/api/picking/tasks/${task._id}/progress`, workerA, {
+      packedOrderIds: [str(orderA._id)],
+    });
+    check(saveA.status === 200 && saveA.data?.ok === true, 'checkbox_handoff: worker A saves first checkbox');
+
+    const releaseA = await api('POST', `/api/picking/tasks/${task._id}/release`, workerA, {
+      packedOrderIds: [str(orderA._id)],
+    });
+    check(releaseA.status === 200 && releaseA.data?.released === true,
+      'checkbox_handoff: worker A can leave task without losing partial progress');
+
+    const afterRelease = await PickingTask.findById(task._id).lean();
+    const itemAReleased = afterRelease.items.find((i) => str(i.orderId) === str(orderA._id));
+    const itemBReleased = afterRelease.items.find((i) => str(i.orderId) === str(orderB._id));
+    check(itemAReleased?.packed === true, 'checkbox_handoff: checked row survives release');
+    eq(str(itemAReleased?.packedBy), str(workerA.telegramId), 'checkbox_handoff: first checkbox keeps worker A authorship');
+    check(Boolean(itemAReleased?.packedAt), 'checkbox_handoff: first checkbox keeps packedAt timestamp');
+    check(itemBReleased?.packed !== true, 'checkbox_handoff: untouched row remains unchecked');
+
+    const claimB = await claimTask(workerB, task._id);
+    const claimItemA = claimB.items.find((i) => str(i.orderId) === str(orderA._id));
+    eq(str(claimItemA?.packedBy), str(workerA.telegramId),
+      'checkbox_handoff: worker B receives previous checkbox author in live task payload');
+
+    const saveB = await api('PATCH', `/api/picking/tasks/${task._id}/progress`, workerB, {
+      packedOrderIds: [str(orderA._id), str(orderB._id)],
+    });
+    check(saveB.status === 200 && saveB.data?.ok === true, 'checkbox_handoff: worker B completes checkbox snapshot');
+
+    const afterB = await PickingTask.findById(task._id).lean();
+    const itemAAfterB = afterB.items.find((i) => str(i.orderId) === str(orderA._id));
+    const itemBAfterB = afterB.items.find((i) => str(i.orderId) === str(orderB._id));
+    eq(str(itemAAfterB?.packedBy), str(workerA.telegramId),
+      'checkbox_handoff: re-saving checked row does NOT steal worker A authorship');
+    eq(str(itemBAfterB?.packedBy), str(workerB.telegramId),
+      'checkbox_handoff: newly checked row is attributed to worker B');
+
+    const completePayload = afterB.items.map((i) => ({ orderId: str(i.orderId), actualQty: i.quantity }));
+    const firstComplete = await completeTask(workerB, task._id, completePayload);
+    check(Boolean(firstComplete), 'checkbox_handoff: worker B finalises handed-off task');
+
+    const completedBeforeRetry = await PickingTask.findById(task._id).lean();
+    const sessionBeforeRetry = await OrderingSession.findById(orderA.orderingSessionId).lean();
+    const ordersBeforeRetry = await Order.find({ _id: { $in: [orderA._id, orderB._id] } }).lean();
+    const historyLengthsBefore = new Map(ordersBeforeRetry.map((o) => [str(o._id), o.history?.length || 0]));
+    const completedEventCountBefore = (sessionBeforeRetry.events || []).filter((e) => e.type === 'picking_completed').length;
+
+    eq(str(completedBeforeRetry.completedBy), str(workerB.telegramId),
+      'checkbox_handoff: final task completion is attributed to worker B');
+    const completedItemA = completedBeforeRetry.items.find((i) => str(i.orderId) === str(orderA._id));
+    const completedItemB = completedBeforeRetry.items.find((i) => str(i.orderId) === str(orderB._id));
+    eq(str(completedItemA?.packedBy), str(workerA.telegramId),
+      'checkbox_handoff: task completion preserves worker A checkbox authorship');
+    eq(str(completedItemB?.packedBy), str(workerB.telegramId),
+      'checkbox_handoff: task completion preserves worker B checkbox authorship');
+
+    const retry = await api('POST', `/api/picking/tasks/${task._id}/complete`, workerB, { items: completePayload });
+    eq(retry.status, 403, 'checkbox_handoff: duplicate complete retry is rejected after lock is consumed');
+    eq(retry.data?.error, 'expired_lock', 'checkbox_handoff: duplicate complete has stable expired_lock code');
+
+    const completedAfterRetry = await PickingTask.findById(task._id).lean();
+    const sessionAfterRetry = await OrderingSession.findById(orderA.orderingSessionId).lean();
+    const ordersAfterRetry = await Order.find({ _id: { $in: [orderA._id, orderB._id] } }).lean();
+    eq(str(completedAfterRetry.completedBy), str(completedBeforeRetry.completedBy),
+      'checkbox_handoff: duplicate complete cannot rewrite task finaliser');
+    eq((sessionAfterRetry.events || []).filter((e) => e.type === 'picking_completed').length, completedEventCountBefore,
+      'checkbox_handoff: duplicate complete cannot emit a second session completion');
+    for (const o of ordersAfterRetry) {
+      eq(o.history?.length || 0, historyLengthsBefore.get(str(o._id)),
+        `checkbox_handoff: duplicate complete cannot append duplicate Order history for ${str(o._id)}`);
+    }
+
+    await assertSessionCompleted(orderA.orderingSessionId, 'checkbox_handoff');
+    return world;
+  } catch (e) { e.world = world; throw e; }
+}
+
+async function scenarioSessionRollover() {
+  const world = await createWorld('session_rollover', { shops: 1, sellers: 1, warehouse: 1, products: 1 });
+  try {
+    const seller = world.sellers[0];
+    const wh = world.warehouses[0];
+    const oldOrder = await placeOrder(world, seller, [{ product: world.products[0], quantity: 2 }], 'old-cycle');
+    await moveWorldToClosedPhase(world);
+    const startOld = await startPicking(world, wh, true);
+    check(startOld.status === 200 && startOld.data?.started === true, 'session_rollover: old cycle picking starts');
+    const oldTask = await PickingTask.findOne({ orderingSessionId: str(oldOrder.orderingSessionId), status: 'pending' }).lean();
+    await claimTask(wh, oldTask._id);
+    const oldProgress = await api('PATCH', `/api/picking/tasks/${oldTask._id}/progress`, wh, {
+      packedOrderIds: [str(oldOrder._id)],
+    });
+    check(oldProgress.status === 200, 'session_rollover: old session checkbox progress is persisted');
+    const oldFresh = await PickingTask.findById(oldTask._id).lean();
+    await completeTask(wh, oldTask._id, oldFresh.items.map((i) => ({ orderId: str(i.orderId), actualQty: i.quantity })));
+    await assertSessionCompleted(oldOrder.orderingSessionId, 'session_rollover old');
+
+    const nextSessionId = await getOrCreateNextSessionId(str(world.group._id), world.schedule);
+    world.sessionIds.add(str(nextSessionId));
+    await updateWorldManifest(world, { phase: 'next_session_fixture' });
+    check(str(nextSessionId) !== str(oldOrder.orderingSessionId), 'session_rollover: next cycle has a distinct OrderingSession id');
+
+    const nextOrder = await createDirectOldOrder(world, {
+      sessionId: nextSessionId,
+      seller,
+      shop: world.shops[0],
+      product: world.products[0],
+      qty: 4,
+    });
+    await buildPickingTasksFromOrders(str(world.group._id), { orderingSessionId: str(nextSessionId) });
+
+    const nextTask = await PickingTask.findOne({
+      orderingSessionId: str(nextSessionId),
+      productId: world.products[0]._id,
+      status: 'pending',
+    }).lean();
+    check(Boolean(nextTask), 'session_rollover: same product gets a fresh task in next session');
+    check(str(nextTask._id) !== str(oldTask._id), 'session_rollover: old/new task documents are distinct');
+    eq(nextTask.items.length, 1, 'session_rollover: next task contains only next-session Order');
+    eq(str(nextTask.items[0].orderId), str(nextOrder._id), 'session_rollover: old Order does not leak into next task');
+    check(nextTask.items.every((i) => i.packed === false), 'session_rollover: old packed checkbox state does not leak into new session');
+    check(nextTask.items.every((i) => !i.packedBy && !i.packedAt), 'session_rollover: old checkbox author/timestamp does not leak into new session');
+
+    const oldAfter = await PickingTask.findById(oldTask._id).lean();
+    eq(oldAfter.status, 'completed', 'session_rollover: historical task remains completed and untouched');
+    eq(str(oldAfter.items[0]?.packedBy), str(wh.telegramId), 'session_rollover: historical checkbox authorship remains on old task');
     return world;
   } catch (e) { e.world = world; throw e; }
 }
@@ -1119,6 +1434,10 @@ async function scenarioGroupMismatch() {
 
 const SCENARIOS = [
   ['happy', scenarioHappy],
+  ['multi_seller_single_order', scenarioMultiSellerSingleOrder],
+  ['ownership_freeze', scenarioOwnershipFreeze],
+  ['checkbox_handoff', scenarioCheckboxHandoff],
+  ['session_rollover', scenarioSessionRollover],
   ['remove_last', scenarioRemoveLast],
   ['conflict_move', scenarioConflictMove],
   ['conflict_relocate', scenarioConflictRelocate],

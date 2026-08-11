@@ -56,11 +56,11 @@ async function createOffersForReceipt(receiptId) {
 
   const items = await ReceiptItem.find(
     { receiptId },
-    '_id destination createdProductId existingProductId name',
+    '_id destination createdProductId name',
   ).lean();
 
   const eligible = items.filter(
-    (i) => (i.destination || 'shelf') !== 'shops' && (i.createdProductId || i.existingProductId),
+    (i) => (i.destination || 'shelf') !== 'shops' && i.createdProductId,
   );
   if (!eligible.length) {
     await Receipt.updateOne({ _id: receiptId }, { $set: { supplementStatus: 'ready' } });
@@ -70,7 +70,7 @@ async function createOffersForReceipt(receiptId) {
   // Усередині однієї накладної однаковий товар показується один раз.
   const byProduct = new Map();
   for (const item of eligible) {
-    const productId = String(item.createdProductId || item.existingProductId);
+    const productId = String(item.createdProductId);
     if (!byProduct.has(productId)) byProduct.set(productId, item);
   }
 

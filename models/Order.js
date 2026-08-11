@@ -65,7 +65,12 @@ const OrderHistoryEntrySchema = new mongoose.Schema({
 
 const OrderSchema = new mongoose.Schema(
   {
+    // Immutable business meaning: the seller who AUTHORED the order. After the
+    // ordering window freezes, this user may move to another shop; the Order does
+    // not follow them and buyerTelegramId remains historical provenance.
     buyerTelegramId: { type: String, required: true },
+    // Operational OWNER/destination of the order. Together with buyerSnapshot and
+    // orderingSessionId this freezes to the shop when ordering closes.
     shopId: { type: mongoose.Schema.Types.ObjectId, ref: 'Shop', default: null },
     items: { type: [OrderItemSchema], required: true },
     // 'confirmed' (some items packed, rest OOS-cancelled) and 'cancelled' (all

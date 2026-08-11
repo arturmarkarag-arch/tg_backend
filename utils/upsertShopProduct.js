@@ -185,12 +185,9 @@ async function pushSharedFieldsToMirror(product, { session = null } = {}) {
 // receipt item (goods that go straight to shops and never touch the warehouse).
 // linkedProductId stays NULL → the record is OWNED by the shop catalog (editable
 // there), as opposed to a warehouse mirror. Idempotent — matched in this order:
-//   1. by receiptItemId (the durable anchor: the same receipt item ALWAYS refreshes
-//      its own doc, even for barcodeless items, so a double-tap confirm can never
-//      create a duplicate). Backed by a unique partial index on the model.
-//   2. by createdShopProductId (kept for docs created before the field existed).
-//   3. by barcode (shop-owned only — never hijacks a warehouse mirror).
-//   4. else create.
+//   1. by receiptItemId (durable anchor for the same receipt item).
+//   2. by createdShopProductId (compatibility with rows created before receiptItemId).
+//   3. else create.
 // Returns the doc; the caller persists item.createdShopProductId.
 // `item` is a plain object (e.g. ReceiptItem.toObject()).
 //
@@ -199,7 +196,6 @@ async function pushSharedFieldsToMirror(product, { session = null } = {}) {
 // embedding is deferred — the caller schedules it AFTER commit via the returned doc.
 async function upsertShopOwnedFromReceiptItem(item, { session = null } = {}) {
   if (!item?._id) { console.warn('[shop-owned] skipped: no item'); return null; }
-  const barcode = String(item.barcode || '').trim();
   const pm = item.photoMeta || {};
   const labelPositions = {};
   if (pm.commentPos) { labelPositions.commentX = pm.commentPos.x; labelPositions.commentY = pm.commentPos.y; }
@@ -215,7 +211,6 @@ async function upsertShopOwnedFromReceiptItem(item, { session = null } = {}) {
     imageUrl:           item.photoUrl || '',
     labelPositions,
     source:             'receive',
-    barcode,
     receiptItemId:      item._id,
     // linkedProductId intentionally NOT set → shop-owned (null).
   };
@@ -244,17 +239,7 @@ async function upsertShopOwnedFromReceiptItem(item, { session = null } = {}) {
       // else it was deleted/converted — fall through to (re)create.
     }
 
-    // 3. Match an existing shop-OWNED doc by barcode (never a warehouse mirror).
-    if (barcode) {
-      const existing = await ses(ShopProduct.findOne({ barcode }));
-      if (existing) {
-        // A warehouse mirror already represents this barcode — don't duplicate/hijack.
-        if (existing.linkedProductId) return existing;
-        return ses(ShopProduct.findByIdAndUpdate(existing._id, { $set: data }, { new: true }));
-      }
-    }
-
-    // 4. Create fresh.
+    // 3. Create fresh.
     if (session) {
       const arr = await ShopProduct.create([{ ...data, linkedProductId: null }], { session });
       return arr[0];
@@ -270,7 +255,7 @@ async function upsertShopOwnedFromReceiptItem(item, { session = null } = {}) {
     return doc;
   } catch (err) {
     if (err.code === 11000) {
-      console.warn('[shop-owned] duplicate, skipped:', barcode);
+      console.warn('[shop-owned] duplicate receipt item, skipped:', String(item._id));
       return null;
     }
     console.error('[shop-owned] failed:', err.code, err.message);

@@ -518,7 +518,7 @@ router.get('/pending', asyncHandler(async (req, res) => {
 // of goods that ARRIVED VIA A RECEIPT (накладна) within `days` — NOT the whole
 // warehouse catalogue. Two kinds:
 //   1. a warehouse Product received onto a shelf: shelvedAt is set. shelvedAt is
-//      written ONLY by the receipt flow (shelfQty>0), so this excludes seeded /
+//      written ONLY by the receipt flow for warehouse-routed receipt goods, so this excludes seeded /
 //      manually-added / migrated products by construction — exactly what we want.
 //      Must also be in a block (visible in the catalogue, not stuck in Надходження).
 //   2. a shop-OWNED ShopProduct received straight to shops (linkedProductId: null,

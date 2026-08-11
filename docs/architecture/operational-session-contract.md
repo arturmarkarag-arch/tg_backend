@@ -64,14 +64,37 @@ Multiple sellers MAY be assigned to one shop. Seller presence alone is not a con
 
 - one seller has at most one active Order for `(buyer, shop, orderingSession)`;
 - that Order contains N product positions;
+- a shop may therefore have multiple active seller-authored Orders in the same session;
 - a shop becomes a conflict only when CURRENT-session active Orders (`new|in_progress`)
   belong to 2+ distinct buyers;
 - that conflict is a HARD gate only before picking starts;
 - after picking has started, the same condition is informational only and MUST NOT block
   picking-session closure;
-- staff may move a conflicting seller to any other active shop or unassign them. Moving a
-  conflict is allowed: if the destination then has active Orders from 2+ buyers, the same
-  pre-start gate simply remains blocked there until staff resolves it.
+- staff may explicitly resolve a current-session conflict by moving/parking the affected
+  Order through the dedicated conflict-repair flow. Moving a conflict is allowed: if the
+  destination then has active Orders from 2+ buyers, the same pre-start gate remains blocked
+  there until staff resolves it.
 
 The Order DB unique index intentionally remains `(buyer, shop, session)`. Do NOT replace it
-with `(shop, session)`: multiple sellers per shop are a supported business state.
+with `(shop, session)`: multiple sellers and multiple seller-authored Orders per shop are a
+supported business state.
+
+### Order ownership after ordering closes
+
+`buyerTelegramId` is the immutable AUTHOR/provenance of the Order. The shop is the operational
+OWNER/destination represented by `shopId` + `buyerSnapshot`; `orderingSessionId` fixes the cycle.
+
+While the ordering window is open and `pickingStatus === 'pending'`, an ordinary seller shop
+change may carry that seller's active Order with them. Once the session's `closeAt` is reached
+(or picking has already left `pending`), ordinary seller reassignment/unassignment MUST NOT
+rewrite any of these Order ownership fields:
+
+- `buyerTelegramId`;
+- `shopId`;
+- `buyerSnapshot.shopId/shopName/shopCity/shopAddress/deliveryGroupId`;
+- `orderingSessionId`.
+
+After that freeze, `User.shopId` may change independently. The seller remains the historical
+author, while the closed-session Order stays with the shop/session where it was placed.
+A dedicated pre-picking conflict-repair endpoint is the only intentional ownership override;
+it must be explicit and auditable, never an implicit side effect of moving the User.
