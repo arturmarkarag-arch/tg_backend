@@ -393,6 +393,34 @@ router.get('/', staffOnly, asyncHandler(async (req, res) => {
   });
 }));
 
+// Read-only photo feed for the Receipts page. This deliberately does not
+// join to Receipt, mutate receipt state, or touch confirm/commit logic: it only
+// returns the newest saved ReceiptItem photos.
+router.get('/items-gallery', staffOnly, asyncHandler(async (req, res) => {
+  const page = Math.max(1, parseInt(req.query.page) || 1);
+  const pageSize = Math.min(50, Math.max(1, parseInt(req.query.pageSize) || 20));
+  const query = {
+    photoUrl: { $exists: true, $nin: ['', null] },
+  };
+
+  const [total, items] = await Promise.all([
+    ReceiptItem.countDocuments(query),
+    ReceiptItem.find(query, '_id photoUrl')
+      .sort({ createdAt: -1, _id: -1 })
+      .skip((page - 1) * pageSize)
+      .limit(pageSize)
+      .lean(),
+  ]);
+
+  res.json({
+    items,
+    total,
+    page,
+    pageSize,
+    pageCount: Math.max(1, Math.ceil(total / pageSize)),
+  });
+}));
+
 router.get('/:id', staffOnly, asyncHandler(async (req, res) => {
   const receipt = await Receipt.findById(req.params.id).lean();
   if (!receipt) throw appError('receipt_not_found');
