@@ -393,9 +393,9 @@ router.get('/', staffOnly, asyncHandler(async (req, res) => {
   });
 }));
 
-// Read-only photo feed for the Receipts page. This deliberately does not
-// join to Receipt, mutate receipt state, or touch confirm/commit logic: it only
-// returns the newest saved ReceiptItem photos.
+// Read-only photo feed for the Receipts page. It reads receipt metadata in one
+// batch so the UI can explain destination, but it never mutates receipt state
+// or touches confirm/commit logic.
 router.get('/items-gallery', staffOnly, asyncHandler(async (req, res) => {
   const page = Math.max(1, parseInt(req.query.page) || 1);
   const pageSize = Math.min(50, Math.max(1, parseInt(req.query.pageSize) || 20));
@@ -405,15 +405,32 @@ router.get('/items-gallery', staffOnly, asyncHandler(async (req, res) => {
 
   const [total, items] = await Promise.all([
     ReceiptItem.countDocuments(query),
-    ReceiptItem.find(query, '_id photoUrl')
+    ReceiptItem.find(query, '_id photoUrl totalQty destination receiptId')
       .sort({ createdAt: -1, _id: -1 })
       .skip((page - 1) * pageSize)
       .limit(pageSize)
       .lean(),
   ]);
 
+  // One batched lookup gives the gallery enough receipt context to explain
+  // where the photographed item went without turning this read-only feed into
+  // an N+1 query. Supplement receipts are always warehouse-bound as well, so
+  // the client can label them truthfully as "Допродаж + склад".
+  const receiptIds = [...new Set(items.map((item) => String(item.receiptId)).filter(Boolean))];
+  const receipts = receiptIds.length
+    ? await Receipt.find({ _id: { $in: receiptIds } }, '_id type').lean()
+    : [];
+  const receiptMap = new Map(receipts.map((receipt) => [String(receipt._id), receipt]));
+  const galleryItems = items.map((item) => {
+    const receipt = receiptMap.get(String(item.receiptId));
+    return {
+      ...item,
+      receiptType: receipt?.type || 'regular',
+    };
+  });
+
   res.json({
-    items,
+    items: galleryItems,
     total,
     page,
     pageSize,
