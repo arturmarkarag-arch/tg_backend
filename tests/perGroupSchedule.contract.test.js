@@ -60,7 +60,9 @@ describe('per-group ordering schedule contracts', () => {
     expect(route).toContain('requestedDayOfWeek');
     expect(route).toContain('scheduleIsChanging');
     expect(route).toContain('nextOpenDate');
-    expect(route).toContain('pickingLifecycleActive');
+    // V35 renamed the lifecycle guard: it no longer means "session left pending"
+    // but "picking of current/next session is confirmed or running".
+    expect(route).toContain('livePickingSession');
   });
 
   it('picking schedule endpoint is group-scoped', () => {
@@ -97,23 +99,31 @@ describe('per-group ordering schedule contracts', () => {
     }
   });
 
-  it('safe schedule edits protect session identity and only rewrite an empty pending target snapshot', () => {
+  it('safe schedule edits protect live work but terminal history does not freeze the group forever', () => {
     const route = read('routes/deliveryGroups.js');
-    expect(route).toContain('Order.exists({ orderingSessionId: { $in: protectedSessionIds } })');
-    expect(route).toContain('PickingTask.exists({ orderingSessionId: { $in: protectedSessionIds } })');
-    expect(route).toContain("currentSession.pickingStatus !== 'pending'");
+    expect(route).toContain("status: { $in: ACTIVE_ORDER_STATUSES }");
+    expect(route).toContain("status: { $in: ['pending', 'locked'] }");
+    expect(route).toContain("pickingStatus: { $in: ['confirmed', 'in_progress'] }");
+    expect(route).toContain('sessionOrder || sessionTask || livePickingSession');
+    expect(route).not.toContain("currentSession.pickingStatus !== 'pending'");
     expect(route).toContain('targetUsed');
     expect(route).toContain('openNotifiedAt');
     expect(route).toContain('getOrderingWindowBoundsForOpenDate');
     expect(route).toContain('scheduleSnapshot: requestedSchedule');
+    // A completed session may be followed by a schedule edit, but the edit may
+    // never reopen that already processed cycle or land on another used session.
     expect(route).toContain('повторно відкрив би вже завершену поточну сесію');
+    expect(route).toContain('новий розклад потрапляє в уже використану сесію');
+    expect(route).toContain("recordRescheduleOnSession = currentSession?.pickingStatus === 'pending'");
+    expect(route).toContain('timingIsChanging && oldSessionId && recordRescheduleOnSession');
   });
 
-  it('empty clock-open groups may be rescheduled, but real session data still blocks edits', () => {
+  it('empty and completed history do not block edits; only live work does', () => {
     const route = read('routes/deliveryGroups.js');
     expect(route).toContain('Clock-time alone must not freeze an empty TEST/configuration group');
+    expect(route).toContain('Terminal history must NOT freeze schedule editing forever');
+    expect(route).toContain('completed tasks are history');
     expect(route).not.toContain("const reason = isOpen ? 'вікно замовлень відкрите'");
-    expect(route).toContain('sessionOrder || sessionTask || pickingLifecycleActive');
   });
 
   it('DeliveryGroup schema keeps delivery weekday and close weekday independent while validating cycle order', () => {

@@ -20,7 +20,8 @@ const { normalizeDeliveryGroup } = require('../utils/deliveryGroupHelpers');
 const { appError, asyncHandler } = require('../utils/errors');
 const { withLock } = require('../utils/lock');
 const { transitionPickingStatus, maybeCompleteSession } = require('../utils/sessionStatus');
-const { getSessionVocab, deriveSessionPhase } = require('../utils/sessionVocab');
+const { getSessionVocab } = require('../utils/sessionVocab');
+const { computeSessionPhase, buildSessionSummary } = require('../services/sessionPresentation');
 const { reconcileLateOrdersForSession } = require('../services/lateOrderReconcile');
 const { ensureSessionShopNumbers, buildShopNumberLookup } = require('../utils/shopNumbering');
 const SupplementOffer   = require('../models/SupplementOffer');
@@ -114,53 +115,6 @@ async function resolveCurrentPickingSession(deliveryGroupId) {
   if (!group) return { group: null, sessionId: null, schedule: null };
   const sessionId = await findCurrentSessionId(groupId, group.orderingSchedule);
   return { group, sessionId, schedule: group.orderingSchedule };
-}
-
-// Derive the single UI phase for a session. Centralised so /start-session and
-// /queue-stats can never disagree. "hasWork" is order-based for live phases and
-// task-based for a completed session (its orders are already fulfilled, so an
-// active-order count would wrongly read 0 and label a real cycle as idle).
-async function computeSessionPhase({ deliveryGroupId, sessionId, pickingStatus, orderingSchedule }) {
-  const windowOpen = isOrderingOpen(orderingSchedule).isOpen;
-  let hasWork;
-  if (pickingStatus === 'completed') {
-    hasWork = (await PickingTask.countDocuments({ orderingSessionId: String(sessionId), status: 'completed' })) > 0;
-  } else {
-    hasWork = !!(await Order.exists({
-      'buyerSnapshot.deliveryGroupId': String(deliveryGroupId),
-      status: { $in: ['new', 'in_progress'] },
-      orderingSessionId: String(sessionId),
-    }));
-  }
-  return deriveSessionPhase({ pickingStatus, windowOpen, hasWork });
-}
-
-// Summary line shown under the status chip:
-//   - completed phase → THIS session: { current:true, seq, openDate, orderCount }
-//       "Сесія №X (Чт, 29.05) — зібрано N замовлень"
-//   - idle phase      → the most recent PRIOR completed session (so an empty
-//       just-rolled group still tells the operator the last cycle finished):
-//       { current:false, ... } or null if there is no prior numbered session.
-//   - any other phase → null (the chip + live counters already say enough).
-async function buildSessionSummary(phase, { deliveryGroupId, sessionId, session }) {
-  if (phase === 'completed') {
-    const orderCount = await Order.countDocuments({
-      orderingSessionId: String(sessionId), status: 'fulfilled',
-    });
-    return { current: true, seq: session?.seq ?? null, openDate: session?.openDate ?? null, orderCount };
-  }
-  if (phase === 'idle') {
-    const last = await OrderingSession.findOne(
-      { groupId: String(deliveryGroupId), pickingStatus: 'completed', seq: { $ne: null }, _id: { $ne: sessionId } },
-      'seq openDate',
-    ).sort({ openDate: -1 }).lean();
-    if (!last) return null;
-    const orderCount = await Order.countDocuments({
-      orderingSessionId: String(last._id), status: 'fulfilled',
-    });
-    return { current: false, seq: last.seq, openDate: last.openDate, orderCount };
-  }
-  return null;
 }
 
 async function buildTaskResponse(task, { isSecondChance = false } = {}) {

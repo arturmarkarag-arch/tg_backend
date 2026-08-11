@@ -28,6 +28,7 @@ const User = require('../models/User');
 const PickingTask = require('../models/PickingTask');
 const OrderingSession = require('../models/OrderingSession');
 const { roundMoney } = require('../utils/money');
+const { resolveOrderStatusAfterCancel } = require('../utils/orderStatus');
 const { assignLateShopNumber } = require('../utils/shopNumbering');
 const { getIO } = require('../socket');
 
@@ -130,13 +131,28 @@ async function reconcileLateOrderStrict(orderId, { maxRetries = 3 } = {}) {
         let statusChanged = false;
         const noActiveLeft = !order.items.some((i) => !i.cancelled && !i.skipped && !i.voided && !i.packed);
         const anyPacked = order.items.some((i) => i.packed);
-        if (skipped > 0 && noActiveLeft && !anyPacked) {
-          // Whole order missed this delivery — terminal. Reuse 'cancelled' (in enum,
-          // no schema churn); item-level skipped + this history action keep it
-          // distinguishable from an out-of-stock cancellation.
-          order.status = 'cancelled';
-          statusChanged = true;
-          order.history.push({ at: new Date(), by: 'system', byName: '', byRole: 'system', action: 'late_skipped_all', meta: { skipped } });
+        if (skipped > 0 && noActiveLeft) {
+          // A SKIP can be the last terminal event of an order. Nothing else will
+          // ever revisit it: `applyPackedItemsToOrders` closes an order only from
+          // a pack, and no task remains here. Without recomputing the status the
+          // order stays `new|in_progress` forever — an eternal "active order" that
+          // blocks schedule edits and reads as unfinished in the session summary.
+          // Picking has started (guard above), so by the session invariant the
+          // ordering window is closed and the canonical rule applies verbatim:
+          //   nothing delivered → 'cancelled' (item-level `skipped` + the
+          //   `late_skipped_all` action keep it distinct from an OOS cancel),
+          //   something delivered → 'confirmed'.
+          const from = order.status;
+          order.status = resolveOrderStatusAfterCancel(order, false);
+          statusChanged = order.status !== from;
+          order.history.push({
+            at: new Date(),
+            by: 'system',
+            byName: '',
+            byRole: 'system',
+            action: anyPacked ? 'late_items_skipped' : 'late_skipped_all',
+            meta: { skipped, appended, from, to: order.status },
+          });
         } else if (skipped > 0) {
           order.history.push({ at: new Date(), by: 'system', byName: '', byRole: 'system', action: 'late_items_skipped', meta: { skipped, appended } });
         }

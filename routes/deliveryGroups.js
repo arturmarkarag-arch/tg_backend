@@ -24,7 +24,8 @@ const { getOrCreateSessionId } = require('../utils/getOrCreateSession');
 const { pushSessionEvent } = require('../utils/sessionStatus');
 const { openItemArrayFilter } = require('../utils/orderItemState');
 const { normalizeDeliveryGroup } = require('../utils/deliveryGroupHelpers');
-const { deriveSessionPhase, PHASE_VOCAB } = require('../utils/sessionVocab');
+const { PHASE_VOCAB } = require('../utils/sessionVocab');
+const { getCurrentGroupPresentation, computeSessionPhase, ACTIVE_ORDER_STATUSES } = require('../services/sessionPresentation');
 const { getIO } = require('../socket');
 
 const cache = require('../utils/cache');
@@ -177,14 +178,13 @@ async function buildSellerClosedDashboard({ user, shop, group, sessionId, catalo
     'seq openDate pickingStatus pickingConfirmedAt pickingStartedAt pickingCompletedAt shopNumbers',
   ).lean();
 
-  const [orders, groupOrderCount, totalTasks, completedTasks, lockedTasks] = await Promise.all([
+  const [orders, totalTasks, completedTasks, lockedTasks] = await Promise.all([
     Order.find({
       buyerTelegramId: String(user.telegramId),
       orderingSessionId: String(sessionId),
       status: { $ne: 'expired' },
       $or: [{ orderType: 'manual' }, { orderType: { $exists: false } }],
     }).select('orderNumber status createdAt updatedAt items').lean(),
-    Order.countDocuments({ orderingSessionId: String(sessionId), status: { $ne: 'expired' } }),
     PickingTask.countDocuments({ orderingSessionId: String(sessionId) }),
     PickingTask.countDocuments({ orderingSessionId: String(sessionId), status: 'completed' }),
     PickingTask.countDocuments({ orderingSessionId: String(sessionId), status: 'locked' }),
@@ -192,8 +192,12 @@ async function buildSellerClosedDashboard({ user, shop, group, sessionId, catalo
 
   const order = summarizeSellerOrders(orders);
   const pickingStatus = session?.pickingStatus || 'pending';
-  const hasWork = pickingStatus === 'completed' ? totalTasks > 0 : groupOrderCount > 0;
-  const phase = deriveSessionPhase({ pickingStatus, windowOpen: false, hasWork });
+  const phase = await computeSessionPhase({
+    deliveryGroupId: String(group._id),
+    sessionId: String(sessionId),
+    pickingStatus,
+    orderingSchedule: group.orderingSchedule,
+  });
   const phaseLabel = PHASE_VOCAB[phase]?.label || 'Очікує';
   const shopNumber = (session?.shopNumbers || []).find((entry) => String(entry.shopId) === String(shop._id))?.number ?? null;
   const progressPercent = totalTasks > 0 ? Math.round((completedTasks / totalTasks) * 100) : 0;
@@ -1054,12 +1058,24 @@ router.get('/', async (req, res) => {
   const shopCountMap = Object.fromEntries(shopCounts.map(({ _id, count }) => [String(_id), count]));
   const sellerCountMap = Object.fromEntries(sellerCounts.map(({ _id, count }) => [String(_id), count]));
 
-  const result = normalizedGroups.map((g) => ({
+  // Picking badge must come from the SAME OrderingSession phase as the picking
+  // page header. `hasRelocatedOrders` is kept only as a compatibility/debug flag;
+  // it must never be translated to "Збирається" because an old/stale active
+  // Order is not proof that the current session is being picked.
+  const presentations = await Promise.all(
+    normalizedGroups.map((g) => getCurrentGroupPresentation(g)),
+  );
+  const result = normalizedGroups.map((g, index) => ({
     ...g,
     isOpen: isOrderingOpen(g.orderingSchedule).isOpen,
     shopCount: shopCountMap[String(g._id)] || 0,
     sellerCount: sellerCountMap[String(g._id)] || 0,
     hasRelocatedOrders: !!problematicByGroup[String(g._id)],
+    pickingStatus: presentations[index]?.pickingStatus ?? null,
+    phase: presentations[index]?.phase ?? null,
+    phaseLabel: presentations[index]?.phase
+      ? (PHASE_VOCAB[presentations[index].phase]?.label || presentations[index].phase)
+      : null,
   }));
   res.json(result);
 });
@@ -1111,6 +1127,7 @@ router.patch('/:id', telegramAuth, requireTelegramRole('admin'), asyncHandler(as
   const timingIsChanging = dayIsChanging || scheduleIsChanging;
 
   let oldSessionId = null;
+  let recordRescheduleOnSession = false;
   let emptyTargetSession = null;
   if (timingIsChanging) {
     const groupIdStr = String(group._id);
@@ -1125,17 +1142,30 @@ router.patch('/:id', telegramAuth, requireTelegramRole('admin'), asyncHandler(as
 
     // Clock-time alone must not freeze an empty TEST/configuration group.
     // We block only when changing the calendar could strand REAL session data.
-    const [sessionOrder, sessionTask, currentSession] = await Promise.all([
-      Order.exists({ orderingSessionId: { $in: protectedSessionIds } }),
-      PickingTask.exists({ orderingSessionId: { $in: protectedSessionIds } }),
+    const [sessionOrder, sessionTask, livePickingSession, currentSession] = await Promise.all([
+      // Terminal history must NOT freeze schedule editing forever. Only orders
+      // that can still change operationally are blockers.
+      Order.exists({
+        orderingSessionId: { $in: protectedSessionIds },
+        status: { $in: ACTIVE_ORDER_STATUSES },
+      }),
+      // Same for tasks: completed tasks are history; only pending/locked work can
+      // be stranded by a calendar change.
+      PickingTask.exists({
+        orderingSessionId: { $in: protectedSessionIds },
+        status: { $in: ['pending', 'locked'] },
+      }),
+      OrderingSession.exists({
+        _id: { $in: protectedSessionIds },
+        pickingStatus: { $in: ['confirmed', 'in_progress'] },
+      }),
       OrderingSession.findById(currentSessionId, 'pickingStatus openNotifiedAt').lean(),
     ]);
 
-    const pickingLifecycleActive = currentSession && currentSession.pickingStatus !== 'pending';
-    if (sessionOrder || sessionTask || pickingLifecycleActive) {
-      const reason = sessionOrder ? 'у поточній або наступній сесії вже є замовлення'
-        : sessionTask ? 'у поточній або наступній сесії вже є задачі збирання'
-        : 'поточна сесія збирання вже вийшла зі стану pending';
+    if (sessionOrder || sessionTask || livePickingSession) {
+      const reason = sessionOrder ? 'у поточній або наступній сесії є активні замовлення'
+        : sessionTask ? 'у поточній або наступній сесії є незавершені задачі збирання'
+        : 'збирання поточної або наступної сесії вже підтверджене чи триває';
       throw appError('group_day_change_session_active', { reason });
     }
 
@@ -1185,6 +1215,10 @@ router.patch('/:id', telegramAuth, requireTelegramRole('admin'), asyncHandler(as
     }
 
     oldSessionId = currentSessionId;
+    // A timing edit after a COMPLETED cycle is future configuration; appending
+    // `rescheduled` to that historical session would falsely rewrite its story.
+    // Only an empty/pending current session is actually being rescheduled.
+    recordRescheduleOnSession = currentSession?.pickingStatus === 'pending';
   }
 
   if (name !== undefined) {
@@ -1214,7 +1248,7 @@ router.patch('/:id', telegramAuth, requireTelegramRole('admin'), asyncHandler(as
   await cache.invalidate(cache.KEYS.DELIVERY_GROUPS);
   await invalidateDeliveryGroup(group._id);
 
-  if (timingIsChanging && oldSessionId) {
+  if (timingIsChanging && oldSessionId && recordRescheduleOnSession) {
     try {
       await pushSessionEvent(oldSessionId, {
         type: 'rescheduled',

@@ -20,7 +20,11 @@ const path = require('path');
 const dotenv = require('dotenv');
 const mongoose = require('mongoose');
 
-dotenv.config({ path: path.join(__dirname, '..', '..', '.env') });
+const envArg = process.argv.find((arg) => arg.startsWith('--env='));
+const envPath = envArg
+  ? path.resolve(process.cwd(), envArg.slice('--env='.length))
+  : path.join(__dirname, '..', '..', '.env');
+dotenv.config({ path: envPath });
 
 const EXECUTE = process.argv.includes('--execute');
 const OBJECT_ID_RE = /^[0-9a-f]{24}$/i;
@@ -44,7 +48,8 @@ async function main() {
   const counters = db.collection('counters');
 
   console.log(`\n🔢 backfillSessionSeq — режим: ${EXECUTE ? '⚠️  ЗАПИС (--execute)' : 'DRY-RUN (нічого не пишу)'}`);
-  console.log(`   база: ${db.databaseName}   host: ${mongoose.connection.host}\n`);
+  console.log(`   база: ${db.databaseName}   host: ${mongoose.connection.host}`);
+  console.log(`   env: ${envPath}\n`);
 
   // Any status counts: an expired/cancelled historical order still proves that
   // the session had real content and therefore deserves its historical number.
