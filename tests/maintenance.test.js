@@ -43,14 +43,22 @@ describe('maintenance read-only', () => {
     expect(res.payload).toBe(null);
   });
 
-  it('блокує бізнесовий POST з 503', () => {
-    const req = { method: 'POST', path: '/api/receipts' };
+  it('блокує бізнесовий POST з 503 без витоку технічних деталей звичайному користувачу', () => {
+    const req = { method: 'POST', path: '/api/receipts', telegramUser: { role: 'seller' } };
     const res = responseRecorder();
     let nextCalled = false;
     maintenanceReadOnlyMiddleware(req, res, () => { nextCalled = true; });
     expect(nextCalled).toBe(false);
     expect(res.statusCode).toBe(503);
     expect(res.payload.error).toBe('maintenance_read_only');
+    expect(res.payload.maintenance.issues[0].technicalDetails).toBeUndefined();
+    expect(res.payload.maintenance.issues[0].howToFix).toBeUndefined();
+  });
+
+  it('залишає технічні деталі maintenance для staff', () => {
+    const req = { method: 'POST', path: '/api/receipts', telegramUser: { role: 'admin' } };
+    const res = responseRecorder();
+    maintenanceReadOnlyMiddleware(req, res, () => {});
     expect(res.payload.maintenance.issues[0].technicalDetails).toContain('E11000');
   });
 

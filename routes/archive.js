@@ -143,7 +143,7 @@ router.post('/:id/restore', asyncHandler(async (req, res) => {
     await session.endSession();
   }
 
-  try { getIO().emit('incoming_updated'); } catch (e) { console.warn('[archive/restore] socket incoming_updated failed:', e.message); }
+  try { getIO().emit('incoming_updated'); } catch (e) {}
 
   res.json(product);
 }));

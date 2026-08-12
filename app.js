@@ -23,17 +23,20 @@ const visionSearchRouter  = require('./routes/visionSearch');
 const productFeedbackRouter = require('./routes/productFeedback');
 const navBadgesRouter = require('./routes/navBadges');
 const supplementRouter = require('./routes/supplement');
-const { getMaintenanceState, maintenanceReadOnlyMiddleware } = require('./services/maintenanceState');
+const { getPublicMaintenanceState, maintenanceReadOnlyMiddleware } = require('./services/maintenanceState');
 
 // The warehouse test harness (destructive: cleanup/seed/reset of real
-// collections) must NEVER be reachable in production. It is loaded and mounted
-// only outside production. Even then it is NOT a public path — it requires the
-// normal telegramAuth (admin) middleware as defense-in-depth.
-const ENABLE_TEST_API = process.env.NODE_ENV !== 'production';
+// collections) must NEVER be reachable in production. Outside production it is
+// still disabled unless ENABLE_TEST_API=true is explicitly set. Even then it is
+// NOT a public API path and requires an authenticated admin.
+const ENABLE_TEST_API = process.env.NODE_ENV !== 'production'
+  && process.env.ENABLE_TEST_API === 'true';
 
 const { expressCorsOptions } = require('./utils/corsOptions');
 
 const app = express();
+// Не розповідаємо кожній відповіді, на чому працює бекенд.
+app.disable('x-powered-by');
 app.use(cors(expressCorsOptions));
 app.use(express.json());
 app.use('/uploads', (req, res, next) => {
@@ -59,7 +62,6 @@ if (ENABLE_TEST_API) {
     // our handler work. processUpdate emits synchronously; handlers run detached.
     res.sendStatus(200);
     try { handleWebhookUpdate(req.body); } catch (err) {
-      console.error('[webhook] processUpdate failed:', err?.message);
     }
   });
 }
@@ -85,15 +87,8 @@ const publicApiPaths = [
   /^\/api\/shop-products\/barcode\/.+$/,
   /^\/api\/health$/,
   /^\/api\/maintenance$/,
-  /^\/api\/bot-status$/,
-];
 
-// The test harness UI calls warehouse-test without auth. This is acceptable
-// ONLY because the entire route is unmounted in production (ENABLE_TEST_API).
-// In production this entry never exists, so it cannot widen the attack surface.
-if (ENABLE_TEST_API) {
-  publicApiPaths.push(/^\/api\/warehouse-test(\/.*)?$/);
-}
+];
 
 function requireAuthForApi(req, res, next) {
   if (!req.path.startsWith('/api')) return next();
@@ -105,19 +100,18 @@ function requireAuthForApi(req, res, next) {
 app.use(requireAuthForApi);
 
 app.get('/api/health', (req, res) => {
-  const maintenance = getMaintenanceState();
+  const maintenance = getPublicMaintenanceState();
   res.json({
     status: maintenance.active ? 'maintenance' : 'ok',
-    environment: process.env.NODE_ENV || 'development',
-    maintenance,
+    maintenance: { active: maintenance.active, mode: maintenance.mode, since: maintenance.since },
   });
 });
 
 app.get('/api/maintenance', (req, res) => {
-  res.json(getMaintenanceState());
+  res.json(getPublicMaintenanceState());
 });
 
-app.get('/api/bot-status', (req, res) => {
+app.get('/api/bot-status', requireTelegramRole('admin'), (req, res) => {
   res.json(getBotStatus());
 });
 
@@ -173,7 +167,7 @@ app.use('/api/v1/telegram', telegramV1Router);
 app.use('/api/v1/auth', authV1Router);
 if (ENABLE_TEST_API) {
   // eslint-disable-next-line global-require
-  app.use('/api/warehouse-test', require('./routes/warehouseTest'));
+  app.use('/api/warehouse-test', requireTelegramRole('admin'), require('./routes/warehouseTest'));
 }
 
 // Centralised error handler — converts AppError (and known Mongoose errors)

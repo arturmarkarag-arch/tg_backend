@@ -5,6 +5,7 @@
 // сама розсилка захищена від дублів прапорцем на сесії, не таймінгом тіку.
 
 const { notifyOrderingOpen } = require('./orderingOpenNotify');
+const { runAsSchedulerLeader } = require('./schedulerLeader');
 
 const TICK_MS = 60 * 1000;
 let timer = null;
@@ -14,7 +15,6 @@ async function runOrderingOpenTick(now = new Date()) {
   try {
     return await notifyOrderingOpen({ now });
   } catch (err) {
-    console.error('[ordering/scheduler] розсилка старту замовлень впала:', err?.message);
     return { notifiedGroups: 0, sentPrivate: 0, sentGroups: 0 };
   }
 }
@@ -24,7 +24,7 @@ function startOrderingOpenScheduler() {
     if (running) return;
     running = true;
     try {
-      await runOrderingOpenTick();
+      await runAsSchedulerLeader('ordering-open', () => runOrderingOpenTick(), { ttlMs: 5 * 60 * 1000 });
     } finally {
       running = false;
     }

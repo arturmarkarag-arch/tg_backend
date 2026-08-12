@@ -72,7 +72,6 @@ async function miniAppLink() {
     const { appUrl } = await getSupplementSettings();
     return appUrl || '';
   } catch (err) {
-    console.warn('[ordering/notify] не вдалося прочитати посилання на Mini App:', err.message);
     return '';
   }
 }
@@ -188,7 +187,6 @@ async function notifyOrderingOpen({ now = new Date() } = {}) {
         sentPrivate += 1;
         deliveredAny = true;
       } catch (err) {
-        console.warn('[ordering/notify] приватне', seller.telegramId, 'не доставлено:', err.message);
       }
       await sleep(SEND_GAP_MS);
     }
@@ -200,7 +198,6 @@ async function notifyOrderingOpen({ now = new Date() } = {}) {
         sentGroups += 1;
         deliveredAny = true;
       } catch (err) {
-        console.warn('[ordering/notify] пост у чат', chatId, 'не доставлено:', err.message);
       }
     }
 
@@ -212,7 +209,6 @@ async function notifyOrderingOpen({ now = new Date() } = {}) {
   }
 
   if (notifiedGroups) {
-    console.log(`[ordering/notify] старт замовлень: ${notifiedGroups} груп → ${sentPrivate} продавцям, ${sentGroups} у чати`);
   }
   return { notifiedGroups, sentPrivate, sentGroups };
 }

@@ -27,7 +27,6 @@ async function deleteObject(key) {
   try {
     await s3.send(new DeleteObjectCommand({ Bucket: process.env.R2_BUCKET_NAME, Key: key }));
   } catch (err) {
-    console.error('[r2] delete failed for', key, err.message);
   }
 }
 

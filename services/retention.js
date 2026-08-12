@@ -5,6 +5,7 @@ const PickingTask = require('../models/PickingTask');
 const Product = require('../models/Product');
 const ShopProduct = require('../models/ShopProduct');
 const ProductVector = require('../models/ProductVector');
+const { runAsSchedulerLeader } = require('./schedulerLeader');
 
 // A warehouse product that has stayed archived this long is treated as "no longer the
 // warehouse's concern, but still worth keeping in the shop catalogue" — see
@@ -119,7 +120,6 @@ async function convertStaleArchivedToShop(now = Date.now()) {
         converted += 1;
       });
     } catch (err) {
-      console.error('[retention] convert-to-shop failed for', String(_id), ':', err?.message);
     } finally {
       await session.endSession();
     }
@@ -132,20 +132,16 @@ async function convertStaleArchivedToShop(now = Date.now()) {
 // the filtered PickingTask purge needs an application-side timer. The interval is
 // unref()'d so it never keeps the process alive on shutdown.
 function startRetentionScheduler() {
-  const runOnce = async () => {
+  const runOnce = async () => runAsSchedulerLeader('retention', async () => {
     try {
       const n = await purgeOldCompletedPickingTasks();
-      if (n) console.log(`[retention] purged ${n} completed picking task(s) older than ${COMPLETED_PICKING_RETENTION_DAYS}d`);
     } catch (err) {
-      console.error('[retention] purge failed:', err?.message);
     }
     try {
       const c = await convertStaleArchivedToShop();
-      if (c) console.log(`[retention] handed over ${c} product(s) archived >${ARCHIVE_TO_SHOP_DAYS}d to the shop catalogue`);
     } catch (err) {
-      console.error('[retention] convert-to-shop sweep failed:', err?.message);
     }
-  };
+  }, { ttlMs: 30 * 60 * 1000 });
   runOnce();
   const timer = setInterval(runOnce, DAY_MS);
   timer.unref();

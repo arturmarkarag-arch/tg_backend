@@ -397,12 +397,11 @@ const ERRORS = {
     }
     for (const [msg, ks] of byMsg) {
       if (ks.length > 1 && !INTENTIONAL_ALIASES.has([...ks].sort().join('|'))) {
-        console.warn(`[errors.js] Same message for codes [${ks.join(', ')}]: "${msg}" — make them distinct for clearer client triage.`);
       }
     }
   } catch (e) {
     if (/Duplicate error codes/.test(e.message)) throw e; // fatal — real bug
-    console.warn('[errors.js] integrity guard skipped:', e.message); // scan is best-effort
+     // scan is best-effort
   }
 })();
 
@@ -467,13 +466,16 @@ function errorHandler(err, req, res, next) {
     return res.status(err.status || 500).json(err.toJSON());
   }
 
-  // Mongoose validation
+  // Mongoose validation. Schema internals are useful to staff while debugging,
+  // but exposing raw validator paths/messages to sellers or unauthenticated
+  // callers gives away unnecessary model structure.
   if (err && err.name === 'ValidationError') {
-    return res.status(400).json({
+    const payload = {
       error: 'validation_failed',
       message: t('validation_failed'),
-      details: err.message,
-    });
+    };
+    if (['admin', 'warehouse'].includes(req?.telegramUser?.role)) payload.details = err.message;
+    return res.status(400).json(payload);
   }
   // Mongoose cast (bad ObjectId etc.)
   if (err && err.name === 'CastError') {
@@ -516,7 +518,6 @@ function errorHandler(err, req, res, next) {
     });
   }
 
-  console.error('[errorHandler] unhandled:', err);
   return res.status(500).json({
     error: 'internal_error',
     message: t('internal_error'),

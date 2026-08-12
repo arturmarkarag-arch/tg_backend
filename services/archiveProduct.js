@@ -266,7 +266,7 @@ async function archiveProduct(productOrId, { notifyBuyers = false, bot = null, r
     for (const sid of affectedSessionIds) {
       if (!sid) continue;
       try { await maybeCompleteSession(sid); }
-      catch (e) { console.warn(`[archiveProduct] maybeCompleteSession ${sid} failed:`, e?.message || e); }
+      catch (e) {}
     }
   }
 
@@ -284,7 +284,6 @@ async function archiveProduct(productOrId, { notifyBuyers = false, bot = null, r
         });
       }
     } catch (e) {
-      console.warn('[archiveProduct] socket user_order_updated failed:', e.message);
     }
 
     if (notifyBuyers && bot) {
@@ -294,7 +293,6 @@ async function archiveProduct(productOrId, { notifyBuyers = false, bot = null, r
           `⛔ Товар "${getProductTitle(product)}" на складі закінчився. Цю позицію видалено з вашого замовлення.`
         )
         .catch((e) => {
-          console.warn(`[archiveProduct] notify buyer ${buyerTelegramId} failed:`, e.message);
           return null;
         });
     }
@@ -309,7 +307,6 @@ async function archiveProduct(productOrId, { notifyBuyers = false, bot = null, r
       }
       io.emit('delivery_groups_updated');
     } catch (e) {
-      console.warn('[archiveProduct] socket shop_status_changed failed:', e.message);
     }
   }
 
@@ -319,7 +316,6 @@ async function archiveProduct(productOrId, { notifyBuyers = false, bot = null, r
     io.emit('product_archived', { productId: String(product._id) });
     io.emit('incoming_updated');
   } catch (e) {
-    console.warn('[archiveProduct] socket product_archived failed:', e.message);
   }
 
   // ── 5. Broadcast block updates (blocks were already updated inside the transaction) ───
@@ -335,7 +331,6 @@ async function archiveProduct(productOrId, { notifyBuyers = false, bot = null, r
         });
       }
     } catch (e) {
-      console.warn('[archiveProduct] socket block_updated failed:', e.message);
     }
   }
 

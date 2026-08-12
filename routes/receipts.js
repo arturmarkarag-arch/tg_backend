@@ -129,9 +129,7 @@ const s3Client = new S3Client({
 (async () => {
   try {
     await s3Client.send(new HeadBucketCommand({ Bucket: process.env.R2_BUCKET_NAME }));
-    console.log('Cloudflare R2 bucket OK');
   } catch (err) {
-    console.error('R2 bucket check failed:', err.message);
   }
 })();
 
@@ -375,7 +373,7 @@ router.post('/', staffOnly, asyncHandler(async (req, res) => {
     itemName: receipt.receiptNumber,
     action: 'receipt_create',
     actor: getActor(req),
-  }).catch((e) => console.error('[ReceiptItemLog] receipt_create error:', e));
+  }).catch((e) => {});
   res.status(201).json(receipt);
 }));
 
@@ -410,7 +408,7 @@ router.patch('/:id', staffOnly, asyncHandler(async (req, res) => {
     action: 'receipt_type_change',
     actor: getActor(req),
     changes: [{ field: 'type', label: 'Тип накладної', from, to: type }],
-  }).catch((e) => console.error('[ReceiptItemLog] receipt_type_change error:', e));
+  }).catch((e) => {});
 
   res.json(receipt);
 }));
@@ -510,7 +508,7 @@ router.post('/:id/items', staffOnly, asyncHandler(async (req, res) => {
     itemName: receiptItem.name,
     action: 'create',
     actor: getActor(req),
-  }).catch((e) => console.error('[ReceiptItemLog] create error:', e));
+  }).catch((e) => {});
 
   const io = getIO();
   if (io) {
@@ -741,7 +739,7 @@ router.patch('/:id/items/:itemId', staffOnly, asyncHandler(async (req, res) => {
       action: 'update',
       actor: getActor(req),
       changes: logChanges,
-    }).catch((e) => console.error('[ReceiptItemLog] update error:', e));
+    }).catch((e) => {});
   }
 
   const io = getIO();
@@ -797,7 +795,7 @@ router.delete('/:id/items/:itemId', staffOnly, asyncHandler(async (req, res) => 
         { field: 'totalQty', label: FIELD_LABELS.totalQty, from: deletedItem.totalQty, to: null },
         { field: 'price', label: FIELD_LABELS.price, from: deletedItem.price, to: null },
       ],
-    }).catch((e) => console.error('[ReceiptItemLog] delete error:', e));
+    }).catch((e) => {});
 
     const io = getIO();
     if (io) io.to(`receipt_${req.params.id}`).emit('receipt_item_deleted', req.params.itemId);
@@ -882,7 +880,7 @@ router.post('/:id/items/:itemId/confirm', staffOnly, asyncHandler(async (req, re
       action: 'confirm',
       actor: getActor(req),
       changes: [{ field: 'status', label: 'Статус', from: 'draft', to: 'confirmed' }],
-    }).catch((e) => console.error('[ReceiptItemLog] confirm error:', e));
+    }).catch((e) => {});
     // Docs are now durable — schedule background Gemini embedding into ProductVector.
     // Warehouse products embed by productId; shop-owned items by shopProductId. Mirrors
     // are never embedded (they reference the warehouse row).
@@ -960,7 +958,7 @@ router.post('/:id/items/:itemId/unconfirm', staffOnly, asyncHandler(async (req, 
         action: 'confirm',
         actor: getActor(req),
         changes: [{ field: 'status', label: 'Статус', from: 'confirmed', to: 'draft' }],
-      }).catch((e) => console.error('[ReceiptItemLog] unconfirm error:', e));
+      }).catch((e) => {});
     }
 
     const io = getIO();
@@ -1148,7 +1146,7 @@ router.post('/:id/commit', staffOnly, asyncHandler(async (req, res) => {
       itemName: receipt.receiptNumber,
       action: 'receipt_complete',
       actor: getActor(req),
-    }).catch((e) => console.error('[ReceiptItemLog] receipt_complete error:', e));
+    }).catch((e) => {});
 
     // Notify warehouse board that new products are available in the incoming strip
     try { getIO().emit('incoming_updated'); } catch (_) {}
@@ -1184,12 +1182,11 @@ router.post('/:id/commit', staffOnly, asyncHandler(async (req, res) => {
         // нього, щоб побачити «Накладну проведено».
         require('../services/supplementNotify')
           .notifyOffers(offers, 'opened')
-          .catch((e) => console.error('[supplement] стартова розсилка впала:', e?.message));
+          .catch((e) => {});
       }
     } catch (err) {
       // Накладна вже проведена і товар на складі — це головне. Провал відкриття
       // дозамовлення логуємо, але не перетворюємо на помилку проведення.
-      console.error('[supplement] не вдалося відкрити дозамовлення для накладної', String(receipt._id), ':', err?.message);
     }
 
     res.json({
@@ -1218,7 +1215,6 @@ router.post('/:id/commit', staffOnly, asyncHandler(async (req, res) => {
     // Surface a clean 409 (already completed), not a 500.
     const fresh = await Receipt.findById(req.params.id).lean();
     if (fresh && fresh.status === 'completed') throw appError('receipt_already_completed');
-    console.error('[receipts.commit] Error:', err);
     throw appError('receipt_commit_failed');
   }
 }));
@@ -1250,7 +1246,6 @@ router.post('/:id/items/:itemId/describe', staffOnly, asyncHandler(async (req, r
     if (io) io.to(`receipt_${req.params.id}`).emit('receipt_item_updated', item.toObject());
     res.json({ _id: item._id, aiDescription: item.aiDescription, name: item.name });
   } catch (err) {
-    console.error('[receipts] describe error:', err.message);
     return res.status(502).json({ error: 'describe_api_error', message: err.message });
   }
 }));

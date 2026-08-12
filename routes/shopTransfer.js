@@ -315,7 +315,7 @@ router.post('/:id/approve', telegramAuth, requireTelegramRole('admin'), asyncHan
   // seller locks so other workers don't repopulate L1 with pre-commit reads.
   if (migrationResult?.invalidate) {
     try { await migrationResult.invalidate(); }
-    catch (e) { console.warn('[shopTransfer approve] cache invalidate failed:', e?.message); }
+    catch (e) {}
   }
 
   // Notify dashboards AFTER commit (same pattern as /me/shop)
@@ -335,7 +335,6 @@ router.post('/:id/approve', telegramAuth, requireTelegramRole('admin'), asyncHan
       io.emit('user_shop_changed', { telegramId: requestDoc.sellerTelegramId });
     }
   } catch (e) {
-    console.warn('[shopTransfer approve] socket emit failed:', e?.message);
   }
 
   res.json(resolvedRequest);

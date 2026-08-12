@@ -40,7 +40,6 @@ async function r2Delete(key) {
   try {
     await s3Client.send(new DeleteObjectCommand({ Bucket: process.env.R2_BUCKET_NAME, Key: key }));
   } catch (err) {
-    console.error(`[shopProducts] r2Delete failed for ${key}:`, err.message);
   }
 }
 
@@ -209,7 +208,7 @@ async function editMirrorThroughToWarehouse(product, fields, res) {
       io.emit('incoming_updated'); // refresh open warehouse boards
       if (photoChanged) io.emit('catalogue_updated', { action: 'update', productId: String(product._id) });
     }
-  } catch (e) { console.warn('[shopProducts/write-through] socket emit failed:', e.message); }
+  } catch (e) {}
 
   return res.json(mirror ? (mirror.toObject ? mirror.toObject() : mirror) : await ShopProduct.findOne({ linkedProductId: product._id }).lean());
 }
@@ -311,7 +310,6 @@ router.post('/:id/describe', staffOnly, asyncHandler(async (req, res) => {
     if (target === owner) await syncMirror(owner);
     res.json({ _id: item._id, aiDescription: target.aiDescription, aiName: aiName || null });
   } catch (err) {
-    console.error('[shopProducts] describe error:', err.message);
     return res.status(502).json({ error: 'describe_api_error', message: err.message });
   }
 }));

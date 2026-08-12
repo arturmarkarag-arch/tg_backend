@@ -37,7 +37,6 @@ function initGemini(key) {
   apiKey = key || null;
   if (!apiKey) {
     geminiStatus = { connected: false, error: 'GEMINI_API_KEY not configured' };
-    console.warn(geminiStatus.error);
     return;
   }
   // We can't verify the key without a network call; mark configured and let the

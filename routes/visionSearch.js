@@ -39,6 +39,16 @@ const staffOnly = requireTelegramRoles(['admin', 'warehouse']);
 const adminOnly = requireTelegramRoles(['admin']);
 const anyRole   = requireTelegramRoles(['admin', 'warehouse', 'seller']);
 
+function staffTechnicalDetails(req, detail) {
+  return ['admin', 'warehouse'].includes(req.telegramUser?.role) && detail
+    ? { details: String(detail) }
+    : {};
+}
+
+function visionError(res, req, status, error, message, detail = '') {
+  return res.status(status).json({ error, message, ...staffTechnicalDetails(req, detail) });
+}
+
 // ─── GET /upload-url — presigned PUT for a one-shot query photo ───────────────
 // Browser uploads the photo straight to R2; the bytes never touch our server.
 router.get('/upload-url', anyRole, asyncHandler(async (req, res) => {
@@ -95,7 +105,7 @@ async function searchByGeminiVector(embedding, k = 5) {
 // server/scripts/reindexGemini.js — it paces requests under the free-tier limit.
 router.post('/embed-all', adminOnly, asyncHandler(async (req, res) => {
   if (!getGeminiStatus().connected) {
-    return res.status(503).json({ error: 'gemini_not_configured', message: getGeminiStatus().error || 'Gemini не підключено' });
+    return visionError(res, req, 503, 'gemini_not_configured', 'Сервіс розпізнавання тимчасово недоступний', getGeminiStatus().error);
   }
 
   const force = req.body?.force === true || req.query.force === 'true';
@@ -113,7 +123,7 @@ router.post('/embed-all', adminOnly, asyncHandler(async (req, res) => {
   let processed = 0, failed = 0;
   for (const p of todo) {
     try { if (await embedProduct(p, { force })) processed++; else failed++; }
-    catch (err) { console.error('[visionSearch] embed-all failed for', String(p._id), err.message); failed++; }
+    catch (err) {  failed++; }
   }
   const embedded  = await ProductVector.countDocuments({ productId: { $exists: true } });
   const remaining = Math.max(0, candidates.length - embedded);
@@ -130,7 +140,7 @@ router.post('/query-vector', anyRole, asyncHandler(async (req, res) => {
   if (!isVisionTmpKey(key)) return res.status(400).json({ error: 'photo_required', message: 'Не вказано фото' });
 
   if (!getGeminiStatus().connected) {
-    return res.status(503).json({ error: 'gemini_not_configured', message: getGeminiStatus().error || 'Gemini не підключено' });
+    return visionError(res, req, 503, 'gemini_not_configured', 'Сервіс розпізнавання тимчасово недоступний', getGeminiStatus().error);
   }
 
   // Client may override (test page slider); otherwise use the admin setting.
@@ -149,8 +159,7 @@ router.post('/query-vector', anyRole, asyncHandler(async (req, res) => {
       const g = await geminiEmbedImageUrl(imageUrl);
       embedding = g.embedding;
     } catch (err) {
-      console.error('[visionSearch] query-vector Gemini error:', err.message);
-      return res.status(502).json({ error: 'gemini_api_error', message: err.message });
+      return visionError(res, req, 502, 'gemini_api_error', 'Сервіс розпізнавання тимчасово недоступний', err.message);
     }
 
     if (!embedding) {
@@ -161,11 +170,7 @@ router.post('/query-vector', anyRole, asyncHandler(async (req, res) => {
     try {
       resultItems = await searchByGeminiVector(embedding, 5);
     } catch (err) {
-      console.error('[visionSearch] vector search error:', err.message);
-      return res.status(502).json({
-        error:   'vector_search_failed',
-        message: `Векторний пошук недоступний — перевір Atlas-індекс "${VECTOR_INDEX}". (${err.message})`,
-      });
+      return visionError(res, req, 502, 'vector_search_failed', 'Векторний пошук тимчасово недоступний', `index=${VECTOR_INDEX}; ${err.message}`);
     }
 
     const log = await VisionTestLog.create({
@@ -214,7 +219,7 @@ router.post('/query-text', anyRole, asyncHandler(async (req, res) => {
   if (!text) return res.status(400).json({ error: 'text_required', message: 'Порожній запит' });
 
   if (!getGeminiStatus().connected) {
-    return res.status(503).json({ error: 'gemini_not_configured', message: getGeminiStatus().error || 'Gemini не підключено' });
+    return visionError(res, req, 503, 'gemini_not_configured', 'Сервіс розпізнавання тимчасово недоступний', getGeminiStatus().error);
   }
 
   const TOP_K_CAP = 200;
@@ -229,8 +234,7 @@ router.post('/query-text', anyRole, asyncHandler(async (req, res) => {
     const e = await geminiEmbedText(text);
     embedding = e.embedding;
   } catch (err) {
-    console.error('[visionSearch] query-text Gemini error:', err.message);
-    return res.status(502).json({ error: 'gemini_api_error', message: err.message });
+    return visionError(res, req, 502, 'gemini_api_error', 'Сервіс розпізнавання тимчасово недоступний', err.message);
   }
   if (!embedding) return res.json({ items: [], total: 0, offset, limit });
 
@@ -257,11 +261,7 @@ router.post('/query-text', anyRole, asyncHandler(async (req, res) => {
       } },
     ]);
   } catch (err) {
-    console.error('[visionSearch] query-text vector search error:', err.message);
-    return res.status(502).json({
-      error:   'vector_search_failed',
-      message: `Векторний пошук недоступний — перевір Atlas-індекс "${VECTOR_INDEX}". (${err.message})`,
-    });
+    return visionError(res, req, 502, 'vector_search_failed', 'Векторний пошук тимчасово недоступний', `index=${VECTOR_INDEX}; ${err.message}`);
   }
 
   const items = result?.[0]?.items || [];
@@ -280,7 +280,7 @@ router.post('/query-vector-warehouse', staffOnly, asyncHandler(async (req, res) 
   if (!isVisionTmpKey(key)) return res.status(400).json({ error: 'photo_required', message: 'Не вказано фото' });
 
   if (!getGeminiStatus().connected) {
-    return res.status(503).json({ error: 'gemini_not_configured', message: getGeminiStatus().error || 'Gemini не підключено' });
+    return visionError(res, req, 503, 'gemini_not_configured', 'Сервіс розпізнавання тимчасово недоступний', getGeminiStatus().error);
   }
 
   const limit = Math.min(50, Math.max(1, parseInt(req.body?.limit, 10) || 20));
@@ -291,8 +291,7 @@ router.post('/query-vector-warehouse', staffOnly, asyncHandler(async (req, res) 
       const g = await geminiEmbedImageUrl(imageUrl);
       embedding = g.embedding;
     } catch (err) {
-      console.error('[visionSearch] warehouse photo Gemini error:', err.message);
-      return res.status(502).json({ error: 'gemini_api_error', message: err.message });
+      return visionError(res, req, 502, 'gemini_api_error', 'Сервіс розпізнавання тимчасово недоступний', err.message);
     }
     if (!embedding) return res.json({ items: [], total: 0 });
 
@@ -307,11 +306,7 @@ router.post('/query-vector-warehouse', staffOnly, asyncHandler(async (req, res) 
         { $replaceRoot: { newRoot: { $mergeObjects: ['$doc', { _score: '$_score' }] } } },
       ]);
     } catch (err) {
-      console.error('[visionSearch] warehouse photo vector search error:', err.message);
-      return res.status(502).json({
-        error:   'vector_search_failed',
-        message: `Векторний пошук по складу недоступний — перевір Atlas-індекс "${VECTOR_INDEX}". (${err.message})`,
-      });
+      return visionError(res, req, 502, 'vector_search_failed', 'Векторний пошук по складу тимчасово недоступний', `index=${VECTOR_INDEX}; ${err.message}`);
     }
     await attachWarehouseLocations(items);
     res.json({ items, total: items.length });
@@ -335,8 +330,7 @@ router.post('/describe', anyRole, asyncHandler(async (req, res) => {
     const { text, usage } = await describeImageUrl(publicUrl(key));
     res.json({ description: text, usage });
   } catch (err) {
-    console.error('[visionSearch] describe error:', err.message);
-    return res.status(502).json({ error: 'gemini_api_error', message: err.message });
+    return visionError(res, req, 502, 'gemini_api_error', 'Сервіс розпізнавання тимчасово недоступний', err.message);
   } finally {
     deleteObject(key); // one-shot photo
   }
@@ -358,8 +352,7 @@ router.post('/translate-label', anyRole, asyncHandler(async (req, res) => {
     const { product, usage, warnings, readable, tokenUsage } = await translateLabelImageUrl(publicUrl(key));
     res.json({ product, usage, warnings, readable, tokenUsage });
   } catch (err) {
-    console.error('[visionSearch] translate-label error:', err.message);
-    return res.status(502).json({ error: 'gemini_api_error', message: err.message });
+    return visionError(res, req, 502, 'gemini_api_error', 'Сервіс розпізнавання тимчасово недоступний', err.message);
   } finally {
     deleteObject(key); // one-shot photo
   }
@@ -383,8 +376,7 @@ router.post('/ask', anyRole, asyncHandler(async (req, res) => {
     const { answer, tokenUsage } = await answerPhotoQuestionImageUrl(publicUrl(key), question, history);
     res.json({ answer, tokenUsage });
   } catch (err) {
-    console.error('[visionSearch] ask error:', err.message);
-    return res.status(502).json({ error: 'gemini_api_error', message: err.message });
+    return visionError(res, req, 502, 'gemini_api_error', 'Сервіс розпізнавання тимчасово недоступний', err.message);
   } finally {
     deleteObject(key); // one-shot photo
   }

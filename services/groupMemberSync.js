@@ -48,7 +48,7 @@ async function trackMemberFromMessage(groupChatId, from) {
       $setOnInsert: { joinedAt: null },
     },
     { upsert: true, new: false },
-  ).catch((e) => console.warn('[groupMemberSync] trackMember failed:', e.message));
+  ).catch((e) => {});
 }
 
 /** Handle a chat_member update (join / leave / kick). */
@@ -84,7 +84,6 @@ async function handleChatMemberUpdate(update) {
     },
     { upsert: true, new: false },
   ).catch((e) => {
-    console.warn('[groupMemberSync] handleChatMemberUpdate failed:', e.message);
     return null;
   });
 

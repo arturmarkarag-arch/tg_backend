@@ -13,7 +13,7 @@ const { getProductTitle } = require('../services/archiveProduct');
 const { buildPickingTasksFromOrders } = require('../services/taskBuilder');
 const { auditSessionCoverage, resolveCoverageGap } = require('../services/sessionCoverage');
 const { auditSessionClosure } = require('../services/sessionClosure');
-const { isOrderingOpen, getOrderingWindowCloseAt, getOrderingWindowOpenAt, getOpenDateWarsaw } = require('../utils/orderingSchedule');
+const { isOrderingOpen, getOrderingWindowCloseAt, getOrderingWindowOpenAt, getNextOrderingWindowOpenAt, getOpenDateWarsaw } = require('../utils/orderingSchedule');
 const { getOrCreateSessionId, findCurrentSessionId } = require('../utils/getOrCreateSession');
 const { ensureSessionSeq } = require('../utils/sessionSeq');
 const { normalizeDeliveryGroup } = require('../utils/deliveryGroupHelpers');
@@ -21,7 +21,7 @@ const { appError, asyncHandler } = require('../utils/errors');
 const { withLock } = require('../utils/lock');
 const { transitionPickingStatus, maybeCompleteSession } = require('../utils/sessionStatus');
 const { getSessionVocab } = require('../utils/sessionVocab');
-const { computeSessionPhase, buildSessionSummary } = require('../services/sessionPresentation');
+const { computeSessionPhase, buildSessionSummary, deriveSessionPresentationMode } = require('../services/sessionPresentation');
 const { reconcileLateOrdersForSession } = require('../services/lateOrderReconcile');
 const { ensureSessionShopNumbers, buildShopNumberLookup } = require('../utils/shopNumbering');
 const SupplementOffer   = require('../models/SupplementOffer');
@@ -101,7 +101,6 @@ async function countOrderedPositions(deliveryGroupId) {
     }
     return products.size;
   } catch (err) {
-    console.warn('[picking/queue-stats] countOrderedPositions failed:', err?.message || err);
     return 0;
   }
 }
@@ -174,7 +173,6 @@ async function buildTaskResponse(task, { isSecondChance = false } = {}) {
   };
 }
 
-
 /**
  * Keep active tasks aligned with one ordering session.
  * Removes task items that belong to orders outside the target session and
@@ -191,7 +189,8 @@ router.get('/session-status', requireTelegramRoles(['warehouse', 'admin', 'selle
   if (!groupId) return res.json({ pickingStatus: 'pending' });
   const group = await DeliveryGroup.findById(groupId, 'dayOfWeek orderingSchedule').lean();
   if (!group) return res.json({ pickingStatus: 'pending' });
-  const sessionId = await getOrCreateSessionId(String(groupId), group.orderingSchedule);
+  const sessionId = await findCurrentSessionId(String(groupId), group.orderingSchedule);
+  if (!sessionId) return res.json({ pickingStatus: 'pending' });
   const session = await OrderingSession.findById(sessionId, 'pickingStatus').lean();
   res.json({ pickingStatus: session?.pickingStatus || 'pending' });
 }));
@@ -245,8 +244,53 @@ router.post('/start-session', requireTelegramRoles(['warehouse', 'admin']), asyn
       const windowCloseAt = getOrderingWindowCloseAt(group.orderingSchedule).toISOString();
       return res.json({ windowOpen: true, message, windowCloseAt });
     }
-    // Window closed → picking allowed for the whole dead-time until the next
-    // window opens; session identity (groupId + openDate) stays the same.
+    // Window closed. Before touching any operational state, resolve the
+    // PRESENTATION read-only. During the final 24h before the next ordering
+    // window, a terminal previous cycle (completed OR empty/idle) must show the
+    // same readiness board. This check deliberately happens before
+    // getOrCreateSessionId/releaseWorkerAndStaleLocks so merely opening the page
+    // cannot create/mutate a session while we are only preparing the next cycle.
+    const nextOrderingOpenAt = getNextOrderingWindowOpenAt(group.orderingSchedule);
+    const existingSessionId = await findCurrentSessionId(String(deliveryGroupId), group.orderingSchedule);
+    const existingSession = existingSessionId
+      ? await OrderingSession.findById(existingSessionId, 'pickingStatus events seq openDate finalSummary').lean()
+      : null;
+    const existingPickingStatus = existingSession?.pickingStatus || 'pending';
+    const existingPhase = existingSessionId
+      ? await computeSessionPhase({
+        deliveryGroupId,
+        sessionId: existingSessionId,
+        pickingStatus: existingPickingStatus,
+        orderingSchedule: group.orderingSchedule,
+      })
+      : 'idle';
+    const presentationMode = deriveSessionPresentationMode({
+      phase: existingPhase,
+      nextOrderingOpenAt,
+    });
+
+    if (presentationMode === 'upcoming_preflight') {
+      const supplementCount = await countActiveOffersForGroup(deliveryGroupId);
+      return res.json({
+        upcomingPreflight: true,
+        presentationMode,
+        nextOrderingOpenAt: nextOrderingOpenAt.toISOString(),
+        pickingStatus: existingSession?.pickingStatus || null,
+        phase: existingPhase,
+        sessionSummary: await buildSessionSummary(existingPhase, {
+          deliveryGroupId,
+          sessionId: existingSessionId,
+          session: existingSession,
+        }),
+        groupDayOfWeek: group.dayOfWeek,
+        events: (existingSession?.events || []).slice(-10),
+        vocab: getSessionVocab(),
+        supplementCount,
+      });
+    }
+
+    // Outside the presentation-only preflight, picking is allowed for the whole
+    // dead-time until the next window opens; session identity stays the same.
 
     // 2. Resolve session, free this worker's stale locks, archive orphans,
     //    drop tasks whose orders no longer belong to the current session.
@@ -304,6 +348,8 @@ router.post('/start-session', requireTelegramRoles(['warehouse', 'admin']), asyn
     const baseEnvelope = {
       pickingStatus: session?.pickingStatus || 'pending',
       phase: basePhase,
+      presentationMode: basePhase,
+      nextOrderingOpenAt: nextOrderingOpenAt.toISOString(),
       sessionSummary: baseSummary,
       groupDayOfWeek: group.dayOfWeek,
       events: recentEvents,
@@ -374,7 +420,6 @@ router.post('/start-session', requireTelegramRoles(['warehouse', 'admin']), asyn
         await ensureSessionSeq(currentSessionId, String(deliveryGroupId));
         session = await OrderingSession.findById(currentSessionId).lean();
       } catch (e) {
-        console.warn('[picking/start-session] ensureSessionSeq failed:', e?.message || e);
       }
     }
 
@@ -480,7 +525,6 @@ router.post('/start-session', requireTelegramRoles(['warehouse', 'admin']), asyn
     });
   } catch (err) {
     if (err && (err.name === 'AppError' || err.name === 'CastError' || isTransientTx(err))) return next(err);
-    console.error('[picking/start-session]', err);
     next(appError('picking_session_failed'));
   }
 });
@@ -673,9 +717,7 @@ router.get('/next-task', requireTelegramRoles(['warehouse', 'admin']), async (re
     // Recovery: якщо сервер упав між фазою 1 (task completed) і фазою 2 (archiveProduct)
     // в out-of-stock flow — довиконуємо архівування тут, а не тільки в start-session.
     if (deliveryGroupId) {
-      archiveOrphanedOutOfStockProducts(deliveryGroupId, sessionId).catch((e) =>
-        console.warn('[picking/next-task] archiveOrphaned failed:', e?.message),
-      );
+      archiveOrphanedOutOfStockProducts(deliveryGroupId, sessionId).catch(() => {});
     }
 
     const { task, routeBlocked } = await findAndLockNext(
@@ -719,7 +761,6 @@ router.get('/next-task', requireTelegramRoles(['warehouse', 'admin']), async (re
     res.json({ task: taskData });
   } catch (err) {
     if (err && (err.name === 'AppError' || err.name === 'CastError' || isTransientTx(err))) return next(err);
-    console.error('[picking/next-task]', err);
     next(appError('picking_next_failed'));
   }
 });
@@ -807,7 +848,6 @@ router.get('/block-tasks', requireTelegramRoles(['warehouse', 'admin']), async (
     res.json({ tasks: previewTasks });
   } catch (err) {
     if (err && (err.name === 'AppError' || err.name === 'CastError' || isTransientTx(err))) return next(err);
-    console.error('[picking/block-tasks]', err);
     next(appError('picking_block_tasks_failed'));
   }
 });
@@ -854,7 +894,6 @@ router.get('/blocks-overview', requireTelegramRoles(['warehouse', 'admin']), asy
     res.json({ blocks });
   } catch (err) {
     if (err && (err.name === 'AppError' || err.name === 'CastError' || isTransientTx(err))) return next(err);
-    console.error('[picking/blocks-overview]', err);
     next(appError('picking_next_failed'));
   }
 });
@@ -905,12 +944,24 @@ router.get('/queue-stats', requireTelegramRoles(['warehouse', 'admin']), async (
     let phase = null;
     let sessionSummary = null;
     let groupDayOfWeek = null;
+    let presentationMode = null;
+    let nextOrderingOpenAt = null;
+    let windowOpen = false;
+    let windowCloseAt = null;
+    let windowMessage = '';
     // Лічильник дозамовлень оновлюється незалежно від OrderingSession.
     const supplementCount = await countActiveOffersForGroup(deliveryGroupId);
     try {
       const groupDoc = await DeliveryGroup.findById(deliveryGroupId, 'dayOfWeek orderingSchedule').lean();
       if (groupDoc) {
         groupDayOfWeek = groupDoc.dayOfWeek;
+        const windowState = isOrderingOpen(groupDoc.orderingSchedule);
+        windowOpen = !!windowState.isOpen;
+        windowMessage = windowState.message || '';
+        windowCloseAt = windowOpen
+          ? getOrderingWindowCloseAt(groupDoc.orderingSchedule).toISOString()
+          : null;
+        nextOrderingOpenAt = getNextOrderingWindowOpenAt(groupDoc.orderingSchedule).toISOString();
             // findCurrentSessionId, НЕ getOrCreate: це опитування раз на 5 секунд для
         // ПОКАЗУ сторінки. Створювати сесію тут означало, що достатньо відкрити
         // «Збирання» на групі з ще відкритим вікном замовлень — і в базі
@@ -920,7 +971,7 @@ router.get('/queue-stats', requireTelegramRoles(['warehouse', 'admin']), async (
         // віртуальний блок дозамовлень від сесії не залежить.
         const sessionId = await findCurrentSessionId(String(deliveryGroupId), groupDoc.orderingSchedule);
         const sessionDoc = sessionId
-          ? await OrderingSession.findById(sessionId, 'pickingStatus events seq openDate').lean()
+          ? await OrderingSession.findById(sessionId, 'pickingStatus events seq openDate finalSummary').lean()
           : null;
         if (sessionDoc) {
           pickingStatus = sessionDoc.pickingStatus || 'pending';
@@ -934,20 +985,25 @@ router.get('/queue-stats', requireTelegramRoles(['warehouse', 'admin']), async (
           sessionSummary = await buildSessionSummary(phase, {
             deliveryGroupId, sessionId, session: sessionDoc,
           });
+        } else {
+          phase = windowOpen ? 'ordering_open' : 'idle';
         }
+        presentationMode = deriveSessionPresentationMode({
+          phase,
+          nextOrderingOpenAt,
+        });
       }
     } catch (e) {
-      console.warn('[picking/queue-stats] session status fetch failed:', e.message);
     }
 
     res.json({
       pendingCount, lockedByMeCount, lockedByOtherCount, activeCount,
       orderedPositions, pickingStatus, events, phase, sessionSummary, groupDayOfWeek,
+      presentationMode, nextOrderingOpenAt, windowOpen, windowCloseAt, windowMessage,
       supplementCount,
     });
   } catch (err) {
     if (err && (err.name === 'AppError' || err.name === 'CastError' || isTransientTx(err))) return next(err);
-    console.error('[picking/queue-stats]', err);
     next(appError('picking_next_failed'));
   }
 });
@@ -976,7 +1032,6 @@ router.post('/tasks/:taskId/complete', requireTelegramRoles(['warehouse', 'admin
   } catch (err) {
     if (err && (err.name === 'AppError' || err.name === 'CastError' || isTransientTx(err))) return next(err);
     if (err.code === 'picking_task_items_changed') return next(appError('picking_task_items_changed'));
-    console.error('[picking/complete]', err);
     if (err.code === 'picking_task_not_found') return next(appError('picking_task_not_found'));
     if (err.code === 'expired_lock') return next(appError('expired_lock'));
     next(appError('picking_complete_failed'));
@@ -1042,7 +1097,6 @@ router.patch('/tasks/:taskId/progress', requireTelegramRoles(['warehouse', 'admi
     res.json({ ok: true });
   } catch (err) {
     if (err && (err.name === 'AppError' || err.name === 'CastError' || isTransientTx(err))) return next(err);
-    console.error('[picking/progress]', err);
     next(appError('picking_progress_failed'));
   }
 });
@@ -1075,7 +1129,6 @@ router.post('/tasks/:taskId/release', requireTelegramRoles(['warehouse', 'admin'
       return res.status(409).json({ code: 'picking_release_unavailable', message: 'Це завдання вже завершене і його не можна повернути в чергу.' });
     }
     if (err && (err.name === 'AppError' || err.name === 'CastError' || isTransientTx(err))) return next(err);
-    console.error('[picking/release]', err);
     next(appError('picking_progress_failed'));
   }
 });
@@ -1223,7 +1276,6 @@ router.post('/tasks/:taskId/claim', requireTelegramRoles(['warehouse', 'admin'])
     }, { ttlMs: 10_000, waitMs: 5_000 });
   } catch (err) {
     if (err && (err.name === 'AppError' || err.name === 'CastError' || isTransientTx(err))) return next(err);
-    console.error('[picking/claim]', err);
     next(appError('picking_claim_failed'));
   }
 });
@@ -1258,7 +1310,6 @@ router.post('/tasks/:taskId/out-of-stock', requireTelegramRoles(['warehouse', 'a
     if (err && err.code === 'expired_lock') return next(appError('expired_lock'));
     if (err && err.code === 'picking_claim_taken_by_other') return next(appError('picking_claim_taken_by_other'));
     if (err && err.code === 'picking_oos_already_packed') return next(appError('picking_oos_already_packed'));
-    console.error('[picking/out-of-stock]', err);
     next(appError('picking_oos_failed'));
   }
 });
@@ -1311,7 +1362,6 @@ router.get('/locked-tasks', requireTelegramRoles(['warehouse', 'admin']), async 
     res.json({ tasks: result });
   } catch (err) {
     if (err && (err.name === 'AppError' || err.name === 'CastError' || isTransientTx(err))) return next(err);
-    console.error('[picking/locked-tasks]', err);
     next(appError('picking_next_failed'));
   }
 });
@@ -1338,7 +1388,6 @@ router.get('/session-closure', requireTelegramRoles(['warehouse', 'admin']), asy
     return res.json(audit);
   } catch (err) {
     if (err && (err.name === 'AppError' || err.name === 'CastError' || isTransientTx(err))) return next(err);
-    console.error('[picking/session-closure]', err);
     return next(appError('picking_next_failed'));
   }
 });
@@ -1365,11 +1414,16 @@ router.get('/shift-board', requireTelegramRoles(['admin']), async (req, res, nex
     let sessionStart = null;
     let sessionId = null;
     if (group) {
-        sessionId = await getOrCreateSessionId(dgId, group.orderingSchedule);
-      const sessionDoc = await OrderingSession.findById(sessionId, 'pickingConfirmedAt').lean();
+      sessionId = await findCurrentSessionId(dgId, group.orderingSchedule);
+      const sessionDoc = sessionId
+        ? await OrderingSession.findById(sessionId, 'pickingConfirmedAt').lean()
+        : null;
       sessionStart = sessionDoc?.pickingConfirmedAt || null;
     }
-    const sessionScope = sessionId ? { orderingSessionId: sessionId } : { deliveryGroupId: dgId };
+    // Сесія поточного циклу ще не матеріалізована → дошка порожня. Фолбек на
+    // deliveryGroupId показав би completed-задачі ВСІХ минулих сесій (лічильники
+    // не скидались би на новому циклі). Той самий патерн, що й у /queue-stats.
+    const sessionScope = sessionId ? { orderingSessionId: sessionId } : { deliveryGroupId: '__no_current_session__' };
 
     // Active workers (currently have a locked task)
     const lockedTasks = await PickingTask.find(
@@ -1505,7 +1559,6 @@ router.get('/shift-board', requireTelegramRoles(['admin']), async (req, res, nex
           .sort((a, b) => new Date(b.at || 0) - new Date(a.at || 0));
       }
     } catch (e) {
-      console.warn('[picking/shift-board] picking history aggregation failed:', e.message);
     }
 
     // ── Order-level "не завершено" aggregation (read-only data for the Зміна card) ──
@@ -1588,7 +1641,6 @@ router.get('/shift-board', requireTelegramRoles(['admin']), async (req, res, nex
         };
       }
     } catch (e) {
-      console.warn('[picking/shift-board] unfinished aggregation failed:', e.message);
     }
 
     // Canonical session integrity. HARD blockers are current-session only;
@@ -1603,7 +1655,6 @@ router.get('/shift-board', requireTelegramRoles(['admin']), async (req, res, nex
         });
       }
     } catch (e) {
-      console.warn('[picking/shift-board] session closure audit failed:', e.message);
     }
 
     // ── "Переглянули каталог" — who pressed «Я переглянув усі товари» this session ──
@@ -1696,13 +1747,11 @@ router.get('/shift-board', requireTelegramRoles(['admin']), async (req, res, nex
         };
       }
     } catch (e) {
-      console.warn('[picking/shift-board] catalog review aggregation failed:', e.message);
     }
 
     res.json({ groupName, sessionStart, lastActivity, workers, totalCompleted, totalPending, pickingHistory, unfinished, sessionClosure, catalogReview });
   } catch (err) {
     if (err && (err.name === 'AppError' || err.name === 'CastError' || isTransientTx(err))) return next(err);
-    console.error('[picking/shift-board]', err);
     next(appError('picking_next_failed'));
   }
 });
@@ -1738,7 +1787,6 @@ router.post('/tasks/:taskId/force-claim', requireTelegramRoles(['warehouse', 'ad
       });
     }
     if (err && (err.name === 'AppError' || err.name === 'CastError' || isTransientTx(err))) return next(err);
-    console.error('[picking/force-claim]', err);
     if (err.code === 'picking_task_not_found') return next(appError('picking_task_not_found'));
     if (err.code === 'picking_claim_unavailable') return next(appError('picking_claim_unavailable'));
     next(appError('picking_claim_failed'));

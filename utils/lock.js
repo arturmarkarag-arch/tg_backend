@@ -98,7 +98,7 @@ async function withLock(key, fn, opts = {}) {
     try {
       await redis.eval(UNLOCK_SCRIPT, 1, namespaced, token);
     } catch (err) {
-      console.warn('[Lock] release failed for', key, err.message);
+      // Ключ локу містить telegramId/sessionId — у консоль не йде.
     }
   }
 }

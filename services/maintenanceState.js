@@ -29,8 +29,6 @@ function enterMaintenance(issue) {
   if (index >= 0) state.issues[index] = normalized;
   else state.issues.push(normalized);
 
-  console.error(`[maintenance] ${normalized.key}: ${normalized.whatBroke}`);
-  console.error(`[maintenance] Інструкція: ${normalized.docsPath}`);
 }
 
 function isMaintenanceActive() {
@@ -43,6 +41,20 @@ function getMaintenanceState() {
     mode: state.active ? 'read_only' : 'normal',
     since: state.since,
     issues: state.issues.map((issue) => ({ ...issue })),
+  };
+}
+
+function getPublicMaintenanceState() {
+  return {
+    active: state.active,
+    mode: state.active ? 'read_only' : 'normal',
+    since: state.since,
+    issues: state.issues.map((issue) => ({
+      key: issue.key,
+      title: issue.title,
+      whatBroke: issue.whatBroke,
+      detectedAt: issue.detectedAt,
+    })),
   };
 }
 
@@ -62,7 +74,9 @@ function maintenanceReadOnlyMiddleware(req, res, next) {
   return res.status(503).json({
     error: 'maintenance_read_only',
     message: 'Система працює в технічному режимі лише для перегляду. Запис заблоковано, доки не буде відновлено критичні індекси MongoDB.',
-    maintenance: getMaintenanceState(),
+    maintenance: ['admin', 'warehouse'].includes(req.telegramUser?.role)
+      ? getMaintenanceState()
+      : getPublicMaintenanceState(),
   });
 }
 
@@ -70,5 +84,6 @@ module.exports = {
   enterMaintenance,
   isMaintenanceActive,
   getMaintenanceState,
+  getPublicMaintenanceState,
   maintenanceReadOnlyMiddleware,
 };

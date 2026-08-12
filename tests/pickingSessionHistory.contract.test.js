@@ -16,8 +16,12 @@ describe('current-session picking history contract', () => {
 
   it('is strictly scoped to the current group session so a new session resets the board', () => {
     const route = read('routes/picking.js');
-    expect(route).toContain('sessionId = await getOrCreateSessionId(dgId, group.orderingSchedule)');
-    expect(route).toContain("const sessionScope = sessionId ? { orderingSessionId: sessionId }");
+    // Read-only resolve: opening the Shift board must never materialise a
+    // session (v36.4). A missing session means "current cycle has no work yet",
+    // NOT "fall back to the whole group" — otherwise the counters of every past
+    // session would leak onto the board.
+    expect(route).toContain('sessionId = await findCurrentSessionId(dgId, group.orderingSchedule)');
+    expect(route).toContain("const sessionScope = sessionId ? { orderingSessionId: sessionId } : { deliveryGroupId: '__no_current_session__' }");
     expect(route).toContain('orderingSessionId: sessionId, deliveryGroupId: dgId');
     expect(route).not.toContain('PickingSessionEvent');
   });

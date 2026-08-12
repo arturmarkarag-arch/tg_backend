@@ -41,7 +41,6 @@ async function emitPositionUpdates() {
       getIO()?.emit('picking_tasks_positions_updated', changed);
     }
   } catch (err) {
-    console.error('[blocks] position refresh error:', err);
   }
 }
 
@@ -131,7 +130,6 @@ router.post('/', staffOnly, asyncHandler(async (req, res) => {
         const io = getIO();
         io.emit('block_updated', slimBlock(created));
       } catch (e) {
-        console.warn('[blocks/create] socket emit failed:', e.message);
       }
 
       return res.status(201).json(created);
@@ -139,7 +137,6 @@ router.post('/', staffOnly, asyncHandler(async (req, res) => {
       if (err.code === 11000 && attempt < MAX_RETRIES) {
         continue;
       }
-      console.error('[blocks/create] Error:', err);
       if (err.code === 11000) throw appError('block_id_conflict');
       throw appError('block_create_failed');
     }
@@ -495,8 +492,7 @@ router.post('/:number/add', staffOnly, asyncHandler(async (req, res) => {
   // is a projection, never part of this request's contract.
   const activatedProduct = await Product.findById(productId);
   if (activatedProduct) {
-    syncMirror(activatedProduct).catch((err) =>
-      console.error('[blocks/add] mirror sync failed:', err.message));
+    syncMirror(activatedProduct).catch(() => {});
   }
 
   const updated = await Block.findById(updatedRaw._id)

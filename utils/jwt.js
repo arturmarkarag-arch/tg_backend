@@ -4,7 +4,6 @@ const SECRET = process.env.JWT_SECRET || '';
 const EXPIRES_IN = process.env.JWT_EXPIRY || '7d';
 
 if (!SECRET) {
-  console.warn('[jwt] JWT_SECRET is not set — browser auth will reject all tokens until it is configured');
 }
 
 // The session token carries only the telegramId. Role and all profile data are

@@ -21,7 +21,7 @@ const { appError, asyncHandler } = require('../utils/errors');
 const { getGeminiStatus } = require('../geminiClient');
 const { describeImageUrl } = require('../utils/productDescribe');
 const { embedProductAsync } = require('../utils/productEmbedding');
-const { getOrCreateSessionId } = require('../utils/getOrCreateSession');
+const { getOrCreateSessionId, findCurrentSessionId } = require('../utils/getOrCreateSession');
 const { normalizeDeliveryGroup } = require('../utils/deliveryGroupHelpers');
 const cache = require('../utils/cache');
 
@@ -45,9 +45,7 @@ const s3Client = new S3Client({
 (async () => {
   try {
     await s3Client.send(new HeadBucketCommand({ Bucket: process.env.R2_BUCKET_NAME }));
-    console.log('Cloudflare R2 bucket OK:', process.env.R2_BUCKET_NAME);
   } catch (err) {
-    console.error('R2 bucket check failed:', err.message);
   }
 })();
 
@@ -69,7 +67,6 @@ async function deleteR2Objects(keys = []) {
     try {
       await s3Client.send(new DeleteObjectCommand({ Bucket: process.env.R2_BUCKET_NAME, Key: key }));
     } catch (err) {
-      console.error(`[deleteR2Objects] Failed to delete ${key}:`, err.message);
     }
   }
 }
@@ -238,7 +235,6 @@ router.post('/ask-group-price', asyncHandler(async (req, res) => {
       await bot.sendPhoto(Number(chatId), photoUrl, { caption });
       return { chatId, sent: true };
     } catch (err) {
-      console.error('Failed to send price request to group', chatId, err.message || err);
       return { chatId, sent: false };
     }
   }));
@@ -699,7 +695,6 @@ router.post('/report-missing', registeredOnly, asyncHandler(async (req, res) => 
         );
         return { chatId, sent: true, reused: true };
       } catch (err) {
-        console.error('Failed to resend existing missing product photo to group', chatId, err.message || err);
       }
     }
 
@@ -720,7 +715,6 @@ router.post('/report-missing', registeredOnly, asyncHandler(async (req, res) => 
       );
       return { chatId, sent: true, reused: false };
     } catch (err) {
-      console.error('Failed to send missing product photo to group', chatId, err.message || err);
       return { chatId, sent: false, error: err.message || String(err) };
     }
   }));
@@ -745,7 +739,7 @@ async function getActiveDeliveryGroups() {
 router.get('/:id/who-ordered', staffOnly, asyncHandler(async (req, res) => {
   const allGroups = await getActiveDeliveryGroups();
   const sessionIdResults = await Promise.all(
-    allGroups.map((group) => getOrCreateSessionId(String(group._id), group.orderingSchedule)),
+    allGroups.map((group) => findCurrentSessionId(String(group._id), group.orderingSchedule)),
   );
   const currentSessionIds = new Set(sessionIdResults.filter(Boolean));
 
@@ -838,10 +832,8 @@ router.get('/proxy-image', asyncHandler(async (req, res) => {
     // Surface it as a clean 404 so the client shows a placeholder instead of a
     // scary 500 — and so it's distinguishable from a real proxy/network failure.
     if (status === 404 || status === 403) {
-      console.warn('[proxy-image] upstream', status, '(object missing) for', url);
       return res.status(404).json({ error: 'image_not_found' });
     }
-    console.error('[proxy-image] upstream fetch failed for', url, '-', err.message);
     return res.status(502).json({ error: 'image_proxy_failed' });
   }
   res.set('Content-Type', upstream.headers['content-type'] || 'image/jpeg');
@@ -924,8 +916,7 @@ router.post('/block-upload-photos', staffOnly, asyncHandler(async (req, res) => 
   // (the mirror is a projection, never blocks this request); $setOnInsert means a
   // later label edit's pushSharedFieldsToMirror fills in price/name/photo.
   for (const product of createdProducts) {
-    syncMirror(product).catch((err) =>
-      console.error('[products/block-upload] mirror sync failed:', err.message));
+    syncMirror(product).catch(() => {});
     // Index the shelf photo for the Прийомка warehouse-locate search.
     embedProductAsync(product, 'block-upload');
   }
@@ -944,7 +935,6 @@ router.post('/block-upload-photos', staffOnly, asyncHandler(async (req, res) => 
       io.emit('catalogue_updated', { action: 'add' });
     }
   } catch (e) {
-    console.warn('[products/upload] socket block_updated failed:', e.message);
   }
 
   res.json({ uploaded: results.length, total: filenames.length, results });
@@ -1007,8 +997,7 @@ router.post('/receive', staffOnly, asyncHandler(async (req, res) => {
   }
 
   if (product.status === 'active') {
-    syncMirror(product).catch((err) =>
-      console.error('[products/receive] mirror sync failed:', err.message));
+    syncMirror(product).catch(() => {});
   }
 
   // Index the warehouse photo for the Прийомка "is it already on the warehouse?" search.
@@ -1018,7 +1007,6 @@ router.post('/receive', staffOnly, asyncHandler(async (req, res) => {
     const io = getIO();
     if (io) io.emit('incoming_updated');
   } catch (e) {
-    console.warn('[products/receive] socket incoming_updated failed:', e.message);
   }
   res.status(201).json(product);
 }));
@@ -1208,8 +1196,7 @@ router.patch('/:id', staffOnly, asyncHandler(async (req, res) => {
   // (linkedProductId: null) are untouched. A photo change additionally re-embeds the
   // warehouse vector, CHAINED after the mirror push so the displayed photo and the
   // search vector refresh in a deterministic order (see below).
-  const mirrorSynced = syncMirror(product).catch((err) =>
-    console.error('[products/patch] mirror sync failed:', err.message));
+  const mirrorSynced = syncMirror(product).catch(() => {});
 
   // Re-price ACTIVE orders so the whole order stays in one price epoch (shared with
   // the write-through shop edit). confirmed/fulfilled orders are intentionally untouched.
@@ -1247,7 +1234,6 @@ router.patch('/:id', staffOnly, asyncHandler(async (req, res) => {
       if (patchFilenames.length > 0) io.emit('catalogue_updated', { action: 'update', productId: String(product._id) });
     }
   } catch (e) {
-    console.warn('[products/patch] socket incoming_updated failed:', e.message);
   }
 
   // Photo changed → its warehouse vector is stale; re-index in the background.
@@ -1309,11 +1295,9 @@ router.post('/:id/describe', staffOnly, asyncHandler(async (req, res) => {
     // Live-refresh open warehouse boards so the generated name/description shows
     // without a reload (same channel the photo edit uses).
     try { const io = getIO(); if (io) io.emit('incoming_updated'); }
-    catch (e) { console.warn('[products/describe] socket emit failed:', e.message); }
-    pushSharedFieldsToMirror(product, {}).catch((err) =>
-      console.error('[products/describe] ShopProduct mirror push failed:', err.message));
+    catch (e) {}
+    pushSharedFieldsToMirror(product, {}).catch(() => {});
   } catch (err) {
-    console.error('[products] describe error:', err.message);
     return res.status(502).json({ error: 'describe_api_error', message: err.message });
   }
 }));

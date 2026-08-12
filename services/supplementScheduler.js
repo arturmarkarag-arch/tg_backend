@@ -4,6 +4,7 @@
 
 const { autoCompleteEmptyOffers, reconcilePendingReceipts } = require('./supplementOffers');
 const { notifyOffers, findDueReminders } = require('./supplementNotify');
+const { runAsSchedulerLeader } = require('./schedulerLeader');
 
 const TICK_MS = 60 * 1000;
 let timer = null;
@@ -12,9 +13,7 @@ let running = false;
 async function runSupplementTick(now = new Date()) {
   try {
     const repaired = await reconcilePendingReceipts();
-    if (repaired) console.log(`[supplement/scheduler] довідновлено накладних: ${repaired}`);
   } catch (err) {
-    console.error('[supplement/scheduler] звірка накладних впала:', err?.message);
   }
 
   try {
@@ -22,14 +21,11 @@ async function runSupplementTick(now = new Date()) {
     if (due.opened.length) await notifyOffers(due.opened, 'opened', { now });
     if (due.reminder.length) await notifyOffers(due.reminder, 'reminder', { now });
   } catch (err) {
-    console.error('[supplement/scheduler] нагадування впали:', err?.message);
   }
 
   try {
     const closed = await autoCompleteEmptyOffers(now);
-    if (closed) console.log(`[supplement/scheduler] авто-завершено ${closed} пропозицій без заявок`);
   } catch (err) {
-    console.error('[supplement/scheduler] авто-завершення впало:', err?.message);
   }
 
   return { ok: true };
@@ -40,7 +36,7 @@ function startSupplementScheduler() {
     if (running) return;
     running = true;
     try {
-      await runSupplementTick();
+      await runAsSchedulerLeader('supplement', () => runSupplementTick(), { ttlMs: 5 * 60 * 1000 });
     } finally {
       running = false;
     }

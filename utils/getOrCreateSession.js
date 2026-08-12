@@ -154,11 +154,9 @@ async function migrateOrdersToSessionIds() {
     );
     const n = result.modifiedCount ?? result.nModified ?? 0;
     totalConverted += n;
-    console.log(`[OrderingSession migration] ${oldSid} → ${newSid} (${n} orders)`);
   }
 
   if (totalConverted > 0) {
-    console.log(`[OrderingSession migration] Done. Total orders migrated: ${totalConverted}`);
   }
 }
 

@@ -44,7 +44,7 @@ function pushOrderAddedEventIfStarted(orderingSessionId, order, actor) {
         meta: { orderId: String(order._id), orderNumber: order.orderNumber },
       });
     })
-    .catch((e) => console.warn('[orders] order_added event push failed:', e.message));
+    .catch((e) => {});
 }
 const { appError, asyncHandler } = require('../utils/errors');
 const { normalizeDeliveryGroup } = require('../utils/deliveryGroupHelpers');
@@ -114,14 +114,24 @@ async function ensureOrderIsStale(order, session = null) {
 }
 
 async function detachOrderFromPendingTasks(orderId, session) {
-  await PickingTask.updateMany(
+  // Capture the exact task set BEFORE $pull. The old cleanup deleted every
+  // empty pending/locked task in the database, so an unrelated group/session
+  // could lose a transiently-empty task during a concurrent repair/build.
+  const affectedTasks = await PickingTask.find(
     { 'items.orderId': orderId, status: { $in: ['pending', 'locked'] } },
+    '_id',
+  ).session(session).lean();
+  const affectedTaskIds = affectedTasks.map((task) => task._id);
+  if (!affectedTaskIds.length) return;
+
+  await PickingTask.updateMany(
+    { _id: { $in: affectedTaskIds }, 'items.orderId': orderId, status: { $in: ['pending', 'locked'] } },
     { $pull: { items: { orderId } } },
     { session },
   );
 
   await PickingTask.deleteMany(
-    { status: { $in: ['pending', 'locked'] }, items: { $size: 0 } },
+    { _id: { $in: affectedTaskIds }, status: { $in: ['pending', 'locked'] }, items: { $size: 0 } },
     { session },
   );
 }
@@ -274,7 +284,7 @@ router.get('/conflicts', staffOnly, async (req, res) => {
   const allGroups = (await getAllDeliveryGroups()).map(normalizeDeliveryGroup);
 
   const sessionIdResults = await Promise.all(
-    allGroups.map((group) => getOrCreateSessionId(String(group._id), group.orderingSchedule)),
+    allGroups.map((group) => findCurrentSessionId(String(group._id), group.orderingSchedule)),
   );
   const currentSessionIds = new Set(sessionIdResults.filter(Boolean));
 
@@ -419,7 +429,7 @@ router.post('/conflicts/resolve', staffOnly, asyncHandler(async (req, res) => {
   }
 
   for (const fn of invalidateFns) {
-    try { await fn(); } catch (e) { console.warn('[conflicts resolve] invalidate failed:', e?.message); }
+    try { await fn(); } catch (e) {}
   }
 
   try {
@@ -434,7 +444,6 @@ router.post('/conflicts/resolve', staffOnly, asyncHandler(async (req, res) => {
       }
     }
   } catch (e) {
-    console.warn('[conflicts resolve] socket emit failed:', e?.message);
   }
 
   res.json({ ok: true });
@@ -545,7 +554,6 @@ router.get('/', async (req, res) => {
   });
 });
 
-
 /**
  * GET /current-items — легкий список позицій поточного замовлення продавця.
  * Викликається ліниво лише після розкриття блока «Замовлено N товарів».
@@ -641,7 +649,6 @@ router.get('/transit/active', staffOnly, async (req, res, next) => {
 
     res.json(enrichedOrders);
   } catch (error) {
-    console.error('[orders.transit.active] Error:', error);
     next(appError('order_transit_failed'));
   }
 });
@@ -650,7 +657,6 @@ router.post('/:id/fulfill', telegramAuth, staffOnly, async (req, res, next) => {
   try {
     return next(appError('order_status_change_disabled'));
   } catch (error) {
-    console.error('[orders.fulfill] Error:', error);
     next(appError('order_fulfill_failed'));
   }
 });
@@ -1026,7 +1032,6 @@ async function placeOrderImpl(req, res) {
         if (fresh) order = fresh;
       }
     } catch (e) {
-      console.warn('[orders] strict late reconcile failed:', e?.message || e);
     }
   }
 
@@ -1040,9 +1045,7 @@ async function placeOrderImpl(req, res) {
   // session (idempotent + gap-free). Fire-and-forget: numbering must never add
   // latency to, or block, an order being placed.
   if (currentSessionId) {
-    ensureSessionSeq(currentSessionId, String(order.buyerSnapshot?.deliveryGroupId || '')).catch((e) =>
-      console.warn('[orders] ensureSessionSeq failed:', e?.message || e),
-    );
+    ensureSessionSeq(currentSessionId, String(order.buyerSnapshot?.deliveryGroupId || '')).catch(() => {});
   }
 
   // Save order position count and clear the user's cart (order is placed — cart is done)
@@ -1071,7 +1074,6 @@ async function placeOrderImpl(req, res) {
   } catch (emitError) {
     socketDelivered = false;
     socketError = emitError?.message || String(emitError);
-    console.warn('[orders] socket emit failed:', socketError);
   }
 
   const responseBody = order.toObject ? order.toObject() : order;
@@ -1233,7 +1235,6 @@ router.patch('/:id/snapshot', staffOnly, async (req, res) => {
       io.emit('delivery_groups_updated');
     }
   } catch (emitError) {
-    console.warn('[orders.snapshot] socket emit failed:', emitError?.message || emitError);
   }
 
   res.json(order);
@@ -1400,9 +1401,7 @@ router.post('/:id/stale/restore-to-cart', telegramAuth, adminOnly, asyncHandler(
   // Restoring a stale order may be the FIRST real content of the destination
   // session, so it has the same numbering obligation as normal order placement.
   if (result?.currentSessionId && result?.deliveryGroupId) {
-    ensureSessionSeq(result.currentSessionId, result.deliveryGroupId).catch((e) =>
-      console.warn('[orders/stale/restore] ensureSessionSeq failed:', e?.message || e),
-    );
+    ensureSessionSeq(result.currentSessionId, result.deliveryGroupId).catch(() => {});
   }
 
   pushOrderAddedEventIfStarted(
@@ -1420,7 +1419,6 @@ router.post('/:id/stale/restore-to-cart', telegramAuth, adminOnly, asyncHandler(
       io.emit('delivery_groups_updated');
     }
   } catch (emitErr) {
-    console.warn('[orders.stale.restore] socket emit failed:', emitErr?.message || emitErr);
   }
 
   res.json({ message: 'Замовлення відновлено в поточній сесії', ...result });
@@ -1480,7 +1478,6 @@ router.post('/:id/stale/expire', telegramAuth, adminOnly, asyncHandler(async (re
       io.emit('delivery_groups_updated');
     }
   } catch (emitErr) {
-    console.warn('[orders.stale.expire] socket emit failed:', emitErr?.message || emitErr);
   }
 
   res.json({ message: 'Старе замовлення закрито', ...result });
@@ -1650,9 +1647,7 @@ router.post('/upsert-item', telegramAuth, requireOrderingWindowOpen, asyncHandle
   // Assign/retry the per-group session number whenever this request touched a real
   // order. Fire-and-forget, same resilience contract as placeOrderImpl.
   if (currentSessionId && result?.orderId) {
-    ensureSessionSeq(currentSessionId, String(group._id)).catch((e) =>
-      console.warn('[orders/upsert-item] ensureSessionSeq failed:', e?.message || e),
-    );
+    ensureSessionSeq(currentSessionId, String(group._id)).catch(() => {});
   }
 
   try {

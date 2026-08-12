@@ -34,9 +34,7 @@ let shuttingDown = false;
 async function shutdown(signal, code = 0) {
   if (shuttingDown) return;
   shuttingDown = true;
-  console.log(`[shutdown] received ${signal} — closing gracefully`);
   const hardExit = setTimeout(() => {
-    console.error('[shutdown] forced exit (timeout)');
     process.exit(code || 1);
   }, 10_000);
   hardExit.unref();
@@ -44,7 +42,6 @@ async function shutdown(signal, code = 0) {
     if (httpServer) await new Promise((resolve) => httpServer.close(resolve));
     await mongoose.connection.close(false);
   } catch (err) {
-    console.error('[shutdown] error while closing:', err?.message);
   } finally {
     clearTimeout(hardExit);
     process.exit(code);
@@ -53,10 +50,8 @@ async function shutdown(signal, code = 0) {
 
 // Uncaught exception завершує процес; unhandled rejection журналюється.
 process.on('unhandledRejection', (reason) => {
-  console.error('[unhandledRejection]', reason);
 });
 process.on('uncaughtException', (err) => {
-  console.error('[uncaughtException]', err);
   shutdown('uncaughtException', 1);
 });
 process.on('SIGTERM', () => shutdown('SIGTERM'));
@@ -89,15 +84,12 @@ async function startServer() {
 
     await mongoose.connect(MONGODB_URI, { useNewUrlParser: true, useUnifiedTopology: true });
     console.log('Connected to MongoDB');
-    const groupScheduleReport = await assertDeliveryGroupSchedulesReady();
-    console.log(`[preflight] delivery-group schedules OK (${groupScheduleReport.total})`);
+    await assertDeliveryGroupSchedulesReady();
     await migrateOrdersToSessionIds();
 
     try {
       await ensureShopProductIndexes();
-      console.log('[indexes] shop_products synced');
     } catch (err) {
-      console.error('[indexes] shop_products failed:', err?.message);
       enterMaintenance({
         key: 'shop_products',
         title: 'Не створився критичний індекс каталогу магазинів',
@@ -116,9 +108,7 @@ async function startServer() {
     const syncCritical = async ({ key, title, whatBroke, howToFix, models }) => {
       try {
         for (const model of models) await model.syncIndexes();
-        console.log(`[indexes] ${key} synced`);
       } catch (err) {
-        console.error(`[indexes] ${key} failed:`, err?.message);
         enterMaintenance({
           key,
           title,
@@ -196,9 +186,7 @@ async function startServer() {
     try {
       await require('./models/GoogleLinkToken').syncIndexes();
       await require('./models/RegistrationToken').syncIndexes();
-      console.log('[indexes] token TTL indexes synced');
     } catch (err) {
-      console.error('[indexes] token TTL sync failed:', err.message);
     }
 
     // Некритичні TTL-індекси журналів.
@@ -207,11 +195,8 @@ async function startServer() {
       await require('./models/ReceiptItemLog').syncIndexes();
       await require('./models/VisionTestLog').syncIndexes();
       await require('./models/CatalogReview').syncIndexes();
-      console.log('[indexes] log-retention TTL indexes synced');
     } catch (err) {
-      console.error('[indexes] log-retention TTL syncIndexes failed:', err.message);
     }
-
 
     // Prefer key stored in DB (via admin settings), fall back to env
     const keyFromDb = await AppSetting.findOne({ key: 'openai.apiKey' }).lean();
@@ -230,7 +215,6 @@ async function startServer() {
     initSocket(server);
 
     if (isMaintenanceActive()) {
-      console.error('[maintenance] Фонові планувальники й Telegram-бот вимкнені до відновлення індексів.');
     } else {
       startRetentionScheduler();
       startSupplementScheduler();
@@ -239,7 +223,6 @@ async function startServer() {
 
     server.on('error', (err) => {
       if (err.code === 'EADDRINUSE') {
-        console.error(`Failed to listen on port ${PORT}: port already in use. Stop the other process or use a different PORT.`);
         process.exit(1);
       }
       throw err;
@@ -249,7 +232,6 @@ async function startServer() {
       console.log(`Server listening on port ${PORT}`);
     });
   } catch (error) {
-    console.error('Failed to start server:', error);
     process.exit(1);
   }
 }

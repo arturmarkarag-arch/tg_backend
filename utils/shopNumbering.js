@@ -43,7 +43,6 @@ async function ensureSessionShopNumbers(sessionId, orders = []) {
     await OrderingSession.updateOne({ _id: sid }, { $set: { shopNumbers: numbers } });
     return numbers;
   } catch (err) {
-    console.error('[shopNumbering] ensureSessionShopNumbers failed:', err.message);
     return [];
   }
 }
@@ -90,7 +89,6 @@ async function assignLateShopNumber(sessionId, shopId, shopName = '', { maxRetri
     }
     return null;
   } catch (err) {
-    console.error('[shopNumbering] assignLateShopNumber failed:', err.message);
     return null;
   }
 }

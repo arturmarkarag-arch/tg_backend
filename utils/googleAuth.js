@@ -4,7 +4,6 @@ const { normalizeEmail } = require('./email');
 const CLIENT_ID = process.env.GOOGLE_AUTH_CLIENT_ID || '';
 
 if (!CLIENT_ID) {
-  console.warn('[googleAuth] GOOGLE_AUTH_CLIENT_ID is not set — Google browser login will reject all attempts until it is configured');
 }
 
 // One client instance; it caches Google's signing certs internally and

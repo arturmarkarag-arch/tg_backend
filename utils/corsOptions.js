@@ -6,33 +6,40 @@
  * When the var is set, only those origins are allowed (requests with no Origin
  * header — curl, server-to-server, same-origin — are still allowed).
  *
- * When it is NOT set, behaviour is permissive (reflect any origin) so nothing
- * breaks today, but a one-time warning is logged in production so a wide-open
- * CORS policy is never shipped silently. Set the env var before going public.
+ * When it is NOT set, development remains permissive. Production fails closed:
+ * WEB_APP_URL is used as the single fallback origin; if that is missing too,
+ * browser cross-origin requests are denied while requests without Origin remain
+ * available for server-to-server traffic.
  *
  * Shared by Express (`cors`) and Socket.IO — both accept this (origin, cb) form.
  */
-let warnedOnce = false;
+function normalizeOrigin(value) {
+  if (!value) return '';
+  try {
+    return new URL(String(value).trim()).origin;
+  } catch (_) {
+    return '';
+  }
+}
 
 function getAllowedOrigins() {
   const raw = process.env.CORS_ALLOWED_ORIGINS;
-  if (!raw) return null; // null → permissive
-  return raw.split(',').map((s) => s.trim()).filter(Boolean);
+  if (raw) {
+    return raw.split(',').map(normalizeOrigin).filter(Boolean);
+  }
+
+  if (process.env.NODE_ENV === 'production') {
+    const fallback = normalizeOrigin(process.env.WEB_APP_URL);
+    return fallback ? [fallback] : [];
+  }
+
+  return null; // development only: permissive
 }
 
 function corsOrigin(origin, callback) {
   const allowed = getAllowedOrigins();
 
-  if (!allowed) {
-    if (process.env.NODE_ENV === 'production' && !warnedOnce) {
-      warnedOnce = true;
-      console.warn(
-        '[cors] CORS_ALLOWED_ORIGINS is not set — ALL origins are allowed. '
-        + 'Set it to a comma-separated allowlist before exposing this publicly.',
-      );
-    }
-    return callback(null, true);
-  }
+  if (!allowed) return callback(null, true);
 
   // No Origin header → non-browser or same-origin request: allow.
   if (!origin) return callback(null, true);

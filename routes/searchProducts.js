@@ -18,9 +18,7 @@ const s3Client = new S3Client({
 (async () => {
   try {
     await s3Client.send(new HeadBucketCommand({ Bucket: process.env.R2_BUCKET_NAME }));
-    console.log('Cloudflare R2 bucket OK');
   } catch (err) {
-    console.error('R2 bucket check failed:', err.message);
   }
 })();
 
@@ -115,7 +113,6 @@ router.post('/resend', telegramAuth, requireTelegramRoles(['seller', 'admin', 'w
     });
     return res.json({ resent: true });
   } catch (err) {
-    console.error('Failed to resend existing request:', err.message || err);
     throw appError('search_resend_failed');
   }
 }));

@@ -63,6 +63,21 @@ const OrderingSessionSchema = new mongoose.Schema(
     pickingStartedAt:   { type: Date, default: null },
     pickingCompletedAt: { type: Date, default: null },
 
+    // Frozen operational counters captured when picking reaches `completed`.
+    // Completed PickingTask rows are retained only for a bounded period; keeping
+    // these small counters on the session preserves historical cards forever
+    // without retaining the whole task graph. A late-order reopen clears this
+    // snapshot and the next completion writes a fresh one.
+    finalSummary: {
+      processedProductCount:       { type: Number, default: 0 },
+      totalProductCount:           { type: Number, default: 0 },
+      archivedProductCount:        { type: Number, default: 0 },
+      archiveRequiredProductCount: { type: Number, default: 0 },
+      completedOrderCount:         { type: Number, default: 0 },
+      totalOrderCount:             { type: Number, default: 0 },
+      finalizedAt:                 { type: Date, default: null },
+    },
+
     events: { type: [SessionEventSchema], default: [] },
 
     // Box numbers for packing. Each SHOP (by shopId) in this session gets one

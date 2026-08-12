@@ -21,7 +21,7 @@ const {
   normalizeOrderingSchedule,
   validateOrderingScheduleDeliveryDay,
 } = require('../utils/orderingSchedule');
-const { getOrCreateSessionId } = require('../utils/getOrCreateSession');
+const { getOrCreateSessionId, findCurrentSessionId } = require('../utils/getOrCreateSession');
 const { pushSessionEvent } = require('../utils/sessionStatus');
 const { openItemArrayFilter } = require('../utils/orderItemState');
 const { normalizeDeliveryGroup } = require('../utils/deliveryGroupHelpers');
@@ -286,7 +286,7 @@ async function buildSellerClosedDashboard({ user, shop, group, sessionId, catalo
 async function buildDeliveryGroupSessionSummary(group, ordersByGroup) {
   const normalizedGroup = normalizeDeliveryGroup(group);
   const status = isOrderingOpen(normalizedGroup.orderingSchedule);
-  const currentSessionId = await getOrCreateSessionId(String(normalizedGroup._id), normalizedGroup.orderingSchedule);
+  const currentSessionId = await findCurrentSessionId(String(normalizedGroup._id), normalizedGroup.orderingSchedule);
   const sessionOpenAt = getOrderingWindowOpenAt(normalizedGroup.orderingSchedule);
   const orders = ordersByGroup[String(group._id)] || [];
   const summary = orders.reduce(
@@ -388,31 +388,33 @@ router.get('/ordering-status', telegramAuth, async (req, res) => {
   // Best-effort: this is a cosmetic flag, it must never break the ordering window.
   let catalogReviewedAt = null;
   try {
-    const sessionId = await getOrCreateSessionId(String(group._id), group.orderingSchedule);
-    const mark = await CatalogReview.findOne(
-      { sessionId, telegramId: String(user.telegramId) }, 'at',
-    ).lean();
-    catalogReviewedAt = mark?.at || null;
+    const sessionId = await findCurrentSessionId(String(group._id), group.orderingSchedule);
+    if (sessionId) {
+      const mark = await CatalogReview.findOne(
+        { sessionId, telegramId: String(user.telegramId) }, 'at',
+      ).lean();
+      catalogReviewedAt = mark?.at || null;
+    }
   } catch (e) {
-    console.warn('[ordering-status] catalog review lookup failed:', e?.message || e);
   }
 
   let closedDashboard = null;
   if (!status.isOpen) {
     try {
-      const sessionId = await getOrCreateSessionId(String(group._id), group.orderingSchedule);
-      closedDashboard = await buildSellerClosedDashboard({
-        user,
-        shop,
-        group,
-            sessionId,
-        catalogReviewedAt,
-      });
+      const sessionId = await findCurrentSessionId(String(group._id), group.orderingSchedule);
+      if (sessionId) {
+        closedDashboard = await buildSellerClosedDashboard({
+          user,
+          shop,
+          group,
+          sessionId,
+          catalogReviewedAt,
+        });
+      }
     } catch (e) {
       // The enriched closed-screen dashboard is informative, not authorization-
       // critical. A transient aggregation failure must not hide the basic window
       // status; the client has a backward-compatible compact fallback.
-      console.warn('[ordering-status] closed dashboard failed:', e?.message || e);
     }
   }
 
@@ -474,7 +476,6 @@ router.post('/catalog-reviewed', telegramAuth, asyncHandler(async (req, res) => 
     const io = getIO();
     if (io) io.to(`picking_group_${String(group._id)}`).emit('shop_status_changed', { groupId: String(group._id) });
   } catch (e) {
-    console.warn('[catalog-reviewed] socket emit failed:', e?.message || e);
   }
 
   res.json({ catalogReviewedAt: saved?.at || doc.at });
@@ -592,14 +593,14 @@ router.get('/:groupId/shop-status', telegramAuth, requireTelegramRoles(['admin',
     });
   }
 
-  const currentSessionId = await getOrCreateSessionId(String(group._id), group.orderingSchedule);
+  const currentSessionId = await findCurrentSessionId(String(group._id), group.orderingSchedule);
   // buyerSnapshot.shopId is stored as ObjectId in some paths and as a String in
   // others — match both forms so direct-add orders (null top-level shopId) are
   // counted. Without this, pre-start showed "0 orders" while the task builder
   // (which keys off buyerSnapshot.deliveryGroupId) still built tasks.
   const shopIdStrs = shopIds.map((id) => String(id));
 
-  const orders = await Order.find({
+  const orders = currentSessionId ? await Order.find({
     $or: [
       { shopId: { $in: shopIds } },
       { 'buyerSnapshot.shopId': { $in: shopIds } },
@@ -607,7 +608,7 @@ router.get('/:groupId/shop-status', telegramAuth, requireTelegramRoles(['admin',
     ],
     orderingSessionId: currentSessionId,
     status: { $in: ['new', 'in_progress'] },
-  }).select('buyerSnapshot shopId buyerTelegramId items orderNumber _id createdAt history').lean();
+  }).select('buyerSnapshot shopId buyerTelegramId items orderNumber _id createdAt history').lean() : [];
 
   // Don't report stale orders while the ordering window is still open — during
   // that window the sessionId in DB may differ from currentSessionId (e.g. when a
@@ -615,7 +616,7 @@ router.get('/:groupId/shop-status', telegramAuth, requireTelegramRoles(['admin',
   const staleOrders = status.isOpen ? [] : await Order.find({
     'buyerSnapshot.deliveryGroupId': String(group._id),
     status: { $in: ['new', 'in_progress'] },
-    orderingSessionId: { $ne: currentSessionId },
+    orderingSessionId: currentSessionId ? { $ne: currentSessionId } : { $ne: null },
   }).select('buyerSnapshot buyerTelegramId items orderNumber _id createdAt orderingSessionId').lean();
 
   const sellers = await User.find({ role: { $in: ['seller', 'admin'] }, shopId: { $in: shopIds } })
@@ -865,7 +866,6 @@ router.get('/:groupId/shop-status', telegramAuth, requireTelegramRoles(['admin',
   });
 }));
 
-
 /**
  * GET /api/delivery-groups/:groupId/shops/:shopId/ordered-products
  * Lazy picking-board disclosure: return ONLY the distinct products currently
@@ -888,7 +888,10 @@ router.get('/:groupId/shops/:shopId/ordered-products', telegramAuth, requireTele
   }).select('_id').lean();
   if (!shop) throw appError('shop_not_found');
 
-  const currentSessionId = await getOrCreateSessionId(String(group._id), group.orderingSchedule);
+  const currentSessionId = await findCurrentSessionId(String(group._id), group.orderingSchedule);
+  if (!currentSessionId) {
+    return res.json({ items: [], total: 0, limit, offset, hasMore: false });
+  }
   const shopObjectId = shop._id;
   const shopId = String(shop._id);
 
@@ -1056,7 +1059,6 @@ router.post('/:id/close-ordering-session', telegramAuth, requireTelegramRole('ad
         meta: { expiredCount },
       });
     } catch (e) {
-      console.warn('[deliveryGroups/close-ordering-session] event push failed:', e.message);
     }
   }
 
@@ -1133,10 +1135,12 @@ router.get('/', async (req, res) => {
     phaseLabel: presentations[index]?.phase
       ? (PHASE_VOCAB[presentations[index].phase]?.label || presentations[index].phase)
       : null,
-    // Server-calculated timestamp keeps the 24h preflight boundary DST-safe and
-    // avoids duplicating weekly timezone math in React. It is presentation data
-    // only; it does not create the next OrderingSession.
-    nextOrderingOpenAt: getNextOrderingWindowOpenAt(g.orderingSchedule).toISOString(),
+    // `presentationMode` is server-authoritative. In particular, both a completed
+    // cycle AND an empty/idle previous cycle enter the same 24h readiness screen.
+    // React must not try to reconstruct this from a partial combination of fields.
+    presentationMode: presentations[index]?.presentationMode ?? presentations[index]?.phase ?? 'idle',
+    nextOrderingOpenAt: presentations[index]?.nextOrderingOpenAt
+      ?? getNextOrderingWindowOpenAt(g.orderingSchedule).toISOString(),
   }));
   res.json(result);
 });
@@ -1322,7 +1326,6 @@ router.patch('/:id', telegramAuth, requireTelegramRole('admin'), asyncHandler(as
         },
       });
     } catch (e) {
-      console.warn('[deliveryGroups/PATCH] rescheduled event push failed:', e.message);
     }
   }
   const persistedGroup = await DeliveryGroup.findById(group._id).lean();

@@ -9,7 +9,6 @@ async function ensureShopProductIndexes() {
   const barcodeIdx = indexes.find((index) => index.name === 'barcode_1');
 
   if (barcodeIdx && !barcodeIdx.partialFilterExpression) {
-    console.log('[indexes] dropping stale ShopProduct.barcode_1');
     await coll.dropIndex('barcode_1');
   }
 

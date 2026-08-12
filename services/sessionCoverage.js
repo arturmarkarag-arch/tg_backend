@@ -281,9 +281,7 @@ async function resolveCoverageGap({ deliveryGroupId, orderingSessionId, productI
   // close when that dangling terminal line was the final blocker.
   if (cancelledCount > 0) {
     const { maybeCompleteSession } = require('../utils/sessionStatus');
-    await maybeCompleteSession(sessionId).catch((err) =>
-      console.warn('[sessionCoverage] maybeCompleteSession after repair failed:', err?.message || err),
-    );
+    await maybeCompleteSession(sessionId).catch(() => {});
   }
 
   return {

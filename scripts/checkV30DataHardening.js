@@ -30,8 +30,8 @@ must('packed/cancelled/skipped rows stay un-voided', order.items.slice(1).every(
 
 // Runtime contracts.
 must('OrderItem schema persists voided state', has('models/Order.js', 'voidReason: { type: String') && has('models/Order.js', 'voidedAt: { type: Date'));
-must('canonical /upsert-item path assigns session seq', has('routes/orders.js', "[orders/upsert-item] ensureSessionSeq failed"));
-must('session seq bootstrap refuses out-of-order numbering', has('utils/sessionSeq.js', 'older content-bearing sessions in group'));
+must('canonical /upsert-item path assigns session seq', has('routes/orders.js', 'ensureSessionSeq(currentSessionId, String(group._id))'));
+must('session seq bootstrap refuses out-of-order numbering', has('utils/sessionSeq.js', 'openDate: { $lt: fresh.openDate }, seq: null'));
 must('stale restore terminalises old order lines', has('routes/orders.js', 'voidOpenOrderItems(staleOrder'));
 must('stale expire terminalises order lines', has('routes/orders.js', 'voidOpenOrderItems(order'));
 must('bulk historical expire terminalises order lines', has('routes/deliveryGroups.js', "'items.$[open].voided': true"));

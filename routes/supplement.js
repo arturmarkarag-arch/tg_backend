@@ -102,7 +102,6 @@ async function boxNumberSessionId(deliveryGroupId, orderingSchedule) {
   try {
     return await findCurrentSessionId(deliveryGroupId, orderingSchedule);
   } catch (err) {
-    console.warn('[supplement] пошук сесії для номера коробки не вдався:', err?.message);
     return null;
   }
 }
@@ -229,7 +228,6 @@ router.post('/:offerId/request', sellerRoles, asyncHandler(async (req, res) => {
     try {
       await assignLateShopNumber(sessionId, ctx.shopId, ctx.shopName);
     } catch (err) {
-      console.warn('[supplement] нумерація коробки не вдалась:', err.message);
     }
   }
 
@@ -327,7 +325,6 @@ router.get('/my', sellerRoles, asyncHandler(async (req, res) => {
     }),
   });
 }));
-
 
 /** GET /api/supplement/admin/seller/:telegramId — дозамовлення, створені конкретним продавцем. */
 router.get('/admin/seller/:telegramId', adminOnly, asyncHandler(async (req, res) => {

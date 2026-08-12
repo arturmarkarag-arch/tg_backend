@@ -28,7 +28,6 @@ async function updateUserBotActivity(chatId) {
       }
     );
   } catch (e) {
-    console.warn('[telegramBot] markUserBotActive failed:', e.message);
   }
 }
 
@@ -36,16 +35,13 @@ async function markUserBotBlocked(chatId) {
   try {
     await User.findOneAndUpdate({ telegramId: String(chatId) }, { botBlocked: true });
   } catch (e) {
-    console.warn('[telegramBot] markUserBotBlocked failed:', e.message);
   }
 }
-
 
 async function logBotInteraction(telegramId, type, action, label = '', context = {}) {
   try {
     await BotInteractionLog.create({ telegramId: String(telegramId), type, action, label, context });
   } catch (e) {
-    console.warn('[telegramBot] logBotInteraction failed:', e.message);
   }
 }
 
@@ -84,10 +80,8 @@ async function handleMyChatMemberUpdate(update) {
       }
     }
   } catch (error) {
-    console.error('Failed to handle my_chat_member update:', error);
   }
 }
-
 
 const SERVER_BASE_URL = process.env.SERVER_BASE_URL || null;
 const WEB_APP_URL = process.env.WEB_APP_URL;
@@ -194,7 +188,6 @@ async function setRoleCommands(chatId, role) {
       scope: { type: 'chat', chat_id: chatId },
     });
   } catch (err) {
-    console.warn('[Bot] Failed to set commands for chat', chatId, err.message);
   }
 }
 
@@ -204,13 +197,11 @@ function escapeHtml(str) {
   return String(str || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
-
 async function sendNotInAnnouncementsGroupMessage(chatId) {
   let admins = [];
   try {
     admins = toPublicSupportAdmins(await getSupportAdmins());
   } catch (err) {
-    console.warn('[Bot] support-admin settings read failed:', err.message);
   }
 
   const lines = [
@@ -281,7 +272,7 @@ async function postGroupWelcome(groupChatId, telegramId, from) {
     await GroupMember.updateOne(
       { groupChatId: String(groupChatId), telegramId: String(telegramId) },
       { $set: { welcomeChatId: String(groupChatId), welcomeMessageId: sent.message_id } },
-    ).catch((e) => console.warn('[Bot] store welcome message_id failed:', e.message));
+    ).catch((e) => {});
   }
   return true;
 }
@@ -294,7 +285,6 @@ async function scheduleGroupWelcome(groupChatId, telegramId, from) {
     try {
       await postGroupWelcome(groupChatId, telegramId, from);
     } catch (err) {
-      console.warn('[Bot] welcome message failed:', err.message);
     } finally {
       pendingWelcomes.delete(dedupeKey);
     }
@@ -316,7 +306,6 @@ async function recheckAndRepushWelcome(groupChatId, telegramId) {
   try {
     member = await bot.getChatMember(gid, Number(tid));
   } catch (e) {
-    console.warn(`[recheck] getChatMember(${gid}, ${tid}) failed:`, e.message);
     return { ok: false, reason: 'check_failed' };
   }
 
@@ -347,7 +336,6 @@ async function recheckAndRepushWelcome(groupChatId, telegramId) {
     const sent = await postGroupWelcome(gid, tid, from);
     return { ok: true, status: sent ? 'reposted' : 'registered' };
   } catch (e) {
-    console.warn(`[recheck] postGroupWelcome(${gid}, ${tid}) failed:`, e.message);
     return { ok: false, reason: 'send_failed' };
   }
 }
@@ -365,7 +353,6 @@ async function deleteWelcomeFor(telegramId) {
       welcomeMessageId: { $ne: null },
     }).lean();
   } catch (e) {
-    console.warn('[Bot] deleteWelcomeFor lookup failed:', e.message);
     return;
   }
   for (const m of members) {
@@ -374,7 +361,6 @@ async function deleteWelcomeFor(telegramId) {
         await bot.deleteMessage(m.welcomeChatId, m.welcomeMessageId);
       } catch (e) {
         // >48h old or no admin rights — not critical.
-        console.warn('[Bot] deleteWelcome message failed:', e.message);
       }
     }
     await GroupMember.updateOne(
@@ -396,7 +382,6 @@ async function isUserInAllowedGroup(telegramId) {
     const { getAllowedGroupIds } = require('./routes/admin');
     groupIds = await getAllowedGroupIds();
   } catch (e) {
-    console.warn('[groupGate] getAllowedGroupIds failed:', e.message);
     return false;
   }
   if (!groupIds.length) return false;
@@ -407,12 +392,10 @@ async function isUserInAllowedGroup(telegramId) {
       if (['member', 'administrator', 'creator'].includes(member?.status)) return true;
     } catch (e) {
       // Fail-closed for THIS group; keep checking the rest.
-      console.warn(`[groupGate] getChatMember(${groupId}, ${telegramId}) failed:`, e.message);
     }
   }
   return false;
 }
-
 
 function getPhotoUrl(photoUrl) {
   if (!photoUrl) return null;
@@ -452,7 +435,6 @@ async function sendMessageWithRetry(chatId, text, options = {}, attempts = 3) {
     }
     if (isBotBlockedError(error)) {
       handleBotBlocked(String(chatId)).catch((err) => {
-        console.error('[Bot] handleBotBlocked threw unexpectedly:', err.message);
       });
     }
     throw error;
@@ -482,7 +464,6 @@ async function handleBotBlocked(telegramId) {
     ).lean();
 
     if (!blockedUser) {
-      console.log(`[Bot] Bot blocked event ignored for unknown telegramId=${telegramId}`);
       return;
     }
 
@@ -503,11 +484,8 @@ async function handleBotBlocked(telegramId) {
     lines.push(`заблокував бота.`);
     const admins = await User.find(activeUserFilter({ role: 'admin' }), 'telegramId').lean();
     const adminIds = admins.map((a) => a.telegramId).filter(Boolean);
-    console.log(`[Bot] Bot blocked by ${telegramId} (${name}). Notifying admins: [${adminIds.join(', ')}]`);
     await sendAdminNotification(lines.join('\n'));
-    console.log(`[Bot] Admin notification sent for blocked user ${telegramId}`);
   } catch (err) {
-    console.error('[Bot] handleBotBlocked failed:', err.message, err.stack);
   }
 }
 
@@ -568,7 +546,7 @@ async function handleShopInviteTransfer(chatId, code) {
           }
           io.emit('user_order_updated', { buyerTelegramId: chatId });
         }
-      } catch (e) { console.warn('[Bot] shop-invite socket emit failed:', e?.message); }
+      } catch (e) {}
     } else {
       const msgByReason = {
         not_found:     'Це посилання недійсне або вже використане.',
@@ -580,7 +558,6 @@ async function handleShopInviteTransfer(chatId, code) {
       await bot.sendMessage(chatId, msgByReason[result.reason] || 'Не вдалося активувати посилання.');
     }
   } catch (e) {
-    console.error('[Bot] redeemShopInvite failed:', e);
     await bot.sendMessage(chatId, 'Сталася помилка під час переведення. Спробуйте ще раз або зверніться до адміністратора.');
   }
 }
@@ -611,23 +588,17 @@ async function sendAdminNotification(text) {
     try {
       await bot.sendMessage(adminId, text);
     } catch (err) {
-      console.warn('[Bot] sendAdminNotification failed for', adminId, err.message);
     }
   }
 }
 
-
-
-
 async function initBot(token) {
   if (!token) {
     status.error = 'TELEGRAM_BOT_TOKEN not configured';
-    console.warn(status.error);
     return;
   }
 
   if (bot) {
-    console.warn('Telegram bot is already initialized');
     return;
   }
 
@@ -850,7 +821,6 @@ async function initBot(token) {
         await bot.sendMessage(chatId, `Відкрийте Mini App: ${miniAppUrl}`);
       }
       } catch (err) {
-        console.error('[Bot] Message handler error:', err);
       }
     });
 
@@ -879,16 +849,13 @@ async function initBot(token) {
 
         scheduleGroupWelcome(groupChatId, telegramId, from);
       } catch (err) {
-        console.error('[Bot] chat_member handler error:', err);
       }
     });
 
     bot.on('error', (err) => {
-      console.error('Telegram bot runtime error:', err);
     });
 
     bot.on('webhook_error', (err) => {
-      console.error('Telegram webhook error:', err);
       status.error = err?.message || String(err);
     });
 
@@ -939,7 +906,6 @@ async function initBot(token) {
               { chat_id: chatId, message_id: msgId }
             );
           } catch (e) {
-            console.warn('[Bot] editMessageReplyMarkup (already-processed) failed:', e.message);
           }
           return;
         }
@@ -964,8 +930,7 @@ async function initBot(token) {
               deliveryGroupId: request.deliveryGroupId,
             });
             await RegistrationRequest.findByIdAndDelete(requestId);
-            deleteWelcomeFor(request.telegramId).catch((e) =>
-              console.warn('[Bot] deleteWelcomeFor failed:', e.message));
+            deleteWelcomeFor(request.telegramId).catch(() => {});
             await bot.answerCallbackQuery(query.id, { text: 'Заявку схвалено', show_alert: false });
             await sendRegistrationApprovedMessage(request.telegramId, request.role);
           }
@@ -984,24 +949,19 @@ async function initBot(token) {
             { chat_id: chatId, message_id: msgId }
           );
         } catch (e) {
-          console.warn('[Bot] editMessageReplyMarkup (processed) failed:', e.message);
         }
         return;
       }
 
-      console.warn('[Bot] Unknown callback query action:', { data, chatId, msgId });
       await bot.answerCallbackQuery(query.id, { text: 'Невідома дія.', show_alert: true });
       } catch (err) {
-        console.error('[Bot] Callback query handler error:', err);
         try { await bot.answerCallbackQuery(query.id); } catch (e) {
-          console.warn('[Bot] answerCallbackQuery (after error) failed:', e.message);
         }
       }
     });
 
     bot.on('my_chat_member', async (update) => {
       await handleMyChatMemberUpdate(update).catch((err) => {
-        console.error('my_chat_member handler failed:', err);
       });
     });
 
@@ -1017,13 +977,10 @@ async function initBot(token) {
     const { path, secretToken } = getWebhookConfig();
     const url = `${String(process.env.SERVER_BASE_URL).replace(/\/$/, '')}${path}`;
     await bot.setWebHook(url, { allowed_updates: ALLOWED_UPDATES, secret_token: secretToken });
-    console.log('[Bot] webhook registered at', url);
-
-    console.log('Telegram bot started (webhook)');
+    // URL навмисно не логуємо: шлях вебхука похідний від токена бота.
   } catch (error) {
     status.error = error.message || String(error);
     status.connected = false;
-    console.error('Failed to start Telegram bot:', error);
   }
 }
 
@@ -1039,7 +996,6 @@ function getBotStatus() {
     hasToken: Boolean(bot),
   };
 }
-
 
 module.exports = {
   initBot,

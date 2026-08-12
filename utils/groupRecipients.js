@@ -47,7 +47,6 @@ async function serviceGroupChatIds() {
     const { getAllowedGroupIds } = require('../routes/admin');
     return await getAllowedGroupIds();
   } catch (err) {
-    console.warn('[groupRecipients] не вдалося прочитати список робочих чатів:', err.message);
     return [];
   }
 }

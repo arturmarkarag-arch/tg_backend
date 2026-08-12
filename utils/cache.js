@@ -26,7 +26,6 @@ const local = new Map(); // key → { value, expiresAt }
 if (isEnabled() && subClient) {
   const ensureSubscribed = () => {
     subClient.subscribe(CHANNEL).catch((err) => {
-      console.warn('[Cache] failed to subscribe:', err.message);
     });
   };
 
@@ -73,7 +72,6 @@ async function get(key) {
         return value;
       }
     } catch (err) {
-      console.warn('[Cache] L2 get failed:', err.message);
     }
   }
   return null;
@@ -87,7 +85,6 @@ async function set(key, value, ttlSec = L2_TTL_SEC) {
     try {
       await redis.set(nsKey(key), JSON.stringify(value), 'EX', ttlSec);
     } catch (err) {
-      console.warn('[Cache] L2 set failed:', err.message);
     }
   }
 }
@@ -99,7 +96,6 @@ async function invalidate(key) {
       await redis.del(nsKey(key));
       await pubClient.publish(CHANNEL, key);
     } catch (err) {
-      console.warn('[Cache] L2 invalidate failed:', err.message);
     }
   }
 }
@@ -117,7 +113,6 @@ async function invalidateAll() {
       } while (cursor !== 0);
       await pubClient.publish(CHANNEL, '*');
     } catch (err) {
-      console.warn('[Cache] L2 invalidateAll failed:', err.message);
     }
   }
 }

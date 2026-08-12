@@ -22,17 +22,11 @@ async function logShopTransition(session, entry) {
 
     await ShopAuditLog.create([{ ...entry, conflictDetected }], { session });
 
+    // Повний слід (хто, з якого магазину, яке замовлення) живе в ShopAuditLog.
+    // У консоль іде лише знеособлений факт — вона не є місцем зберігання аудиту.
     const tag = entry.orderAction === 'left_behind' || conflictDetected ? 'WARN' : 'INFO';
-    console.log(
-      `[SHOP_AUDIT:${tag}] seller=${entry.sellerTelegramId}(${entry.sellerName || ''}) ` +
-      `${entry.fromShopName || entry.fromShopId || '∅'} → ${entry.toShopName || entry.toShopId || '∅'} ` +
-      `| order=${entry.orderId || '-'} action=${entry.orderAction} ` +
-      `${entry.orderShopBefore || '-'}→${entry.orderShopAfter || '-'} ` +
-      `| reason=${entry.reason} source=${entry.source} conflict=${conflictDetected}`,
-    );
     return conflictDetected;
   } catch (e) {
-    console.error('[SHOP_AUDIT] failed to write audit log:', e?.message);
     return false;
   }
 }

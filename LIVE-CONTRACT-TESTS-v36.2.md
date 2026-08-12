@@ -59,3 +59,7 @@ node -r ../dev-use-test-db.js scripts/liveOrderPickingE2ECleanup.js --runId=<RUN
 ```
 
 `--keep-on-failure` можна додати до ручного запуску, якщо треба залишити synthetic fixtures у тестовій БД для огляду після падіння.
+
+## v36.4 addition — final summary retention
+
+`test:live:contracts` now also runs `final_summary_retention`: it completes a synthetic session, verifies `OrderingSession.finalSummary`, deletes only that synthetic session's completed `PickingTask` rows (simulating retention), then calls the real `queue-stats` HTTP endpoint and verifies that phase/counters remain `completed` and unchanged.

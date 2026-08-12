@@ -78,13 +78,11 @@ async function notifyOffers(offers, type, { now = new Date() } = {}) {
 
   const { appUrl } = await getSupplementSettings();
   if (!appUrl) {
-    console.warn('[supplement/notify] не налаштовано посилання на Mini App — повідомлення не надіслано');
     return { sentPrivate: 0, sentGroups: 0 };
   }
 
   const { getBot, sendMessageWithRetry } = require('../telegramBot');
   if (!getBot()) {
-    console.warn('[supplement/notify] бот не піднятий — повідомлення відкладено');
     return { sentPrivate: 0, sentGroups: 0 };
   }
 
@@ -124,7 +122,6 @@ async function notifyOffers(offers, type, { now = new Date() } = {}) {
         sentPrivate += 1;
         deliveredAny = true;
       } catch (err) {
-        console.warn('[supplement/notify] приватне повідомлення', seller.telegramId, 'не доставлено:', err.message);
       }
       await sleep(SEND_GAP_MS);
     }
@@ -135,7 +132,6 @@ async function notifyOffers(offers, type, { now = new Date() } = {}) {
         sentGroups += 1;
         deliveredAny = true;
       } catch (err) {
-        console.warn('[supplement/notify] пост у групу', chatId, 'не доставлено:', err.message);
       }
     }
   }
@@ -145,7 +141,6 @@ async function notifyOffers(offers, type, { now = new Date() } = {}) {
   // дві години — це нагадування, а не критичний запис.
   if (type === 'opened' && !deliveredAny) await releaseOpened(claimed);
 
-  console.log(`[supplement/notify] ${type}: ${claimed.length} пропозицій → ${sentPrivate} продавцям, ${sentGroups} у групи`);
   return { sentPrivate, sentGroups };
 }
 

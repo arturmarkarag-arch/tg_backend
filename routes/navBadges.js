@@ -86,7 +86,6 @@ async function safeCount(key, enabled, fn) {
   try {
     return await fn();
   } catch (err) {
-    console.error(`[nav-badges] ${key} failed:`, err?.message);
     return 0;
   }
 }

@@ -48,7 +48,7 @@ async function withMirrorRetry(fn) {
 // commit without its mirror) and the embedding is NOT scheduled here — the
 // caller schedules it AFTER commit, using the returned doc.
 async function upsertShopProductFromProduct(product, { session = null } = {}) {
-  if (!product?._id) { console.warn('[shop-upsert] skipped: no product'); return null; }
+  if (!product?._id) {  return null; }
   const barcode = String(product.barcode || '').trim();
   // Identify the mirror ONLY by its warehouse owner. Matching by barcode used to let
   // this upsert "adopt" a pre-existing shop-OWNED product that merely SHARED the
@@ -104,7 +104,6 @@ async function upsertShopProductFromProduct(product, { session = null } = {}) {
     // resolved at search time. So there is nothing to schedule here.
     return await withMirrorRetry(run);
   } catch (err) {
-    console.error('[shop-upsert] failed after retries:', err.code, err.message);
     return null;
   }
 }
@@ -176,7 +175,6 @@ async function pushSharedFieldsToMirror(product, { session = null } = {}) {
     // which the mirror references at search time. Nothing to schedule here.
     return await withMirrorRetry(run);
   } catch (err) {
-    console.error('[shop-mirror-push] failed after retries:', err.code, err.message);
     return null;
   }
 }
@@ -195,7 +193,7 @@ async function pushSharedFieldsToMirror(product, { session = null } = {}) {
 // PROPAGATE (the confirm aborts, so a ShopProduct can never half-commit) and the
 // embedding is deferred — the caller schedules it AFTER commit via the returned doc.
 async function upsertShopOwnedFromReceiptItem(item, { session = null } = {}) {
-  if (!item?._id) { console.warn('[shop-owned] skipped: no item'); return null; }
+  if (!item?._id) {  return null; }
   const pm = item.photoMeta || {};
   const labelPositions = {};
   if (pm.commentPos) { labelPositions.commentX = pm.commentPos.x; labelPositions.commentY = pm.commentPos.y; }
@@ -255,10 +253,8 @@ async function upsertShopOwnedFromReceiptItem(item, { session = null } = {}) {
     return doc;
   } catch (err) {
     if (err.code === 11000) {
-      console.warn('[shop-owned] duplicate receipt item, skipped:', String(item._id));
       return null;
     }
-    console.error('[shop-owned] failed:', err.code, err.message);
     return null;
   }
 }

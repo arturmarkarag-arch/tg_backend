@@ -237,7 +237,6 @@ async function reconcileLateOrdersForSession(deliveryGroupId, orderingSessionId)
       appended += r.appended;
       skipped += r.skipped;
     } catch (err) {
-      console.warn('[lateOrderReconcile] order', String(o._id), 'failed:', err.message);
     }
   }
   return { appended, skipped, orders: touched };

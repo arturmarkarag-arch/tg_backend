@@ -53,7 +53,7 @@ async function embedShopProduct(doc, { force = false } = {}) {
 function embedShopProductAsync(doc, ctx = '', opts = undefined) {
   Promise.resolve()
     .then(() => embedShopProduct(doc, opts))
-    .catch((err) => console.error(`[embed:shop-owned] ${ctx} ${doc?._id}:`, err.message));
+    .catch((err) => {});
 }
 
 module.exports = { embedShopProduct, embedShopProductAsync };

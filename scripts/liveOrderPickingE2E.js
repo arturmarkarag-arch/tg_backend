@@ -25,7 +25,7 @@
  *   node scripts/liveOrderPickingE2E.js --execute
  *
  * Optional:
- *   --scenario=happy,conflict_move,conflict_relocate,conflict_unassign,coverage,isolation,barrier,short_pick,oos,late_order,recovery,hidden_item,group_mismatch,remove_last
+ *   --scenario=happy,multi_seller_single_order,ownership_freeze,checkbox_handoff,session_rollover,final_summary_retention,security_boundaries,conflict_move,conflict_relocate,conflict_unassign,coverage,isolation,barrier,short_pick,oos,late_order,recovery,hidden_item,group_mismatch,remove_last
  *   --keep-on-failure     Keep ONLY the failed scenario fixtures for manual inspection.
  *                         Cleanup command + run id are printed. Never enabled by default.
  */
@@ -945,6 +945,108 @@ async function scenarioSessionRollover() {
   } catch (e) { e.world = world; throw e; }
 }
 
+
+async function scenarioFinalSummaryRetention() {
+  const world = await createWorld('final_summary_retention', { shops: 1, sellers: 1, warehouse: 1, products: 1 });
+  try {
+    const seller = world.sellers[0];
+    const wh = world.warehouses[0];
+    const order = await placeOrder(world, seller, [{ product: world.products[0], quantity: 2 }], 'summary');
+
+    await moveWorldToClosedPhase(world);
+    const start = await startPicking(world, wh, true);
+    check(start.status === 200 && start.data?.started === true, 'final_summary_retention: picking starts');
+
+    const session = await currentSession(world);
+    await completeEveryPendingTask(world, wh, session._id);
+    const completed = await assertSessionCompleted(session._id, 'final_summary_retention');
+    check(Boolean(completed?.finalSummary?.finalizedAt), 'final_summary_retention: completion freezes finalSummary');
+    eq(Number(completed?.finalSummary?.processedProductCount || 0), 1, 'final_summary_retention: frozen processed product count');
+    eq(Number(completed?.finalSummary?.totalProductCount || 0), 1, 'final_summary_retention: frozen total product count');
+    eq(Number(completed?.finalSummary?.completedOrderCount || 0), 1, 'final_summary_retention: frozen completed order count');
+    eq(Number(completed?.finalSummary?.totalOrderCount || 0), 1, 'final_summary_retention: frozen total order count');
+
+    // Simulate the 90-day retention sweep on this synthetic session only. The
+    // detailed graph disappears, but the user-facing historical session must not
+    // degrade to idle/0/0.
+    const purged = await PickingTask.deleteMany({ orderingSessionId: str(session._id), status: 'completed' });
+    check((purged.deletedCount || 0) > 0, 'final_summary_retention: synthetic completed tasks purged');
+
+    const stats = await api('GET', `/api/picking/queue-stats?deliveryGroupId=${encodeURIComponent(str(world.group._id))}`, wh);
+    eq(stats.status, 200, 'final_summary_retention: queue-stats still resolves after task retention');
+    eq(stats.data?.phase, 'completed', 'final_summary_retention: frozen summary preserves completed phase after task purge');
+    eq(Number(stats.data?.sessionSummary?.processedProductCount || 0), 1, 'final_summary_retention: historical processed count survives task purge');
+    eq(Number(stats.data?.sessionSummary?.totalProductCount || 0), 1, 'final_summary_retention: historical total count survives task purge');
+    eq(Number(stats.data?.sessionSummary?.completedOrderCount || 0), 1, 'final_summary_retention: historical completed order count survives task purge');
+    eq(Number(stats.data?.sessionSummary?.totalOrderCount || 0), 1, 'final_summary_retention: historical total order count survives task purge');
+
+    const unchangedOrder = await Order.findById(order._id).lean();
+    eq(unchangedOrder?.status, 'fulfilled', 'final_summary_retention: retention simulation never mutates the Order');
+    return world;
+  } catch (e) { e.world = world; throw e; }
+}
+
+async function scenarioSecurityBoundaries() {
+  const world = await createWorld('security_boundaries', { shops: 1, sellers: 1, warehouse: 1, admins: 1, products: 1 });
+  try {
+    const seller = world.sellers[0];
+    const warehouse = world.warehouses[0];
+    const admin = world.admins[0];
+    const sellerTid = str(seller.telegramId);
+
+    const noAuthUsers = await api('GET', '/api/users');
+    eq(noAuthUsers.status, 401, 'security_boundaries: unauthenticated users API is rejected');
+
+    const sellerUsers = await api('GET', '/api/users', seller);
+    eq(sellerUsers.status, 403, 'security_boundaries: seller cannot enumerate admin users API');
+
+    const warehouseUsers = await api('GET', '/api/users', warehouse);
+    eq(warehouseUsers.status, 403, 'security_boundaries: warehouse cannot enumerate admin-only users API');
+
+    const originalRole = (await User.findOne({ telegramId: sellerTid }).lean())?.role;
+    const escalate = await api('PATCH', `/api/users/${sellerTid}`, seller, { role: 'admin' });
+    eq(escalate.status, 403, 'security_boundaries: seller cannot promote self through users API');
+    eq((await User.findOne({ telegramId: sellerTid }).lean())?.role, originalRole, 'security_boundaries: failed privilege escalation does not mutate DB role');
+
+    const fakeTid = makeTelegramId(880);
+    const createWithoutAuth = await api('POST', '/api/users', null, {
+      telegramId: fakeTid,
+      role: 'admin',
+      firstName: 'SHOULD_NOT_EXIST',
+    });
+    eq(createWithoutAuth.status, 401, 'security_boundaries: unauthenticated user creation is rejected');
+    eq(await User.countDocuments({ telegramId: fakeTid }), 0, 'security_boundaries: rejected unauthenticated user creation leaves no DB row');
+
+    const sellerReceipt = await api('POST', '/api/receipts', seller, { type: 'regular' });
+    eq(sellerReceipt.status, 403, 'security_boundaries: seller cannot create staff receipt');
+
+    const sellerPicking = await api('POST', '/api/picking/start-session', seller, {
+      deliveryGroupId: str(world.group._id), confirm: true,
+    });
+    eq(sellerPicking.status, 403, 'security_boundaries: seller cannot start warehouse picking');
+
+    const hiddenTestApi = await api('POST', '/api/warehouse-test/cleanup', admin, {});
+    eq(hiddenTestApi.status, 404, 'security_boundaries: destructive warehouse-test API is absent in production mode');
+
+    const publicCatalogue = await api('GET', '/api/search-products');
+    eq(publicCatalogue.status, 400, 'security_boundaries: public search endpoint refuses catalogue enumeration without barcode');
+
+    const registry = await api('GET', '/api/shops/registry');
+    eq(registry.status, 200, 'security_boundaries: public registration shop registry remains available');
+    const registryItems = Array.isArray(registry.data) ? registry.data : (registry.data?.shops || []);
+    const syntheticShop = registryItems.find((item) => str(item?._id) === str(world.shops[0]._id));
+    check(Boolean(syntheticShop), 'security_boundaries: synthetic shop appears in public registry');
+    check(!Object.prototype.hasOwnProperty.call(syntheticShop || {}, 'sellers'), 'security_boundaries: public shop registry has no seller list');
+    check(!Object.prototype.hasOwnProperty.call(syntheticShop || {}, 'phoneNumber'), 'security_boundaries: public shop registry has no seller phone');
+    check(!Object.prototype.hasOwnProperty.call(syntheticShop || {}, 'telegramId'), 'security_boundaries: public shop registry has no seller telegram id');
+
+    const adminUsers = await api('GET', '/api/users?pageSize=5', admin);
+    eq(adminUsers.status, 200, 'security_boundaries: authenticated admin keeps users API access');
+  } finally {
+    await cleanupWorld(world);
+  }
+}
+
 async function scenarioRemoveLast() {
   const world = await createWorld('remove_last', { shops: 1, sellers: 1, warehouse: 1, products: 1 });
   try {
@@ -1438,6 +1540,8 @@ const SCENARIOS = [
   ['ownership_freeze', scenarioOwnershipFreeze],
   ['checkbox_handoff', scenarioCheckboxHandoff],
   ['session_rollover', scenarioSessionRollover],
+  ['final_summary_retention', scenarioFinalSummaryRetention],
+  ['security_boundaries', scenarioSecurityBoundaries],
   ['remove_last', scenarioRemoveLast],
   ['conflict_move', scenarioConflictMove],
   ['conflict_relocate', scenarioConflictRelocate],

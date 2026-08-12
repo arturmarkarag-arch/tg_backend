@@ -892,7 +892,6 @@ async function archiveOrphanedOutOfStockProductsImpl(groupId, sessionId) {
       await archiveProduct(product, { notifyBuyers: false, bot: null, reason: 'system_archive' });
       fixedCount += 1;
     } catch (err) {
-      console.warn(`[pickingService] orphan archive failed for ${pid}:`, err.message);
     }
   }
 

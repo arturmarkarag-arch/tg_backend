@@ -486,7 +486,6 @@ router.patch('/:id/sellers', telegramAuth, requireTelegramRole('admin'), asyncHa
     ? [...new Set(req.body.sellers.map((id) => String(id).trim()).filter(Boolean))]
     : [];
 
-
   const shopIdStr = String(shop._id);
 
   // Поточні продавці цього магазину
@@ -562,7 +561,7 @@ router.patch('/:id/sellers', telegramAuth, requireTelegramRole('admin'), asyncHa
       session.endSession();
     }
     for (const fn of invalidateFns) {
-      try { await fn(); } catch (e) { console.warn('[shops sellers] invalidate failed:', e?.message); }
+      try { await fn(); } catch (e) {}
     }
     await invalidateShop(req.params.id);
   }

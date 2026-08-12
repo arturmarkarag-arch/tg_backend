@@ -142,7 +142,6 @@ let openaiStatus = { connected: false, error: null };
 function initOpenAI(apiKey) {
   if (!apiKey) {
     openaiStatus = { connected: false, error: 'OPENAI_API_KEY not configured' };
-    console.warn(openaiStatus.error);
     return null;
   }
   try {
@@ -152,7 +151,6 @@ function initOpenAI(apiKey) {
   } catch (error) {
     openai = null;
     openaiStatus = { connected: false, error: error.message || String(error) };
-    console.error('Failed to initialize OpenAI client:', error);
     return null;
   }
 }

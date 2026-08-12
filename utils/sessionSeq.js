@@ -58,9 +58,6 @@ async function ensureSessionSeq(sessionId, groupId) {
           orderingSessionId: { $in: olderUnnumbered.map((row) => String(row._id)) },
         });
         if (olderHasOrders) {
-          console.warn(
-            `[sessionSeq] ${sid} left unnumbered: older content-bearing sessions in group ${gid} need backfill first`,
-          );
           return null;
         }
       }

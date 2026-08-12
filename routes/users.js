@@ -53,7 +53,6 @@ async function sanitizeUserPayload(payload, existing = null) {
     data.shopNumber = '';
   }
 
-
   return data;
 }
 
@@ -650,11 +649,7 @@ router.patch('/:telegramId', asyncHandler(async (req, res) => {
     && (payload.shopId ? String(payload.shopId) : null) !== oldShopId
     && ['seller', 'admin'].includes(payload.role ?? existing.role);
   if (rawShopLeak) {
-    console.warn(
-      `[SHOP_AUDIT:WARN] RAW shopId change via PATCH /users/${req.params.telegramId} ` +
-      `(${oldShopId || '∅'} → ${payload.shopId || '∅'}) — order NOT migrated. ` +
-      'This path should route through migrateSellerShop/unassignSellerAndPark.',
-    );
+    // Хто саме і на який магазин — лежить у ShopAuditLog; у консоль іде лише факт.
   }
 
   const user = await User.findOneAndUpdate(

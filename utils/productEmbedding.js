@@ -53,7 +53,7 @@ async function embedProduct(product, { force = false } = {}) {
 function embedProductAsync(product, ctx = '', opts = undefined) {
   Promise.resolve()
     .then(() => embedProduct(product, opts))
-    .catch((err) => console.error(`[embed:product] ${ctx} ${product?._id}:`, err.message));
+    .catch((err) => {});
 }
 
 module.exports = { embedProduct, embedProductAsync };

@@ -46,7 +46,7 @@ describe('session status UI/server consistency contract', () => {
   it('session numbering is wired into the real upsert-item path and has a safe backfill', () => {
     const orders = readServer('routes/orders.js');
     const backfill = readServer('scripts/backfillSessionSeq.js');
-    expect(orders).toContain('[orders/upsert-item] ensureSessionSeq failed:');
+    expect(orders).toContain('ensureSessionSeq(currentSessionId, String(group._id))');
     expect(backfill).toContain("process.argv.includes('--execute')");
     expect(backfill).toContain("arg.startsWith('--env=')");
     expect(backfill).toContain('DRY-RUN');

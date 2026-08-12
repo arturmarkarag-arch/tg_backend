@@ -120,7 +120,7 @@ async function redeemShopInvite({ code, sellerTelegramId }) {
   // in migrateSellerShop about the stale-read window.
   if (result?.ok) {
     if (result._invalidate) {
-      try { await result._invalidate(); } catch (e) { console.warn('[redeemShopInvite] invalidate failed:', e?.message); }
+      try { await result._invalidate(); } catch (e) {}
     }
     try { await invalidateShop(result.shop._id); } catch (_) {}
     if (result.fromShopId) { try { await invalidateShop(result.fromShopId); } catch (_) {} }

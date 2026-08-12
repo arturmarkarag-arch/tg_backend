@@ -70,12 +70,9 @@ function initSocket(httpServer) {
   if (redisEnabled() && pubClient && subClient) {
     try {
       io.adapter(createAdapter(pubClient, subClient));
-      console.log('[Socket] Redis adapter active — events broadcast across all workers');
     } catch (err) {
-      console.warn('[Socket] Redis adapter init failed, falling back to single-process:', err.message);
     }
   } else {
-    console.warn('[Socket] Running without Redis adapter — single-process only');
   }
 
   // Auth middleware — verify initData (mini-app) OR session JWT (browser).
@@ -135,7 +132,6 @@ function initSocket(httpServer) {
     // derived only from the authenticated socket identity — never from client
     // payload — so another user cannot subscribe to someone else's notifications.
     socket.join(`user_${socket.telegramId}`);
-    console.log(`[Socket] Client connected: ${socket.id} (telegramId=${socket.telegramId})`);
 
     const isWarehouseStaff = () => ['admin', 'warehouse'].includes(socket.userRole);
 
@@ -233,8 +229,6 @@ function initSocket(httpServer) {
         return;
       }
       try {
-        console.log(`[Socket] move_item: product=${productId} from=${fromBlock} to=${toBlock} idx=${toIndex}`);
-
         const session = await mongoose.connection.startSession();
         try {
           await session.withTransaction(async () => {
@@ -312,7 +306,6 @@ function initSocket(httpServer) {
         // Notify the mover — only blockIds needed, data arrives via block_updated
         socket.emit('move_success', { source: { blockId: fromBlock }, target: { blockId: toBlock } });
       } catch (err) {
-        console.error('[Socket] move_item error:', err);
         socket.emit('move_error', { error: err.message || 'Move failed' });
       }
     });
@@ -327,8 +320,7 @@ function initSocket(httpServer) {
     });
 
     // Cleanup on disconnect
-    socket.on('disconnect', (reason) => {
-      console.log(`[Socket] Client disconnected: ${socket.id} (telegramId=${socket.telegramId}) reason=${reason}`);
+    socket.on('disconnect', () => {
       for (const [productId, data] of lockedItems) {
         if (data.socketId === socket.id) {
           releaseLock(productId);

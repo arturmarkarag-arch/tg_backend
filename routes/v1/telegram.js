@@ -141,7 +141,6 @@ async function buildUserProfile(user) {
   // profile, so it is the canonical place to record a real app open.
   const appOpenedAt = new Date();
   await User.updateOne({ _id: user._id }, { $set: { lastAppOpenedAt: appOpenedAt } }).catch((err) => {
-    console.warn('[buildUserProfile] lastAppOpenedAt update failed:', err?.message);
   });
 
   const userShop = user.shopId ? await getShop(user.shopId) : null;
@@ -157,10 +156,6 @@ async function buildUserProfile(user) {
     sessionOpenAt = sessionContext.sessionOpenAt;
     currentOrderingSessionId = sessionContext.orderingSessionId;
   } catch (error) {
-    console.error(
-      '[buildUserProfile] Не вдалося визначити ordering session:',
-      error
-    );
   }
 
   let activeSellerCount = 1;
@@ -355,7 +350,7 @@ router.patch('/me/shop', asyncHandler(async (req, res) => {
   // workers don't repopulate L1 with pre-commit reads.
   if (migrationResult?.invalidate) {
     try { await migrationResult.invalidate(); }
-    catch (e) { console.warn('[PATCH /me/shop] cache invalidate failed:', e?.message); }
+    catch (e) {}
   }
 
   if (migrationResult?.movedOrder) {
@@ -371,7 +366,6 @@ router.patch('/me/shop', asyncHandler(async (req, res) => {
         io.emit('user_order_updated', { buyerTelegramId: user.telegramId });
       }
     } catch (e) {
-      console.warn('[PATCH /me/shop] socket emit failed:', e?.message);
     }
   }
 
@@ -501,10 +495,6 @@ router.post('/mini-app/state', asyncHandler(async (req, res) => {
       const sessionContext = await resolveOrderingSessionContext(user);
       currentOrderingSessionId = sessionContext.orderingSessionId;
     } catch (error) {
-      console.error(
-        '[POST /mini-app/state] Не вдалося визначити ordering session:',
-        error
-      );
     }
   }
 
@@ -833,10 +823,8 @@ router.post('/register-request', asyncHandler(async (req, res) => {
     }
 
     // Post-commit, best-effort side effects.
-    deleteWelcomeFor(telegramId).catch((e) =>
-      console.warn('[register-request] deleteWelcomeFor failed:', e?.message || e));
-    sendRegistrationApprovedMessage(createdUser.telegramId, createdUser.role).catch((e) =>
-      console.warn('[register-request] approved message failed:', e?.message || e));
+    deleteWelcomeFor(telegramId).catch(() => {});
+    sendRegistrationApprovedMessage(createdUser.telegramId, createdUser.role).catch(() => {});
 
     return res.status(201).json({ registered: true, role: 'seller', telegramId });
   }
@@ -961,11 +949,9 @@ router.post('/register-requests/:id/approve', adminOnly, asyncHandler(async (req
   if (userExists) throw appError('registration_user_exists');
 
   // Remove the group "register here" welcome now that they're in the system.
-  deleteWelcomeFor(createdUser.telegramId).catch((err) =>
-    console.warn('[approve] deleteWelcomeFor failed:', err?.message || err));
+  deleteWelcomeFor(createdUser.telegramId).catch(() => {});
 
   await sendRegistrationApprovedMessage(createdUser.telegramId, createdUser.role).catch((err) => {
-    console.warn('[approve] sendRegistrationApprovedMessage failed:', err?.message || err);
   });
 
   res.json({ message: 'Заявку схвалено', telegramId: createdUser.telegramId, role: createdUser.role });

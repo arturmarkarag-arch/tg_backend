@@ -62,7 +62,6 @@ async function buildPickingTasksFromOrders(targetDeliveryGroupId = null, options
     // Preserve the original "silently skip a redundant concurrent build"
     // behaviour — the in-flight build recomputes from current orders anyway.
     if (err && err.code === 'lock_busy') {
-      console.warn('[taskBuilder] build skipped — another build already running for', lockKey);
       return;
     }
     throw err;
@@ -234,9 +233,7 @@ async function buildPickingTasksImpl(targetDeliveryGroupId = null, options = {})
       const writeErrors = err?.writeErrors || err?.result?.result?.writeErrors || [];
       const unexpected = writeErrors.filter((e) => (e?.err?.code ?? e?.code) !== 11000);
       if (unexpected.length) {
-        console.error('[taskBuilder] PickingTask insert failed for', unexpected.length, 'task(s):', unexpected);
       } else if (!writeErrors.length && err?.code !== 11000) {
-        console.error('[taskBuilder] PickingTask insert error:', err);
       }
     }
   }

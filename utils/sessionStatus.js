@@ -71,6 +71,7 @@ async function transitionPickingStatus(sessionId, toStatus, { actor = {}, meta =
 
   let fromStatuses;
   const set = { pickingStatus: toStatus };
+  const unset = {};
 
   if (toStatus === 'pending') {
     // cancel-start: only allowed from confirmed (nobody packed yet)
@@ -82,23 +83,29 @@ async function transitionPickingStatus(sessionId, toStatus, { actor = {}, meta =
   } else if (toStatus === 'in_progress') {
     fromStatuses = allowReopen ? ['confirmed', 'completed'] : ['confirmed'];
     set.pickingStartedAt = now;
-    if (allowReopen) set.pickingCompletedAt = null; // reviving a finished session
+    if (allowReopen) {
+      set.pickingCompletedAt = null; // reviving a finished session
+      unset.finalSummary = 1; // old counters are no longer authoritative
+    }
   } else { // completed
     fromStatuses = ['confirmed', 'in_progress'];
     set.pickingCompletedAt = now;
   }
 
-  return OrderingSession.findOneAndUpdate(
-    { _id: sessionId, pickingStatus: { $in: fromStatuses } },
-    {
-      $set: set,
-      $push: {
-        events: {
-          $each: [{ at: now, type: eventType, by, byName, meta }],
-          $slice: -MAX_EVENTS,
-        },
+  const update = {
+    $set: set,
+    $push: {
+      events: {
+        $each: [{ at: now, type: eventType, by, byName, meta }],
+        $slice: -MAX_EVENTS,
       },
     },
+  };
+  if (Object.keys(unset).length) update.$unset = unset;
+
+  return OrderingSession.findOneAndUpdate(
+    { _id: sessionId, pickingStatus: { $in: fromStatuses } },
+    update,
     withSession({ new: true }, mongoSession),
   );
 }
@@ -136,7 +143,31 @@ async function maybeCompleteSession(orderingSessionId, { actor = {}, meta = {}, 
   }
 
   // Supplements are intentionally outside OrderingSession lifecycle.
-  return transitionPickingStatus(orderingSessionId, 'completed', { actor, meta }, mongoSession);
+  const completed = await transitionPickingStatus(orderingSessionId, 'completed', { actor, meta }, mongoSession);
+  if (!completed) return null;
+
+  // Completion is the moment historical counters become immutable. The task
+  // documents themselves have bounded retention, so without this snapshot an
+  // old completed session would eventually degrade to a misleading 0/0 card.
+  // No current caller finalises inside an external transaction; keep the guard
+  // explicit so a future transactional caller cannot accidentally read outside
+  // its snapshot. If the snapshot write fails, completion remains valid and the
+  // presentation layer lazily backfills it while task history still exists.
+  if (!mongoSession) {
+    try {
+      const { loadSessionSummaryStats } = require('../services/sessionPresentation');
+      const summary = await loadSessionSummaryStats(String(orderingSessionId));
+      const finalizedAt = completed.pickingCompletedAt || new Date();
+      await OrderingSession.updateOne(
+        { _id: orderingSessionId, pickingStatus: 'completed' },
+        { $set: { finalSummary: { ...summary, finalizedAt } } },
+      );
+      completed.finalSummary = { ...summary, finalizedAt };
+    } catch (err) {
+    }
+  }
+
+  return completed;
 }
 
 module.exports = { pushSessionEvent, transitionPickingStatus, maybeCompleteSession, MAX_EVENTS };

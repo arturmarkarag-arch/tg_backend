@@ -49,7 +49,6 @@ async function createOffersForReceipt(receiptId) {
 
   // Проведена накладна-дозамовлення повинна мати цільову групу.
   if (!receipt.targetDeliveryGroupId) {
-    console.error('[supplement] накладна', receipt.receiptNumber, '— тип supplement без цільової групи; пропозиції не створюються');
     await Receipt.updateOne({ _id: receiptId }, { $set: { supplementStatus: 'ready' } });
     return { created: [], complete: true };
   }
@@ -103,11 +102,9 @@ async function createOffersForReceipt(receiptId) {
     } catch (err) {
       if (err?.code === 11000) { duplicates += 1; continue; }
       failed += 1;
-      console.error('[supplement] не вдалося створити пропозицію', doc.productId, '→', doc.deliveryGroupId, ':', err?.message);
     }
   }
   if (duplicates) {
-    console.log(`[supplement] накладна ${String(receiptId)}: ${duplicates} пропозицій уже існували — пропущено`);
   }
 
   const complete = failed === 0;
@@ -116,7 +113,6 @@ async function createOffersForReceipt(receiptId) {
     { $set: { supplementStatus: complete ? 'ready' : 'pending' } },
   );
   if (!complete) {
-    console.error(`[supplement] накладна ${String(receiptId)}: ${failed} пропозицій НЕ створено — позначено на повтор`);
   }
 
   return { created, complete };
@@ -134,8 +130,7 @@ async function reconcilePendingReceipts() {
       if (created.length) {
         // Розсилка йде тим самим шляхом, що й у звичайному відкритті.
         const { notifyOffers } = require('./supplementNotify');
-        notifyOffers(created, 'opened').catch((e) =>
-          console.error('[supplement] розсилка після довідновлення впала:', e?.message));
+        notifyOffers(created, 'opened').catch(() => {});
         for (const offer of created) {
           emit('supplement_opened', {
             offerId: String(offer._id),
@@ -145,9 +140,7 @@ async function reconcilePendingReceipts() {
         }
       }
       if (complete) repaired += 1;
-      console.log(`[supplement] довідновлено накладну ${receipt.receiptNumber}: +${created.length} пропозицій`);
     } catch (err) {
-      console.error('[supplement] довідновлення накладної', receipt.receiptNumber, 'впало:', err?.message);
     }
   }
   return repaired;
@@ -412,7 +405,6 @@ async function countActiveOffersForGroup(deliveryGroupId) {
       status: { $in: ACTIVE_STATUSES },
     });
   } catch (err) {
-    console.warn('[supplement] підрахунок дозамовлень не вдався:', err?.message);
     return 0;
   }
 }

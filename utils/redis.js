@@ -33,10 +33,10 @@ function makeClient(label) {
     lazyConnect: false,
     retryStrategy: (times) => Math.min(times * 200, 2000),
   });
-  client.on('connect', () => { console.log(`[Redis:${label}] connected`); });
+  client.on('connect', () => {});
   client.on('ready',   () => { connected = true; });
-  client.on('error',   (err) => { console.warn(`[Redis:${label}] error:`, err.message); });
-  client.on('end',     () => { connected = false; console.warn(`[Redis:${label}] connection closed`); });
+  client.on('error',   (err) => {});
+  client.on('end',     () => { connected = false;  });
   return client;
 }
 
@@ -45,7 +45,6 @@ if (REDIS_URL) {
   pubClient = makeClient('pub');
   subClient = makeClient('sub');
 } else {
-  console.warn('[Redis] REDIS_URL is not set — running in single-process mode (no shared cache, no distributed locks, no socket adapter).');
 }
 
 function isEnabled() {

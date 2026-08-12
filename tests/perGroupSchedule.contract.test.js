@@ -49,8 +49,7 @@ describe('per-group ordering schedule contracts', () => {
 
   it('server startup fails fast before serving groups without schedules', () => {
     const index = read('index.js');
-    expect(index).toContain('assertDeliveryGroupSchedulesReady');
-    expect(index).toContain('delivery-group schedules OK');
+    expect(index).toContain('await assertDeliveryGroupSchedulesReady();');
   });
 
   it('group create/update keeps delivery day independent from close day and guards timing changes', () => {
