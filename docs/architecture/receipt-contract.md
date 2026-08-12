@@ -54,15 +54,23 @@ quantity-allocation contract.
 
 For `Receipt.type='supplement'`, every item is `destination='shelf'`.
 
-## Draft integrity / concurrency
+## Item mutation / concurrency
 
-Mutating an item is allowed only while its Receipt is `draft`.
+A completed receipt is NOT read-only. Items may be edited, added and deleted at any time;
+see `docs/receipt/readme.md` §5 for the business rules.
 
-CREATE, PATCH and DELETE must re-check the draft state in the same MongoDB transaction as
-the item write/delete. A concurrent receipt commit must therefore either happen before the
-item mutation (mutation is rejected) or after it (commit sees the saved value).
+The gate is no longer the receipt status but the state of what the item created:
 
-A completed receipt is read-only.
+- edits always propagate to the derived documents (`services/receiptSync.js`) inside the
+  SAME transaction as the item write — the receipt can never diverge from the warehouse;
+- `totalQty` is applied as a DELTA to `Product.quantity`, never as an overwrite;
+- deleting an item, unconfirming it, or switching its destination first calls
+  `describeItemUsage`; anything already in a block / order / picking task / accepted
+  supplement request rejects with `receipt_item_in_use`. Receipt editing never archives a
+  product and never cancels order items.
+
+PATCH re-reads the item inside its own transaction so concurrent edits serialise on the
+document instead of racing on a stale quantity.
 
 ## Photo gallery
 
@@ -81,4 +89,5 @@ Not part of this contract yet:
 
 - simultaneous `shops + shelf` allocation;
 - final semantics/UI for distributing one `totalQty` between those destinations;
-- changes to the current confirmed-item edit/unconfirm lifecycle.
+- deleting a completed receipt as a whole (only an empty draft can be deleted);
+- a correction/reversal document ("сторно") as an alternative to editing the original.

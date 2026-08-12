@@ -6,7 +6,6 @@ const { requireTelegramRoles } = require('../middleware/telegramAuth');
 const Receipt = require('../models/Receipt');
 const ReceiptItem = require('../models/ReceiptItem');
 const Product = require('../models/Product');
-const ShopProduct = require('../models/ShopProduct');
 const Block = require('../models/Block');
 const ReceiptItemLog = require('../models/ReceiptItemLog');
 const DeliveryGroup = require('../models/DeliveryGroup');
@@ -24,6 +23,16 @@ const {
   assertCanConfirmItem,
   assertItemReadyToConfirm,
 } = require('../utils/receiptPermissions');
+// Проведена накладна редагується так само, як відкрита; весь контракт
+// «правка позиції → товар, дзеркало, вектор, дозамовлення» живе в одному місці.
+const {
+  labelPositionsFromMeta,
+  snapshotItem,
+  describeItemUsage,
+  propagateItemEdit,
+  rollbackItemArtifacts,
+  hasOpenSupplementWave,
+} = require('../services/receiptSync');
 
 const staffOnly = requireTelegramRoles(['admin', 'warehouse']);
 
@@ -66,11 +75,7 @@ async function ensureReceiptItemProduct(item, session) {
     'orderNumber',
   ).sort({ orderNumber: -1 }).session(session).lean();
   const nextOrderNumber = (maxProduct?.orderNumber ?? 0) + 1;
-  const pm = item.photoMeta || {};
-  const labelPositions = {};
-  if (pm.commentPos) { labelPositions.commentX = pm.commentPos.x; labelPositions.commentY = pm.commentPos.y; }
-  if (pm.pricePos)   { labelPositions.priceX   = pm.pricePos.x;   labelPositions.priceY   = pm.pricePos.y; }
-  if (pm.qtyPos)     { labelPositions.qtyX     = pm.qtyPos.x;     labelPositions.qtyY     = pm.qtyPos.y; }
+  const labelPositions = labelPositionsFromMeta(item.photoMeta);
 
   product = new Product({
     orderNumber: nextOrderNumber,
@@ -413,10 +418,23 @@ router.patch('/:id', staffOnly, asyncHandler(async (req, res) => {
   res.json(receipt);
 }));
 
+/**
+ * Додавання позиції — дозволене і в проведену накладну.
+ *
+ * Нова позиція завжди починається як 'draft': сам факт того, що накладну колись
+ * провели, не підписує рядок, якого тоді не існувало. Товар з'явиться при
+ * підтвердженні, тим самим шляхом, що й у відкритій накладній.
+ *
+ * Виняток — накладна-дозамовлення з уже закритим прийомом заявок: нову позицію
+ * не буде кому показати, а відкривати нею хвилю заново неправильно.
+ */
 router.post('/:id/items', staffOnly, asyncHandler(async (req, res) => {
   const receipt = await Receipt.findById(req.params.id);
   if (!receipt) throw appError('receipt_not_found');
-  if (receipt.status !== 'draft') throw appError('receipt_already_completed');
+  if (receipt.type === 'supplement' && receipt.status === 'completed'
+      && !(await hasOpenSupplementWave(receipt._id))) {
+    throw appError('receipt_supplement_wave_closed');
+  }
 
   if (!req.is('multipart/form-data')) throw appError('receipt_multipart_required');
 
@@ -481,18 +499,15 @@ router.post('/:id/items', staffOnly, asyncHandler(async (req, res) => {
     qtyPerPackage: parseNumberField(parsed.fields.qtyPerPackage, 'qtyPerPackage'),
   });
 
-  // Save item AND re-check receipt.status='draft' in the SAME transaction so that
-  // a concurrent commit (which CAS-flips status to 'completed') will either run
-  // before us (we abort with 409) or run after us (it sees our changes).
-  // Аналогічний захист є в PATCH і DELETE — тепер і тут.
+  // Save item AND re-check that the receipt still exists in the SAME transaction,
+  // so a concurrently deleted receipt can't leave an orphan item behind. Статус
+  // тут більше не гейт: позиція, додана під час проведення, просто лишається
+  // непідтвердженою в уже проведеній накладній — це підтримуваний стан.
   const addItemSession = await mongoose.connection.startSession();
   try {
     await addItemSession.withTransaction(async () => {
-      const liveReceipt = await Receipt.findOne(
-        { _id: req.params.id, status: 'draft' },
-        '_id status',
-      ).session(addItemSession);
-      if (!liveReceipt) throw appError('receipt_already_completed');
+      const liveReceipt = await Receipt.findById(req.params.id, '_id status').session(addItemSession);
+      if (!liveReceipt) throw appError('receipt_not_found');
       await receiptItem.save({ session: addItemSession });
     });
   } catch (txErr) {
@@ -556,86 +571,94 @@ router.get('/:id/items', staffOnly, asyncHandler(async (req, res) => {
   res.json(enrichedItems);
 }));
 
+/** Поля позиції, які показуються в журналі накладної. */
+function logSnapshot(item) {
+  return {
+    totalQty: item.totalQty,
+    destination: item.destination,
+    price: item.price,
+    qtyPerPackage: item.qtyPerPackage,
+    qtyPerShop: item.qtyPerShop,
+    photoUrl: item.photoUrl,
+  };
+}
+
 // ОНОВЛЕННЯ ПОЗИЦІЇ (PATCH)
+/**
+ * Правка позиції дозволена В БУДЬ-ЯКИЙ ДЕНЬ, зокрема в проведеній накладній.
+ *
+ * Накладна — не заморожений папірець, а жива згадка про те, що приїхало: помилку
+ * в ціні чи кількості помічають і назавтра. Тому статус накладної тут більше не
+ * гейт; гейтом лишається лише те, чи товар уже поїхав далі (див. нижче зміну
+ * призначення) та права з receiptPermissions.
+ *
+ * Кожна правка ОДРАЗУ протягується в похідні документи (propagateItemEdit):
+ * складський товар + його дзеркало ShopProduct, або товар магазину. Кількість
+ * застосовується РІЗНИЦЕЮ, бо залишок відтоді могли міняти вручну. Замовлення
+ * не чіпаються: у них своя зафіксована ціна, і правка накладної не переписує
+ * заднім числом уже погоджену з магазином суму.
+ */
 router.patch('/:id/items/:itemId', staffOnly, asyncHandler(async (req, res) => {
   if (!req.is('multipart/form-data')) {
     throw appError('validation_failed', { field: 'multipart/form-data is required' });
   }
 
-  // Validate item existence BEFORE consuming the body.
-  const [receipt, item] = await Promise.all([
-    Receipt.findById(req.params.id).lean(),
-    ReceiptItem.findOne({ _id: req.params.itemId, receiptId: req.params.id }),
-  ]);
-  if (!item) throw appError('receipt_item_not_found');
+  // Validate existence BEFORE consuming the body.
+  const receipt = await Receipt.findById(req.params.id).lean();
   if (!receipt) throw appError('receipt_not_found');
+  if (!(await ReceiptItem.exists({ _id: req.params.itemId, receiptId: req.params.id }))) {
+    throw appError('receipt_item_not_found');
+  }
 
   const parsed = await parseMultipart(req);
 
-  let nextDestination = item.destination || 'shelf';
+  // ── Розбір payload. `undefined` = поле не надсилали → лишається як є ───────
+  let nextDestination;
   if (parsed.fields.destination !== undefined) {
     nextDestination = String(parsed.fields.destination);
     if (!['shelf', 'shops'].includes(nextDestination)) {
       throw appError('receipt_destination_required');
     }
-  }
-  // Накладна-дозамовлення за поточним контрактом завжди приходить на склад.
-  if (receipt.type === 'supplement' && nextDestination !== 'shelf') {
-    throw appError('receipt_supplement_shelf_only');
+    // Накладна-дозамовлення за поточним контрактом завжди приходить на склад.
+    if (receipt.type === 'supplement' && nextDestination !== 'shelf') {
+      throw appError('receipt_supplement_shelf_only');
+    }
   }
 
-  let totalQty = item.totalQty;
+  let nextTotalQty;
   if (parsed.fields.totalQty !== undefined) {
-    totalQty = parseIntField(parsed.fields.totalQty, item.totalQty);
-    if (!Number.isInteger(totalQty) || totalQty < 1) throw appError('receipt_qty_invalid');
+    nextTotalQty = parseIntField(parsed.fields.totalQty, 0);
+    if (!Number.isInteger(nextTotalQty) || nextTotalQty < 1) throw appError('receipt_qty_invalid');
   }
 
-  // Не стираємо групи/qtyPerShop при редагуванні іншого поля: якщо поле не
-  // прийшло у multipart, зберігаємо поточне значення.
-  let deliveryGroupIds = item.deliveryGroupIds || [];
+  let nextDeliveryGroupIds;
   if (parsed.fields.deliveryGroupIds !== undefined) {
-    deliveryGroupIds = safeParseArray(parsed.fields.deliveryGroupIds);
-    if (deliveryGroupIds === null) {
+    nextDeliveryGroupIds = safeParseArray(parsed.fields.deliveryGroupIds);
+    if (nextDeliveryGroupIds === null) {
       throw appError('validation_failed', { field: 'deliveryGroupIds' });
     }
-    if (deliveryGroupIds.length > 0) {
-      const existingCount = await DeliveryGroup.countDocuments({ _id: { $in: deliveryGroupIds } });
-      if (existingCount !== deliveryGroupIds.length) {
+    if (nextDeliveryGroupIds.length > 0) {
+      const existingCount = await DeliveryGroup.countDocuments({ _id: { $in: nextDeliveryGroupIds } });
+      if (existingCount !== nextDeliveryGroupIds.length) {
         throw appError('validation_failed', { field: 'deliveryGroupIds' });
       }
     }
   }
 
-  let qtyPerShop = item.qtyPerShop || 0;
+  let nextQtyPerShop;
   if (parsed.fields.qtyPerShop !== undefined) {
-    qtyPerShop = parseIntField(parsed.fields.qtyPerShop, item.qtyPerShop || 0);
-    if (!Number.isInteger(qtyPerShop) || qtyPerShop < 0) {
+    nextQtyPerShop = parseIntField(parsed.fields.qtyPerShop, -1);
+    if (!Number.isInteger(nextQtyPerShop) || nextQtyPerShop < 0) {
       throw appError('validation_failed', { field: 'qtyPerShop' });
     }
   }
 
-  const arraysEqual = (a = [], b = []) =>
-    a.length === b.length && a.every((v, i) => String(v) === String(b[i]));
-  const changedFields = [];
-
-  if (parsed.fields.price !== undefined) {
-    const nextPrice = parsed.fields.price !== '' ? Number(parsed.fields.price) : null;
-    if (nextPrice !== item.price) changedFields.push('price');
-  }
+  let nextPrice;
+  if (parsed.fields.price !== undefined) nextPrice = parseNumberField(parsed.fields.price, 'price');
+  let nextQtyPerPackage;
   if (parsed.fields.qtyPerPackage !== undefined) {
-    const nextQtyPerPackage = parsed.fields.qtyPerPackage !== '' ? Number(parsed.fields.qtyPerPackage) : null;
-    if (nextQtyPerPackage !== item.qtyPerPackage) changedFields.push('qtyPerPackage');
+    nextQtyPerPackage = parseNumberField(parsed.fields.qtyPerPackage, 'qtyPerPackage');
   }
-  if (nextDestination !== (item.destination || 'shelf')) changedFields.push('destination');
-  if (totalQty !== item.totalQty) changedFields.push('totalQty');
-  if (parsed.fields.deliveryGroupIds !== undefined
-      && !arraysEqual(deliveryGroupIds, item.deliveryGroupIds || [])) changedFields.push('deliveryGroupIds');
-  if (parsed.fields.qtyPerShop !== undefined && qtyPerShop !== (item.qtyPerShop || 0)) changedFields.push('qtyPerShop');
-
-  const hasNewMainPhoto = (parsed.files || []).some(
-    (f) => f.field === 'photo' || !f.field,
-  );
-  if (hasNewMainPhoto || safeUploadName(parsed.fields.photoFilename)) changedFields.push('photoUrl');
 
   let normalizedPhotoMeta = null;
   if (parsed.fields.photoMeta !== undefined) {
@@ -651,136 +674,194 @@ router.patch('/:id/items/:itemId', staffOnly, asyncHandler(async (req, res) => {
         pricePos: rawPhotoMeta.pricePos || null,
         qtyPos: rawPhotoMeta.qtyPos || null,
       };
-      const prevMeta = item.photoMeta || { comment: '', commentPos: { x: 0.5, y: 0.5 } };
-      if (normalizedPhotoMeta.comment !== (prevMeta.comment || '')
-          || normalizedPhotoMeta.commentPos.x !== (prevMeta.commentPos?.x || 0.5)
-          || normalizedPhotoMeta.commentPos.y !== (prevMeta.commentPos?.y || 0.5)
-          || JSON.stringify(normalizedPhotoMeta.pricePos) !== JSON.stringify(prevMeta.pricePos || null)
-          || JSON.stringify(normalizedPhotoMeta.qtyPos) !== JSON.stringify(prevMeta.qtyPos || null)) {
-        changedFields.push('photoMeta');
-      }
     }
   }
 
-  // Завершена накладна — read-only. Поведінку confirmed-позицій окремо не
-  // змінюємо в цій задачі; тут лише зберігаємо існуючий receipt-level freeze.
-  if (receipt.status === 'completed' && changedFields.length > 0) {
-    throw appError('receipt_completed_locked');
-  }
-
-  assertCanEditItem(req.user, item, changedFields);
-
-  const oldSnapshot = {
-    totalQty: item.totalQty,
-    destination: item.destination,
-    price: item.price,
-    qtyPerPackage: item.qtyPerPackage,
-    qtyPerShop: item.qtyPerShop,
-    photoUrl: item.photoUrl,
-  };
-
-  item.totalQty = totalQty;
-  item.destination = nextDestination;
-  item.deliveryGroupIds = deliveryGroupIds;
-  item.qtyPerShop = qtyPerShop;
-  if (parsed.fields.price !== undefined) item.price = parseNumberField(parsed.fields.price, 'price');
-  if (parsed.fields.qtyPerPackage !== undefined) {
-    item.qtyPerPackage = parseNumberField(parsed.fields.qtyPerPackage, 'qtyPerPackage');
-  }
-  if (normalizedPhotoMeta) item.photoMeta = normalizedPhotoMeta;
-
-  const originalFilename = safeUploadName(parsed.fields.originalFilename);
-  if (originalFilename) item.originalPhotoUrl = r2Url('originals', originalFilename);
-
   const photoFilename = safeUploadName(parsed.fields.photoFilename);
-  if (photoFilename) {
-    item.photoUrl = r2Url('products', photoFilename);
-    item.photoName = photoFilename;
-  }
+  const originalFilename = safeUploadName(parsed.fields.originalFilename);
 
-  // Re-check draft status in the SAME transaction as item.save(). This closes
-  // the race where commit could flip the receipt after the initial read but
-  // before the item update was persisted.
+  const arraysEqual = (a = [], b = []) =>
+    a.length === b.length && a.every((v, i) => String(v) === String(b[i]));
+
+  let outcome = null;
   const txSession = await mongoose.connection.startSession();
   try {
     await txSession.withTransaction(async () => {
-      const liveReceipt = await Receipt.findOne(
-        { _id: req.params.id, status: 'draft' },
-        '_id status',
+      outcome = null; // withTransaction може перезапустити колбек — скидаємо результат
+
+      // Позицію перечитуємо ВСЕРЕДИНІ транзакції: різниця кількості рахується
+      // від актуального значення, тож дві паралельні правки не загублять одна одну
+      // (конфлікт запису → повторна спроба з новим читанням).
+      const item = await ReceiptItem.findOne(
+        { _id: req.params.itemId, receiptId: req.params.id },
       ).session(txSession);
-      if (!liveReceipt) throw appError('receipt_completed_locked');
+      if (!item) throw appError('receipt_item_not_found');
+      const liveReceipt = await Receipt.findById(req.params.id, '_id status type').session(txSession).lean();
+      if (!liveReceipt) throw appError('receipt_not_found');
+      const afterCommit = liveReceipt.status === 'completed';
+
+      // Хвиля дозамовлення вже пішла продавцям: підписи на фото перемальовуються
+      // разом з ціною (photoFilename), але ПІДМІНИТИ саму світлину (originalFilename
+      // = нове знімання/галерея) не можна — магазин замовляв би одне, а приїхало б
+      // інше. Перевірка живого статусу тут, а не до транзакції: накладну могли
+      // провести саме поки вантажилось фото.
+      if (liveReceipt.type === 'supplement' && afterCommit && originalFilename) {
+        throw appError('receipt_supplement_photo_locked');
+      }
+
+      const destination = nextDestination ?? (item.destination || 'shelf');
+      const totalQty = nextTotalQty ?? item.totalQty;
+      const deliveryGroupIds = nextDeliveryGroupIds ?? (item.deliveryGroupIds || []);
+      const qtyPerShop = nextQtyPerShop ?? (item.qtyPerShop || 0);
+
+      const changedFields = [];
+      if (nextPrice !== undefined && nextPrice !== item.price) changedFields.push('price');
+      if (nextQtyPerPackage !== undefined && nextQtyPerPackage !== item.qtyPerPackage) {
+        changedFields.push('qtyPerPackage');
+      }
+      if (destination !== (item.destination || 'shelf')) changedFields.push('destination');
+      if (totalQty !== item.totalQty) changedFields.push('totalQty');
+      if (nextDeliveryGroupIds !== undefined
+          && !arraysEqual(deliveryGroupIds, item.deliveryGroupIds || [])) changedFields.push('deliveryGroupIds');
+      if (nextQtyPerShop !== undefined && qtyPerShop !== (item.qtyPerShop || 0)) changedFields.push('qtyPerShop');
+      if (photoFilename) changedFields.push('photoUrl');
+
+      assertCanEditItem(req.user, item, changedFields);
+
+      // ── Зміна призначення вже створеної позиції ─────────────────────────────
+      // Складський товар і товар магазину — РІЗНІ сутності, а не прапорець на
+      // одній. Перемкнути призначення можна, лише поки створеним товаром ще
+      // ніхто не скористався: тоді старий товар прибирається начисто, позиція
+      // повертається в 'draft', і повторне підтвердження створює новий у
+      // правильному місці. Якщо товар уже в блоці/замовленні/збиранні — відмова
+      // з поясненням; нишком архівувати його (і скасовувати позиції в
+      // замовленнях магазинів) правка накладної не має права.
+      const statusBefore = item.status;
+      const rerouted = destination !== (item.destination || 'shelf')
+        && !!(item.createdProductId || item.createdShopProductId);
+      if (rerouted) {
+        const usage = await describeItemUsage(item, { session: txSession });
+        if (usage.inUse) throw appError('receipt_item_in_use', { reasons: usage.reasons.join('; ') });
+        await rollbackItemArtifacts(item, { session: txSession });
+        item.status = 'draft';
+      }
+
+      const before = logSnapshot(item);
+      const prev = snapshotItem(item);
+
+      item.totalQty = totalQty;
+      item.destination = destination;
+      item.deliveryGroupIds = deliveryGroupIds;
+      item.qtyPerShop = qtyPerShop;
+      if (nextPrice !== undefined) item.price = nextPrice;
+      if (nextQtyPerPackage !== undefined) item.qtyPerPackage = nextQtyPerPackage;
+      if (normalizedPhotoMeta) item.photoMeta = normalizedPhotoMeta;
+      if (originalFilename) item.originalPhotoUrl = r2Url('originals', originalFilename);
+      if (photoFilename) {
+        item.photoUrl = r2Url('products', photoFilename);
+        item.photoName = photoFilename;
+      }
+
       await item.save({ session: txSession });
+
+      // Товар, дзеркало і вектор оновлюються в ТІЙ САМІЙ транзакції, що й позиція:
+      // накладна не може розійтися зі складом навіть на мить.
+      const propagation = await propagateItemEdit(item, prev, { session: txSession });
+
+      outcome = { item, before, after: logSnapshot(item), propagation, rerouted, statusBefore, afterCommit };
     });
   } finally {
     txSession.endSession();
   }
 
-  const newSnapshot = {
-    totalQty: item.totalQty,
-    destination: item.destination,
-    price: item.price,
-    qtyPerPackage: item.qtyPerPackage,
-    qtyPerShop: item.qtyPerShop,
-    photoUrl: item.photoUrl,
-  };
-  const logChanges = Object.entries(oldSnapshot)
-    .filter(([field]) => String(oldSnapshot[field] ?? '') !== String(newSnapshot[field] ?? ''))
-    .map(([field]) => ({
+  const { item, before, after, propagation, rerouted, statusBefore, afterCommit } = outcome;
+
+  const logChanges = Object.keys(before)
+    .filter((field) => String(before[field] ?? '') !== String(after[field] ?? ''))
+    .map((field) => ({
       field,
       label: FIELD_LABELS[field] || field,
-      from: oldSnapshot[field],
-      to: newSnapshot[field],
+      from: before[field],
+      to: after[field],
     }));
+  if (rerouted && statusBefore !== item.status) {
+    logChanges.push({ field: 'status', label: 'Статус', from: statusBefore, to: item.status });
+  }
   if (logChanges.length > 0) {
     ReceiptItemLog.create({
-      receiptId: receipt._id,
+      receiptId: req.params.id,
       itemId: item._id,
       itemName: item.name,
       action: 'update',
       actor: getActor(req),
       changes: logChanges,
+      // Скільки саме додалося/відняли на складі — головне питання при розборі
+      // «чому залишок такий»; сам by-value залишок у логу позиції не видно.
+      meta: {
+        afterCommit,
+        ...(propagation.quantityDelta ? { stockDelta: propagation.quantityDelta } : {}),
+        ...(propagation.quantityClamped ? { stockClampedToZero: true } : {}),
+        ...(propagation.productId ? { productId: propagation.productId } : {}),
+        ...(propagation.shopProductId ? { shopProductId: propagation.shopProductId } : {}),
+      },
     }).catch((e) => {});
   }
 
+  // Нове фото → старий вектор бреше. Перегенерація ПІСЛЯ коміту (Gemini повільний
+  // і не має тримати транзакцію), force — бо рядок вектора вже існує.
+  if (propagation.reembed === 'warehouse') {
+    embedProductAsync(propagation.reembedDoc, 'receipt-item-edit', { force: true });
+  } else if (propagation.reembed === 'shop-owned') {
+    embedShopProductAsync(propagation.reembedDoc, 'receipt-item-edit', { force: true });
+  }
+
   const io = getIO();
-  if (io) io.to(`receipt_${req.params.id}`).emit('receipt_item_updated', item);
+  if (io) {
+    io.to(`receipt_${req.params.id}`).emit('receipt_item_updated', item);
+    // Правка проведеної накладної міняє живий товар — дошки складу мають це побачити.
+    if (propagation.productId || propagation.shopProductId) io.emit('incoming_updated');
+  }
 
   res.json(item);
 }));
 
 // ВИДАЛЕННЯ ПОЗИЦІЇ (DELETE)
+/**
+ * Видалити рядок можна і з проведеної накладної — але лише поки товар, який він
+ * створив, нікуди не поїхав. Товар у блоці, в замовленні магазину чи в збиранні
+ * не зникає через правку паперу: тоді приходить 409 зі списком причин, а забрати
+ * товар зі складу можна свідомою архівацією на сторінці Складу.
+ */
 router.delete('/:id/items/:itemId', staffOnly, asyncHandler(async (req, res) => {
   const session = await mongoose.connection.startSession();
   try {
     let deletedItem = null;
+    let removedArtifacts = null;
 
     await session.withTransaction(async () => {
-      // Атомарна перевірка статусу + delete у одній сесії: захищає від race
-      // condition «commit накладної проскочив після перевірки, до видалення».
-      const receipt = await Receipt.findOne(
-        { _id: req.params.id },
-        '_id status',
-      ).session(session);
+      removedArtifacts = null; // withTransaction може перезапустити колбек
+      const receipt = await Receipt.findById(req.params.id, '_id status').session(session);
       if (!receipt) throw appError('receipt_not_found');
-      if (receipt.status !== 'draft') throw appError('receipt_completed_no_delete');
 
       const item = await ReceiptItem.findOne(
         { _id: req.params.itemId, receiptId: req.params.id },
       ).session(session);
       if (!item) throw appError('receipt_item_not_found');
 
-      // Only the worker who added it (or admin) may delete, and never once
-      // it has been confirmed. Checked inside the txn so a concurrent
-      // confirm/commit cannot slip between the check and the delete.
+      // Only the worker who added it (or admin) may delete, and a confirmed item
+      // is admin-only. Checked inside the txn so a concurrent confirm cannot slip
+      // between the check and the delete.
       assertCanDeleteItem(req.user, item);
+
+      // Позиція без створених документів (не підтверджена) — просто зникає.
+      if (item.createdProductId || item.createdShopProductId) {
+        const usage = await describeItemUsage(item, { session });
+        if (usage.inUse) throw appError('receipt_item_in_use', { reasons: usage.reasons.join('; ') });
+        removedArtifacts = await rollbackItemArtifacts(item, { session });
+      }
 
       await item.deleteOne({ session });
       deletedItem = item;
-
-      // If confirm had created a shop-owned ShopProduct, remove it too.
-      if (deletedItem.createdShopProductId) {
-        await ShopProduct.deleteOne({ _id: deletedItem.createdShopProductId }).session(session);
-      }
     });
 
     // Аудит-лог видалення позиції — обов'язковий слід для розслідувань
@@ -795,10 +876,15 @@ router.delete('/:id/items/:itemId', staffOnly, asyncHandler(async (req, res) => 
         { field: 'totalQty', label: FIELD_LABELS.totalQty, from: deletedItem.totalQty, to: null },
         { field: 'price', label: FIELD_LABELS.price, from: deletedItem.price, to: null },
       ],
+      // Що саме зникло разом з рядком — інакше «куди подівся товар» не відновити.
+      meta: removedArtifacts || {},
     }).catch((e) => {});
 
     const io = getIO();
-    if (io) io.to(`receipt_${req.params.id}`).emit('receipt_item_deleted', req.params.itemId);
+    if (io) {
+      io.to(`receipt_${req.params.id}`).emit('receipt_item_deleted', req.params.itemId);
+      if (removedArtifacts) io.emit('incoming_updated');
+    }
 
     res.json({ message: 'Позицію видалено' });
   } finally {
@@ -809,10 +895,14 @@ router.delete('/:id/items/:itemId', staffOnly, asyncHandler(async (req, res) => 
 // ── CONFIRM / UNCONFIRM A SINGLE ITEM ─────────────────────────────────────
 // Only the worker who added the item (or an admin) may sign it off. A receipt
 // can only be committed once every non-deleted item is confirmed.
+//
+// Підтвердження працює і в проведеній накладній: рядок, доданий після
+// проведення, стає товаром тим самим шляхом, що й будь-який інший.
 router.post('/:id/items/:itemId/confirm', staffOnly, asyncHandler(async (req, res) => {
   const session = await mongoose.connection.startSession();
   try {
     let confirmedItem = null;
+    let receiptDoc = null;
     // ShopProducts that need (re)embedding — scheduled AFTER commit so we never
     // embed a doc that could still roll back. Reset on every transaction attempt.
     let embedTargets = [];
@@ -821,7 +911,8 @@ router.post('/:id/items/:itemId/confirm', staffOnly, asyncHandler(async (req, re
       const receipt = await Receipt.findById(req.params.id).session(session);
       const item = await ReceiptItem.findOne({ _id: req.params.itemId, receiptId: req.params.id }).session(session);
       if (!item) throw appError('receipt_item_not_found');
-      if (!receipt || receipt.status !== 'draft') throw appError('receipt_completed_locked');
+      if (!receipt) throw appError('receipt_not_found');
+      receiptDoc = receipt;
 
       assertCanConfirmItem(req.user, item);
       assertItemReadyToConfirm(item);
@@ -888,6 +979,33 @@ router.post('/:id/items/:itemId/confirm', staffOnly, asyncHandler(async (req, re
       if (kind === 'warehouse') embedProductAsync(doc, reason);
       else                      embedShopProductAsync(doc, reason); // shop-owned
     }
+
+    // Позиція, додана в УЖЕ проведену накладну-дозамовлення, має потрапити в ту
+    // саму хвилю — інакше товар мовчки осів би на складі, а магазини його не
+    // побачили. Створення ідемпотентне (унікальний {receiptItemId, deliveryGroupId}),
+    // тому наздоганяє рівно нову позицію. Якщо прийом заявок уже закрито, нічого
+    // не робимо: заново відкривати хвилю правкою накладної не можна.
+    if (receiptDoc?.status === 'completed' && receiptDoc.type === 'supplement'
+        && await hasOpenSupplementWave(receiptDoc._id)) {
+      try {
+        const { createOffersForReceipt } = require('../services/supplementOffers');
+        const { created } = await createOffersForReceipt(receiptDoc._id);
+        if (created.length) {
+          for (const offer of created) {
+            try {
+              getIO()?.emit('supplement_opened', {
+                offerId: String(offer._id),
+                deliveryGroupId: String(offer.deliveryGroupId),
+              });
+            } catch (_) { /* сокет не критичний */ }
+          }
+          require('../services/supplementNotify').notifyOffers(created, 'opened').catch(() => {});
+        }
+      } catch (err) {
+        // Товар уже на складі — це головне; звірятель supplementScheduler добʼє.
+      }
+    }
+
     const io = getIO();
     if (io) {
       io.to(`receipt_${req.params.id}`).emit('receipt_item_confirmed', confirmedItem);
@@ -899,49 +1017,40 @@ router.post('/:id/items/:itemId/confirm', staffOnly, asyncHandler(async (req, re
   }
 }));
 
-// Reverse a confirmation so the owner can fix a mistake before the receipt is
-// committed. Without this, one wrong confirm would permanently block the whole
-// receipt (confirmed items can't be edited/deleted) with no non-admin recovery.
+/**
+ * Зняти підтвердження — це ВІДКАТ позиції: створений нею товар (з дзеркалом,
+ * вектором і пропозиціями дозамовлення) зникає, і рядок знову можна правити чи
+ * видалити. Працює і в проведеній накладній.
+ *
+ * Єдина умова — товаром ще ніхто не скористався. Раніше товар у блоці просто
+ * тихо лишався жити без підтвердженої позиції; тепер це явна відмова з
+ * причиною, бо «зняв підтвердження, а товар усе одно на полиці» — саме той
+ * мовчазний розрив між накладною і складом, який ця сторінка має виключати.
+ */
 router.post('/:id/items/:itemId/unconfirm', staffOnly, asyncHandler(async (req, res) => {
   const session = await mongoose.connection.startSession();
   try {
     let updatedItem = null;
     let didUnconfirm = false;
+    let removedArtifacts = null;
     await session.withTransaction(async () => {
       didUnconfirm = false; // reset per attempt (withTransaction may re-run this)
-      const receipt = await Receipt.findById(req.params.id).session(session);
+      removedArtifacts = null;
+      const receipt = await Receipt.findById(req.params.id, '_id status').session(session);
       const item = await ReceiptItem.findOne({ _id: req.params.itemId, receiptId: req.params.id }).session(session);
       if (!item) throw appError('receipt_item_not_found');
-      if (!receipt || receipt.status !== 'draft') throw appError('receipt_completed_locked');
+      if (!receipt) throw appError('receipt_not_found');
 
       assertCanConfirmItem(req.user, item);
 
       if (item.status === 'confirmed') {
-        if ((item.destination || 'shelf') === 'shops') {
-          // shops item: created no warehouse product / stock. Remove the shop-owned
-          // catalog entry it created (if any) so a re-confirm — to any destination —
-          // starts clean. Never deletes a warehouse mirror (linkedProductId: null guard).
-          if (item.createdShopProductId) {
-            await ShopProduct.deleteOne({ _id: item.createdShopProductId, linkedProductId: null }).session(session);
-            item.createdShopProductId = null;
-          }
-        } else if (item.createdProductId) {
-          const product = await Product.findById(item.createdProductId).session(session);
-          if (product && product.source === 'receipt') {
-            const inBlock = await Block.exists({ productIds: product._id }).session(session);
-            if (!inBlock) {
-              // Also remove the auto-created shop catalog entry so a later
-              // re-confirm doesn't leave an orphan + create a duplicate.
-              await ShopProduct.deleteOne({ linkedProductId: product._id }).session(session);
-              await product.deleteOne({ session });
-              item.createdProductId = null;
-            }
-          }
+        if (item.createdProductId || item.createdShopProductId) {
+          const usage = await describeItemUsage(item, { session });
+          if (usage.inUse) throw appError('receipt_item_in_use', { reasons: usage.reasons.join('; ') });
+          removedArtifacts = await rollbackItemArtifacts(item, { session });
         }
 
         item.status = 'draft';
-        // Stock was reversed above — allow a later re-confirm to re-apply it.
-        item.stockApplied = false;
         await item.save({ session });
         didUnconfirm = true;
       }
@@ -958,6 +1067,7 @@ router.post('/:id/items/:itemId/unconfirm', staffOnly, asyncHandler(async (req, 
         action: 'confirm',
         actor: getActor(req),
         changes: [{ field: 'status', label: 'Статус', from: 'confirmed', to: 'draft' }],
+        meta: removedArtifacts || {},
       }).catch((e) => {});
     }
 
@@ -1103,6 +1213,10 @@ router.post('/:id/commit', staffOnly, asyncHandler(async (req, res) => {
           if (item.qtyPerPackage) currentProduct.quantityPerPackage = item.qtyPerPackage;
           if (!stockAlreadyApplied) currentProduct.quantity = item.totalQty;
           await currentProduct.save({ session });
+          // Проведення дописує в товар ціну/упаковку — отже, дзеркало теж мусить
+          // їх побачити. Без цього правка ціни між підтвердженням і проведенням
+          // лишала «Товари Магазинів» зі старою ціною назавжди.
+          await syncMirror(currentProduct, { session });
           if (!stockAlreadyApplied) {
             item.stockApplied = true;
             await item.save({ session });
@@ -1130,6 +1244,9 @@ router.post('/:id/commit', staffOnly, asyncHandler(async (req, res) => {
         });
 
         await currentProduct.save({ session });
+        // Той самий інваріант, що й у підтвердженні: складський товар не існує
+        // без свого дзеркала в «Товарах Магазинів».
+        await syncMirror(currentProduct, { session });
         item.createdProductId = currentProduct._id;
         item.stockApplied = true;
         await item.save({ session });

@@ -45,12 +45,18 @@ describe('receipt core contract', () => {
     expect(route).toContain('const { text, name } = await describeImageUrl(url)');
   });
 
-  test('PATCH re-checks draft status inside its write transaction', () => {
+  // Проведена накладна більше не заморожена (docs/receipt/readme.md §5), тому
+  // PATCH тримається не на статусі, а на транзакції: позиція перечитується
+  // всередині неї, і в ній же правка доходить до товару й дзеркала.
+  test('PATCH re-reads the item and propagates inside one write transaction', () => {
     const start = route.indexOf("router.patch('/:id/items/:itemId'");
     const end = route.indexOf('// ВИДАЛЕННЯ ПОЗИЦІЇ (DELETE)', start);
     const patch = route.slice(start, end);
-    expect(patch).toContain("{ _id: req.params.id, status: 'draft' }");
+    expect(patch).toContain('.session(txSession)');
     expect(patch).toContain('await item.save({ session: txSession })');
+    expect(patch).toContain('await propagateItemEdit(item, prev, { session: txSession })');
+    // Статус накладної не гейтить правку позиції.
+    expect(patch).not.toContain("status: 'draft'");
   });
 
   test('supplement offers use only the product created by the receipt item', () => {
