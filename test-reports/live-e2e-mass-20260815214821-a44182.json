@@ -1,0 +1,3974 @@
+{
+  "runId": "20260815214821-a44182",
+  "marker": "__LIVE_E2E_MASS__20260815214821-a44182",
+  "seed": 2384756087,
+  "config": {
+    "sellers": 100,
+    "lateSellers": 8,
+    "shops": 120,
+    "products": 240,
+    "blocks": 12,
+    "warehouses": 12,
+    "itemsPerOrder": 20,
+    "orderConcurrency": 100,
+    "mergeRaceSellers": 25,
+    "conflictShops": 10,
+    "oosBlocks": 2
+  },
+  "db": "tg_manager",
+  "host": "ac-hq2xfhf-shard-00-02.epfky0s.mongodb.net",
+  "execute": true,
+  "durationMs": 852039,
+  "summary": {
+    "passed": 743,
+    "failed": 0,
+    "error": null
+  },
+  "metrics": {
+    "api": {
+      "POST order": {
+        "n": 175,
+        "ok": 175,
+        "fail": 0,
+        "p50Ms": 12027,
+        "p95Ms": 13171,
+        "p99Ms": 14048,
+        "maxMs": 14128
+      },
+      "POST start-session": {
+        "n": 2,
+        "ok": 2,
+        "fail": 0,
+        "p50Ms": 1171,
+        "p95Ms": 1171,
+        "p99Ms": 1171,
+        "maxMs": 27851
+      },
+      "POST conflict-resolve": {
+        "n": 20,
+        "ok": 20,
+        "fail": 0,
+        "p50Ms": 3701,
+        "p95Ms": 7575,
+        "p99Ms": 7575,
+        "maxMs": 7622
+      },
+      "POST claim-race": {
+        "n": 12,
+        "ok": 1,
+        "fail": 11,
+        "p50Ms": 2761,
+        "p95Ms": 4667,
+        "p99Ms": 4667,
+        "maxMs": 5049
+      },
+      "POST complete": {
+        "n": 199,
+        "ok": 199,
+        "fail": 0,
+        "p50Ms": 29325,
+        "p95Ms": 39369,
+        "p99Ms": 46659,
+        "maxMs": 47370
+      },
+      "POST claim": {
+        "n": 2,
+        "ok": 2,
+        "fail": 0,
+        "p50Ms": 456,
+        "p95Ms": 456,
+        "p99Ms": 456,
+        "maxMs": 488
+      },
+      "PATCH progress-race": {
+        "n": 1,
+        "ok": 1,
+        "fail": 0,
+        "p50Ms": 280,
+        "p95Ms": 280,
+        "p99Ms": 280,
+        "maxMs": 280
+      },
+      "POST OOS-race": {
+        "n": 1,
+        "ok": 0,
+        "fail": 1,
+        "p50Ms": 633,
+        "p95Ms": 633,
+        "p99Ms": 633,
+        "maxMs": 633
+      },
+      "GET locked-poll": {
+        "n": 110,
+        "ok": 110,
+        "fail": 0,
+        "p50Ms": 736,
+        "p95Ms": 8378,
+        "p99Ms": 9227,
+        "maxMs": 9245
+      },
+      "POST next-task": {
+        "n": 32,
+        "ok": 32,
+        "fail": 0,
+        "p50Ms": 736,
+        "p95Ms": 1511,
+        "p99Ms": 1570,
+        "maxMs": 2222
+      },
+      "PATCH progress": {
+        "n": 12,
+        "ok": 12,
+        "fail": 0,
+        "p50Ms": 578,
+        "p95Ms": 8687,
+        "p99Ms": 8687,
+        "maxMs": 8820
+      },
+      "POST heartbeat": {
+        "n": 12,
+        "ok": 12,
+        "fail": 0,
+        "p50Ms": 165,
+        "p95Ms": 357,
+        "p99Ms": 357,
+        "maxMs": 517
+      },
+      "GET closure-poll": {
+        "n": 110,
+        "ok": 110,
+        "fail": 0,
+        "p50Ms": 21656,
+        "p95Ms": 28956,
+        "p99Ms": 30778,
+        "maxMs": 35534
+      },
+      "POST OOS": {
+        "n": 40,
+        "ok": 40,
+        "fail": 0,
+        "p50Ms": 33772,
+        "p95Ms": 38731,
+        "p99Ms": 38876,
+        "maxMs": 48231
+      },
+      "POST coverage-repair": {
+        "n": 1,
+        "ok": 1,
+        "fail": 0,
+        "p50Ms": 50301,
+        "p95Ms": 50301,
+        "p99Ms": 50301,
+        "maxMs": 50301
+      }
+    },
+    "phases": {
+      "fixtures": {
+        "durationMs": 5935
+      },
+      "ordering_burst": {
+        "durationMs": 14154
+      },
+      "same_seller_merge_races": {
+        "durationMs": 9059
+      },
+      "conflict_gate": {
+        "durationMs": 36696
+      },
+      "concurrent_picking": {
+        "durationMs": 629166
+      }
+    },
+    "counts": {
+      "workerIterations": [
+        23,
+        20,
+        21,
+        21,
+        21,
+        21,
+        23,
+        20,
+        21,
+        21,
+        21,
+        20
+      ],
+      "polls": [
+        {
+          "n": 28,
+          "failures": 0,
+          "transportErrors": 0
+        },
+        {
+          "n": 28,
+          "failures": 0,
+          "transportErrors": 0
+        },
+        {
+          "n": 28,
+          "failures": 0,
+          "transportErrors": 0
+        },
+        {
+          "n": 26,
+          "failures": 0,
+          "transportErrors": 0
+        }
+      ],
+      "sellers": 100,
+      "lateSellers": 8,
+      "shops": 120,
+      "products": 240,
+      "blocks": 12,
+      "warehouses": 12,
+      "sessionOrders": 109,
+      "currentTasks": 240,
+      "oldTasksRemaining": 5,
+      "emptyBlocks": 2,
+      "shortPickOrders": 9
+    },
+    "races": {
+      "claim": [
+        200,
+        409,
+        409,
+        409,
+        409,
+        409,
+        409,
+        409,
+        409,
+        409,
+        409,
+        409
+      ],
+      "progressComplete": {
+        "progress": 200,
+        "complete": 200
+      },
+      "oosComplete": {
+        "oos": 409,
+        "complete": 200,
+        "reason": "packed"
+      }
+    }
+  },
+  "assertions": [
+    {
+      "ok": true,
+      "name": "Mass preflight can create an ordering-open per-group schedule",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "Mass preflight can create a picking-allowed per-group schedule",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "Mass critical Order unique index exists",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "Mass session-scoped PickingTask unique index exists",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "Mass Block partial unique index exists",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "Mass process is isolated from Redis",
+      "details": "REDIS_URL was configured and disabled for this process"
+    },
+    {
+      "ok": true,
+      "name": "Mass ephemeral real Express app is healthy",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "Mass: synthetic per-group ordering window is open",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S67 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S1 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S80 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S3 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S14 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S9 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S79 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S62 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S15 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S66 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S69 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S81 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S68 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S5 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S11 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S82 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S74 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S84 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S75 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S77 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S76 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S70 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S13 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S78 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S87 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S6 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S20 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S83 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S85 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S89 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S90 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S92 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S2 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S10 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S96 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S95 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S93 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S17 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S18 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S16 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S25 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S22 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S24 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S88 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S33 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S36 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S31 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S34 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S27 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S97 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S99 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S26 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S100 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S86 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S41 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S30 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S45 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S40 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S35 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S19 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S37 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S39 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S55 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S8 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S58 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S98 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S38 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S57 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S23 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S64 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S50 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S53 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S72 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S4 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S60 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S32 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S44 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S7 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S47 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S54 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S52 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S65 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S51 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S61 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S21 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S48 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S73 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S56 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S42 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S59 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S49 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S46 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S71 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S29 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S63 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S91 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S94 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S28 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S43 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S12 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "All 100 initial Orders land in ONE ordering session",
+      "details": "actual=1 expected=1"
+    },
+    {
+      "ok": true,
+      "name": "Mass ordering burst created one current OrderingSession",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "Mass current OrderingSession exists",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S16 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S9 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S4 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S10 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S13 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S21 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S12 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S7 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S22 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S14 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S5 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S11 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S2 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S17 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S6 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S1 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S15 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S23 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S3 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S25 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S20 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S18 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S8 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S24 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S19 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S22 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S21 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S7 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S16 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S14 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S10 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S5 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S4 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S13 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S9 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S11 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S12 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S2 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S1 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S15 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S17 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S6 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S25 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S20 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S23 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S24 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S3 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S18 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S8 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S19 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S22 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S21 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S16 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S10 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S14 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S7 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S4 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S11 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S13 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S6 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S17 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S1 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S15 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S2 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S9 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S12 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S5 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S25 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S20 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S24 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S23 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S8 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S18 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S3 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass order request accepted",
+      "details": "seller=MASS_S19 status=201 err="
+    },
+    {
+      "ok": true,
+      "name": "100 concurrent sellers still produce exactly one active Order each",
+      "details": "actual=100 expected=100"
+    },
+    {
+      "ok": true,
+      "name": "No seller/shop/session has duplicate active Orders after mass races",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365856"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365862"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365860"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365857"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365868"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365859"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365865"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365858"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365861"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365864"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365867"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365863"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365866"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365869"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365870"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365871"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365872"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365873"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365874"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365875"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365876"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365877"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365878"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365879"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365880"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365881"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365882"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365883"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365884"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365885"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365886"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365887"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365888"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365889"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365890"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365891"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365892"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365893"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365894"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365895"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365896"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365897"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365898"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365899"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365900"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365901"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365902"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365903"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365904"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365905"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365906"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365907"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365908"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365909"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365910"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365911"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365912"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365913"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365914"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365915"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365916"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365917"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365918"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365919"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365920"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365927"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365926"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365921"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365925"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365924"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365929"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365923"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365922"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365928"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365930"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365931"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365932"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365933"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365934"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365935"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365936"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365937"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365938"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365939"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365940"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365941"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365942"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365943"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365944"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365945"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365946"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365947"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365948"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365949"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365950"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365951"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365952"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365953"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365954"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365955"
+    },
+    {
+      "ok": true,
+      "name": "Mass old session has a distinct identity",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "Old orphan tasks are visible as warnings during mass run",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "Old stale Orders are visible as warnings during mass run",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "Mass: closed synthetic per-group schedule exists",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "Mass current OrderingSession identity survives open→closed phase",
+      "details": "actual=\"6a80dead68af4aa2371e1f2c\" expected=\"6a80dead68af4aa2371e1f2c\""
+    },
+    {
+      "ok": true,
+      "name": "Mass synthetic picking phase is closed",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "Mass pre-start conflict gate blocks with many mixed Orders",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "Mass start reports every conflict shop",
+      "details": "reported=30"
+    },
+    {
+      "ok": true,
+      "name": "Mass no current-session PickingTask is built before conflicts resolve",
+      "details": "actual=0 expected=0"
+    },
+    {
+      "ok": true,
+      "name": "Mass concurrent conflict moves all succeed",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "Mass picking starts only after all conflicts are resolved",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "Mass session is confirmed immediately after start",
+      "details": "actual=\"confirmed\" expected=\"confirmed\""
+    },
+    {
+      "ok": true,
+      "name": "Mass box numbering freezes one box per active resolved shop",
+      "details": "actual=100 expected=100"
+    },
+    {
+      "ok": true,
+      "name": "Mass taskBuilder creates exactly one current-session task for every ordered product",
+      "details": "actual=240 expected=240"
+    },
+    {
+      "ok": true,
+      "name": "Mass all freshly-built tasks are pending",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "Hot product task contains almost every shop",
+      "details": "items=100"
+    },
+    {
+      "ok": true,
+      "name": "Second hot product also stresses large PickingTask.items array",
+      "details": "items=100"
+    },
+    {
+      "ok": true,
+      "name": "Exactly one warehouse worker wins an atomic claim race",
+      "details": "actual=1 expected=1"
+    },
+    {
+      "ok": true,
+      "name": "Hot 100-shop product completes once after claim race",
+      "details": "actual=200 expected=200"
+    },
+    {
+      "ok": true,
+      "name": "Mass progress-race task claimed",
+      "details": "actual=200 expected=200"
+    },
+    {
+      "ok": true,
+      "name": "At least one progress/complete contender succeeds",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "Progress/complete race leaves one terminal completed task",
+      "details": "actual=\"completed\" expected=\"completed\""
+    },
+    {
+      "ok": true,
+      "name": "Mass OOS/complete race task claimed",
+      "details": "actual=200 expected=200"
+    },
+    {
+      "ok": true,
+      "name": "OOS/complete race has a successful winner",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "OOS/complete race leaves one canonical completionReason",
+      "details": "packed"
+    },
+    {
+      "ok": true,
+      "name": "Mass orphan OOS recovery archives interrupted product while other work still exists",
+      "details": "{\"fixedCount\":1}"
+    },
+    {
+      "ok": true,
+      "name": "Mass late Order simultaneously skips passed product and joins pending task",
+      "details": "late=0 appended=1 skipped=1"
+    },
+    {
+      "ok": true,
+      "name": "Mass late Order simultaneously skips passed product and joins pending task",
+      "details": "late=1 appended=1 skipped=1"
+    },
+    {
+      "ok": true,
+      "name": "Mass late Order simultaneously skips passed product and joins pending task",
+      "details": "late=2 appended=1 skipped=1"
+    },
+    {
+      "ok": true,
+      "name": "Mass late Order simultaneously skips passed product and joins pending task",
+      "details": "late=3 appended=1 skipped=1"
+    },
+    {
+      "ok": true,
+      "name": "Mass late Order simultaneously skips passed product and joins pending task",
+      "details": "late=4 appended=1 skipped=1"
+    },
+    {
+      "ok": true,
+      "name": "Mass late Order simultaneously skips passed product and joins pending task",
+      "details": "late=5 appended=1 skipped=1"
+    },
+    {
+      "ok": true,
+      "name": "Mass late Order simultaneously skips passed product and joins pending task",
+      "details": "late=6 appended=1 skipped=1"
+    },
+    {
+      "ok": true,
+      "name": "Mass late Order simultaneously skips passed product and joins pending task",
+      "details": "late=7 appended=1 skipped=1"
+    },
+    {
+      "ok": true,
+      "name": "Mass next-task returns clean HTTP response",
+      "details": "worker=MASS_W4 status=200"
+    },
+    {
+      "ok": true,
+      "name": "Mass next-task returns clean HTTP response",
+      "details": "worker=MASS_W9 status=200"
+    },
+    {
+      "ok": true,
+      "name": "Mass next-task returns clean HTTP response",
+      "details": "worker=MASS_W7 status=200"
+    },
+    {
+      "ok": true,
+      "name": "Mass next-task returns clean HTTP response",
+      "details": "worker=MASS_W3 status=200"
+    },
+    {
+      "ok": true,
+      "name": "Mass next-task returns clean HTTP response",
+      "details": "worker=MASS_W5 status=200"
+    },
+    {
+      "ok": true,
+      "name": "Mass next-task returns clean HTTP response",
+      "details": "worker=MASS_W10 status=200"
+    },
+    {
+      "ok": true,
+      "name": "Mass next-task returns clean HTTP response",
+      "details": "worker=MASS_W8 status=200"
+    },
+    {
+      "ok": true,
+      "name": "Mass next-task returns clean HTTP response",
+      "details": "worker=MASS_W6 status=200"
+    },
+    {
+      "ok": true,
+      "name": "Mass next-task returns clean HTTP response",
+      "details": "worker=MASS_W2 status=200"
+    },
+    {
+      "ok": true,
+      "name": "Mass next-task returns clean HTTP response",
+      "details": "worker=MASS_W12 status=200"
+    },
+    {
+      "ok": true,
+      "name": "Mass next-task returns clean HTTP response",
+      "details": "worker=MASS_W11 status=200"
+    },
+    {
+      "ok": true,
+      "name": "Mass next-task returns clean HTTP response",
+      "details": "worker=MASS_W1 status=200"
+    },
+    {
+      "ok": true,
+      "name": "Mass partial progress save succeeds",
+      "details": "task=6a80def249d2556de7bd6be4"
+    },
+    {
+      "ok": true,
+      "name": "Mass heartbeat succeeds after progress",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W4 task=6a80def349d2556de7bd6ee9 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W9 task=6a80def349d2556de7bd7273 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W7 task=6a80def349d2556de7bd70fd status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W5 task=6a80def349d2556de7bd6f97 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W11 task=6a80def349d2556de7bd73d6 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W3 task=6a80def349d2556de7bd6e1e status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W8 task=6a80def349d2556de7bd71ba status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W6 task=6a80def349d2556de7bd703e status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W2 task=6a80def349d2556de7bd6d68 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W12 task=6a80def349d2556de7bd7494 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W10 task=6a80def349d2556de7bd7330 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W4 task=6a80def349d2556de7bd6eed status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W1 task=6a80def249d2556de7bd6be4 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W5 task=6a80def349d2556de7bd6fa0 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W3 task=6a80def349d2556de7bd6e26 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W7 task=6a80def349d2556de7bd7104 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W9 task=6a80def349d2556de7bd7279 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W8 task=6a80def349d2556de7bd71c4 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W10 task=6a80def349d2556de7bd7339 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W6 task=6a80def349d2556de7bd7049 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass partial progress save succeeds",
+      "details": "task=6a80def349d2556de7bd7054"
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W4 task=6a80def349d2556de7bd6ef4 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass heartbeat succeeds after progress",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W1 task=6a80def349d2556de7bd6cae status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W11 task=6a80def349d2556de7bd73df status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W12 task=6a80def349d2556de7bd7499 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W2 task=6a80def349d2556de7bd6d72 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W7 task=6a80def349d2556de7bd710e status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W5 task=6a80def349d2556de7bd6fa8 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W3 task=6a80def349d2556de7bd6e2d status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W9 task=6a80def349d2556de7bd7283 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W10 task=6a80def349d2556de7bd7340 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W8 task=6a80def349d2556de7bd71cd status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W4 task=6a80def349d2556de7bd6ef9 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W6 task=6a80def349d2556de7bd7054 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W1 task=6a80def349d2556de7bd6cb6 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W2 task=6a80def349d2556de7bd6d80 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W11 task=6a80def349d2556de7bd73e6 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W12 task=6a80def349d2556de7bd74a3 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W7 task=6a80def349d2556de7bd7118 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W5 task=6a80def349d2556de7bd6faf status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W3 task=6a80def349d2556de7bd6e36 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W10 task=6a80def349d2556de7bd7347 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W9 task=6a80def349d2556de7bd7291 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W8 task=6a80def349d2556de7bd71d3 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W4 task=6a80def349d2556de7bd6f05 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W6 task=6a80def349d2556de7bd705d status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W11 task=6a80def349d2556de7bd73ed status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W1 task=6a80def349d2556de7bd6cbc status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W12 task=6a80def349d2556de7bd74ad status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W2 task=6a80def349d2556de7bd6d8c status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W7 task=6a80def349d2556de7bd711f status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W5 task=6a80def349d2556de7bd6fb6 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass partial progress save succeeds",
+      "details": "task=6a80def349d2556de7bd6fba"
+    },
+    {
+      "ok": true,
+      "name": "Mass heartbeat succeeds after progress",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W4 task=6a80def349d2556de7bd6f0e status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W10 task=6a80def349d2556de7bd734f status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W3 task=6a80def349d2556de7bd6e44 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W8 task=6a80def349d2556de7bd71db status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W9 task=6a80def349d2556de7bd729a status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W6 task=6a80def349d2556de7bd706d status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W12 task=6a80def349d2556de7bd74b6 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W1 task=6a80def349d2556de7bd6cc6 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W2 task=6a80def349d2556de7bd6d95 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W7 task=6a80def349d2556de7bd7128 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W11 task=6a80def349d2556de7bd73f4 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W5 task=6a80def349d2556de7bd6fba status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W4 task=6a80def349d2556de7bd6f18 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W10 task=6a80def349d2556de7bd7359 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W8 task=6a80def349d2556de7bd71e5 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W9 task=6a80def349d2556de7bd72a1 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W6 task=6a80def349d2556de7bd7076 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W3 task=6a80def349d2556de7bd6e50 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W1 task=6a80def349d2556de7bd6cce status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W12 task=6a80def349d2556de7bd74bf status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W7 task=6a80def349d2556de7bd7132 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W2 task=6a80def349d2556de7bd6d9e status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W10 task=6a80def349d2556de7bd7366 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W5 task=6a80def349d2556de7bd6fc4 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W11 task=6a80def349d2556de7bd73fa status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W4 task=6a80def349d2556de7bd6f21 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass partial progress save succeeds",
+      "details": "task=6a80def349d2556de7bd736f"
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W6 task=6a80def349d2556de7bd707a status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W9 task=6a80def349d2556de7bd72ac status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass heartbeat succeeds after progress",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "Mass partial progress save succeeds",
+      "details": "task=6a80def349d2556de7bd6f2d"
+    },
+    {
+      "ok": true,
+      "name": "Mass heartbeat succeeds after progress",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W8 task=6a80def349d2556de7bd71ed status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W3 task=6a80def349d2556de7bd6e5e status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W12 task=6a80def349d2556de7bd74c6 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W2 task=6a80def349d2556de7bd6daa status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W1 task=6a80def349d2556de7bd6cd8 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W7 task=6a80def349d2556de7bd713f status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W11 task=6a80def349d2556de7bd7405 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W6 task=6a80def349d2556de7bd7084 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W5 task=6a80def349d2556de7bd6fcf status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W9 task=6a80def349d2556de7bd72b4 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W7 task=6a80def349d2556de7bd714b status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W3 task=6a80def349d2556de7bd6e6a status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W8 task=6a80def349d2556de7bd71f3 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W10 task=6a80def349d2556de7bd736f status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W2 task=6a80def349d2556de7bd6db6 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W12 task=6a80def349d2556de7bd74cc status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W4 task=6a80def349d2556de7bd6f2d status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W1 task=6a80def349d2556de7bd6ce4 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W6 task=6a80def349d2556de7bd708c status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W11 task=6a80def349d2556de7bd7410 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W5 task=6a80def349d2556de7bd6fd5 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W9 task=6a80def349d2556de7bd72bd status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W7 task=6a80def349d2556de7bd7153 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W3 task=6a80def349d2556de7bd6e73 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W8 task=6a80def349d2556de7bd71fe status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W10 task=6a80def349d2556de7bd7373 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W2 task=6a80def349d2556de7bd6dbf status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W1 task=6a80def349d2556de7bd6cf3 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W6 task=6a80def349d2556de7bd7093 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W4 task=6a80def349d2556de7bd6f35 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W12 task=6a80def349d2556de7bd74d2 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W5 task=6a80def349d2556de7bd6fdb status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W7 task=6a80def349d2556de7bd715c status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W9 task=6a80def349d2556de7bd72c6 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W3 task=6a80def349d2556de7bd6e7a status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W11 task=6a80def349d2556de7bd7419 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass partial progress save succeeds",
+      "details": "task=6a80def349d2556de7bd72cc"
+    },
+    {
+      "ok": true,
+      "name": "Mass heartbeat succeeds after progress",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W8 task=6a80def349d2556de7bd7208 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W10 task=6a80def349d2556de7bd737a status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W2 task=6a80def349d2556de7bd6dd1 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W4 task=6a80def349d2556de7bd6f43 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W12 task=6a80def349d2556de7bd74d9 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W1 task=6a80def349d2556de7bd6d09 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W5 task=6a80def349d2556de7bd6fe4 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W6 task=6a80def349d2556de7bd709b status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W3 task=6a80def349d2556de7bd6e85 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W7 task=6a80def349d2556de7bd7165 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass partial progress save succeeds",
+      "details": "task=6a80def349d2556de7bd6e95"
+    },
+    {
+      "ok": true,
+      "name": "Mass heartbeat succeeds after progress",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W11 task=6a80def349d2556de7bd7421 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W5 task=6a80def349d2556de7bd6fec status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W10 task=6a80def349d2556de7bd737e status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W8 task=6a80def349d2556de7bd7211 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W9 task=6a80def349d2556de7bd72cc status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W1 task=6a80def349d2556de7bd6d12 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W4 task=6a80def349d2556de7bd6f48 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W2 task=6a80def349d2556de7bd6dd9 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W12 task=6a80def349d2556de7bd74e7 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W7 task=6a80def349d2556de7bd7170 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W6 task=6a80def349d2556de7bd70a5 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W3 task=6a80def349d2556de7bd6e95 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W5 task=6a80def349d2556de7bd6ff5 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W10 task=6a80def349d2556de7bd738a status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W9 task=6a80def349d2556de7bd72d9 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W8 task=6a80def349d2556de7bd721e status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W11 task=6a80def349d2556de7bd7430 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W1 task=6a80def349d2556de7bd6d1d status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W4 task=6a80def349d2556de7bd6f53 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W2 task=6a80def349d2556de7bd6de2 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass partial progress save succeeds",
+      "details": "task=6a80def349d2556de7bd6de8"
+    },
+    {
+      "ok": true,
+      "name": "Mass heartbeat succeeds after progress",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W12 task=6a80def349d2556de7bd74ef status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W6 task=6a80def349d2556de7bd70b0 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W7 task=6a80def349d2556de7bd7178 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W3 task=6a80def349d2556de7bd6e9d status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W5 task=6a80def349d2556de7bd6ffe status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W9 task=6a80def349d2556de7bd72e6 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W8 task=6a80def349d2556de7bd722a status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W10 task=6a80def349d2556de7bd7391 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass partial progress save succeeds",
+      "details": "task=6a80def349d2556de7bd7232"
+    },
+    {
+      "ok": true,
+      "name": "Mass heartbeat succeeds after progress",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W1 task=6a80def349d2556de7bd6d29 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W11 task=6a80def349d2556de7bd7438 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W4 task=6a80def349d2556de7bd6f5c status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W6 task=6a80def349d2556de7bd70bb status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W3 task=6a80def349d2556de7bd6ea5 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W12 task=6a80def349d2556de7bd74fb status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W2 task=6a80def349d2556de7bd6de8 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W5 task=6a80def349d2556de7bd700b status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W7 task=6a80def349d2556de7bd7183 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W9 task=6a80def349d2556de7bd72f1 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W10 task=6a80def349d2556de7bd7399 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W11 task=6a80def349d2556de7bd7442 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W1 task=6a80def349d2556de7bd6d31 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W8 task=6a80def349d2556de7bd7232 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W3 task=6a80def349d2556de7bd6eab status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W4 task=6a80def349d2556de7bd6f65 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W6 task=6a80def349d2556de7bd70c6 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W2 task=6a80def349d2556de7bd6def status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W12 task=6a80def349d2556de7bd7501 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W9 task=6a80def349d2556de7bd72f7 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W10 task=6a80def349d2556de7bd73a0 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W1 task=6a80def349d2556de7bd6d3d status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W5 task=6a80def349d2556de7bd7012 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W7 task=6a80def349d2556de7bd718e status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass partial progress save succeeds",
+      "details": "task=6a80def349d2556de7bd719b"
+    },
+    {
+      "ok": true,
+      "name": "Mass partial progress save succeeds",
+      "details": "task=6a80def349d2556de7bd6d46"
+    },
+    {
+      "ok": true,
+      "name": "Mass heartbeat succeeds after progress",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "Mass heartbeat succeeds after progress",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W11 task=6a80def349d2556de7bd744d status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W8 task=6a80def349d2556de7bd723a status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W6 task=6a80def349d2556de7bd70ce status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W4 task=6a80def349d2556de7bd6f6a status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W3 task=6a80def349d2556de7bd6eb5 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W10 task=6a80def349d2556de7bd73a6 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W2 task=6a80def349d2556de7bd6dfa status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W9 task=6a80def349d2556de7bd72fd status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W12 task=6a80def349d2556de7bd750b status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W7 task=6a80def349d2556de7bd719b status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W1 task=6a80def349d2556de7bd6d46 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W5 task=6a80def349d2556de7bd701b status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W6 task=6a80def349d2556de7bd70d6 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W11 task=6a80def349d2556de7bd7458 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W8 task=6a80def349d2556de7bd7243 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W4 task=6a80def349d2556de7bd6f70 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W3 task=6a80def349d2556de7bd6ebe status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W2 task=6a80def349d2556de7bd6e05 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W10 task=6a80def349d2556de7bd73ad status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W9 task=6a80def349d2556de7bd7307 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W12 task=6a80def349d2556de7bd7513 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W1 task=6a80def349d2556de7bd6d55 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W7 task=6a80def349d2556de7bd71a4 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W5 task=6a80def349d2556de7bd7026 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W6 task=6a80def349d2556de7bd70dd status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W8 task=6a80def349d2556de7bd724c status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W11 task=6a80def349d2556de7bd7461 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W4 task=6a80def349d2556de7bd6f7a status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W3 task=6a80def349d2556de7bd6ec8 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W10 task=6a80def349d2556de7bd73b3 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W12 task=6a80def349d2556de7bd751a status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W9 task=6a80def349d2556de7bd7310 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W2 task=6a80def349d2556de7bd6e0d status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W1 task=6a80def349d2556de7bd6d5a status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W6 task=6a80def349d2556de7bd70e3 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W7 task=6a80def349d2556de7bd71ac status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W11 task=6a80def349d2556de7bd746c status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass partial progress save succeeds",
+      "details": "task=6a80def349d2556de7bd70f3"
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W4 task=6a80def349d2556de7bd6f81 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W8 task=6a80def349d2556de7bd7257 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W5 task=6a80def349d2556de7bd7030 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass heartbeat succeeds after progress",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W2 task=6a80def349d2556de7bd6e13 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W12 task=6a80def349d2556de7bd751f status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W3 task=6a80def349d2556de7bd6ed1 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W10 task=6a80def349d2556de7bd73be status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W9 task=6a80def349d2556de7bd731d status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass next-task returns clean HTTP response",
+      "details": "worker=MASS_W2 status=200"
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W7 task=6a80def349d2556de7bd71b4 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W1 task=6a80def349d2556de7bd6edc status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W11 task=6a80def349d2556de7bd7477 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass next-task returns clean HTTP response",
+      "details": "worker=MASS_W7 status=200"
+    },
+    {
+      "ok": true,
+      "name": "Mass next-task returns clean HTTP response",
+      "details": "worker=MASS_W1 status=200"
+    },
+    {
+      "ok": true,
+      "name": "Mass next-task returns clean HTTP response",
+      "details": "worker=MASS_W11 status=200"
+    },
+    {
+      "ok": true,
+      "name": "Mass next-task returns clean HTTP response",
+      "details": "worker=MASS_W1 status=200"
+    },
+    {
+      "ok": true,
+      "name": "Mass next-task returns clean HTTP response",
+      "details": "worker=MASS_W11 status=200"
+    },
+    {
+      "ok": true,
+      "name": "Mass next-task returns clean HTTP response",
+      "details": "worker=MASS_W7 status=200"
+    },
+    {
+      "ok": true,
+      "name": "Mass next-task returns clean HTTP response",
+      "details": "worker=MASS_W11 status=200"
+    },
+    {
+      "ok": true,
+      "name": "Mass next-task returns clean HTTP response",
+      "details": "worker=MASS_W1 status=200"
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W4 task=6a80def349d2556de7bd6f8b status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W3 task=6a80def349d2556de7bd7268 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass next-task returns clean HTTP response",
+      "details": "worker=MASS_W4 status=200"
+    },
+    {
+      "ok": true,
+      "name": "Mass next-task returns clean HTTP response",
+      "details": "worker=MASS_W3 status=200"
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W6 task=6a80def349d2556de7bd70f3 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W5 task=6a80def349d2556de7bd7036 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W8 task=6a80def349d2556de7bd7260 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W12 task=6a80def349d2556de7bd7522 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass next-task returns clean HTTP response",
+      "details": "worker=MASS_W6 status=200"
+    },
+    {
+      "ok": true,
+      "name": "Mass next-task returns clean HTTP response",
+      "details": "worker=MASS_W5 status=200"
+    },
+    {
+      "ok": true,
+      "name": "Mass next-task returns clean HTTP response",
+      "details": "worker=MASS_W8 status=200"
+    },
+    {
+      "ok": true,
+      "name": "Mass next-task returns clean HTTP response",
+      "details": "worker=MASS_W12 status=200"
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W9 task=6a80def349d2556de7bd7328 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W10 task=6a80def349d2556de7bd73c9 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass next-task returns clean HTTP response",
+      "details": "worker=MASS_W9 status=200"
+    },
+    {
+      "ok": true,
+      "name": "Mass next-task returns clean HTTP response",
+      "details": "worker=MASS_W10 status=200"
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W2 task=6a80def349d2556de7bd7480 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W7 task=6a80def349d2556de7bd748b status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass task finalization succeeds",
+      "details": "worker=MASS_W1 task=6a80def349d2556de7bd7526 status=200 err="
+    },
+    {
+      "ok": true,
+      "name": "Mass next-task returns clean HTTP response",
+      "details": "worker=MASS_W2 status=200"
+    },
+    {
+      "ok": true,
+      "name": "Mass next-task returns clean HTTP response",
+      "details": "worker=MASS_W7 status=200"
+    },
+    {
+      "ok": true,
+      "name": "Mass next-task returns clean HTTP response",
+      "details": "worker=MASS_W1 status=200"
+    },
+    {
+      "ok": true,
+      "name": "Background closure/lock polling had no 5xx/transport errors during concurrent writes",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "All reachable current-group PickingTasks are terminal after concurrent workers",
+      "details": "actual=0 expected=0"
+    },
+    {
+      "ok": true,
+      "name": "Mass closure refuses to hide deliberately injected integrity failures",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "Mass closure exposes hidden OrderItem as coverage_gaps",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "Mass closure exposes hidden live OrderItem as unterminated_items",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "Mass closure exposes wrong-group current-session task",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "Mass closure exposes wrong-group current-session Order",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "Old-session debris is warning/repair territory, never a current blocker",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "Mass hidden item repair resolves final coverage blocker",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "Mass current session has ZERO blockers after explicit repair",
+      "details": "[]"
+    },
+    {
+      "ok": true,
+      "name": "Mass session reaches completed after all real work + repairs",
+      "details": "actual=\"completed\" expected=\"completed\""
+    },
+    {
+      "ok": true,
+      "name": "Mass pickingCompletedAt stamped",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "No seller/shop/session has duplicate active Orders after mass races",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365856"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365862"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365860"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365857"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365868"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365859"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365865"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365858"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365861"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365864"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365867"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365863"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365866"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365869"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365870"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365871"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365872"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365873"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365874"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365875"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365876"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365877"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365878"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365879"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365880"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365881"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365882"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365883"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365884"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365885"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365886"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365887"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365888"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365889"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365890"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365891"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365892"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365893"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365894"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365895"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365896"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365897"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365898"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365899"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365900"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365901"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365902"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365903"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365904"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365905"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365906"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365907"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365908"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365909"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365910"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365911"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365912"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365913"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365914"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365915"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365916"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365917"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365918"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365919"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365920"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365927"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365926"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365921"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365925"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365924"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365929"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365923"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365922"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365928"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365930"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365931"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365932"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365933"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365934"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365935"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365936"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365937"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365938"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365939"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365940"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365941"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365942"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365943"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365944"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365945"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365946"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365947"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365948"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365949"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365950"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365951"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365952"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365953"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365954"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365955"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365961"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365962"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365963"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365964"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365965"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365966"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365967"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365968"
+    },
+    {
+      "ok": true,
+      "name": "No duplicate product rows inside any mass Order",
+      "details": "order=973365969"
+    },
+    {
+      "ok": true,
+      "name": "Every operational current-session OrderItem is terminal at finish",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "Every operational current-session Order has terminal business status",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "No locked PickingTask leaks after mass shift",
+      "details": "actual=0 expected=0"
+    },
+    {
+      "ok": true,
+      "name": "No unreconciled completed OOS task remains after mass shift",
+      "details": "actual=0 expected=0"
+    },
+    {
+      "ok": true,
+      "name": "Multiple physical blocks can become empty without E11000",
+      "details": "emptyBlocks=2"
+    },
+    {
+      "ok": true,
+      "name": "Every product from whole OOS blocks is archived under concurrent picking",
+      "details": "actual=40 expected=40"
+    },
+    {
+      "ok": true,
+      "name": "Mass short-pick data survives into Orders",
+      "details": "ordersWithShortPick=9"
+    }
+  ]
+}

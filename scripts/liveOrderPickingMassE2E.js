@@ -252,6 +252,22 @@ async function batchMap(items, size, fn) {
   return out;
 }
 
+async function sealSyntheticOrderingNotification(groupId, schedule, sessionIds = null) {
+  // The live TEST server may be running its real ordering-open scheduler against
+  // the same Atlas database while this local E2E process runs. Synthetic sellers
+  // use fake Telegram ids; if the real notifier sees them, Telegram correctly
+  // answers 403/chat-not-found and production code marks that synthetic User as
+  // botBlocked. Pre-claim the synthetic session BEFORE sellers exist so external
+  // schedulers can never turn harness fixtures into registration_blocked users.
+  const sessionId = await getOrCreateSessionId(str(groupId), schedule);
+  if (sessionIds) sessionIds.add(str(sessionId));
+  await OrderingSession.updateOne(
+    { _id: sessionId },
+    { $set: { openNotifiedAt: new Date() } },
+  );
+  return sessionId;
+}
+
 async function createWorld() {
   phaseStart('fixtures');
   const { deliveryDay, openSchedule, closedSchedule } = buildOpenClosedTestSchedules();
@@ -266,6 +282,7 @@ async function createWorld() {
     members: [],
   });
   await cache.invalidate(cache.KEYS.DELIVERY_GROUPS);
+  await sealSyntheticOrderingNotification(world.group._id, openSchedule, world.sessionIds);
 
   const shopDocs = Array.from({ length: CFG.shops }, (_, i) => ({
     name: `${MARKER}:shop:${String(i + 1).padStart(3, '0')}`,

@@ -1,0 +1,383 @@
+{
+  "runId": "20260815220324-b7ac83",
+  "marker": "__LIVE_E2E__20260815220324-b7ac83",
+  "createdAt": "2026-08-15T22:03:53.388Z",
+  "db": "tg_manager",
+  "redisWasConfiguredButIsolated": true,
+  "execute": true,
+  "requestedScenarios": [
+    "multi_seller_single_order",
+    "ownership_freeze"
+  ],
+  "summary": {
+    "passedScenarios": 2,
+    "failedScenarios": 0,
+    "passedAssertions": 70,
+    "failedAssertions": 0
+  },
+  "scenarios": [
+    {
+      "name": "multi_seller_single_order",
+      "ok": true,
+      "durationMs": 6628
+    },
+    {
+      "name": "ownership_freeze",
+      "ok": true,
+      "durationMs": 12833
+    }
+  ],
+  "assertions": [
+    {
+      "ok": true,
+      "name": "MongoDB connection",
+      "details": "db=tg_manager host=ac-hq2xfhf-shard-00-01.epfky0s.mongodb.net allowed=epfky0s.mongodb.net"
+    },
+    {
+      "ok": true,
+      "name": "Synthetic per-group schedule can represent ordering-open phase",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "Synthetic per-group schedule can represent picking-allowed phase",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "Critical Order active uniqueness index exists",
+      "details": "value=one_active_order_per_buyer_shop_session"
+    },
+    {
+      "ok": true,
+      "name": "Critical PickingTask session-scoped uniqueness index exists",
+      "details": "value=one_active_task_per_product_group_session"
+    },
+    {
+      "ok": true,
+      "name": "OrderingSession groupId+openDate unique index exists",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "Critical Block partial unique index exists",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "MongoDB transaction round-trip",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "No previous LIVE_E2E fixture leftovers detected",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "Live Redis is isolated from this suite",
+      "details": "REDIS_URL existed but is disabled in test process"
+    },
+    {
+      "ok": true,
+      "name": "Ephemeral real Express app is writable",
+      "details": "status=ok"
+    },
+    {
+      "ok": true,
+      "name": "multi_seller_single_order: synthetic per-group ordering window starts open",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "multi_seller_single_order: three sellers may be assigned to one shop",
+      "details": "actual=3 expected=3"
+    },
+    {
+      "ok": true,
+      "name": "multi_seller_single_order: HTTP order accepted",
+      "details": "status=201 error="
+    },
+    {
+      "ok": true,
+      "name": "multi_seller_single_order: only the seller who ordered creates an Order",
+      "details": "actual=1 expected=1"
+    },
+    {
+      "ok": true,
+      "name": "multi_seller_single_order: assigned silent sellers do not create phantom Orders",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "multi_seller_single_order: closed synthetic schedule exists",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "multi_seller_single_order: ordering session identity survives open→closed test phase",
+      "details": "actual=\"6a80e23768af4aa2371e212f\" expected=\"6a80e23768af4aa2371e212f\""
+    },
+    {
+      "ok": true,
+      "name": "multi_seller_single_order: picking phase window is closed",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "multi_seller_single_order: multiple assigned sellers alone do NOT block picking start",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "multi_seller_single_order: no conflict is reported when only one buyer has an active Order",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "multi_seller_single_order: task is built normally",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "multi_seller_single_order: task contains only the real seller-authored Order",
+      "details": "actual=1 expected=1"
+    },
+    {
+      "ok": true,
+      "name": "multi_seller_single_order: task references the real Order",
+      "details": "actual=\"6a80e236f055d5cd3135194d\" expected=\"6a80e236f055d5cd3135194d\""
+    },
+    {
+      "ok": true,
+      "name": "Task claim succeeds",
+      "details": "status=200 error="
+    },
+    {
+      "ok": true,
+      "name": "Task complete endpoint succeeds",
+      "details": "status=200 error="
+    },
+    {
+      "ok": true,
+      "name": "multi_seller_single_order: session completed",
+      "details": "actual=\"completed\" expected=\"completed\""
+    },
+    {
+      "ok": true,
+      "name": "multi_seller_single_order: pickingCompletedAt stamped",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "multi_seller_single_order: SCENARIO PASS",
+      "details": "6628 ms"
+    },
+    {
+      "ok": true,
+      "name": "ownership_freeze: synthetic per-group ordering window starts open",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "ownership_freeze: HTTP order accepted",
+      "details": "status=201 error="
+    },
+    {
+      "ok": true,
+      "name": "ownership_freeze: HTTP order accepted",
+      "details": "status=201 error="
+    },
+    {
+      "ok": true,
+      "name": "ownership_freeze: HTTP order accepted",
+      "details": "status=201 error="
+    },
+    {
+      "ok": true,
+      "name": "ownership_freeze: same group/window uses one OrderingSession",
+      "details": "actual=\"6a80e23e68af4aa2371e2133\" expected=\"6a80e23e68af4aa2371e2133\""
+    },
+    {
+      "ok": true,
+      "name": "ownership_freeze: all seller-authored Orders share that OrderingSession",
+      "details": "actual=\"6a80e23e68af4aa2371e2133\" expected=\"6a80e23e68af4aa2371e2133\""
+    },
+    {
+      "ok": true,
+      "name": "ownership_freeze: ordinary seller move succeeds while ordering is still open",
+      "details": "actual=200 expected=200"
+    },
+    {
+      "ok": true,
+      "name": "ownership_freeze: BEFORE closeAt active Order follows seller to new shop",
+      "details": "actual=\"6a80e23cf055d5cd313519ca\" expected=\"6a80e23cf055d5cd313519ca\""
+    },
+    {
+      "ok": true,
+      "name": "ownership_freeze: BEFORE closeAt buyerSnapshot follows seller too",
+      "details": "actual=\"6a80e23cf055d5cd313519ca\" expected=\"6a80e23cf055d5cd313519ca\""
+    },
+    {
+      "ok": true,
+      "name": "ownership_freeze: open-window move does not invent a second session inside same group cycle",
+      "details": "actual=\"6a80e23e68af4aa2371e2133\" expected=\"6a80e23e68af4aa2371e2133\""
+    },
+    {
+      "ok": true,
+      "name": "ownership_freeze: closed synthetic schedule exists",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "ownership_freeze: ordering session identity survives open→closed test phase",
+      "details": "actual=\"6a80e23e68af4aa2371e2133\" expected=\"6a80e23e68af4aa2371e2133\""
+    },
+    {
+      "ok": true,
+      "name": "ownership_freeze: picking phase window is closed",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "ownership_freeze: seller profile may move after ordering close",
+      "details": "actual=200 expected=200"
+    },
+    {
+      "ok": true,
+      "name": "ownership_freeze: seller profile may be unassigned after ordering close",
+      "details": "actual=200 expected=200"
+    },
+    {
+      "ok": true,
+      "name": "ownership_freeze: frozen seller User.shopId moves to target shop",
+      "details": "actual=\"6a80e23cf055d5cd313519ca\" expected=\"6a80e23cf055d5cd313519ca\""
+    },
+    {
+      "ok": true,
+      "name": "ownership_freeze: existing seller remains assigned to target shop (multi-seller preserved)",
+      "details": "actual=\"6a80e23cf055d5cd313519ca\" expected=\"6a80e23cf055d5cd313519ca\""
+    },
+    {
+      "ok": true,
+      "name": "ownership_freeze: frozen seller User.shopId can be cleared",
+      "details": "actual=\"\" expected=\"\""
+    },
+    {
+      "ok": true,
+      "name": "ownership_freeze: moved-after-close seller remains Order author",
+      "details": "actual=\"-9983142016339601\" expected=\"-9983142016339601\""
+    },
+    {
+      "ok": true,
+      "name": "ownership_freeze: moved-after-close Order.shopId remains owned by original shop",
+      "details": "actual=\"6a80e23bf055d5cd313519c4\" expected=\"6a80e23bf055d5cd313519c4\""
+    },
+    {
+      "ok": true,
+      "name": "ownership_freeze: moved-after-close buyerSnapshot.shopId is immutable",
+      "details": "actual=\"6a80e23bf055d5cd313519c4\" expected=\"6a80e23bf055d5cd313519c4\""
+    },
+    {
+      "ok": true,
+      "name": "ownership_freeze: moved-after-close delivery-group snapshot is immutable",
+      "details": "actual=\"6a80e23bf055d5cd313519c1\" expected=\"6a80e23bf055d5cd313519c1\""
+    },
+    {
+      "ok": true,
+      "name": "ownership_freeze: moved-after-close orderingSessionId is immutable",
+      "details": "actual=\"6a80e23e68af4aa2371e2133\" expected=\"6a80e23e68af4aa2371e2133\""
+    },
+    {
+      "ok": true,
+      "name": "ownership_freeze: unassigned-after-close seller remains Order author",
+      "details": "actual=\"-9983142041121753\" expected=\"-9983142041121753\""
+    },
+    {
+      "ok": true,
+      "name": "ownership_freeze: unassigned-after-close Order.shopId remains owned by original shop",
+      "details": "actual=\"6a80e23bf055d5cd313519c7\" expected=\"6a80e23bf055d5cd313519c7\""
+    },
+    {
+      "ok": true,
+      "name": "ownership_freeze: unassigned-after-close buyerSnapshot.shopId is immutable",
+      "details": "actual=\"6a80e23bf055d5cd313519c7\" expected=\"6a80e23bf055d5cd313519c7\""
+    },
+    {
+      "ok": true,
+      "name": "ownership_freeze: unassigned-after-close delivery-group snapshot is immutable",
+      "details": "actual=\"6a80e23bf055d5cd313519c1\" expected=\"6a80e23bf055d5cd313519c1\""
+    },
+    {
+      "ok": true,
+      "name": "ownership_freeze: unassigned-after-close orderingSessionId is immutable",
+      "details": "actual=\"6a80e23e68af4aa2371e2133\" expected=\"6a80e23e68af4aa2371e2133\""
+    },
+    {
+      "ok": true,
+      "name": "ownership_freeze: picking starts from shop-owned Orders after seller profile changes",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "ownership_freeze: moving a seller profile after closeAt does not create a phantom Order conflict",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "ownership_freeze: task is built from frozen Orders",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "ownership_freeze: picking sees the three Order-owned shops from their correct lifecycle moments",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "ownership_freeze: all three seller-authored Orders survive into picking exactly once",
+      "details": "actual=3 expected=3"
+    },
+    {
+      "ok": true,
+      "name": "ownership_freeze: post-close seller move does NOT move historical Order from shop 1",
+      "details": "actual=\"6a80e23bf055d5cd313519c4\" expected=\"6a80e23bf055d5cd313519c4\""
+    },
+    {
+      "ok": true,
+      "name": "ownership_freeze: pre-close seller move DID move active Order to shop 3",
+      "details": "actual=\"6a80e23cf055d5cd313519ca\" expected=\"6a80e23cf055d5cd313519ca\""
+    },
+    {
+      "ok": true,
+      "name": "ownership_freeze: post-close unassign does NOT park historical Order",
+      "details": "actual=\"6a80e23bf055d5cd313519c7\" expected=\"6a80e23bf055d5cd313519c7\""
+    },
+    {
+      "ok": true,
+      "name": "Task claim succeeds",
+      "details": "status=200 error="
+    },
+    {
+      "ok": true,
+      "name": "Task complete endpoint succeeds",
+      "details": "status=200 error="
+    },
+    {
+      "ok": true,
+      "name": "ownership_freeze: session completed",
+      "details": "actual=\"completed\" expected=\"completed\""
+    },
+    {
+      "ok": true,
+      "name": "ownership_freeze: pickingCompletedAt stamped",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "ownership_freeze: SCENARIO PASS",
+      "details": "12833 ms"
+    }
+  ],
+  "preserved": []
+}

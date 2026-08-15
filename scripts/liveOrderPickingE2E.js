@@ -256,6 +256,22 @@ async function allocBlockId() {
   throw new Error('Не вдалося виділити synthetic blockId');
 }
 
+async function sealSyntheticOrderingNotification(groupId, schedule, sessionIds = null) {
+  // The live TEST server may be running its real ordering-open scheduler against
+  // the same Atlas database while this local E2E process runs. Synthetic sellers
+  // use fake Telegram ids; if the real notifier sees them, Telegram correctly
+  // answers 403/chat-not-found and production code marks that synthetic User as
+  // botBlocked. Pre-claim the synthetic session BEFORE sellers exist so external
+  // schedulers can never turn harness fixtures into registration_blocked users.
+  const sessionId = await getOrCreateSessionId(str(groupId), schedule);
+  if (sessionIds) sessionIds.add(str(sessionId));
+  await OrderingSession.updateOne(
+    { _id: sessionId },
+    { $set: { openNotifiedAt: new Date() } },
+  );
+  return sessionId;
+}
+
 async function createWorld(name, {
   shops = 1,
   sellers = 1,
@@ -284,6 +300,7 @@ async function createWorld(name, {
     world.group = group;
     await updateWorldManifest(world, { phase: 'group_created' });
     await cache.invalidate(cache.KEYS.DELIVERY_GROUPS);
+    await sealSyntheticOrderingNotification(group._id, openSchedule, world.sessionIds);
 
     for (let i = 0; i < shops; i += 1) {
       world.shops.push(await Shop.create({
@@ -680,7 +697,8 @@ async function scenarioMultiSellerSingleOrder() {
     await moveWorldToClosedPhase(world);
     const start = await startPicking(world, wh, true);
     check(start.status === 200 && start.data?.started === true,
-      'multi_seller_single_order: multiple assigned sellers alone do NOT block picking start');
+      'multi_seller_single_order: multiple assigned sellers alone do NOT block picking start',
+      `status=${start.status} error=${start.data?.error || ''} pickingNotReady=${Boolean(start.data?.pickingNotReady)} readyAt=${start.data?.pickingReadyAt || ''}`);
     check(start.data?.unresolved !== true,
       'multi_seller_single_order: no conflict is reported when only one buyer has an active Order');
 
