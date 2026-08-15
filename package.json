@@ -35,7 +35,11 @@
     "test:live:security": "node -r ../dev-use-test-db.js scripts/liveOrderPickingE2E.js --execute --scenario=security_boundaries",
     "test:live:race:preflight": "node -r ../dev-use-test-db.js scripts/liveOrderPickingE2E.js --scenario=ownership_freeze,checkbox_handoff,session_rollover,final_summary_retention,isolation,barrier",
     "test:live:race": "node -r ../dev-use-test-db.js scripts/liveOrderPickingE2E.js --execute --scenario=ownership_freeze,checkbox_handoff,session_rollover,final_summary_retention,isolation,barrier",
-    "test:v36.4:hardening": "vitest run tests/securityBoundary.test.js tests/maintenance.test.js tests/pickingUpcomingReadiness.contract.test.js tests/readOnlySessionMaterialization.contract.test.js tests/orderTaskDetachScope.contract.test.js tests/sessionFinalSummary.contract.test.js tests/schedulerLeader.contract.test.js"
+    "test:v36.4:hardening": "vitest run tests/securityBoundary.test.js tests/maintenance.test.js tests/pickingUpcomingReadiness.contract.test.js tests/readOnlySessionMaterialization.contract.test.js tests/orderTaskDetachScope.contract.test.js tests/sessionFinalSummary.contract.test.js tests/schedulerLeader.contract.test.js",
+    "test:v38:routing": "node scripts/checkReceiptRoutingV38.js",
+    "test:release": "vitest run --hookTimeout=180000 --testTimeout=120000 --no-file-parallelism",
+    "test:release:static": "node scripts/checkReleaseStaticV48_4.js",
+    "test:db:readiness:preflight": "node scripts/liveOrderPickingE2E.js"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1030.0",

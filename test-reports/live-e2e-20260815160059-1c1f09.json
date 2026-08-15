@@ -1,0 +1,69 @@
+{
+  "runId": "20260815160059-1c1f09",
+  "marker": "__LIVE_E2E__20260815160059-1c1f09",
+  "createdAt": "2026-08-15T16:01:01.372Z",
+  "db": "tg_manager",
+  "redisWasConfiguredButIsolated": true,
+  "execute": false,
+  "requestedScenarios": "all",
+  "summary": {
+    "passedScenarios": 0,
+    "failedScenarios": 0,
+    "passedAssertions": 10,
+    "failedAssertions": 0
+  },
+  "scenarios": [],
+  "assertions": [
+    {
+      "ok": true,
+      "name": "MongoDB connection",
+      "details": "db=tg_manager host=ac-hq2xfhf-shard-00-00.epfky0s.mongodb.net allowed=epfky0s.mongodb.net"
+    },
+    {
+      "ok": true,
+      "name": "Synthetic per-group schedule can represent ordering-open phase",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "Synthetic per-group schedule can represent picking-allowed phase",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "Critical Order active uniqueness index exists",
+      "details": "value=one_active_order_per_buyer_shop_session"
+    },
+    {
+      "ok": true,
+      "name": "Critical PickingTask session-scoped uniqueness index exists",
+      "details": "value=one_active_task_per_product_group_session"
+    },
+    {
+      "ok": true,
+      "name": "OrderingSession groupId+openDate unique index exists",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "Critical Block partial unique index exists",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "MongoDB transaction round-trip",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "No previous LIVE_E2E fixture leftovers detected",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "Live Redis is isolated from this suite",
+      "details": "REDIS_URL existed but is disabled in test process"
+    }
+  ],
+  "preserved": []
+}

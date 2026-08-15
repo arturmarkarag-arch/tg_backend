@@ -24,6 +24,15 @@ const ProductSchema = new mongoose.Schema(
     quantityPerPackage: { type: Number, default: 0 },
     notes: { type: String, default: '' },
     source: { type: String, default: '' },
+    // Normal seller catalogue gate. Supplement-only goods still need a Product
+    // for warehouse location / supplement picking, but must not appear in the
+    // ordinary ordering catalogue unless the worker also selected `На склад`.
+    orderingEnabled: { type: Boolean, default: true },
+    // Receiving-route metadata. These are informational flags; received quantity
+    // is NOT used to infer either of them.
+    mandatoryDistribution: { type: Boolean, default: false },
+    mayNotReachAllShops: { type: Boolean, default: false },
+    receiptItemId: { type: mongoose.Schema.Types.ObjectId, ref: 'ReceiptItem', default: null },
     originalImageUrl: { type: String, default: '' },
     labelPositions: { type: mongoose.Schema.Types.Mixed, default: {} },
     archivedAt: { type: Date, default: null },
@@ -45,6 +54,11 @@ const ProductSchema = new mongoose.Schema(
     // "Товари" nav badge — a product counts as new for 7 days after shelving.
     // Set once; not reset on re-shelving.
     shelvedAt: { type: Date, default: null },
+    // First real placement into a warehouse block. Unlike `shelvedAt` (receipt
+    // confirmation/arrival timestamp), this marks when the item actually became
+    // physically catalogue-eligible. Seller sessions use it to prevent a product
+    // added to a block mid-session from appearing until that group's next cycle.
+    firstBlockPlacedAt: { type: Date, default: null },
     originalOrderNumber: { type: Number, default: null },
     restoredFromArchive: { type: Boolean, default: false },
     // Human-friendly Ukrainian description for the card UI. Generated on demand

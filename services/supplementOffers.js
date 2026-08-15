@@ -9,12 +9,16 @@ const Product           = require('../models/Product');
 const ReceiptItem       = require('../models/ReceiptItem');
 const SupplementOffer   = require('../models/SupplementOffer');
 const SupplementRequest = require('../models/SupplementRequest');
+const DeliveryGroup     = require('../models/DeliveryGroup');
 
 const Receipt = require('../models/Receipt');
 
 const { withLock } = require('../utils/lock');
 const { getProductTitle } = require('./archiveProduct');
 const { getIO } = require('../socket');
+const { normalizeReceiptItemRouting } = require('../utils/receiptRouting');
+const { resolveSupplementTarget } = require('./supplementTargets');
+const { isOrderingOpen } = require('../utils/orderingSchedule');
 
 // ─── Статус ──────────────────────────────────────────────────────────────────
 
@@ -37,62 +41,100 @@ const ACTIVE_STATUSES = SupplementOffer.ACTIVE_STATUSES;
 async function createOffersForReceipt(receiptId) {
   const receipt = await Receipt.findById(
     receiptId,
-    'type targetDeliveryGroupId supplementOpenedAt receiptNumber',
+    'type targetDeliveryGroupId supplementOpenedAt receiptNumber status',
   ).lean();
   if (!receipt) return { created: [], complete: true };
 
-  // Звичайна накладна не створює дозамовлення.
-  if (receipt.type !== 'supplement') {
-    await Receipt.updateOne({ _id: receiptId }, { $set: { supplementStatus: null } });
-    return { created: [], complete: true };
-  }
-
-  // Проведена накладна-дозамовлення повинна мати цільову групу.
-  if (!receipt.targetDeliveryGroupId) {
-    await Receipt.updateOne({ _id: receiptId }, { $set: { supplementStatus: 'ready' } });
-    return { created: [], complete: true };
-  }
-
   const items = await ReceiptItem.find(
     { receiptId },
-    '_id destination createdProductId name',
+    '_id destination routing routingVersion createdProductId name status supplementBatchVersion supplementPublishRequestedAt',
   ).lean();
 
-  const eligible = items.filter(
-    (i) => (i.destination || 'shelf') !== 'shops' && i.createdProductId,
-  );
-  if (!eligible.length) {
-    await Receipt.updateOne({ _id: receiptId }, { $set: { supplementStatus: 'ready' } });
-    return { created: [], complete: true };
+  // Legacy supplement receipt = one receipt-level group. New regular receipts
+  // may mix ordinary / mandatory / supplement items, each supplement item carrying
+  // its own group. No destructive migration is required.
+  const candidates = [];
+  let deferred = 0;
+  if (receipt.type === 'supplement') {
+    if (!receipt.targetDeliveryGroupId) {
+      await Receipt.updateOne({ _id: receiptId }, { $set: { supplementStatus: 'ready' } });
+      return { created: [], complete: true };
+    }
+    for (const item of items) {
+      if (!item.createdProductId) continue;
+      candidates.push({
+        item,
+        productId: String(item.createdProductId),
+        deliveryGroupId: String(receipt.targetDeliveryGroupId),
+      });
+    }
+  } else {
+    for (const item of items) {
+      const routing = normalizeReceiptItemRouting(item, receipt);
+      if (!routing.supplement || !item.createdProductId || !routing.supplementDeliveryGroupId) continue;
+      if (item.status !== 'confirmed') continue;
+
+      // V47.16: current items are batch-managed. Confirming a product only makes
+      // it READY for a supplement batch; it must not create an offer or send a
+      // Telegram message yet. The explicit batch publish action stamps
+      // supplementPublishRequestedAt. Legacy rows (version 0) keep their old
+      // auto-open semantics so deployments require no migration.
+      if (Number(item.supplementBatchVersion || 0) >= 1 && !item.supplementPublishRequestedAt) continue;
+
+      // Final gate at the actual offer-creation boundary. Commit/routing preflights
+      // catch the normal case, but this also protects delayed reconciliation from
+      // opening a week-old pending supplement after the next ordinary window has
+      // already started.
+      const target = await resolveSupplementTarget(
+        routing.supplementDeliveryGroupId,
+        { requireOrderingClosed: true, allowDeferred: true },
+      );
+      if (target.deferred) {
+        deferred += 1;
+        continue;
+      }
+      candidates.push({
+        item,
+        productId: String(item.createdProductId),
+        deliveryGroupId: String(target.deliveryGroupId),
+      });
+    }
   }
 
-  // Усередині однієї накладної однаковий товар показується один раз.
-  const byProduct = new Map();
-  for (const item of eligible) {
-    const productId = String(item.createdProductId);
-    if (!byProduct.has(productId)) byProduct.set(productId, item);
+  if (!candidates.length) {
+    // A current per-item supplement may be prepared while ordinary ordering is
+    // still open. Keep the receipt pending; the minute scheduler will retry and
+    // open the offer after that group's ordinary window closes. No employee has
+    // to come back just to click the same route again.
+    if (deferred > 0) {
+      await Receipt.updateOne({ _id: receiptId }, { $set: { supplementStatus: 'pending' } });
+      return { created: [], complete: false, deferred };
+    }
+
+    // Ordinary receipts with no supplement items don't need a supplement status.
+    await Receipt.updateOne(
+      { _id: receiptId },
+      { $set: { supplementStatus: receipt.type === 'supplement' ? 'ready' : null } },
+    );
+    return { created: [], complete: true, deferred: 0 };
   }
 
-  // Закриття виконується вручну, тому дедлайну немає.
   const openedAt = receipt.supplementOpenedAt ? new Date(receipt.supplementOpenedAt) : new Date();
 
-  const deliveryGroupId = String(receipt.targetDeliveryGroupId);
+  // One offer per receipt item + group (the model's unique index is the final
+  // idempotency guard). Do not dedupe across different items unless they literally
+  // share the same receiptItemId; each photographed receiving row is auditable.
+  const docs = candidates.map(({ item, productId, deliveryGroupId }) => ({
+    receiptId,
+    receiptItemId: item._id,
+    productId,
+    deliveryGroupId,
+    openedAt,
+    closesAt: null,
+    status: 'open',
+    lastReminderAt: openedAt,
+  }));
 
-  const docs = [];
-  for (const [productId, item] of byProduct) {
-    docs.push({
-      receiptId,
-      receiptItemId: item._id,
-      productId,
-      deliveryGroupId,
-      openedAt,
-      closesAt: null,
-      status: 'open',
-      lastReminderAt: openedAt,
-    });
-  }
-
-  // Окремі помилки не зупиняють решту вставок; pending добиває звірятель.
   const created = [];
   let duplicates = 0;
   let failed = 0;
@@ -104,23 +146,19 @@ async function createOffersForReceipt(receiptId) {
       failed += 1;
     }
   }
-  if (duplicates) {
-  }
 
-  const complete = failed === 0;
+  const complete = failed === 0 && deferred === 0;
   await Receipt.updateOne(
     { _id: receiptId },
     { $set: { supplementStatus: complete ? 'ready' : 'pending' } },
   );
-  if (!complete) {
-  }
 
-  return { created, complete };
+  return { created, complete, deferred };
 }
 
 /** Доводить до кінця проведені накладні зі supplementStatus='pending'. */
 async function reconcilePendingReceipts() {
-  const stuck = await Receipt.find({ supplementStatus: 'pending' }, '_id receiptNumber').limit(20).lean();
+  const stuck = await Receipt.find({ supplementStatus: 'pending' }, '_id receiptNumber').limit(500).lean();
   if (!stuck.length) return 0;
 
   let repaired = 0;
@@ -128,9 +166,6 @@ async function reconcilePendingReceipts() {
     try {
       const { created, complete } = await createOffersForReceipt(receipt._id);
       if (created.length) {
-        // Розсилка йде тим самим шляхом, що й у звичайному відкритті.
-        const { notifyOffers } = require('./supplementNotify');
-        notifyOffers(created, 'opened').catch(() => {});
         for (const offer of created) {
           emit('supplement_opened', {
             offerId: String(offer._id),
@@ -143,6 +178,12 @@ async function reconcilePendingReceipts() {
     } catch (err) {
     }
   }
+
+  // Do NOT send Telegram here. supplementScheduler calls findDueReminders()
+  // immediately after reconciliation and receives *all* open/unnotified offers
+  // in one query. That is the batching boundary: even when one publication wave
+  // spans several receipts (or retries a partially-created batch), all products
+  // of the same delivery group are claimed and announced in ONE message.
   return repaired;
 }
 
@@ -179,12 +220,13 @@ function formatLocation(location) {
 // ─── Збірка відповіді API ────────────────────────────────────────────────────
 
 function productView(product) {
-  if (!product) return { productId: null, title: 'Товар недоступний', imageUrl: null, price: 0 };
+  if (!product) return { productId: null, title: 'Товар недоступний', imageUrl: null, price: 0, quantityPerPackage: 0 };
   return {
     productId: String(product._id),
     title: getProductTitle(product),
     imageUrl: (Array.isArray(product.imageUrls) && product.imageUrls[0]) || product.localImageUrl || null,
     price: Number(product.price || 0),
+    quantityPerPackage: Number(product.quantityPerPackage || 0),
     aiDescription: product.aiDescription || '',
   };
 }
@@ -254,42 +296,80 @@ async function claimOffer(offerId, telegramId, now = new Date()) {
   const me = String(telegramId || '');
   const staleBefore = new Date(now.getTime() - LOCK_TIMEOUT_MS);
 
-  const claimed = await SupplementOffer.findOneAndUpdate(
-    {
-      _id: offerId,
-      status: { $in: ACTIVE_STATUSES },
-      $or: [
-        { lockedBy: null },
-        { lockedBy: me },
-        { lockedAt: { $lt: staleBefore } },
-      ],
-    },
-    { $set: { lockedBy: me, lockedAt: now } },
-    { new: true },
-  );
-  if (claimed) return { ok: true, offer: claimed };
+  // Claim/release/heartbeat/packed/freeze/complete all share the SAME logical
+  // offer lock. The Mongo predicate below is still the ownership backstop, but
+  // the distributed lock prevents a stale claim from racing a completion/freeze
+  // decision between two Node workers.
+  return withOfferLock(offerId, async () => {
+    const claimed = await SupplementOffer.findOneAndUpdate(
+      {
+        _id: offerId,
+        status: { $in: ACTIVE_STATUSES },
+        $or: [
+          { lockedBy: null },
+          { lockedBy: me },
+          { lockedAt: { $lt: staleBefore } },
+        ],
+      },
+      { $set: { lockedBy: me, lockedAt: now } },
+      { new: true },
+    );
+    if (claimed) return { ok: true, offer: claimed };
 
-  const existing = await SupplementOffer.findById(offerId, 'lockedBy status').lean();
-  if (!existing) return { ok: false, reason: 'supplement_offer_not_found' };
-  if (existing.status === 'completed') return { ok: false, reason: 'supplement_closed' };
-  return { ok: false, reason: 'supplement_locked_by_other', lockedBy: String(existing.lockedBy || '') };
+    const existing = await SupplementOffer.findById(offerId, 'lockedBy status').lean();
+    if (!existing) return { ok: false, reason: 'supplement_offer_not_found' };
+    if (existing.status === 'completed') return { ok: false, reason: 'supplement_closed' };
+    return { ok: false, reason: 'supplement_locked_by_other', lockedBy: String(existing.lockedBy || '') };
+  });
+}
+
+/** Keep a legitimately long-running supplement card alive and report ownership. */
+async function heartbeatOffer(offerId, telegramId, now = new Date()) {
+  const me = String(telegramId || '');
+  return withOfferLock(offerId, async () => {
+    const mine = await SupplementOffer.findOneAndUpdate(
+      { _id: offerId, status: { $in: ACTIVE_STATUSES }, lockedBy: me },
+      { $set: { lockedAt: now } },
+      { new: true },
+    );
+    if (mine) return { ok: true, held: true, state: 'mine', offer: mine };
+
+    const existing = await SupplementOffer.findById(offerId, 'lockedBy lockedAt status').lean();
+    if (!existing) return { ok: true, held: false, state: 'missing' };
+    if (existing.status === 'completed') return { ok: true, held: false, state: 'completed' };
+    if (!existing.lockedBy) return { ok: true, held: false, state: 'available' };
+    return {
+      ok: true,
+      held: false,
+      state: String(existing.lockedBy) === me ? 'mine_stale' : 'other_worker',
+      lockedBy: String(existing.lockedBy || ''),
+    };
+  });
 }
 
 /** Відпустити пропозицію (закрили картку). Тільки власник — чужий замок не чіпаємо. */
 async function releaseOffer(offerId, telegramId) {
-  await SupplementOffer.updateOne(
+  return withOfferLock(offerId, () => SupplementOffer.updateOne(
     { _id: offerId, lockedBy: String(telegramId || '') },
     { $set: { lockedBy: null, lockedAt: null } },
-  );
+  ));
 }
 
-/** Ручне закриття прийому для всіх відкритих пропозицій накладної. */
-async function freezeReceiptOffers(receiptId, actor = {}, now = new Date()) {
+/**
+ * Ручне закриття прийому для конкретної групи в межах накладної.
+ *
+ * Legacy supplement receipt historically had exactly one target group, but new
+ * regular receipts may contain several independent per-item supplement routes.
+ * Therefore the current flow MUST freeze receipt+group, not the whole receipt.
+ */
+async function freezeReceiptOffers(receiptId, actor = {}, now = new Date(), { deliveryGroupId = null } = {}) {
   if (!mongoose.Types.ObjectId.isValid(String(receiptId || ''))) {
     throw Object.assign(new Error('receipt not found'), { code: 'receipt_not_found' });
   }
 
-  const open = await SupplementOffer.find({ receiptId, status: 'open' }, '_id deliveryGroupId').lean();
+  const filter = { receiptId, status: 'open' };
+  if (deliveryGroupId) filter.deliveryGroupId = String(deliveryGroupId);
+  const open = await SupplementOffer.find(filter, '_id deliveryGroupId').lean();
   const frozen = [];
   for (const o of open) {
     const updated = await withOfferLock(o._id, () => SupplementOffer.findOneAndUpdate(
@@ -317,7 +397,54 @@ async function freezeReceiptOffers(receiptId, actor = {}, now = new Date()) {
   return frozen;
 }
 
-/** Після ручного frozen автоматично закриває пропозиції без заявок. */
+/**
+ * Safety boundary: supplement ordering must never overlap the next ordinary
+ * ordering window of the same delivery group. If warehouse staff forgot to
+ * freeze an old wave manually, the scheduler freezes it as soon as that group's
+ * normal ordering window opens. Existing requests remain available for packing;
+ * sellers simply cannot add/change quantities anymore.
+ */
+async function freezeOffersForActiveOrderingWindows(now = new Date()) {
+  const open = await SupplementOffer.find({ status: 'open' }, '_id receiptId deliveryGroupId').lean();
+  if (!open.length) return 0;
+
+  const groupIds = [...new Set(open.map((o) => String(o.deliveryGroupId || '')).filter(Boolean))];
+  const groups = await DeliveryGroup.find({ _id: { $in: groupIds } }, '_id orderingSchedule').lean();
+  const activeGroupIds = new Set(
+    groups
+      .filter((group) => group.orderingSchedule && isOrderingOpen(group.orderingSchedule, now).isOpen)
+      .map((group) => String(group._id)),
+  );
+  if (!activeGroupIds.size) return 0;
+
+  let frozenCount = 0;
+  for (const offer of open) {
+    if (!activeGroupIds.has(String(offer.deliveryGroupId))) continue;
+    const updated = await withOfferLock(offer._id, () => SupplementOffer.findOneAndUpdate(
+      { _id: offer._id, status: 'open' },
+      {
+        $set: {
+          status: 'frozen',
+          frozenAt: now,
+          frozenBy: 'system:ordering-window',
+          frozenByName: 'Автоматично: почалась звичайна сесія',
+        },
+      },
+      { new: true },
+    ));
+    if (!updated) continue;
+    frozenCount += 1;
+    emit('supplement_frozen', {
+      offerId: String(updated._id),
+      receiptId: String(updated.receiptId),
+      deliveryGroupId: String(updated.deliveryGroupId),
+      reason: 'ordinary_ordering_opened',
+    });
+  }
+  return frozenCount;
+}
+
+/** Після ручного/автоматичного frozen закриває пропозиції без заявок. */
 async function autoCompleteEmptyOffers(now = new Date()) {
   const frozen = await SupplementOffer.find(
     { status: 'frozen' },
@@ -356,6 +483,12 @@ async function completeOffer(offerId, actor = {}, now = new Date()) {
 
     if (doc.status !== 'frozen') {
       throw Object.assign(new Error('offer not frozen'), { code: 'supplement_not_frozen' });
+    }
+    // Ownership is checked INSIDE the same offer lock as completion. The old
+    // route checked lockedBy before entering this critical section, leaving a
+    // race where a stale lock could be claimed by another worker in-between.
+    if (actor?.by && String(doc.lockedBy || '') !== String(actor.by)) {
+      throw Object.assign(new Error('offer not claimed'), { code: 'supplement_not_claimed' });
     }
 
     const requests = await SupplementRequest.find({ offerId: doc._id }, 'packed').lean();
@@ -424,7 +557,7 @@ async function loadProductsFor(offers = []) {
   if (!ids.length) return new Map();
   const products = await Product.find(
     { _id: { $in: ids } },
-    '_id name brand model category warehouse orderNumber price imageUrls localImageUrl aiDescription',
+    '_id name brand model category warehouse orderNumber price quantityPerPackage imageUrls localImageUrl aiDescription',
   ).lean();
   return new Map(products.map((p) => [String(p._id), p]));
 }
@@ -442,8 +575,10 @@ module.exports = {
   offerViewForWarehouse,
   withOfferLock,
   claimOffer,
+  heartbeatOffer,
   releaseOffer,
   freezeReceiptOffers,
+  freezeOffersForActiveOrderingWindows,
   autoCompleteEmptyOffers,
   completeOffer,
   countActiveOffersForGroup,

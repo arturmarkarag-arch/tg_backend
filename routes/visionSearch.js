@@ -76,6 +76,7 @@ function shopResolveLookup(proj, as = 'sp') {
       let: { pid: '$productId', sid: '$shopProductId' },
       pipeline: [
         { $match: { $expr: { $or: [{ $eq: ['$linkedProductId', '$$pid'] }, { $eq: ['$_id', '$$sid'] }] } } },
+        { $match: { orderingEnabled: { $ne: false } } },
         { $project: proj },
       ],
       as,
@@ -240,10 +241,14 @@ router.post('/query-text', anyRole, asyncHandler(async (req, res) => {
 
   // Rank productvectors, then resolve each hit to its FULL doc (so the catalog list
   // can render + edit it). Hits that don't resolve (e.g. a deleted mirror) drop out.
+  const sellerSearch = req.telegramUser?.role === 'seller';
   const resolve = collection === 'products'
     ? [
         { $match: { productId: { $exists: true } } },
-        { $lookup: { from: 'products', localField: 'productId', foreignField: '_id', as: 'doc', pipeline: [{ $project: { geminiVector: 0 } }] } },
+        { $lookup: { from: 'products', localField: 'productId', foreignField: '_id', as: 'doc', pipeline: [
+          ...(sellerSearch ? [{ $match: { orderingEnabled: { $ne: false } } }] : []),
+          { $project: { geminiVector: 0 } },
+        ] } },
       ]
     : [shopResolveLookup({ geminiVector: 0, embedding: 0, descriptor: 0 }, 'doc')];
 

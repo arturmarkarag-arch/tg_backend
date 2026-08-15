@@ -7,11 +7,15 @@ const { shiftUp, shiftDown } = require('../utils/shiftOrderNumbers');
 const { normalizeBarcode } = require('../utils/barcodeScanner');
 const Block = require('../models/Block');
 const { getIO } = require('../socket');
+const { productCataloguePatch } = require('../utils/catalogueSocket');
 const Product = require('../models/Product');
 const ShopProduct = require('../models/ShopProduct');
 const { pushSharedFieldsToMirror, syncMirror } = require('../utils/upsertShopProduct');
 const { repriceActiveOrders } = require('../utils/repriceActiveOrders');
 const Order = require('../models/Order');
+const ReceiptItem = require('../models/ReceiptItem');
+const SupplementOffer = require('../models/SupplementOffer');
+const SupplementRequest = require('../models/SupplementRequest');
 const User = require('../models/User');
 const Shop = require('../models/Shop');
 const DeliveryGroup = require('../models/DeliveryGroup');
@@ -23,10 +27,71 @@ const { describeImageUrl } = require('../utils/productDescribe');
 const { embedProductAsync } = require('../utils/productEmbedding');
 const { getOrCreateSessionId, findCurrentSessionId } = require('../utils/getOrCreateSession');
 const { normalizeDeliveryGroup } = require('../utils/deliveryGroupHelpers');
+const { getOrderingWindowOpenAt, getOpenDateWarsaw } = require('../utils/orderingSchedule');
 const cache = require('../utils/cache');
+const { buildWarehouseStockEstimate } = require('../utils/warehouseStockEstimate');
+const { getSellerVisualOrder } = require('../services/sellerVisualOrdering');
 
 const staffOnly = requireTelegramRoles(['admin', 'warehouse']);
 const registeredOnly = requireTelegramRoles(['seller', 'admin', 'warehouse']);
+
+// Seller catalogue is frozen to the start of the current ordering cycle. A
+// warehouse product received after that moment may exist physically and even be
+// visible in "Нові товари", but it must not suddenly appear halfway through an
+// already-open seller session. When the next weekly cycle starts, the cutoff
+// advances and the product becomes part of the ordinary catalogue automatically.
+async function getSellerCatalogCycleContext(req) {
+  if (req.telegramUser?.role !== 'seller' || !req.telegramUser?.shopId) {
+    // Staff can open the same "Товари" screen for diagnostics. Keep that
+    // presentation isolated from seller-group cycles and refresh it daily.
+    return {
+      cutoff: null,
+      cacheScope: `staff:${new Date().toISOString().slice(0, 10)}`,
+    };
+  }
+  const shop = await Shop.findById(req.telegramUser.shopId, 'deliveryGroupId').lean();
+  if (!shop?.deliveryGroupId) {
+    return { cutoff: null, cacheScope: `seller:${req.telegramUser.id || req.telegramId || 'no-shop'}` };
+  }
+  const group = normalizeDeliveryGroup(await DeliveryGroup.findById(shop.deliveryGroupId).lean());
+  if (!group?.orderingSchedule) {
+    return { cutoff: null, cacheScope: `group:${String(shop.deliveryGroupId)}:no-schedule` };
+  }
+  return {
+    cutoff: getOrderingWindowOpenAt(group.orderingSchedule),
+    cacheScope: `group:${String(shop.deliveryGroupId)}:${getOpenDateWarsaw(group.orderingSchedule)}`,
+  };
+}
+
+async function getSellerCatalogCycleOpenAt(req) {
+  return (await getSellerCatalogCycleContext(req)).cutoff;
+}
+
+function applySellerCycleCutoff(query, cutoff) {
+  if (!cutoff) return query;
+  const condition = {
+    $or: [
+      { firstBlockPlacedAt: { $lte: cutoff } },
+      // Legacy products predate firstBlockPlacedAt. Fall back to the old receipt
+      // arrival timestamp (and finally createdAt) so deploying this field does not
+      // hide the existing catalogue.
+      {
+        $and: [
+          { $or: [{ firstBlockPlacedAt: null }, { firstBlockPlacedAt: { $exists: false } }] },
+          {
+            $or: [
+              { shelvedAt: { $lte: cutoff } },
+              { shelvedAt: null, createdAt: { $lte: cutoff } },
+              { shelvedAt: { $exists: false }, createdAt: { $lte: cutoff } },
+            ],
+          },
+        ],
+      },
+    ],
+  };
+  query.$and = [...(query.$and || []), condition];
+  return query;
+}
 
 function escapeRegex(value = '') {
   return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -94,6 +159,125 @@ async function buildLocationMap(ids = []) {
 }
 
 const router = express.Router();
+
+// GET /api/v1/products/warehouse-stats?ids=<id,id,...>
+//
+// Read-only / informational warehouse calculator. The physical received quantity
+// (`ReceiptItem.totalQty`) is deliberately NOT written back to Product.quantity,
+// and the estimate never drives archive/routing/picking decisions. Seller order
+// quantities are package multipliers (X1..X6), so estimated units are:
+//
+//   receivedQty - ((regularOrderedPackages + supplementOrderedPackages)
+//                  * current quantityPerPackage)
+//
+// `quantityPerPackage` is the CURRENT product value. Historical orders do not
+// snapshot pack size, therefore this is intentionally an approximate statistic.
+router.get('/warehouse-stats', staffOnly, asyncHandler(async (req, res) => {
+  const rawIds = String(req.query.ids || '')
+    .split(',')
+    .map((value) => value.trim())
+    .filter(Boolean)
+    .slice(0, 50);
+
+  const ids = rawIds.filter((value) => mongoose.Types.ObjectId.isValid(value));
+  if (!ids.length) return res.json({ items: [] });
+
+  const objectIds = ids.map((value) => new mongoose.Types.ObjectId(value));
+  const products = await Product.find(
+    { _id: { $in: objectIds } },
+    '_id quantityPerPackage receiptItemId',
+  ).lean();
+  if (!products.length) return res.json({ items: [] });
+
+  const productIds = products.map((product) => product._id);
+  const receiptItemIds = products.map((product) => product.receiptItemId).filter(Boolean);
+
+  const [receiptItems, regularOrders, offers] = await Promise.all([
+    ReceiptItem.find({
+      $or: [
+        ...(receiptItemIds.length ? [{ _id: { $in: receiptItemIds } }] : []),
+        { createdProductId: { $in: productIds } },
+      ],
+    }, '_id createdProductId totalQty').lean(),
+    Order.aggregate([
+      {
+        $match: {
+          orderType: { $ne: 'direct_allocation' },
+          'items.productId': { $in: productIds },
+        },
+      },
+      { $unwind: '$items' },
+      { $match: { 'items.productId': { $in: productIds } } },
+      {
+        $group: {
+          _id: '$items.productId',
+          packages: { $sum: { $ifNull: ['$items.quantity', 0] } },
+        },
+      },
+    ]),
+    SupplementOffer.find(
+      { productId: { $in: productIds } },
+      '_id productId',
+    ).lean(),
+  ]);
+
+  const receivedByReceiptItem = new Map();
+  const receivedByProduct = new Map();
+  for (const item of receiptItems) {
+    const qty = Number(item.totalQty);
+    if (!Number.isFinite(qty)) continue;
+    receivedByReceiptItem.set(String(item._id), qty);
+    if (item.createdProductId) receivedByProduct.set(String(item.createdProductId), qty);
+  }
+
+  const regularPackagesByProduct = new Map(
+    regularOrders.map((row) => [String(row._id), Number(row.packages || 0)]),
+  );
+
+  const offerProductById = new Map(offers.map((offer) => [String(offer._id), String(offer.productId)]));
+  const supplementPackagesByProduct = new Map();
+  if (offers.length) {
+    const supplementRows = await SupplementRequest.aggregate([
+      { $match: { offerId: { $in: offers.map((offer) => offer._id) } } },
+      { $group: { _id: '$offerId', packages: { $sum: { $ifNull: ['$quantity', 0] } } } },
+    ]);
+    for (const row of supplementRows) {
+      const productId = offerProductById.get(String(row._id));
+      if (!productId) continue;
+      supplementPackagesByProduct.set(
+        productId,
+        Number(supplementPackagesByProduct.get(productId) || 0) + Number(row.packages || 0),
+      );
+    }
+  }
+
+  const items = products.map((product) => {
+    const productId = String(product._id);
+    const regularOrderedPackages = Number(regularPackagesByProduct.get(productId) || 0);
+    const supplementOrderedPackages = Number(supplementPackagesByProduct.get(productId) || 0);
+    const orderedPackages = regularOrderedPackages + supplementOrderedPackages;
+    const quantityPerPackage = Number(product.quantityPerPackage || 0);
+
+    let receivedQty = null;
+    if (product.receiptItemId && receivedByReceiptItem.has(String(product.receiptItemId))) {
+      receivedQty = receivedByReceiptItem.get(String(product.receiptItemId));
+    } else if (receivedByProduct.has(productId)) {
+      receivedQty = receivedByProduct.get(productId);
+    }
+
+    return {
+      productId,
+      ...buildWarehouseStockEstimate({
+        receivedQty,
+        regularOrderedPackages,
+        supplementOrderedPackages,
+        quantityPerPackage,
+      }),
+    };
+  });
+
+  res.json({ items });
+}));
 
 // GET /api/v1/products/upload-url?folder=products&ext=jpg — staff presigned PUT URL for direct browser→R2 upload
 router.get('/upload-url', staffOnly, asyncHandler(async (req, res) => {
@@ -256,8 +440,112 @@ router.get('/drafts', staffOnly, asyncHandler(async (req, res) => {
   res.json(products);
 }));
 
-// GET /api/v1/products/:id/position — absolute index of a product in the
-// unfiltered seller catalogue (used for deep-links). Matches the GET / filter
+// Seller ordering catalogue — presentation-only visual sequence.
+//
+// IMPORTANT scope:
+//   - ONLY Product.status=active;
+//   - ONLY products physically present in Block.productIds;
+//   - ONLY ordinary-order-enabled products;
+//   - seller cycle cutoff remains authoritative;
+//   - embeddings/order never mutate Block, PickingTask, Product.orderNumber or session data.
+//
+// The frontend receives ONE already-ordered `items` array. It never receives
+// embeddings or a second array telling React how to sort.
+async function getEligibleSellerCatalogProducts(req) {
+  const context = await getSellerCatalogCycleContext(req);
+  const match = {
+    status: 'active',
+    orderingEnabled: { $ne: false },
+  };
+  applySellerCycleCutoff(match, context.cutoff);
+  const products = await Product.aggregate([
+    { $match: match },
+    {
+      $lookup: {
+        from: 'blocks',
+        localField: '_id',
+        foreignField: 'productIds',
+        as: '_block',
+        pipeline: [{ $project: { _id: 1 } }],
+      },
+    },
+    { $match: { '_block.0': { $exists: true } } },
+    { $project: { _id: 1, orderNumber: 1, createdAt: 1 } },
+    { $sort: { orderNumber: 1, createdAt: -1, _id: 1 } },
+  ]);
+  return { context, products };
+}
+
+async function getOrderedSellerCatalogIds(req) {
+  const { context, products } = await getEligibleSellerCatalogProducts(req);
+  const visual = await getSellerVisualOrder({
+    cacheScope: context.cacheScope,
+    eligibleProducts: products,
+  });
+  return { ids: visual.ids, meta: visual.meta };
+}
+
+router.get('/catalog', registeredOnly, asyncHandler(async (req, res) => {
+  const limit = Math.min(50, Math.max(1, Number(req.query.limit) || 24));
+  const offset = Math.max(0, Number(req.query.offset) || 0);
+  const { ids } = await getOrderedSellerCatalogIds(req);
+  const total = ids.length;
+  const pageIds = ids.slice(offset, offset + limit);
+  if (!pageIds.length) {
+    return res.json({ items: [], offset, limit, total, hasMore: false });
+  }
+
+  const docs = await Product.find({ _id: { $in: pageIds } }).lean();
+  const byId = new Map(docs.map((product) => [String(product._id), product]));
+  const products = pageIds.map((id) => byId.get(String(id))).filter(Boolean);
+  // Preserve the existing seller-card shape exactly; only the ORDER of rows is
+  // new. This keeps order-save snapshots, "new" badges and image rendering
+  // independent from the visual-order rollout.
+  const items = products.map((product) => ({
+    id: product._id,
+    title: getProductTitle(product),
+    name: product.name || '',
+    price: product.price,
+    quantity: product.quantity,
+    quantityPerPackage: product.quantityPerPackage || 0,
+    barcode: product.barcode || '',
+    source: product.source || '',
+    image_url: product.imageUrls?.[0] || product.localImageUrl || '',
+    thumbnail_url: product.imageUrls?.[0] || product.localImageUrl || '',
+    imageUrls: product.imageUrls || [],
+    originalImageUrl: product.originalImageUrl || '',
+    localImageUrl: product.localImageUrl || '',
+    labelPositions: product.labelPositions || {},
+    status: product.status,
+    orderNumber: product.orderNumber ?? 0,
+    createdAt: product.createdAt,
+    shelvedAt: product.shelvedAt || null,
+    firstBlockPlacedAt: product.firstBlockPlacedAt || null,
+  }));
+
+  return res.json({
+    items,
+    offset,
+    limit,
+    total,
+    hasMore: offset + items.length < total,
+  });
+}));
+
+router.get('/catalog/:id/position', registeredOnly, asyncHandler(async (req, res) => {
+  const { id } = req.params;
+  if (!mongoose.Types.ObjectId.isValid(id)) {
+    return res.status(400).json({ error: 'invalid_id' });
+  }
+  const { ids } = await getOrderedSellerCatalogIds(req);
+  const position = ids.indexOf(String(id));
+  if (position < 0) return res.status(404).json({ error: 'not_in_catalog' });
+  return res.json({ position, total: ids.length });
+}));
+
+// Legacy orderNumber-position resolver for callers of the generic /v1/products list.
+// Seller Товари → Товари deep-links use /catalog/:id/position above so their
+// position always matches the backend visual sequence. Matches the GET / filter
 // (not archived + in a block) and sort (orderNumber asc, createdAt desc,
 // _id asc) exactly, so the returned `position` lines up with the `offset`
 // clients use to page in.
@@ -280,7 +568,9 @@ router.get('/:id/position', asyncHandler(async (req, res) => {
 
   const catalogMatch = {
     status: { $ne: 'archived' },
+    orderingEnabled: { $ne: false },
   };
+  applySellerCycleCutoff(catalogMatch, await getSellerCatalogCycleOpenAt(req));
   const basePipeline = [
     { $match: catalogMatch },
     {
@@ -369,8 +659,12 @@ router.get('/', async (req, res) => {
   }
 
   const isV1 = String(req.baseUrl || '').includes('/api/v1') || String(req.originalUrl || '').startsWith('/api/v1');
+  if (isV1) {
+    query.orderingEnabled = { $ne: false };
+    applySellerCycleCutoff(query, await getSellerCatalogCycleOpenAt(req));
+  }
 
-  // For the seller-facing catalogue (v1), show every product placed in a block
+  // For the seller-facing catalogue (v1), show every order-enabled product placed in a block
   // (not archived), regardless of age. The old NEW_DAYS split is gone — new
   // products now appear here too; the "Нові товари" page is a separate view-only
   // gallery of the last 14 days, not a slice carved out of this list.
@@ -453,6 +747,7 @@ router.get('/', async (req, res) => {
       orderNumber: product.orderNumber ?? 0,
       createdAt: product.createdAt,
       shelvedAt: product.shelvedAt || null,
+      firstBlockPlacedAt: product.firstBlockPlacedAt || null,
     }));
 
     return res.json({
@@ -526,7 +821,7 @@ router.get('/pending', asyncHandler(async (req, res) => {
 // appear here (view-only); nothing else references them.
 function newProductsPipeline(cutoff) {
   return [
-    { $match: { status: { $ne: 'archived' }, shelvedAt: { $gte: cutoff } } },
+    { $match: { status: { $ne: 'archived' }, orderingEnabled: { $ne: false }, shelvedAt: { $gte: cutoff } } },
     {
       $lookup: {
         from: 'blocks',
@@ -543,6 +838,8 @@ function newProductsPipeline(cutoff) {
         price: 1,
         imageUrls: 1,
         image_url: 1,
+        mandatoryDistribution: 1,
+        mayNotReachAllShops: 1,
         _sortDate: '$shelvedAt',
       },
     },
@@ -563,6 +860,8 @@ function newProductsPipeline(cutoff) {
               price: 1,
               imageUrl: 1,
               originalImageUrl: 1,
+              mandatoryDistribution: 1,
+              mayNotReachAllShops: 1,
               _sortDate: '$createdAt',
             },
           },
@@ -600,6 +899,8 @@ router.get('/new-list', asyncHandler(async (req, res) => {
         image_url: 1,
         imageUrl: 1,
         originalImageUrl: 1,
+        mandatoryDistribution: 1,
+        mayNotReachAllShops: 1,
       },
     },
   ]);
@@ -1224,14 +1525,13 @@ router.patch('/:id', staffOnly, asyncHandler(async (req, res) => {
     const io = getIO();
     if (io) {
       io.emit('incoming_updated');
-      // A new photo / repositioned labels change what the catalogue tile shows
-      // (the seller mini-app reads imageUrls[0]). The catalogue is the one view
-      // that stays mounted and only refreshes its window on 'catalogue_updated' —
-      // a bare 'incoming_updated' is just for the Надходження lists. Without this
-      // the edited photo stays stale on every open catalogue until a full reload.
-      // action:'update' + productId → the mini-app refreshes its window only if
-      // THIS product is currently in view; otherwise it ignores the event.
-      if (patchFilenames.length > 0) io.emit('catalogue_updated', { action: 'update', productId: String(product._id) });
+      // Every shared Product edit can affect an already-open catalogue card
+      // (name/price/pack size/notes/barcode/order/photo), not only photo edits.
+      // Keep the existing targeted payload so MiniApp refreshes only its current
+      // window when this product is actually visible. Admin TanStack caches use
+      // the same event through QuerySocketBridge.
+      io.emit('catalogue_updated', { action: 'update', productId: String(product._id) });
+      io.to('staff').emit('catalogue_cache_patch', { action: 'update', entity: 'warehouse', productId: String(product._id), patch: productCataloguePatch(product) });
     }
   } catch (e) {
   }
@@ -1294,8 +1594,14 @@ router.post('/:id/describe', staffOnly, asyncHandler(async (req, res) => {
     res.json({ _id: product._id, aiDescription: product.aiDescription, aiName: aiName || null });
     // Live-refresh open warehouse boards so the generated name/description shows
     // without a reload (same channel the photo edit uses).
-    try { const io = getIO(); if (io) io.emit('incoming_updated'); }
-    catch (e) {}
+    try {
+      const io = getIO();
+      if (io) {
+        io.emit('incoming_updated');
+        io.emit('catalogue_updated', { action: 'update', productId: String(product._id) });
+      io.to('staff').emit('catalogue_cache_patch', { action: 'update', entity: 'warehouse', productId: String(product._id), patch: productCataloguePatch(product) });
+      }
+    } catch (e) {}
     pushSharedFieldsToMirror(product, {}).catch(() => {});
   } catch (err) {
     return res.status(502).json({ error: 'describe_api_error', message: err.message });

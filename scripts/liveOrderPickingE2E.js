@@ -106,7 +106,7 @@ const Counter = require('../models/Counter');
 const ShopAuditLog = require('../models/ShopAuditLog');
 const AppSetting = require('../models/AppSetting');
 const cache = require('../utils/cache');
-const { isOrderingOpen } = require('../utils/orderingSchedule');
+const { isOrderingOpen, getOrderingWindowOpenAt } = require('../utils/orderingSchedule');
 const { buildOpenClosedTestSchedules } = require('./helpers/perGroupTestSchedule');
 const { getOrCreateSessionId, getOrCreateNextSessionId } = require('../utils/getOrCreateSession');
 const { buildPickingTasksFromOrders } = require('../services/taskBuilder');
@@ -346,6 +346,17 @@ async function createWorld(name, {
 
     const blockId = await allocBlockId();
     world.block = await Block.create({ blockId, productIds: world.products.map((p) => p._id), version: 1 });
+
+    // Seller availability is fenced to products that were already physically
+    // placed before this ordering cycle opened. These fixtures are created
+    // after the synthetic window is opened, so stamp the synthetic placement
+    // just before that boundary; production availability rules stay untouched.
+    const availableBeforeOpen = new Date(getOrderingWindowOpenAt(openSchedule).getTime() - 60_000);
+    await Product.updateMany(
+      { _id: { $in: world.products.map((p) => p._id) } },
+      { $set: { firstBlockPlacedAt: availableBeforeOpen } },
+    );
+
     await updateWorldManifest(world, { phase: 'ready' });
     return world;
   } catch (e) {

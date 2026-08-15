@@ -1,0 +1,65 @@
+{
+  "runId": "20260815160553-56a170",
+  "marker": "__LIVE_E2E_MASS__20260815160553-56a170",
+  "seed": 3894293353,
+  "config": {
+    "sellers": 100,
+    "lateSellers": 8,
+    "shops": 120,
+    "products": 240,
+    "blocks": 12,
+    "warehouses": 12,
+    "itemsPerOrder": 20,
+    "orderConcurrency": 100,
+    "mergeRaceSellers": 25,
+    "conflictShops": 10,
+    "oosBlocks": 2
+  },
+  "db": "tg_manager",
+  "host": "ac-hq2xfhf-shard-00-01.epfky0s.mongodb.net",
+  "execute": false,
+  "durationMs": 1531,
+  "summary": {
+    "passed": 6,
+    "failed": 0,
+    "error": null
+  },
+  "metrics": {
+    "api": {},
+    "phases": {},
+    "counts": {},
+    "races": {}
+  },
+  "assertions": [
+    {
+      "ok": true,
+      "name": "Mass preflight can create an ordering-open per-group schedule",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "Mass preflight can create a picking-allowed per-group schedule",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "Mass critical Order unique index exists",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "Mass session-scoped PickingTask unique index exists",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "Mass Block partial unique index exists",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "Mass process is isolated from Redis",
+      "details": "REDIS_URL was configured and disabled for this process"
+    }
+  ]
+}

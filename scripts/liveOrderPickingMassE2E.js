@@ -88,7 +88,7 @@ const Counter = require('../models/Counter');
 const ShopAuditLog = require('../models/ShopAuditLog');
 const AppSetting = require('../models/AppSetting');
 const cache = require('../utils/cache');
-const { isOrderingOpen } = require('../utils/orderingSchedule');
+const { isOrderingOpen, getOrderingWindowOpenAt } = require('../utils/orderingSchedule');
 const { buildOpenClosedTestSchedules } = require('./helpers/perGroupTestSchedule');
 const { getOrCreateSessionId } = require('../utils/getOrCreateSession');
 const { signSession } = require('../utils/jwt');
@@ -323,6 +323,17 @@ async function createWorld() {
     if (!ids.length) break;
     world.blocks.push(await Block.create({ blockId: blockIds[b], productIds: ids, version: 1 }));
   }
+
+  // The live product route accepts only products that were already on a shelf
+  // when the ordering cycle opened. MASS fixtures are synthetic and are built
+  // after opening their synthetic window, so backdate only their placement
+  // marker to model a real pre-existing shelf product.
+  const availableBeforeOpen = new Date(getOrderingWindowOpenAt(openSchedule).getTime() - 60_000);
+  await Product.updateMany(
+    { _id: { $in: world.products.map((p) => p._id) } },
+    { $set: { firstBlockPlacedAt: availableBeforeOpen } },
+  );
+
   await saveManifest('fixtures_ready');
   phaseEnd('fixtures');
 }

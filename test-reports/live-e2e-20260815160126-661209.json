@@ -1,0 +1,362 @@
+{
+  "runId": "20260815160126-661209",
+  "marker": "__LIVE_E2E__20260815160126-661209",
+  "createdAt": "2026-08-15T16:01:57.457Z",
+  "db": "tg_manager",
+  "redisWasConfiguredButIsolated": true,
+  "execute": true,
+  "requestedScenarios": [
+    "multi_seller_single_order",
+    "ownership_freeze",
+    "checkbox_handoff",
+    "session_rollover",
+    "final_summary_retention",
+    "security_boundaries",
+    "isolation",
+    "barrier",
+    "coverage",
+    "oos",
+    "hidden_item"
+  ],
+  "summary": {
+    "passedScenarios": 1,
+    "failedScenarios": 10,
+    "passedAssertions": 41,
+    "failedAssertions": 10
+  },
+  "scenarios": [
+    {
+      "name": "multi_seller_single_order",
+      "ok": false,
+      "durationMs": 1503,
+      "error": "status=400 error=order_no_valid_items",
+      "assertionName": "multi_seller_single_order: HTTP order accepted"
+    },
+    {
+      "name": "ownership_freeze",
+      "ok": false,
+      "durationMs": 1343,
+      "error": "status=400 error=order_no_valid_items",
+      "assertionName": "ownership_freeze: HTTP order accepted"
+    },
+    {
+      "name": "checkbox_handoff",
+      "ok": false,
+      "durationMs": 1237,
+      "error": "status=400 error=order_no_valid_items",
+      "assertionName": "checkbox_handoff: HTTP order accepted"
+    },
+    {
+      "name": "session_rollover",
+      "ok": false,
+      "durationMs": 1104,
+      "error": "status=400 error=order_no_valid_items",
+      "assertionName": "session_rollover: HTTP order accepted"
+    },
+    {
+      "name": "final_summary_retention",
+      "ok": false,
+      "durationMs": 945,
+      "error": "status=400 error=order_no_valid_items",
+      "assertionName": "final_summary_retention: HTTP order accepted"
+    },
+    {
+      "name": "security_boundaries",
+      "ok": true,
+      "durationMs": 2513
+    },
+    {
+      "name": "coverage",
+      "ok": false,
+      "durationMs": 927,
+      "error": "status=400 error=order_no_valid_items",
+      "assertionName": "coverage: HTTP order accepted"
+    },
+    {
+      "name": "isolation",
+      "ok": false,
+      "durationMs": 1221,
+      "error": "status=400 error=order_no_valid_items",
+      "assertionName": "isolation: HTTP order accepted"
+    },
+    {
+      "name": "barrier",
+      "ok": false,
+      "durationMs": 2114,
+      "error": "status=400 error=order_no_valid_items",
+      "assertionName": "barrier: HTTP order accepted"
+    },
+    {
+      "name": "oos",
+      "ok": false,
+      "durationMs": 1233,
+      "error": "status=400 error=order_no_valid_items",
+      "assertionName": "oos: HTTP order accepted"
+    },
+    {
+      "name": "hidden_item",
+      "ok": false,
+      "durationMs": 1034,
+      "error": "status=400 error=order_no_valid_items",
+      "assertionName": "hidden_item: HTTP order accepted"
+    }
+  ],
+  "assertions": [
+    {
+      "ok": true,
+      "name": "MongoDB connection",
+      "details": "db=tg_manager host=ac-hq2xfhf-shard-00-01.epfky0s.mongodb.net allowed=epfky0s.mongodb.net"
+    },
+    {
+      "ok": true,
+      "name": "Synthetic per-group schedule can represent ordering-open phase",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "Synthetic per-group schedule can represent picking-allowed phase",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "Critical Order active uniqueness index exists",
+      "details": "value=one_active_order_per_buyer_shop_session"
+    },
+    {
+      "ok": true,
+      "name": "Critical PickingTask session-scoped uniqueness index exists",
+      "details": "value=one_active_task_per_product_group_session"
+    },
+    {
+      "ok": true,
+      "name": "OrderingSession groupId+openDate unique index exists",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "Critical Block partial unique index exists",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "MongoDB transaction round-trip",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "No previous LIVE_E2E fixture leftovers detected",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "Live Redis is isolated from this suite",
+      "details": "REDIS_URL existed but is disabled in test process"
+    },
+    {
+      "ok": true,
+      "name": "Ephemeral real Express app is writable",
+      "details": "status=ok"
+    },
+    {
+      "ok": true,
+      "name": "multi_seller_single_order: synthetic per-group ordering window starts open",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "multi_seller_single_order: three sellers may be assigned to one shop",
+      "details": "actual=3 expected=3"
+    },
+    {
+      "ok": false,
+      "name": "multi_seller_single_order: HTTP order accepted",
+      "details": "status=400 error=order_no_valid_items"
+    },
+    {
+      "ok": true,
+      "name": "ownership_freeze: synthetic per-group ordering window starts open",
+      "details": ""
+    },
+    {
+      "ok": false,
+      "name": "ownership_freeze: HTTP order accepted",
+      "details": "status=400 error=order_no_valid_items"
+    },
+    {
+      "ok": true,
+      "name": "checkbox_handoff: synthetic per-group ordering window starts open",
+      "details": ""
+    },
+    {
+      "ok": false,
+      "name": "checkbox_handoff: HTTP order accepted",
+      "details": "status=400 error=order_no_valid_items"
+    },
+    {
+      "ok": true,
+      "name": "session_rollover: synthetic per-group ordering window starts open",
+      "details": ""
+    },
+    {
+      "ok": false,
+      "name": "session_rollover: HTTP order accepted",
+      "details": "status=400 error=order_no_valid_items"
+    },
+    {
+      "ok": true,
+      "name": "final_summary_retention: synthetic per-group ordering window starts open",
+      "details": ""
+    },
+    {
+      "ok": false,
+      "name": "final_summary_retention: HTTP order accepted",
+      "details": "status=400 error=order_no_valid_items"
+    },
+    {
+      "ok": true,
+      "name": "security_boundaries: synthetic per-group ordering window starts open",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "security_boundaries: unauthenticated users API is rejected",
+      "details": "actual=401 expected=401"
+    },
+    {
+      "ok": true,
+      "name": "security_boundaries: seller cannot enumerate admin users API",
+      "details": "actual=403 expected=403"
+    },
+    {
+      "ok": true,
+      "name": "security_boundaries: warehouse cannot enumerate admin-only users API",
+      "details": "actual=403 expected=403"
+    },
+    {
+      "ok": true,
+      "name": "security_boundaries: seller cannot promote self through users API",
+      "details": "actual=403 expected=403"
+    },
+    {
+      "ok": true,
+      "name": "security_boundaries: failed privilege escalation does not mutate DB role",
+      "details": "actual=\"seller\" expected=\"seller\""
+    },
+    {
+      "ok": true,
+      "name": "security_boundaries: unauthenticated user creation is rejected",
+      "details": "actual=401 expected=401"
+    },
+    {
+      "ok": true,
+      "name": "security_boundaries: rejected unauthenticated user creation leaves no DB row",
+      "details": "actual=0 expected=0"
+    },
+    {
+      "ok": true,
+      "name": "security_boundaries: seller cannot create staff receipt",
+      "details": "actual=403 expected=403"
+    },
+    {
+      "ok": true,
+      "name": "security_boundaries: seller cannot start warehouse picking",
+      "details": "actual=403 expected=403"
+    },
+    {
+      "ok": true,
+      "name": "security_boundaries: destructive warehouse-test API is absent in production mode",
+      "details": "actual=404 expected=404"
+    },
+    {
+      "ok": true,
+      "name": "security_boundaries: public search endpoint refuses catalogue enumeration without barcode",
+      "details": "actual=400 expected=400"
+    },
+    {
+      "ok": true,
+      "name": "security_boundaries: public registration shop registry remains available",
+      "details": "actual=200 expected=200"
+    },
+    {
+      "ok": true,
+      "name": "security_boundaries: synthetic shop appears in public registry",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "security_boundaries: public shop registry has no seller list",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "security_boundaries: public shop registry has no seller phone",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "security_boundaries: public shop registry has no seller telegram id",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "security_boundaries: authenticated admin keeps users API access",
+      "details": "actual=200 expected=200"
+    },
+    {
+      "ok": true,
+      "name": "security_boundaries: SCENARIO PASS",
+      "details": "2513 ms"
+    },
+    {
+      "ok": true,
+      "name": "coverage: synthetic per-group ordering window starts open",
+      "details": ""
+    },
+    {
+      "ok": false,
+      "name": "coverage: HTTP order accepted",
+      "details": "status=400 error=order_no_valid_items"
+    },
+    {
+      "ok": true,
+      "name": "isolation: synthetic per-group ordering window starts open",
+      "details": ""
+    },
+    {
+      "ok": false,
+      "name": "isolation: HTTP order accepted",
+      "details": "status=400 error=order_no_valid_items"
+    },
+    {
+      "ok": true,
+      "name": "barrier: synthetic per-group ordering window starts open",
+      "details": ""
+    },
+    {
+      "ok": false,
+      "name": "barrier: HTTP order accepted",
+      "details": "status=400 error=order_no_valid_items"
+    },
+    {
+      "ok": true,
+      "name": "oos: synthetic per-group ordering window starts open",
+      "details": ""
+    },
+    {
+      "ok": false,
+      "name": "oos: HTTP order accepted",
+      "details": "status=400 error=order_no_valid_items"
+    },
+    {
+      "ok": true,
+      "name": "hidden_item: synthetic per-group ordering window starts open",
+      "details": ""
+    },
+    {
+      "ok": false,
+      "name": "hidden_item: HTTP order accepted",
+      "details": "status=400 error=order_no_valid_items"
+    }
+  ],
+  "preserved": []
+}

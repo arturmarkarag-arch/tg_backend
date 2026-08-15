@@ -204,8 +204,13 @@ router.use((req, res, next) => {
   return telegramAuth(req, res, next);
 });
 
-function isProductAvailable(product) {
-  return Boolean(product) && product.status !== 'archived';
+function isProductAvailable(product, orderingCycleOpenAt = null) {
+  if (!product || product.status === 'archived' || product.orderingEnabled === false) return false;
+  if (orderingCycleOpenAt) {
+    const availableStamp = product.firstBlockPlacedAt || product.shelvedAt || product.createdAt;
+    if (availableStamp && new Date(availableStamp) > new Date(orderingCycleOpenAt)) return false;
+  }
+  return true;
 }
 
 function buildProductLabel(product) {
@@ -595,6 +600,7 @@ router.get('/current-items', sellerOnly, asyncHandler(async (req, res) => {
         name: product?.name || item.name || 'Товар',
         price: Number(item.price || 0),
         quantity: Number(item.quantity || 0),
+        quantityPerPackage: Number(product?.quantityPerPackage || 0),
         imageUrl: (Array.isArray(product?.imageUrls) && product.imageUrls[0])
           || product?.localImageUrl
           || product?.originalImageUrl
@@ -773,6 +779,10 @@ async function placeOrderImpl(req, res) {
     }
   }
 
+  const orderingCycleOpenAt = group?.orderingSchedule
+    ? getOrderingWindowOpenAt(group.orderingSchedule)
+    : null;
+
   const productIds = items
     .map((item) => item?.productId)
     .filter(Boolean)
@@ -798,7 +808,7 @@ async function placeOrderImpl(req, res) {
     const productId = String(item?.productId || '');
     const product = productMap.get(productId);
     if (!product) continue;
-    if (!isProductAvailable(product)) {
+    if (!isProductAvailable(product, orderingCycleOpenAt)) {
       archivedItems.push({
         productId,
         name: buildProductLabel(product),
@@ -1507,11 +1517,34 @@ router.post('/upsert-item', telegramAuth, requireOrderingWindowOpen, asyncHandle
   if (!group) throw appError('delivery_group_not_found');
 
   const currentSessionId = await getOrCreateSessionId(String(group._id), group.orderingSchedule);
+  const orderingCycleOpenAt = getOrderingWindowOpenAt(group.orderingSchedule);
 
-  const mongoSession = await mongoose.connection.startSession();
+  // V47.7 session fence: a tab that was opened in the PREVIOUS ordering session
+  // must never silently write its stale intent into the new session. The client
+  // session id is REQUIRED, matching the existing mini-app navigation fence:
+  // accepting a missing id would let an old cached/stale tab bypass the guard.
+  const clientOrderingSessionId = String(req.body?.orderingSessionId || '').trim();
+  if (!clientOrderingSessionId || clientOrderingSessionId !== String(currentSessionId || '')) {
+    return res.status(409).json({
+      error: 'ordering_session_changed',
+      message: 'Почалася нова сесія замовлень. Оновіть каталог і повторіть дію.',
+      orderingSessionId: String(currentSessionId || ''),
+    });
+  }
+
+  // All mutations of one seller's active Order are serialized across Node
+  // workers. This closes the first-item race where two DIFFERENT products arrive
+  // concurrently, both see "no order", and both try to create an active Order.
+  // The DB unique index remains the final backstop, but normal traffic should not
+  // reach it. Different products may still be optimistic/concurrent on the client;
+  // the authoritative document mutation is one short critical section here.
+  const mutationLockKey = `order:upsert:${String(user.telegramId)}:${String(user.shopId)}:${String(currentSessionId || '')}`;
+
   let result;
-  try {
-    await mongoSession.withTransaction(async () => {
+  await withLock(mutationLockKey, async () => {
+    const mongoSession = await mongoose.connection.startSession();
+    try {
+      await mongoSession.withTransaction(async () => {
       const actor = {
         at: new Date(),
         by: String(user.telegramId),
@@ -1529,7 +1562,7 @@ router.post('/upsert-item', telegramAuth, requireOrderingWindowOpen, asyncHandle
         if (newQty === 0) { result = { ok: true, productId, newQty: 0, action: 'noop' }; return; }
 
         const product = await Product.findById(productId).session(mongoSession).lean();
-        if (!product || !isProductAvailable(product)) throw appError('product_not_found');
+        if (!product || !isProductAvailable(product, orderingCycleOpenAt)) throw appError('product_not_found');
         const inBlock = await Block.findOne({ productIds: product._id }).session(mongoSession).lean();
         if (!inBlock) throw appError('product_not_in_block');
 
@@ -1582,7 +1615,7 @@ router.post('/upsert-item', telegramAuth, requireOrderingWindowOpen, asyncHandle
         order.history.push({ ...actor, action: 'item_removed', meta: { productId, qty: removedQty } });
       } else if (!activeItem) {
         const product = await Product.findById(productId).session(mongoSession).lean();
-        if (!product || !isProductAvailable(product)) throw appError('product_not_found');
+        if (!product || !isProductAvailable(product, orderingCycleOpenAt)) throw appError('product_not_found');
         const inBlock = await Block.findOne({ productIds: product._id }).session(mongoSession).lean();
         if (!inBlock) throw appError('product_not_in_block');
 
@@ -1638,10 +1671,11 @@ router.post('/upsert-item', telegramAuth, requireOrderingWindowOpen, asyncHandle
       );
 
       result = { ok: true, productId, newQty, action: newQty === 0 ? 'removed' : (activeItem ? 'updated' : 'added'), orderId: String(order._id) };
-    });
-  } finally {
-    mongoSession.endSession();
-  }
+      });
+    } finally {
+      mongoSession.endSession();
+    }
+  }, { ttlMs: 15_000, waitMs: 12_000 });
 
   // The MiniApp's canonical order path is /upsert-item (not legacy POST /orders).
   // Assign/retry the per-group session number whenever this request touched a real
@@ -1658,7 +1692,7 @@ router.post('/upsert-item', telegramAuth, requireOrderingWindowOpen, asyncHandle
     }
   } catch { /* non-critical */ }
 
-  res.json(result);
+  res.json({ ...result, orderingSessionId: String(currentSessionId || '') });
 }));
 
 // POST /set-item-qty — seller sets the exact quantity for a product in their active session order.

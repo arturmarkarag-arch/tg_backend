@@ -11,7 +11,7 @@ const supplement = read('services/supplementOffers.js');
 describe('receipt core contract', () => {
   test('totalQty remains the single received quantity', () => {
     expect(model).toContain("totalQty: { type: Number, required: true, min: 1 }");
-    expect(permissions).toContain("if (!(item.totalQty >= 1)) missing.push('кількість що приїхала')");
+    expect(permissions).toContain("if (!(Number(item?.totalQty) >= 1)) missing.push('кількість що приїхала')");
   });
 
   test('legacy receipt structure, split, matching and evidence fields are absent', () => {
@@ -59,13 +59,26 @@ describe('receipt core contract', () => {
     expect(patch).not.toContain("status: 'draft'");
   });
 
-  test('supplement offers use only the product created by the receipt item', () => {
-    expect(supplement).toContain("'_id destination createdProductId name'");
+  test('supplement offers project the receipt-created product identity even as the projection grows', () => {
+    const start = supplement.indexOf('const items = await ReceiptItem.find');
+    const end = supplement.indexOf(').lean();', start);
+    const projection = supplement.slice(start, end);
+    for (const field of ['createdProductId', 'name', 'routing', 'routingVersion']) {
+      expect(projection).toContain(field);
+    }
     expect(supplement).not.toContain('existingProductId');
   });
 
-  test('photo gallery keeps totalQty metadata contract', () => {
-    expect(route).toContain("ReceiptItem.find(query, '_id photoUrl totalQty destination receiptId')");
+  test('photo gallery carries display, inline-preparation and edit-navigation context', () => {
+    const start = route.indexOf("router.get('/items-gallery'");
+    const end = route.indexOf("router.get('/:id'", start);
+    const gallery = route.slice(start, end);
+    for (const field of [
+      'receiptId', 'photoUrl', 'originalPhotoUrl', 'totalQty', 'destination',
+      'routingVersion', 'routing', 'price', 'qtyPerPackage', 'status', 'createdBy',
+    ]) expect(gallery).toContain(field);
+    expect(gallery).toContain('receiptType');
+    expect(gallery).toContain('receiptTargetDeliveryGroupId');
   });
   test('cleanup migration removes retired DB fields without touching totalQty or AI metadata', () => {
     const migration = read('scripts/cleanupReceiptContractLegacyFields.js');

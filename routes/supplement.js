@@ -16,6 +16,7 @@ const SupplementRequest = require('../models/SupplementRequest');
 const { requireTelegramRoles } = require('../middleware/telegramAuth');
 const { appError, asyncHandler } = require('../utils/errors');
 const { findCurrentSessionId } = require('../utils/getOrCreateSession');
+const { isOrderingOpen } = require('../utils/orderingSchedule');
 const { assignLateShopNumber, buildShopNumberLookup } = require('../utils/shopNumbering');
 const { getIO } = require('../socket');
 const {
@@ -28,6 +29,7 @@ const {
   offerViewForWarehouse,
   withOfferLock,
   claimOffer,
+  heartbeatOffer,
   releaseOffer,
   freezeReceiptOffers,
   completeOffer,
@@ -79,6 +81,10 @@ async function sellerContext(user) {
 }
 
 /** Пропозиція + перевірка, що вона справді адресована цьому продавцю. */
+function isOrdinaryOrderingOpenForSeller(ctx, now = new Date()) {
+  return !!ctx?.groupOrderingSchedule && isOrderingOpen(ctx.groupOrderingSchedule, now).isOpen;
+}
+
 async function loadOfferForSeller(offerId, ctx) {
   if (!mongoose.Types.ObjectId.isValid(offerId)) throw appError('supplement_offer_not_found');
   const offer = await SupplementOffer.findById(offerId);
@@ -111,6 +117,18 @@ async function boxNumberSessionId(deliveryGroupId, orderingSchedule) {
 /** GET /api/supplement/available — активні пропозиції групи продавця. */
 router.get('/available', sellerRoles, asyncHandler(async (req, res) => {
   const ctx = await sellerContext(req.telegramUser);
+  // Hard runtime gate in addition to the minute scheduler: at the exact instant
+  // normal ordering opens, an old forgotten supplement wave disappears from the
+  // seller UI even before the background freeze tick runs.
+  if (isOrdinaryOrderingOpenForSeller(ctx)) {
+    return res.json({
+      offers: [],
+      serverTime: new Date().toISOString(),
+      shopId: ctx.shopId,
+      deliveryGroupId: ctx.deliveryGroupId,
+      groupName: ctx.groupName,
+    });
+  }
 
   const offers = await SupplementOffer.find({
     deliveryGroupId: ctx.deliveryGroupId,
@@ -152,6 +170,7 @@ router.get('/available', sellerRoles, asyncHandler(async (req, res) => {
 router.post('/:offerId/request', sellerRoles, asyncHandler(async (req, res) => {
   const user = req.telegramUser;
   const ctx = await sellerContext(user);
+  if (isOrdinaryOrderingOpenForSeller(ctx)) throw appError('supplement_ordering_still_open', { group: ctx.groupName });
   const offer = await loadOfferForSeller(req.params.offerId, ctx);
 
   const quantity = Math.trunc(Number(req.body?.quantity));
@@ -246,6 +265,7 @@ router.post('/:offerId/request', sellerRoles, asyncHandler(async (req, res) => {
 router.delete('/:offerId/request', sellerRoles, asyncHandler(async (req, res) => {
   const user = req.telegramUser;
   const ctx = await sellerContext(user);
+  if (isOrdinaryOrderingOpenForSeller(ctx)) throw appError('supplement_ordering_still_open', { group: ctx.groupName });
   const offer = await loadOfferForSeller(req.params.offerId, ctx);
 
   // Видалення виконується під offer-lock і лише для packed=false.
@@ -497,22 +517,35 @@ async function buildOfferCard(offer, me = '') {
 
 /**
  * POST /api/supplement/receipts/:receiptId/freeze
- * Ручне закриття прийому дозамовлень для всієї накладної. Доступне складу й
- * адміну. Telegram-повідомлення про закриття свідомо НЕ надсилається.
+ * Ручне закриття прийому дозамовлень для КОНКРЕТНОЇ групи цієї накладної.
+ * Current regular receipts can contain per-item supplement routes for different
+ * groups, so closing one group's virtual block must not freeze another group.
+ * Legacy supplement receipts may omit deliveryGroupId — their old receipt-level
+ * target is used as the compatibility fallback.
  */
 router.post('/receipts/:receiptId/freeze', warehouseRoles, asyncHandler(async (req, res) => {
   const receiptId = String(req.params.receiptId || '');
   if (!mongoose.Types.ObjectId.isValid(receiptId)) throw appError('receipt_not_found');
 
   const receipt = await Receipt.findById(receiptId, 'type targetDeliveryGroupId').lean();
-  if (!receipt || receipt.type !== 'supplement') throw appError('receipt_not_found');
+  if (!receipt) throw appError('receipt_not_found');
 
-  const frozen = await freezeReceiptOffers(receiptId, actorOf(req.telegramUser));
+  const deliveryGroupId = String(
+    req.body?.deliveryGroupId || (receipt.type === 'supplement' ? receipt.targetDeliveryGroupId : '') || '',
+  );
+  if (!mongoose.Types.ObjectId.isValid(deliveryGroupId)) throw appError('supplement_target_required');
+
+  const frozen = await freezeReceiptOffers(
+    receiptId,
+    actorOf(req.telegramUser),
+    new Date(),
+    { deliveryGroupId },
+  );
   // frozen без заявок одразу закриваємо, щоб порожні картки не висіли до тіку.
   const { autoCompleteEmptyOffers } = require('../services/supplementOffers');
   await autoCompleteEmptyOffers(new Date());
 
-  res.json({ ok: true, frozenCount: frozen.length });
+  res.json({ ok: true, frozenCount: frozen.length, deliveryGroupId });
 }));
 
 /**
@@ -560,6 +593,19 @@ router.post('/offers/:offerId/claim', warehouseRoles, asyncHandler(async (req, r
   res.json({ offer: await buildOfferCard(claimedDoc, me), serverTime: new Date().toISOString() });
 }));
 
+/** POST /api/supplement/offers/:offerId/heartbeat — продовжити активний lease. */
+router.post('/offers/:offerId/heartbeat', warehouseRoles, asyncHandler(async (req, res) => {
+  if (!mongoose.Types.ObjectId.isValid(req.params.offerId)) throw appError('supplement_offer_not_found');
+  const me = String(req.telegramUser?.telegramId || '');
+  const result = await heartbeatOffer(req.params.offerId, me);
+  res.json({
+    ok: true,
+    held: !!result.held,
+    state: result.state || 'missing',
+    serverTime: new Date().toISOString(),
+  });
+}));
+
 /** POST /api/supplement/offers/:offerId/release — закрив картку, відпустив товар. */
 router.post('/offers/:offerId/release', warehouseRoles, asyncHandler(async (req, res) => {
   if (!mongoose.Types.ObjectId.isValid(req.params.offerId)) throw appError('supplement_offer_not_found');
@@ -585,6 +631,13 @@ router.patch('/requests/:requestId/packed', warehouseRoles, asyncHandler(async (
     if (String(fresh.lockedBy || '') !== String(actor.by)) {
       throw appError('supplement_not_claimed');
     }
+    // A real packing action is also proof of liveness. Refresh the lease in the
+    // same critical section so an actively clicking worker cannot become stale
+    // between heartbeat ticks.
+    await SupplementOffer.updateOne(
+      { _id: fresh._id, lockedBy: String(actor.by) },
+      { $set: { lockedAt: new Date() } },
+    );
 
     // Фільтр за поточним packed робить повторний тап ідемпотентним.
     await SupplementRequest.updateOne(
@@ -618,14 +671,9 @@ router.patch('/requests/:requestId/packed', warehouseRoles, asyncHandler(async (
 
 /** POST /api/supplement/offers/:offerId/complete — завершити frozen-пропозицію. */
 router.post('/offers/:offerId/complete', warehouseRoles, asyncHandler(async (req, res) => {
-  const me = String(req.telegramUser?.telegramId || '');
-  // Завершує складник, який узяв пропозицію в роботу.
-  const holder = await SupplementOffer.findById(req.params.offerId, 'lockedBy status').lean();
-  if (!holder) throw appError('supplement_offer_not_found');
-  if (holder.status !== 'completed' && String(holder.lockedBy || '') !== me) {
-    throw appError('supplement_not_claimed');
-  }
-
+  // completeOffer verifies status + ownership INSIDE its offer lock. Do not do a
+  // separate read here: that old read-before-lock pattern allowed a stale owner
+  // to pass the check just before another worker reclaimed the offer.
   try {
     await completeOffer(req.params.offerId, actorOf(req.telegramUser));
   } catch (err) {

@@ -10,6 +10,10 @@ const ReceiptSchema = new mongoose.Schema(
     startedAt: { type: Date, default: Date.now },
     completedAt: { type: Date, default: null },
 
+    // LEGACY COMPATIBILITY: current UI creates only `regular` receipts. New
+    // supplement intent lives per ReceiptItem.routing; `type='supplement'` and
+    // receipt-level target fields remain only so historical receipts/old clients
+    // keep working without a destructive migration.
     type: { type: String, enum: ['regular', 'supplement'], default: 'regular' },
     targetDeliveryGroupId: { type: String, default: null },
     supplementOpenedAt: { type: Date, default: null },

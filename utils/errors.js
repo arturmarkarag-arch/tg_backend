@@ -248,9 +248,18 @@ const ERRORS = {
   receipt_items_not_all_confirmed: { status: 409, message: ({ pending } = {}) =>
                                 `Не всі позиції підтверджені (${pending ?? '?'} без підпису). Кожен працівник має підтвердити свої позиції перед проведенням.` },
   receipt_item_incomplete: { status: 422, message: ({ fields } = {}) =>
-                                `Щоб підтвердити позицію, заповніть: ${fields || 'усі обовʼязкові поля'}. ` +
-                                'Прийняти товар можна й без них, але для підтвердження ціна та кількість в упаковці обовʼязкові.' },
+                                `Щоб підтвердити позицію, заповніть: ${fields || 'усі обовʼязкові поля'}.` },
+  receipt_item_not_prepared: { status: 422, message: ({ fields } = {}) =>
+                                `Перед вибором маршруту заповніть: ${fields || 'ціну та кількість в упаковці'}.` },
   receipt_destination_required: { status: 400, message: 'Вкажіть призначення: «Склад» або «Магазини»' },
+  receipt_route_required: { status: 422, message: 'Оберіть, куди піде товар: «На склад», «Обовʼязковий» або «Дозамовлення»' },
+  receipt_route_conflict: { status: 422, message: '«Обовʼязковий» і «Дозамовлення» не можна вибрати одночасно' },
+  receipt_route_warning_requires_mandatory: { status: 422, message: 'Позначка «Може приїхати не всім» доступна лише для обовʼязкового товару' },
+  receipt_route_warning_with_warehouse: { status: 422, message: '«Може приїхати не всім» не поєднується з «На склад»: якщо після обовʼязкової роздачі є залишок на склад, обовʼязковим магазинам товару вистачило' },
+  receipt_route_locked: { status: 409, message: 'Маршрут підтвердженої позиції не змінюється напряму. Спочатку зніміть підтвердження.' },
+  receipt_remainder_not_supported_legacy: { status: 409, message: 'Додавання залишку на склад доступне лише для нового підтвердженого маршруту товару.' },
+  receipt_remainder_route_invalid: { status: 422, message: 'Залишок можна додати на склад після «Обовʼязковий» або «Дозамовлення».' },
+  receipt_remainder_product_failed: { status: 500, message: 'Не вдалося додати залишок товару на склад.' },
 
   // ── Тип накладної (звичайна / дозамовлення) ────────────────────────────────
   receipt_type_invalid:     { status: 400, message: 'Невідомий тип накладної' },
@@ -267,6 +276,8 @@ const ERRORS = {
                                 'Прийом заявок на це дозамовлення вже закрито — нову позицію додати нікому' },
   supplement_target_required: { status: 400, message: 'Оберіть групу доставки, для якої відкрити дозамовлення' },
   supplement_target_not_found:{ status: 404, message: 'Обрану групу доставки більше не існує — оновіть список і виберіть іншу' },
+  supplement_ordering_still_open: { status: 409, message: ({ group } = {}) =>
+                                `У групі «${group || 'без назви'}» звичайна сесія замовлень ще відкрита. Дозамовлення відкриваємо тільки після її закриття.` },
   // Єдина причина відмови, що лишилась: показувати хвилю нікому. Стан вікна
   // замовлень і збирання групу НЕ блокує — рішення за працівником.
   supplement_target_no_shops: { status: 409, message: ({ group } = {}) =>
@@ -277,6 +288,10 @@ const ERRORS = {
   block_create_failed:      { status: 500, message: 'Не вдалося створити блок' },
   block_list_failed:        { status: 500, message: 'Не вдалося отримати список блоків' },
   block_fetch_failed:       { status: 500, message: 'Не вдалося отримати блок' },
+  block_not_empty:          { status: 409, message: 'Видалити можна лише порожній блок' },
+  block_delete_tail_only:   { status: 409, message: ({ maxBlockId } = {}) => maxBlockId
+                                ? `Щоб не створити дірку в нумерації, спочатку видаліть останній блок #${maxBlockId}.`
+                                : 'Видаляти блоки можна лише з кінця послідовності.' },
   block_search_query_required:{ status: 400, message: 'Не вказано пошуковий запит' },
 
   // ── Admin / OpenAI / cities ────────────────────────────────────────────────

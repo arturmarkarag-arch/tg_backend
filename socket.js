@@ -132,6 +132,10 @@ function initSocket(httpServer) {
     // derived only from the authenticated socket identity — never from client
     // payload — so another user cannot subscribe to someone else's notifications.
     socket.join(`user_${socket.telegramId}`);
+    // Staff-only room for rich cache reconciliation payloads. Seller sockets
+    // still receive the minimal public catalogue_updated signal, but never the
+    // product field patch used by admin TanStack caches.
+    if (['admin', 'warehouse'].includes(socket.userRole)) socket.join('staff');
 
     const isWarehouseStaff = () => ['admin', 'warehouse'].includes(socket.userRole);
 

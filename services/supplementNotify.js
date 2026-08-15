@@ -12,7 +12,7 @@ const REMINDER_EVERY_MS = 2 * 60 * 60 * 1000;
 const SEND_GAP_MS = 40;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-function buildText(type, { groupName, appUrl }) {
+function buildText(type, { groupName, appUrl, offersCount = 0 }) {
   const name = groupName || 'Група доставки';
   const title = type === 'reminder'
     ? `Нагадування — Дозамовлення — ${name}`
@@ -23,6 +23,7 @@ function buildText(type, { groupName, appUrl }) {
     title,
     '',
     `Всі магазини ${name}, приїхав новий товар, ЗРОБІТЬ ТЕРМІНОВО ЗАМОВЛЕННЯ.`,
+    ...(offersCount > 1 ? [`Нових товарів у пачці: ${offersCount}.`] : []),
     '',
     'Відкрийте додаток → «Товари» — картки позначені бейджем «Дозамовлення».',
     appUrl,
@@ -113,6 +114,7 @@ async function notifyOffers(offers, type, { now = new Date() } = {}) {
     const text = buildText(type, {
       groupName: groupNameById.get(groupId) || '',
       appUrl,
+      offersCount: byGroup.get(groupId)?.length || 0,
     });
 
     const sellers = await sellersOfGroup(groupId);

@@ -10,6 +10,7 @@ const { embedProductAsync } = require('../utils/productEmbedding');
 const { syncMirror } = require('../utils/upsertShopProduct');
 const { repriceActiveOrders } = require('../utils/repriceActiveOrders');
 const { getIO } = require('../socket');
+const { productCataloguePatch, shopProductCataloguePatch } = require('../utils/catalogueSocket');
 const { getGeminiStatus } = require('../geminiClient');
 const { describeImageUrl } = require('../utils/productDescribe');
 
@@ -57,6 +58,9 @@ router.get('/', anyRole, asyncHandler(async (req, res) => {
   const limit  = Math.min(100, Math.max(1, Number(req.query.limit)  || 50));
   const offset = Math.max(0, Number(req.query.offset) || 0);
   const query  = {};
+  if (req.telegramUser?.role === 'seller' || req.user?.role === 'seller') {
+    query.orderingEnabled = { $ne: false };
+  }
 
   if (req.query.barcode) {
     query.barcode = String(req.query.barcode).trim();
@@ -104,7 +108,11 @@ router.get('/barcode/:code', asyncHandler(async (req, res) => {
 // Used by the shop-products deep-link (?product=<shopProductId>): the page
 // fetches the doc, pulls its barcode, and drops that into the search box.
 router.get('/:id', anyRole, asyncHandler(async (req, res) => {
-  const item = await ShopProduct.findById(req.params.id).lean();
+  const query = { _id: req.params.id };
+  if (req.telegramUser?.role === 'seller' || req.user?.role === 'seller') {
+    query.orderingEnabled = { $ne: false };
+  }
+  const item = await ShopProduct.findOne(query).lean();
   if (!item) throw appError('product_not_found');
   res.json(item);
 }));
@@ -139,6 +147,13 @@ router.post('/', staffOnly, asyncHandler(async (req, res) => {
       imageUrl,
       originalImageUrl,
     });
+    try {
+      const io = getIO();
+      if (io) {
+        io.emit('catalogue_updated', { action: 'add', shopProductId: String(item._id) });
+        io.to('staff').emit('catalogue_cache_patch', { action: 'add', entity: 'shop', shopProductId: String(item._id), patch: shopProductCataloguePatch(item) });
+      }
+    } catch (e) {}
     res.status(201).json(item);
     // Auto-index for vector search (background; needs a photo).
     if (item.imageUrl || item.originalImageUrl) embedShopProductAsync(item, 'create');
@@ -206,7 +221,10 @@ async function editMirrorThroughToWarehouse(product, fields, res) {
     const io = getIO();
     if (io) {
       io.emit('incoming_updated'); // refresh open warehouse boards
-      if (photoChanged) io.emit('catalogue_updated', { action: 'update', productId: String(product._id) });
+      // Shared mirror edits (price/name/pack/notes/barcode/photo) all affect the
+      // live seller catalogue, not only photo changes.
+      io.emit('catalogue_updated', { action: 'update', productId: String(product._id) });
+      io.to('staff').emit('catalogue_cache_patch', { action: 'update', entity: 'warehouse', productId: String(product._id), patch: productCataloguePatch(product) });
     }
   } catch (e) {}
 
@@ -269,6 +287,14 @@ router.patch('/:id', staffOnly, asyncHandler(async (req, res) => {
     throw err;
   }
 
+  try {
+    const io = getIO();
+    if (io) {
+      io.emit('catalogue_updated', { action: 'update', shopProductId: String(item._id) });
+      io.to('staff').emit('catalogue_cache_patch', { action: 'update', entity: 'shop', shopProductId: String(item._id), patch: shopProductCataloguePatch(item) });
+    }
+  } catch (e) {}
+
   res.json(item.toObject());
   // New photo → the existing ProductVector row is stale; force a re-embed in the
   // background (force:true overwrites it — plain calls skip when a row exists).
@@ -308,6 +334,19 @@ router.post('/:id/describe', staffOnly, asyncHandler(async (req, res) => {
     await target.save();
     // Live mirror → push the warehouse-owned description back onto the mirror.
     if (target === owner) await syncMirror(owner);
+    try {
+      const io = getIO();
+      if (io) {
+        const publicPayload = target === owner
+          ? { action: 'update', productId: String(owner._id) }
+          : { action: 'update', shopProductId: String(item._id) };
+        const staffPayload = target === owner
+          ? { action: 'update', entity: 'warehouse', productId: String(owner._id), patch: productCataloguePatch(owner) }
+          : { action: 'update', entity: 'shop', shopProductId: String(item._id), patch: shopProductCataloguePatch(item) };
+        io.emit('catalogue_updated', publicPayload);
+        io.to('staff').emit('catalogue_cache_patch', staffPayload);
+      }
+    } catch (e) {}
     res.json({ _id: item._id, aiDescription: target.aiDescription, aiName: aiName || null });
   } catch (err) {
     return res.status(502).json({ error: 'describe_api_error', message: err.message });
@@ -329,6 +368,13 @@ router.delete('/:id', staffOnly, asyncHandler(async (req, res) => {
   }
 
   await ShopProduct.deleteOne({ _id: item._id });
+  try {
+    const io = getIO();
+    if (io) {
+      io.emit('catalogue_updated', { action: 'remove', shopProductId: String(item._id) });
+      io.to('staff').emit('catalogue_cache_patch', { action: 'remove', entity: 'shop', shopProductId: String(item._id) });
+    }
+  } catch (e) {}
   res.json({ ok: true });
 }));
 

@@ -9,6 +9,7 @@ const { requireTelegramRoles } = require('../middleware/telegramAuth');
 const { appError, asyncHandler } = require('../utils/errors');
 const { refreshPickingTaskPositions } = require('../services/taskBuilder');
 const { syncMirror } = require('../utils/upsertShopProduct');
+const { withLock } = require('../utils/lock');
 
 // On the "Полки" board a product tile renders ONLY its photo (+ name as the
 // alt/placeholder letter). Everything else on the warehouse Product — price,
@@ -97,15 +98,16 @@ async function getNextBlockId() {
       }
     }
 
-    if (counter.seq < maxBlockId) {
+    // Under the blocks:sequence lock the counter must mirror the real tail.
+    // This also self-heals older deployments where deleting a tail block left
+    // Counter.seq ahead of maxBlockId and the next create would skip a number.
+    if (counter.seq !== maxBlockId) {
       const updated = await Counter.findOneAndUpdate(
         { name: 'blockId', seq: counter.seq },
         { $set: { seq: maxBlockId } },
         { new: true }
       ).lean();
-      if (!updated) {
-        continue;
-      }
+      if (!updated) continue;
     }
 
     const updatedCounter = await Counter.findOneAndUpdate(
@@ -119,30 +121,30 @@ async function getNextBlockId() {
 
 // POST /api/blocks — create a new block with the next sequential blockId
 router.post('/', staffOnly, asyncHandler(async (req, res) => {
-  const MAX_RETRIES = 5;
-  for (let attempt = 1; attempt <= MAX_RETRIES; attempt += 1) {
-    try {
-      const nextBlockId = await getNextBlockId();
-      const block = await Block.create({ blockId: nextBlockId, productIds: [] });
-      const created = block.toObject();
-
+  return withLock('blocks:sequence', async () => {
+    const MAX_RETRIES = 5;
+    for (let attempt = 1; attempt <= MAX_RETRIES; attempt += 1) {
       try {
-        const io = getIO();
-        io.emit('block_updated', slimBlock(created));
-      } catch (e) {
-      }
+        const nextBlockId = await getNextBlockId();
+        const block = await Block.create({ blockId: nextBlockId, productIds: [] });
+        const created = block.toObject();
 
-      return res.status(201).json(created);
-    } catch (err) {
-      if (err.code === 11000 && attempt < MAX_RETRIES) {
-        continue;
+        try {
+          const io = getIO();
+          io.emit('block_updated', slimBlock(created));
+        } catch (e) {
+        }
+
+        return res.status(201).json(created);
+      } catch (err) {
+        if (err.code === 11000 && attempt < MAX_RETRIES) continue;
+        if (err.code === 11000) throw appError('block_id_conflict');
+        throw appError('block_create_failed');
       }
-      if (err.code === 11000) throw appError('block_id_conflict');
-      throw appError('block_create_failed');
     }
-  }
 
-  throw appError('block_id_conflict');
+    throw appError('block_id_conflict');
+  }, { ttlMs: 10_000, waitMs: 5_000 });
 }));
 
 // GET /api/blocks/incoming/products — products not assigned to any block.
@@ -156,8 +158,17 @@ router.get('/incoming/products', asyncHandler(async (req, res) => {
     // Надходження = NOT in a block, awaiting placement → 'pending' (active⟺in-block).
     status: 'pending',
     source: { $in: ['receive', 'receipt'] },
+    // A supplement-only receipt keeps a technical Product for stable productId
+    // and supplement picking, but orderingEnabled=false means it is NOT a
+    // warehouse remainder waiting to be placed into a block. Only real
+    // warehouse-routed goods belong in the Надходження placement queue.
+    orderingEnabled: { $ne: false },
     _id: { $nin: assignedIds },
+    // New receipt flow keeps received quantity as reference metadata rather
+    // than pretending it is the exact warehouse remainder, so a receipt product
+    // with quantity=0 must still be placeable. Restores remain visible too.
     $or: [
+      { source: 'receipt' },
       { quantity: { $gt: 0 } },
       { restoredFromArchive: true },
     ],
@@ -375,11 +386,11 @@ router.post('/:number/add', staffOnly, asyncHandler(async (req, res) => {
   if (!productId) throw appError('block_missing_product_id');
   if (!mongoose.Types.ObjectId.isValid(productId)) throw appError('block_invalid_product_id');
 
-  // INVARIANT (server-enforced): a product becomes 'active' the instant it enters
-  // a block, and an archived product may NEVER be shelved (restore it first).
-  // This is the single gate — no client path can place a non-active product into
-  // a block, so "in a block" is always equivalent to "active / orderable".
-  const productDoc = await Product.findById(productId, 'status').lean();
+  // Physical shelving gate: archived products may never be placed in a block
+  // (restore them first). Being in a block no longer automatically means the
+  // product is orderable: orderingEnabled and the seller's current session
+  // cutoff independently gate the ordinary seller catalog.
+  const productDoc = await Product.findById(productId, 'status firstBlockPlacedAt').lean();
   if (!productDoc) throw appError('product_not_found');
   if (productDoc.status === 'archived') throw appError('product_archived_cannot_shelve');
 
@@ -482,8 +493,13 @@ router.post('/:number/add', staffOnly, asyncHandler(async (req, res) => {
   }
   if (!updatedRaw) throw appError('block_concurrent_modification');
 
-  // In-block ⟹ active (invariant). Idempotent; the product just entered a block.
-  await Product.updateOne({ _id: productId }, { $set: { status: 'active' } });
+  // The physical placement timestamp is frozen the first time the product enters
+  // any block. It is distinct from receipt `shelvedAt` (arrival/confirmation).
+  // This lets a seller session stay catalog-stable even if warehouse staff place
+  // a newly received product into a block after that session has already started.
+  const activationSet = { status: 'active' };
+  if (!productDoc.firstBlockPlacedAt) activationSet.firstBlockPlacedAt = new Date();
+  await Product.updateOne({ _id: productId }, { $set: activationSet });
 
   // This is THE normal activation path (receive/restore → Надходження → block), so
   // the ShopProduct mirror must be created/refreshed HERE — previously only the
@@ -511,28 +527,43 @@ router.post('/:number/add', staffOnly, asyncHandler(async (req, res) => {
   res.json(updated);
 }));
 
-// DELETE /api/blocks/:number — only allowed when block is empty
-router.delete('/:number', requireTelegramRoles(['admin', 'manager']), asyncHandler(async (req, res) => {
-  const num = parseInt(req.params.number, 10);
-  if (isNaN(num)) throw appError(400, 'Invalid block number');
+// DELETE /api/blocks/:number — only the EMPTY TAIL block may be removed.
+// Example: with blocks 1..20, #20 may be deleted; only then #19 becomes the
+// tail and may be deleted. This preserves a gap-free physical block sequence.
+router.delete('/:number', requireTelegramRoles(['admin', 'warehouse', 'manager']), asyncHandler(async (req, res) => {
+  const num = Number(req.params.number);
+  if (!Number.isInteger(num) || num < 1) throw appError('block_invalid_number');
 
-  const block = await Block.findOne({ blockId: num }).lean();
-  if (!block) throw appError(404, 'Block not found');
+  return withLock('blocks:sequence', async () => {
+    const [block, maxBlock] = await Promise.all([
+      Block.findOne({ blockId: num }).lean(),
+      Block.findOne({}, 'blockId').sort({ blockId: -1 }).lean(),
+    ]);
+    if (!block) throw appError('block_not_found');
+    if (!maxBlock || Number(maxBlock.blockId) !== num) {
+      throw appError('block_delete_tail_only', { maxBlockId: maxBlock?.blockId ?? null });
+    }
 
-  const activeCount = await Product.countDocuments({
-    _id: { $in: block.productIds || [] },
-    status: { $in: ['active', 'pending'] },
-  });
-  if (activeCount > 0) throw appError(409, 'Block is not empty');
+    // "Empty" is literal here. Do not silently ignore archived/missing refs: a
+    // block may be deleted only after its stored sequence itself is empty. This
+    // keeps block numbering and any diagnostic/history tooling unambiguous.
+    if ((block.productIds || []).length > 0) throw appError('block_not_empty');
 
-  await Block.deleteOne({ blockId: num });
+    await Block.deleteOne({ blockId: num });
+    const newMax = await Block.findOne({}, 'blockId').sort({ blockId: -1 }).lean();
+    await Counter.findOneAndUpdate(
+      { name: 'blockId' },
+      { $set: { seq: Number(newMax?.blockId || 0) } },
+      { upsert: true, new: true },
+    );
 
-  try {
-    const io = getIO();
-    io.emit('block_deleted', { blockId: num });
-  } catch (_) { /* socket not ready */ }
+    try {
+      const io = getIO();
+      io.emit('block_deleted', { blockId: num, maxBlockId: Number(newMax?.blockId || 0) });
+    } catch (_) { /* socket not ready */ }
 
-  res.json({ ok: true, blockId: num });
+    return res.json({ ok: true, blockId: num, maxBlockId: Number(newMax?.blockId || 0) });
+  }, { ttlMs: 10_000, waitMs: 5_000 });
 }));
 
 module.exports = router;

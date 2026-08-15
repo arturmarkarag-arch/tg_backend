@@ -1,6 +1,7 @@
 'use strict';
 
-// Вибір групи не має серверного eligibility-гейта. Див. docs/receipt/readme.md.
+// Legacy вибір групи лишається permissive, але current per-item supplement може
+// попросити строгий business gate: ordinary ordering window already closed.
 
 const { humanDuration } = require('../services/supplementTargets');
 const {
@@ -24,18 +25,12 @@ const scheduleForEndDay = (endDay) => ({
   endMinute: 30,
 });
 
-describe('TRIPWIRE: сервер не вирішує за працівника', () => {
-  // Тест захищає ручний вибір групи від повторного eligibility-гейта.
+describe("TRIPWIRE: supplement target не прив'язується до конкретного OrderingSession", () => {
   const mod = require('../services/supplementTargets');
 
-  it('модуль не експортує правило допуску', () => {
-    expect(mod.isEligibleState).toBeUndefined();
-    expect(mod.ELIGIBLE_STATES).toBeUndefined();
-  });
-
   it('ціль хвилі — лише група, без сесії', () => {
-    // resolveSupplementTarget повертає {deliveryGroupId, state}. Поява
-    // orderingSessionId означала б, що хвилю знову прив'язали до доставки.
+    // Поява orderingSessionId означала б, що хвилю знову прив'язали до
+    // конкретної доставки. Current gate перевіряє лише weekly window open/closed.
     expect(String(mod.resolveSupplementTarget)).not.toMatch(/orderingSessionId/);
   });
 });

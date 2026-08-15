@@ -383,12 +383,23 @@ router.get('/ordering-status', telegramAuth, async (req, res) => {
   const window = getWindowDescription(group.orderingSchedule);
   const sessionOpenAt = getOrderingWindowOpenAt(group.orderingSchedule).toISOString();
 
+  // Resolve the session once and return its id to the client. While ordering is
+  // open we materialise it if needed, so a resumed/old WebView can proactively
+  // detect the NEW weekly session before its next navigation/order write.
+  let sessionId = null;
+  try {
+    sessionId = status.isOpen
+      ? await getOrCreateSessionId(String(group._id), group.orderingSchedule)
+      : await findCurrentSessionId(String(group._id), group.orderingSchedule);
+  } catch (e) {
+    sessionId = null;
+  }
+
   // "Я переглянув усі товари" — seed the button's state so a seller who already
   // pressed it (possibly on another device) sees the done state, not the button.
   // Best-effort: this is a cosmetic flag, it must never break the ordering window.
   let catalogReviewedAt = null;
   try {
-    const sessionId = await findCurrentSessionId(String(group._id), group.orderingSchedule);
     if (sessionId) {
       const mark = await CatalogReview.findOne(
         { sessionId, telegramId: String(user.telegramId) }, 'at',
@@ -401,7 +412,6 @@ router.get('/ordering-status', telegramAuth, async (req, res) => {
   let closedDashboard = null;
   if (!status.isOpen) {
     try {
-      const sessionId = await findCurrentSessionId(String(group._id), group.orderingSchedule);
       if (sessionId) {
         closedDashboard = await buildSellerClosedDashboard({
           user,
@@ -423,6 +433,7 @@ router.get('/ordering-status', telegramAuth, async (req, res) => {
     groupName: group.name,
     window,
     sessionOpenAt,
+    orderingSessionId: sessionId ? String(sessionId) : '',
     catalogReviewedAt,
     closedDashboard,
     ...transferPayload,

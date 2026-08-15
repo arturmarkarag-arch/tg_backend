@@ -28,6 +28,11 @@ const ShopProductSchema = new mongoose.Schema(
       enum: ['receive', 'seller', 'manual'],
       default: 'manual',
     },
+    // Manual mandatory-distribution warning for receipt-sourced goods. No stock
+    // arithmetic is used to derive this value.
+    orderingEnabled: { type: Boolean, default: true },
+    mandatoryDistribution: { type: Boolean, default: false },
+    mayNotReachAllShops: { type: Boolean, default: false },
     // Telegram id of whoever created this record. Drives future edit-permission
     // rules (e.g. a seller may edit only their own entries).
     createdBy: { type: String, default: '' },
@@ -37,8 +42,9 @@ const ShopProductSchema = new mongoose.Schema(
       ref: 'Product',
       default: null,
     },
-    // Set ONLY for a shop-OWNED product created from a `destination: 'shops'`
-    // receipt item. This is the idempotency anchor: re-confirming the same
+    // Set ONLY for a shop-OWNED product created from a current mandatory-only
+    // receipt item (or a legacy destination='shops' row). This is the idempotency
+    // anchor: re-confirming the same
     // receipt item refreshes THIS doc instead of creating a duplicate (which a
     // barcodeless item would otherwise do on every confirm). `default: undefined`
     // so warehouse mirrors and seller/manual products omit the field entirely

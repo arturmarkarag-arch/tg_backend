@@ -6,6 +6,9 @@ const { requireTelegramRoles } = require('../middleware/telegramAuth');
 const Receipt = require('../models/Receipt');
 const ReceiptItem = require('../models/ReceiptItem');
 const Product = require('../models/Product');
+const ShopProduct = require('../models/ShopProduct');
+const ProductVector = require('../models/ProductVector');
+const SupplementOffer = require('../models/SupplementOffer');
 const Block = require('../models/Block');
 const ReceiptItemLog = require('../models/ReceiptItemLog');
 const DeliveryGroup = require('../models/DeliveryGroup');
@@ -17,10 +20,20 @@ const { embedProductAsync } = require('../utils/productEmbedding');
 const { getGeminiStatus } = require('../geminiClient');
 const { describeImageUrl } = require('../utils/productDescribe');
 const { appError, asyncHandler } = require('../utils/errors');
+const { withLock } = require('../utils/lock');
+const { normalizeReceiptPhotoMeta, photoCommentsText } = require('../utils/receiptPhotoMeta');
+const {
+  blankRouting,
+  normalizeReceiptItemRouting,
+  legacyDestinationForRouting,
+  validateReceiptItemRouting,
+  isNormalOrderingEnabled,
+} = require('../utils/receiptRouting');
 const {
   assertCanEditItem,
   assertCanDeleteItem,
   assertCanConfirmItem,
+  assertItemReadyForRouting,
   assertItemReadyToConfirm,
 } = require('../utils/receiptPermissions');
 // Проведена накладна редагується так само, як відкрита; весь контракт
@@ -32,6 +45,7 @@ const {
   propagateItemEdit,
   rollbackItemArtifacts,
   hasOpenSupplementWave,
+  hasActiveSupplementItemWave,
 } = require('../services/receiptSync');
 
 const staffOnly = requireTelegramRoles(['admin', 'warehouse']);
@@ -45,10 +59,15 @@ const FIELD_LABELS = {
   photoUrl: 'Фото',
 };
 
-async function ensureReceiptItemProduct(item, session) {
-  // Shop-routed goods never touch warehouse stock.
-  if ((item.destination || 'shelf') === 'shops') return null;
+async function ensureReceiptItemProduct(item, session, receipt = null) {
+  const routing = normalizeReceiptItemRouting(item, receipt);
+  const destination = legacyDestinationForRouting(routing);
 
+  // Mandatory-only goods never create warehouse stock. They live as a
+  // standalone ShopProduct and are physically distributed by the warehouse.
+  if (destination === 'shops') return null;
+
+  const orderingEnabled = isNormalOrderingEnabled(routing);
   let product = null;
 
   // Idempotency: once this receipt item created a warehouse Product, reuse it.
@@ -56,11 +75,19 @@ async function ensureReceiptItemProduct(item, session) {
     product = await Product.findById(item.createdProductId).session(session);
     if (product) {
       if (!item.stockApplied) {
-        product.quantity = item.totalQty;
+        // New routing keeps received quantity as receipt metadata only. Legacy
+        // rows preserve the historical stock-seed behavior.
+        product.quantity = Number(item.routingVersion || 0) >= 1 ? 0 : item.totalQty;
       }
       if (item.price !== null) product.price = item.price;
       if (item.qtyPerPackage) product.quantityPerPackage = item.qtyPerPackage;
+      product.notes = photoCommentsText(item.photoMeta);
+      product.labelPositions = labelPositionsFromMeta(item.photoMeta);
       if (!product.shelvedAt) product.shelvedAt = new Date();
+      product.orderingEnabled = orderingEnabled;
+      product.mandatoryDistribution = !!routing.mandatory;
+      product.mayNotReachAllShops = !!routing.mayNotReachAllShops;
+      product.receiptItemId = item._id;
       await product.save({ session });
       if (!item.stockApplied) {
         item.stockApplied = true;
@@ -80,7 +107,7 @@ async function ensureReceiptItemProduct(item, session) {
   product = new Product({
     orderNumber: nextOrderNumber,
     price: item.price ?? 0,
-    quantity: item.totalQty,
+    quantity: Number(item.routingVersion || 0) >= 1 ? 0 : item.totalQty,
     warehouse: '',
     category: '',
     name: item.name || '',
@@ -89,10 +116,15 @@ async function ensureReceiptItemProduct(item, session) {
     status: 'pending',
     shelvedAt: new Date(),
     source: 'receipt',
+    orderingEnabled,
+    mandatoryDistribution: !!routing.mandatory,
+    mayNotReachAllShops: !!routing.mayNotReachAllShops,
+    receiptItemId: item._id,
     imageUrls: [item.photoUrl],
     imageNames: [item.photoName],
     originalImageUrl: item.originalPhotoUrl || '',
     labelPositions,
+    notes: photoCommentsText(item.photoMeta),
     quantityPerPackage: item.qtyPerPackage || 0,
     aiDescription: item.aiDescription || '',
   });
@@ -110,6 +142,50 @@ async function ensureReceiptItemProduct(item, session) {
   item.stockApplied = true;
   await item.save({ session });
   return product;
+}
+
+
+// V47.15: a confirmed mandatory/supplement decision is historical business fact.
+// If stock remains later, adding that remainder to the warehouse must be ADDITIVE:
+// never unconfirm/re-confirm, never recreate supplement offers, never re-notify shops.
+// Mandatory-only rows already own a standalone ShopProduct. When they gain a
+// warehouse Product, convert that SAME ShopProduct document into the warehouse
+// mirror so "Товари Магазинів" does not get a duplicate card or a new id.
+async function convertReceiptShopOwnedToWarehouseMirror(item, product, session) {
+  const oldShopProductId = item.createdShopProductId;
+  if (oldShopProductId) {
+    const converted = await ShopProduct.findOneAndUpdate(
+      { _id: oldShopProductId, linkedProductId: null },
+      {
+        $set: { linkedProductId: product._id },
+        $unset: { receiptItemId: 1 },
+      },
+      { new: true, session },
+    );
+
+    if (converted) {
+      // Same clean photo => same vector. Move ownership instead of paying Gemini
+      // to embed the identical image again. If a warehouse vector somehow already
+      // exists, discard only the obsolete shop-owned vector.
+      const existingProductVector = await ProductVector.exists({ productId: product._id }).session(session);
+      if (existingProductVector) {
+        await ProductVector.deleteMany({ shopProductId: oldShopProductId }).session(session);
+      } else {
+        await ProductVector.updateOne(
+          { shopProductId: oldShopProductId },
+          { $set: { productId: product._id }, $unset: { shopProductId: 1 } },
+          { session },
+        );
+      }
+    }
+
+    // From now on the receipt item owns one warehouse Product; its ShopProduct is
+    // reached through Product.linkedProductId semantics, not the old standalone id.
+    item.createdShopProductId = null;
+    await item.save({ session });
+  }
+
+  return syncMirror(product, { session });
 }
 
 function getActor(req) {
@@ -280,48 +356,295 @@ router.get('/', staffOnly, asyncHandler(async (req, res) => {
   });
 }));
 
-// Read-only photo feed for the Receipts page. It reads receipt metadata in one
-// batch so the UI can explain destination, but it never mutates receipt state
-// or touches confirm/commit logic.
+// Read-only photo feed for the Receipts page. The full-photo view intentionally
+// exposes only the small amount of context needed under the image and for the
+// inline preparation: clean-original fallback, received quantity, normalized
+// route inputs, preparation readiness/status and batch-publication state.
 router.get('/items-gallery', staffOnly, asyncHandler(async (req, res) => {
   const page = Math.max(1, parseInt(req.query.page) || 1);
   const pageSize = Math.min(50, Math.max(1, parseInt(req.query.pageSize) || 20));
-  const query = {
-    photoUrl: { $exists: true, $nin: ['', null] },
-  };
+  const query = { photoUrl: { $exists: true, $nin: ['', null] } };
 
-  const [total, items] = await Promise.all([
+  // Keep the photo feed on the same calendar semantics as the receipt list:
+  // filter by the parent Receipt.createdAt, not by when an individual photo row
+  // happened to be added/edited. dateTo is inclusive end-of-day.
+  const receiptCreatedAt = {};
+  const fromMs = Date.parse(req.query.dateFrom || '');
+  const toMs = Date.parse(req.query.dateTo || '');
+  if (Number.isFinite(fromMs)) receiptCreatedAt.$gte = new Date(fromMs);
+  if (Number.isFinite(toMs)) receiptCreatedAt.$lte = new Date(toMs + 24 * 60 * 60 * 1000 - 1);
+
+  if (Object.keys(receiptCreatedAt).length) {
+    const receiptIds = await Receipt.distinct('_id', { createdAt: receiptCreatedAt });
+    if (receiptIds.length === 0) {
+      return res.json({ items: [], total: 0, page, pageSize, pageCount: 1 });
+    }
+    query.receiptId = { $in: receiptIds };
+  }
+
+  const [total, rows] = await Promise.all([
     ReceiptItem.countDocuments(query),
-    ReceiptItem.find(query, '_id photoUrl totalQty destination receiptId')
+    ReceiptItem.find(
+      query,
+      '_id receiptId photoUrl originalPhotoUrl totalQty destination routingVersion routing price qtyPerPackage status createdBy supplementBatchVersion supplementPublishRequestedAt',
+    )
       .sort({ createdAt: -1, _id: -1 })
       .skip((page - 1) * pageSize)
       .limit(pageSize)
       .lean(),
   ]);
 
-  // One batched lookup gives the gallery enough receipt context to explain
-  // where the photographed item went without turning this read-only feed into
-  // an N+1 query. Supplement receipts are always warehouse-bound as well, so
-  // the client can label them truthfully as "Допродаж + склад".
-  const receiptIds = [...new Set(items.map((item) => String(item.receiptId)).filter(Boolean))];
+  // Legacy supplement rows encoded their route on Receipt.type instead of the
+  // item. Return that tiny compatibility hint so the client can label old photos
+  // correctly without fetching N receipts.
+  const receiptIds = [...new Set(rows.map((row) => String(row.receiptId || '')).filter(Boolean))];
   const receipts = receiptIds.length
-    ? await Receipt.find({ _id: { $in: receiptIds } }, '_id type').lean()
+    ? await Receipt.find(
+        { _id: { $in: receiptIds } },
+        '_id type targetDeliveryGroupId',
+      ).lean()
     : [];
-  const receiptMap = new Map(receipts.map((receipt) => [String(receipt._id), receipt]));
-  const galleryItems = items.map((item) => {
-    const receipt = receiptMap.get(String(item.receiptId));
+  const receiptById = new Map(receipts.map((receipt) => [String(receipt._id), receipt]));
+  const items = rows.map((row) => {
+    const receipt = receiptById.get(String(row.receiptId || ''));
     return {
-      ...item,
+      ...row,
       receiptType: receipt?.type || 'regular',
+      receiptTargetDeliveryGroupId: receipt?.targetDeliveryGroupId || null,
     };
   });
 
   res.json({
-    items: galleryItems,
+    items,
     total,
     page,
     pageSize,
     pageCount: Math.max(1, Math.ceil(total / pageSize)),
+  });
+}));
+
+
+// ── SUPPLEMENT BATCH PUBLICATION ────────────────────────────────────────────
+// Preparing/confirming a supplement product never sends Telegram by itself.
+// V48.2 current rows are deliberately UNASSIGNED: workers mark all needed items
+// as supplement first, then choose one delivery group for the whole batch here.
+// Legacy V47.16 rows that already carry a group remain publishable.
+router.get('/supplement-batches/pending', staffOnly, asyncHandler(async (_req, res) => {
+  const rows = await ReceiptItem.find({
+    status: 'confirmed',
+    routingVersion: { $gte: 1 },
+    'routing.supplement': true,
+    createdProductId: { $ne: null },
+    supplementBatchVersion: { $gte: 1 },
+    supplementPublishRequestedAt: null,
+  }, '_id receiptId routing.supplementDeliveryGroupId supplementBatchVersion').lean();
+
+  const { describeSupplementTargets } = require('../services/supplementTargets');
+  const targets = await describeSupplementTargets();
+  if (!rows.length) {
+    return res.json({ readyCount: 0, groups: [], targets: targets.groups || [], serverTime: targets.serverTime || new Date().toISOString() });
+  }
+
+  // Only a completed receiving document may enter a seller batch. Workers can
+  // prepare products earlier, but receiving must be formally closed first.
+  const receiptIds = [...new Set(rows.map((row) => String(row.receiptId)))];
+  const completed = await Receipt.find(
+    { _id: { $in: receiptIds }, status: 'completed' },
+    '_id',
+  ).lean();
+  const completedIds = new Set(completed.map((receipt) => String(receipt._id)));
+  const publishable = rows.filter((row) => completedIds.has(String(row.receiptId)));
+
+  const readyCount = publishable.filter((row) => !String(row.routing?.supplementDeliveryGroupId || '').trim()).length;
+
+  // Compatibility only: old batch-v1 items may already have a group. Keep them
+  // visible until published; new UI never writes this field per product.
+  const legacyCounts = new Map();
+  for (const row of publishable) {
+    const gid = String(row.routing?.supplementDeliveryGroupId || '').trim();
+    if (!gid) continue;
+    legacyCounts.set(gid, (legacyCounts.get(gid) || 0) + 1);
+  }
+  const byId = new Map((targets.groups || []).map((group) => [String(group.deliveryGroupId), group]));
+  const groups = [...legacyCounts.entries()].map(([deliveryGroupId, count]) => {
+    const target = byId.get(deliveryGroupId) || {};
+    return {
+      deliveryGroupId,
+      count,
+      name: target.name || target.title || 'Група доставки',
+      state: target.state || null,
+      title: target.title || '',
+      details: target.details || [],
+      note: target.note || '',
+      orderingClosesAt: target.orderingClosesAt || null,
+    };
+  }).sort((a, b) => String(a.name).localeCompare(String(b.name), 'uk'));
+
+  res.json({
+    readyCount,
+    groups,
+    targets: targets.groups || [],
+    serverTime: targets.serverTime || new Date().toISOString(),
+  });
+}));
+
+router.post('/supplement-batches/:deliveryGroupId/publish', staffOnly, asyncHandler(async (req, res) => {
+  const deliveryGroupId = String(req.params.deliveryGroupId || '').trim();
+  if (!deliveryGroupId) throw appError('supplement_target_required');
+
+  // Global publish lock is intentional: two workers selecting different groups
+  // must never split/steal the same unassigned ready pool concurrently.
+  const result = await withLock('supplement-batch:publish', async () => {
+    const target = await require('../services/supplementTargets').resolveSupplementTarget(
+      deliveryGroupId,
+      { requireOrderingClosed: true, allowDeferred: true },
+    );
+
+    const candidates = await ReceiptItem.find({
+      status: 'confirmed',
+      routingVersion: { $gte: 1 },
+      'routing.supplement': true,
+      createdProductId: { $ne: null },
+      supplementBatchVersion: { $gte: 1 },
+      supplementPublishRequestedAt: null,
+      $or: [
+        { 'routing.supplementDeliveryGroupId': deliveryGroupId },
+        { 'routing.supplementDeliveryGroupId': null },
+        { 'routing.supplementDeliveryGroupId': '' },
+        { 'routing.supplementDeliveryGroupId': { $exists: false } },
+      ],
+    }, '_id receiptId createdProductId routing.supplementDeliveryGroupId').lean();
+
+    if (!candidates.length) return { selected: 0, notificationOffers: [], deferred: false, failed: 0 };
+
+    const receiptIds = [...new Set(candidates.map((row) => String(row.receiptId)))];
+    const completed = await Receipt.find(
+      { _id: { $in: receiptIds }, status: 'completed' },
+      '_id',
+    ).lean();
+    const completedIds = new Set(completed.map((receipt) => String(receipt._id)));
+    const publishable = candidates.filter((row) => completedIds.has(String(row.receiptId)));
+    if (!publishable.length) return { selected: 0, notificationOffers: [], deferred: false, failed: 0 };
+
+    const now = new Date();
+    const ids = publishable.map((row) => row._id);
+
+    // Assign the selected group and claim publication in one DB operation. The
+    // predicate still accepts legacy rows already assigned to the same group.
+    await ReceiptItem.updateMany(
+      {
+        _id: { $in: ids },
+        supplementPublishRequestedAt: null,
+        $or: [
+          { 'routing.supplementDeliveryGroupId': deliveryGroupId },
+          { 'routing.supplementDeliveryGroupId': null },
+          { 'routing.supplementDeliveryGroupId': '' },
+          { 'routing.supplementDeliveryGroupId': { $exists: false } },
+        ],
+      },
+      {
+        $set: {
+          'routing.supplementDeliveryGroupId': deliveryGroupId,
+          supplementPublishRequestedAt: now,
+        },
+      },
+    );
+
+    const selectedRows = await ReceiptItem.find({
+      _id: { $in: ids },
+      'routing.supplementDeliveryGroupId': deliveryGroupId,
+      supplementPublishRequestedAt: now,
+    }, '_id receiptId createdProductId').lean();
+    if (!selectedRows.length) return { selected: 0, notificationOffers: [], deferred: false, failed: 0 };
+
+    const selectedIds = selectedRows.map((row) => row._id);
+    const involvedReceiptIds = [...new Set(selectedRows.map((row) => String(row.receiptId)))];
+
+    if (target.deferred) {
+      await Receipt.updateMany(
+        { _id: { $in: involvedReceiptIds } },
+        { $set: { supplementStatus: 'pending' } },
+      );
+      return {
+        selected: selectedRows.length,
+        notificationOffers: [],
+        deferred: true,
+        failed: 0,
+        orderingClosesAt: target.orderingClosesAt || null,
+      };
+    }
+
+    let failed = 0;
+    try {
+      await SupplementOffer.bulkWrite(
+        selectedRows.map((row) => ({
+          updateOne: {
+            filter: { receiptItemId: row._id, deliveryGroupId },
+            update: {
+              $setOnInsert: {
+                receiptId: row.receiptId,
+                receiptItemId: row._id,
+                productId: row.createdProductId,
+                deliveryGroupId,
+                openedAt: now,
+                closesAt: null,
+                status: 'open',
+                lastReminderAt: now,
+              },
+            },
+            upsert: true,
+          },
+        })),
+        { ordered: false },
+      );
+    } catch (err) {
+      const writeErrors = Array.isArray(err?.writeErrors) ? err.writeErrors : [];
+      const nonDuplicate = writeErrors.filter((entry) => Number(entry?.code || entry?.err?.code) !== 11000);
+      failed = nonDuplicate.length || (writeErrors.length ? 0 : 1);
+    }
+
+    const allBatchOffers = await SupplementOffer.find({
+      receiptItemId: { $in: selectedIds },
+      deliveryGroupId,
+    }).lean();
+    const existingItemIds = new Set(allBatchOffers.map((offer) => String(offer.receiptItemId)));
+    failed += selectedRows.filter((row) => !existingItemIds.has(String(row._id))).length;
+    const notificationOffers = allBatchOffers.filter((offer) => (
+      offer.status === 'open' && !(offer.notifiedTypes || []).includes('opened')
+    ));
+
+    await Receipt.updateMany(
+      { _id: { $in: involvedReceiptIds } },
+      { $set: { supplementStatus: 'pending' } },
+    );
+
+    return { selected: selectedRows.length, notificationOffers, deferred: false, failed };
+  }, { ttlMs: 20_000, waitMs: 8_000 });
+
+  const notificationOffers = result.notificationOffers || [];
+  if (notificationOffers.length) {
+    for (const offer of notificationOffers) {
+      try {
+        getIO()?.emit('supplement_opened', {
+          offerId: String(offer._id),
+          deliveryGroupId: String(offer.deliveryGroupId),
+          closesAt: offer.closesAt,
+        });
+      } catch (_) {}
+    }
+    if (!result.failed) {
+      await require('../services/supplementNotify').notifyOffers(notificationOffers, 'opened').catch(() => {});
+    }
+  }
+
+  try { getIO()?.emit('receipt_supplement_batch_changed', { deliveryGroupId }); } catch (_) {}
+
+  res.json({
+    selectedCount: result.selected || 0,
+    openedCount: notificationOffers.length,
+    deferred: !!result.deferred,
+    repairPending: Number(result.failed || 0) > 0,
+    orderingClosesAt: result.orderingClosesAt || null,
   });
 }));
 
@@ -355,8 +678,9 @@ async function getNextReceiptNumber() {
 const RECEIPT_TYPES = ['regular', 'supplement'];
 
 router.post('/', staffOnly, asyncHandler(async (req, res) => {
-  // Тип задається ОДИН раз, тут. Далі він визначає і дозволені призначення
-  // позицій, і те, що станеться при проведенні (див. POST /:id/commit).
+  // LEGACY compatibility: current UI always posts type='regular' and chooses
+  // supplement per item after receiving. We still accept the old whole-receipt
+  // type so cached clients and historical workflows do not break during rollout.
   const type = String(req.body?.type || 'regular');
   if (!RECEIPT_TYPES.includes(type)) throw appError('receipt_type_invalid');
 
@@ -383,13 +707,11 @@ router.post('/', staffOnly, asyncHandler(async (req, res) => {
 }));
 
 /**
- * PATCH /:id — зміна типу накладної.
+ * PATCH /:id — LEGACY зміна типу накладної.
  *
- * Дозволено ЛИШЕ поки накладна порожня і не проведена. Тип керує призначенням
- * позицій ('supplement' → тільки на склад), тож перемикання вже наповненої
- * накладної означало б тихо перекроїти сенс кожної позиції: рядок «на магазини»
- * раптом став би товаром дозамовлення, який ніхто не переперевіряв.
- * Порожня накладна такої історії не має — там це просто виправлення описки.
+ * Поточний UI цей endpoint не використовує: всі нові накладні regular, а
+ * дозамовлення вибирається на ReceiptItem.routing. Залишено лише для старих
+ * клієнтів; працює тільки для порожньої draft-накладної.
  */
 router.patch('/:id', staffOnly, asyncHandler(async (req, res) => {
   const type = String(req.body?.type || '');
@@ -444,6 +766,8 @@ router.post('/:id/items', staffOnly, asyncHandler(async (req, res) => {
   const photoFilename    = safeUploadName(parsed.fields.photoFilename);
   const originalFilename = safeUploadName(parsed.fields.originalFilename);
   const photoMeta = safeParseObject(parsed.fields.photoMeta) || null;
+  // Legacy direct-to-shops fields from pre-routing clients. Current UI does not
+  // send them; keep parsing only for backward compatibility.
   const deliveryGroupIds = safeParseArray(parsed.fields.deliveryGroupIds);
   if (deliveryGroupIds === null) throw appError('receipt_invalid_delivery_groups');
   if (deliveryGroupIds.length > 0) {
@@ -454,17 +778,36 @@ router.post('/:id/items', staffOnly, asyncHandler(async (req, res) => {
 
   if (!photoFilename) throw appError('receipt_photo_required');
 
-  const destination = String(parsed.fields.destination || 'shelf');
-  if (!['shelf', 'shops'].includes(destination)) throw appError('receipt_destination_required');
-
-  // КРИТИЧНЕ ПРАВИЛО: у накладній-дозамовленні кожна позиція йде НА СКЛАД.
-  if (receipt.type === 'supplement' && destination !== 'shelf') {
-    throw appError('receipt_supplement_shelf_only');
-  }
-
   // Єдине поле фізичної кількості в накладній.
   const totalQty = parseIntField(parsed.fields.totalQty);
   if (!Number.isInteger(totalQty) || totalQty < 1) throw appError('receipt_qty_invalid');
+
+  // Current Stage 1 UI never sends these. We still parse them so a cached legacy
+  // client can create an already-prepared row, but a legacy destination must NOT
+  // bypass the new Stage 2 gate.
+  const initialPrice = parseNumberField(parsed.fields.price, 'price');
+  const initialQtyPerPackage = parseNumberField(parsed.fields.qtyPerPackage, 'qtyPerPackage');
+
+  // Receiving and routing are separate. New regular items are intentionally
+  // saved without a route. Legacy clients that still send destination are only
+  // allowed to normalize it when the same payload already satisfies Stage 2.
+  let routing = blankRouting();
+  if (receipt.type === 'supplement') {
+    routing = { ...routing, warehouse: true, supplement: true };
+  } else if (parsed.fields.destination !== undefined) {
+    const legacyDestination = String(parsed.fields.destination || 'shelf');
+    if (!['shelf', 'shops'].includes(legacyDestination)) throw appError('receipt_destination_required');
+    assertItemReadyForRouting({
+      photoUrl: r2Url('products', photoFilename),
+      totalQty,
+      price: initialPrice,
+      qtyPerPackage: initialQtyPerPackage,
+    });
+    routing = legacyDestination === 'shops'
+      ? { ...routing, mandatory: true }
+      : { ...routing, warehouse: true };
+  }
+  const destination = legacyDestinationForRouting(routing);
 
   let photoUrl = r2Url('products', photoFilename);
   let photoName = photoFilename;
@@ -478,25 +821,17 @@ router.post('/:id/items', staffOnly, asyncHandler(async (req, res) => {
     createdBy: String(req.user.telegramId),
     status: 'draft',
     destination,
+    routingVersion: receipt.type === 'supplement' ? 0 : 1,
+    routing,
     photoUrl,
     photoName,
     originalPhotoUrl,
-    photoMeta: photoMeta && typeof photoMeta === 'object'
-      ? {
-          comment: String(photoMeta.comment || ''),
-          commentPos: {
-            x: Number(photoMeta?.commentPos?.x) || 0.5,
-            y: Number(photoMeta?.commentPos?.y) || 0.5,
-          },
-          pricePos: photoMeta.pricePos || null,
-          qtyPos:   photoMeta.qtyPos || null,
-        }
-      : undefined,
+    photoMeta: normalizeReceiptPhotoMeta(photoMeta) || undefined,
     totalQty,
     deliveryGroupIds: Array.isArray(deliveryGroupIds) ? deliveryGroupIds : [],
     qtyPerShop,
-    price: parseNumberField(parsed.fields.price, 'price'),
-    qtyPerPackage: parseNumberField(parsed.fields.qtyPerPackage, 'qtyPerPackage'),
+    price: initialPrice,
+    qtyPerPackage: initialQtyPerPackage,
   });
 
   // Save item AND re-check that the receipt still exists in the SAME transaction,
@@ -593,10 +928,10 @@ function logSnapshot(item) {
  * призначення) та права з receiptPermissions.
  *
  * Кожна правка ОДРАЗУ протягується в похідні документи (propagateItemEdit):
- * складський товар + його дзеркало ShopProduct, або товар магазину. Кількість
- * застосовується РІЗНИЦЕЮ, бо залишок відтоді могли міняти вручну. Замовлення
- * не чіпаються: у них своя зафіксована ціна, і правка накладної не переписує
- * заднім числом уже погоджену з магазином суму.
+ * складський товар + його дзеркало ShopProduct, або товар магазину. Для нового
+ * routing flow totalQty лишається довідковою кількістю прийомки й НЕ змінює
+ * складський залишок; delta-sync кількості працює лише для legacy-позицій.
+ * Замовлення не чіпаються: у них своя зафіксована ціна.
  */
 router.patch('/:id/items/:itemId', staffOnly, asyncHandler(async (req, res) => {
   if (!req.is('multipart/form-data')) {
@@ -619,7 +954,8 @@ router.patch('/:id/items/:itemId', staffOnly, asyncHandler(async (req, res) => {
     if (!['shelf', 'shops'].includes(nextDestination)) {
       throw appError('receipt_destination_required');
     }
-    // Накладна-дозамовлення за поточним контрактом завжди приходить на склад.
+    // LEGACY whole-receipt supplement contract was shelf-only. New regular
+    // receipts route supplement per item through the dedicated /routing endpoint.
     if (receipt.type === 'supplement' && nextDestination !== 'shelf') {
       throw appError('receipt_supplement_shelf_only');
     }
@@ -665,15 +1001,7 @@ router.patch('/:id/items/:itemId', staffOnly, asyncHandler(async (req, res) => {
     const rawPhotoMeta = safeParseObject(parsed.fields.photoMeta);
     if (rawPhotoMeta === undefined) throw appError('validation_failed', { field: 'photoMeta' });
     if (rawPhotoMeta && typeof rawPhotoMeta === 'object') {
-      normalizedPhotoMeta = {
-        comment: String(rawPhotoMeta.comment || ''),
-        commentPos: {
-          x: Number(rawPhotoMeta?.commentPos?.x) || 0.5,
-          y: Number(rawPhotoMeta?.commentPos?.y) || 0.5,
-        },
-        pricePos: rawPhotoMeta.pricePos || null,
-        qtyPos: rawPhotoMeta.qtyPos || null,
-      };
+      normalizedPhotoMeta = normalizeReceiptPhotoMeta(rawPhotoMeta);
     }
   }
 
@@ -705,11 +1033,22 @@ router.patch('/:id/items/:itemId', staffOnly, asyncHandler(async (req, res) => {
       // = нове знімання/галерея) не можна — магазин замовляв би одне, а приїхало б
       // інше. Перевірка живого статусу тут, а не до транзакції: накладну могли
       // провести саме поки вантажилось фото.
-      if (liveReceipt.type === 'supplement' && afterCommit && originalFilename) {
-        throw appError('receipt_supplement_photo_locked');
+      if (afterCommit && originalFilename) {
+        const legacySupplement = liveReceipt.type === 'supplement';
+        const itemSupplementActive = !legacySupplement
+          && await hasActiveSupplementItemWave(item._id, { session: txSession });
+        if (legacySupplement || itemSupplementActive) {
+          throw appError('receipt_supplement_photo_locked');
+        }
       }
 
-      const destination = nextDestination ?? (item.destination || 'shelf');
+      // New routing rows change business direction ONLY through the dedicated
+      // /routing endpoint. A cached legacy client may still include destination in
+      // a generic edit payload; ignore that field instead of silently destroying
+      // a valid combined route (mandatory+warehouse / supplement+warehouse).
+      const destination = Number(item.routingVersion || 0) >= 1
+        ? (item.destination || 'shelf')
+        : (nextDestination ?? (item.destination || 'shelf'));
       const totalQty = nextTotalQty ?? item.totalQty;
       const deliveryGroupIds = nextDeliveryGroupIds ?? (item.deliveryGroupIds || []);
       const qtyPerShop = nextQtyPerShop ?? (item.qtyPerShop || 0);
@@ -725,6 +1064,8 @@ router.patch('/:id/items/:itemId', staffOnly, asyncHandler(async (req, res) => {
           && !arraysEqual(deliveryGroupIds, item.deliveryGroupIds || [])) changedFields.push('deliveryGroupIds');
       if (nextQtyPerShop !== undefined && qtyPerShop !== (item.qtyPerShop || 0)) changedFields.push('qtyPerShop');
       if (photoFilename) changedFields.push('photoUrl');
+      if (normalizedPhotoMeta) changedFields.push('photoMeta');
+      if (originalFilename) changedFields.push('originalPhotoUrl');
 
       assertCanEditItem(req.user, item, changedFields);
 
@@ -760,6 +1101,19 @@ router.patch('/:id/items/:itemId', staffOnly, asyncHandler(async (req, res) => {
       if (photoFilename) {
         item.photoUrl = r2Url('products', photoFilename);
         item.photoName = photoFilename;
+      }
+
+      // A confirmed row is already a published system item. Draft rows may keep
+      // price/package empty while receiving, but once confirmed we never allow an
+      // edit to break the publication invariant.
+      if (item.status === 'confirmed') {
+        assertItemReadyToConfirm(item, liveReceipt);
+      } else {
+        const liveRouting = normalizeReceiptItemRouting(item, liveReceipt);
+        const hasRoute = liveRouting.warehouse || liveRouting.mandatory || liveRouting.supplement;
+        if (hasRoute && (nextPrice !== undefined || nextQtyPerPackage !== undefined)) {
+          assertItemReadyForRouting(item);
+        }
       }
 
       await item.save({ session: txSession });
@@ -892,6 +1246,222 @@ router.delete('/:id/items/:itemId', staffOnly, asyncHandler(async (req, res) => 
   }
 }));
 
+// ── ROUTING AFTER RECEIVING + COMMERCIAL PREPARATION ───────────────────────
+// Stage 1 saves photo + received quantity. Stage 2 requires price + package
+// quantity. Only then may Stage 3 choose routing on the item card. Draft rows are
+// freely routable. Confirmed primary routes are immutable EXCEPT the explicit
+// additive `add-warehouse-remainder` operation below (false -> true warehouse only).
+router.patch('/:id/items/:itemId/routing', staffOnly, asyncHandler(async (req, res) => {
+  const receipt = await Receipt.findById(req.params.id).lean();
+  if (!receipt) throw appError('receipt_not_found');
+
+  // First read is for ownership only. The actual write below is a single atomic
+  // status=draft CAS, so it cannot race a confirm into "artifacts from route A,
+  // flags from route B".
+  const authItem = await ReceiptItem.findOne({ _id: req.params.itemId, receiptId: req.params.id }).lean();
+  if (!authItem) throw appError('receipt_item_not_found');
+  assertCanEditItem(req.user, authItem, ['routing']);
+  // Stage 2 is mandatory: no routing until price + package quantity are ready.
+  assertItemReadyForRouting(authItem);
+
+  const body = req.body || {};
+  const routing = {
+    warehouse: body.warehouse === true,
+    mandatory: body.mandatory === true,
+    supplement: body.supplement === true,
+    mayNotReachAllShops: body.mayNotReachAllShops === true,
+    supplementDeliveryGroupId: body.supplementDeliveryGroupId
+      ? String(body.supplementDeliveryGroupId)
+      : null,
+  };
+
+  // Current draft UX only marks «Дозамовлення» on the item. The delivery group
+  // is intentionally chosen later, once, for the whole batch. Older cached
+  // clients may still send a per-item group and remain backward-compatible.
+  const check = validateReceiptItemRouting(routing, {
+    allowEmpty: true,
+    allowSupplementWithoutGroup: true,
+  });
+  if (!check.ok) {
+    if (check.reason === 'mandatory_and_supplement') throw appError('receipt_route_conflict');
+    if (check.reason === 'may_not_reach_without_mandatory') throw appError('receipt_route_warning_requires_mandatory');
+    if (check.reason === 'may_not_reach_with_warehouse') throw appError('receipt_route_warning_with_warehouse');
+  }
+
+  if (routing.supplement && routing.supplementDeliveryGroupId) {
+    const { resolveSupplementTarget } = require('../services/supplementTargets');
+    const resolved = await resolveSupplementTarget(
+      routing.supplementDeliveryGroupId,
+      { requireOrderingClosed: true, allowDeferred: true },
+    );
+    routing.supplementDeliveryGroupId = resolved.deliveryGroupId;
+  } else if (!routing.supplement) {
+    routing.supplementDeliveryGroupId = null;
+  }
+  if (!routing.mandatory) routing.mayNotReachAllShops = false;
+
+  // Return the real pre-image from the atomic write. Besides making the audit log
+  // exact under two simultaneous toggles, the predicate makes confirm vs routing
+  // mutually exclusive AND closes the tiny readiness race between the read above
+  // and this write. Stage 2 cannot disappear underneath a concurrent route click.
+  const previousItem = await ReceiptItem.findOneAndUpdate(
+    {
+      _id: req.params.itemId,
+      receiptId: req.params.id,
+      status: 'draft',
+      photoUrl: { $nin: ['', null] },
+      totalQty: { $gte: 1 },
+      price: { $gt: 0 },
+      qtyPerPackage: { $gte: 1 },
+    },
+    {
+      $set: {
+        routingVersion: 1,
+        routing,
+        destination: legacyDestinationForRouting(routing),
+        // Supplement routes are batch-managed. Current UI deliberately leaves
+        // the delivery group empty here; it is chosen once when the whole batch
+        // is published. A cached older client that still supplied a group remains
+        // readable as batch v1; unassigned current rows are batch v2.
+        supplementBatchVersion: routing.supplement
+          ? (routing.supplementDeliveryGroupId ? 1 : 2)
+          : 0,
+        supplementPublishRequestedAt: null,
+      },
+    },
+    { new: false },
+  );
+  if (!previousItem) {
+    const currentItem = await ReceiptItem.findOne({ _id: req.params.itemId, receiptId: req.params.id }).lean();
+    if (!currentItem) throw appError('receipt_item_not_found');
+    if (currentItem.status === 'draft') assertItemReadyForRouting(currentItem);
+    throw appError('receipt_route_locked');
+  }
+
+  const item = await ReceiptItem.findById(req.params.itemId);
+  const prev = normalizeReceiptItemRouting(previousItem, receipt);
+
+  ReceiptItemLog.create({
+    receiptId: item.receiptId,
+    itemId: item._id,
+    itemName: item.name,
+    action: 'routing_change',
+    actor: getActor(req),
+    changes: [{ field: 'routing', label: 'Маршрут', from: prev, to: routing }],
+  }).catch(() => {});
+
+  const out = item.toObject();
+  out.routing = normalizeReceiptItemRouting(out, receipt);
+  try { getIO()?.to(`receipt_${req.params.id}`).emit('receipt_item_updated', out); } catch (_) {}
+  res.json(out);
+}));
+
+// ── ADD REMAINDER TO WAREHOUSE AFTER PRIMARY ROUTE ─────────────────────────
+// A real-world correction, NOT a reroute: mandatory/supplement may be decided and
+// executed first, then workers discover there is stock left. The only permitted
+// post-confirm mutation is false -> true for routing.warehouse. Primary-route
+// artifacts stay intact; supplement offers/requests/notifications are untouched.
+router.post('/:id/items/:itemId/add-warehouse-remainder', staffOnly, asyncHandler(async (req, res) => {
+  const session = await mongoose.connection.startSession();
+  let updatedItem = null;
+  let productForEmbedding = null;
+  let productId = null;
+  let didPromote = false;
+
+  try {
+    await session.withTransaction(async () => {
+      const receipt = await Receipt.findById(req.params.id).session(session);
+      const item = await ReceiptItem.findOne({ _id: req.params.itemId, receiptId: req.params.id }).session(session);
+      if (!receipt) throw appError('receipt_not_found');
+      if (!item) throw appError('receipt_item_not_found');
+
+      assertCanConfirmItem(req.user, item);
+      if (item.status !== 'confirmed') throw appError('receipt_item_not_confirmed_yet');
+      if (receipt.type === 'supplement' || Number(item.routingVersion || 0) < 1) {
+        throw appError('receipt_remainder_not_supported_legacy');
+      }
+
+      const before = normalizeReceiptItemRouting(item, receipt);
+
+      // Idempotent double tap/retry: once warehouse=true, return the same state and
+      // perform zero artifact/notification work.
+      if (before.warehouse) {
+        updatedItem = item.toObject();
+        updatedItem.routing = before;
+        productId = item.createdProductId ? String(item.createdProductId) : null;
+        return;
+      }
+
+      // "Remainder" only makes sense after one of the two primary non-warehouse
+      // decisions. A warehouse-only item was already warehouse from the start.
+      if (!before.mandatory && !before.supplement) {
+        throw appError('receipt_remainder_route_invalid');
+      }
+
+      const nextRouting = {
+        ...before,
+        warehouse: true,
+        // The old warning means "mandatory stock may be insufficient". Once the
+        // worker explicitly says a remainder exists for warehouse, that warning is
+        // contradictory and must be cleared.
+        mayNotReachAllShops: false,
+      };
+      const check = validateReceiptItemRouting(nextRouting);
+      if (!check.ok) throw appError('receipt_remainder_route_invalid');
+
+      item.routingVersion = 1;
+      item.routing = nextRouting;
+      item.destination = legacyDestinationForRouting(nextRouting);
+      await item.save({ session });
+
+      // Supplement-only already owns a hidden warehouse Product; this call simply
+      // flips orderingEnabled=true. Mandatory-only creates the Product now.
+      const product = await ensureReceiptItemProduct(item, session, receipt);
+      if (!product) throw appError('receipt_remainder_product_failed');
+
+      await convertReceiptShopOwnedToWarehouseMirror(item, product, session);
+      productForEmbedding = product;
+      productId = String(product._id);
+
+      didPromote = true;
+      updatedItem = item.toObject();
+      updatedItem.routing = nextRouting;
+      updatedItem.currentLocation = { blockId: null, status: product.status ?? null };
+      updatedItem.productCurrentQty = product.quantity ?? null;
+    });
+
+    if (didPromote && productForEmbedding) embedProductAsync(productForEmbedding, 'receipt-remainder-to-warehouse');
+
+    if (didPromote && updatedItem) {
+      ReceiptItemLog.create({
+        receiptId: updatedItem.receiptId,
+        itemId: updatedItem._id,
+        itemName: updatedItem.name,
+        action: 'routing_change',
+        actor: getActor(req),
+        changes: [{
+          field: 'routing.warehouse',
+          label: 'Залишок на склад',
+          from: false,
+          to: true,
+        }],
+        meta: { additive: true, primaryRoutePreserved: true },
+      }).catch(() => {});
+    }
+
+    const io = getIO();
+    if (didPromote && io && updatedItem) {
+      io.to(`receipt_${req.params.id}`).emit('receipt_item_updated', updatedItem);
+      io.emit('incoming_updated');
+      if (productId) io.emit('catalogue_updated', { action: 'add', productId });
+    }
+
+    res.json(updatedItem);
+  } finally {
+    session.endSession();
+  }
+}));
+
 // ── CONFIRM / UNCONFIRM A SINGLE ITEM ─────────────────────────────────────
 // Only the worker who added the item (or an admin) may sign it off. A receipt
 // can only be committed once every non-deleted item is confirmed.
@@ -915,14 +1485,43 @@ router.post('/:id/items/:itemId/confirm', staffOnly, asyncHandler(async (req, re
       receiptDoc = receipt;
 
       assertCanConfirmItem(req.user, item);
-      assertItemReadyToConfirm(item);
+      assertItemReadyToConfirm(item, receipt);
+
+      // Confirming a newly added supplement row in an already-completed regular
+      // receipt opens its offer immediately after this transaction. Re-check the
+      // core business boundary at that exact moment. If ordinary ordering is
+      // still open, confirmation is allowed but offer creation is deferred until
+      // the scheduler observes that the window has closed.
+      const currentRouting = normalizeReceiptItemRouting(item, receipt);
+      if (receipt.status === 'completed'
+          && receipt.type !== 'supplement'
+          && currentRouting.supplement
+          && currentRouting.supplementDeliveryGroupId) {
+        // Compatibility for v1 rows that already carry a group. V48.2 rows are
+        // intentionally unassigned until batch publication, so there is nothing
+        // group-specific to validate at per-item confirm time.
+        const { resolveSupplementTarget } = require('../services/supplementTargets');
+        await resolveSupplementTarget(
+          currentRouting.supplementDeliveryGroupId,
+          { requireOrderingClosed: true, allowDeferred: true },
+        );
+      }
 
       if (item.status !== 'confirmed') {
+        // Any current per-item supplement confirmed after V47.16 joins the batch
+        // workflow even if its draft route was saved by a cached V47.15 client.
+        // Existing already-confirmed historical rows remain untouched.
+        if (receipt.type !== 'supplement'
+            && Number(item.routingVersion || 0) >= 1
+            && currentRouting.supplement) {
+          item.supplementBatchVersion = currentRouting.supplementDeliveryGroupId ? 1 : 2;
+          item.supplementPublishRequestedAt = null;
+        }
         item.status = 'confirmed';
         await item.save({ session });
       }
 
-      const product = await ensureReceiptItemProduct(item, session);
+      const product = await ensureReceiptItemProduct(item, session, receipt);
 
       // Shop-catalog routing by destination — now INSIDE the stock transaction so
       // a warehouse Product can NEVER commit without its ShopProduct mirror, and a
@@ -944,8 +1543,8 @@ router.post('/:id/items/:itemId/confirm', staffOnly, asyncHandler(async (req, re
         if (product.originalImageUrl || product.imageUrls?.[0]) {
           embedTargets.push(['warehouse', product, 'receipt-confirm-warehouse']);
         }
-      } else if ((item.destination || 'shelf') === 'shops') {
-        // Shops item → shop-OWNED ShopProduct (no warehouse Product/stock).
+      } else if (legacyDestinationForRouting(normalizeReceiptItemRouting(item, receipt)) === 'shops') {
+        // Mandatory-only item → shop-OWNED ShopProduct (no warehouse Product/stock).
         const sp = await upsertShopOwnedFromReceiptItem(item.toObject(), { session });
         if (sp && String(sp._id) !== String(item.createdShopProductId || '')) {
           item.createdShopProductId = sp._id;
@@ -985,8 +1584,7 @@ router.post('/:id/items/:itemId/confirm', staffOnly, asyncHandler(async (req, re
     // побачили. Створення ідемпотентне (унікальний {receiptItemId, deliveryGroupId}),
     // тому наздоганяє рівно нову позицію. Якщо прийом заявок уже закрито, нічого
     // не робимо: заново відкривати хвилю правкою накладної не можна.
-    if (receiptDoc?.status === 'completed' && receiptDoc.type === 'supplement'
-        && await hasOpenSupplementWave(receiptDoc._id)) {
+    if (receiptDoc?.status === 'completed') {
       try {
         const { createOffersForReceipt } = require('../services/supplementOffers');
         const { created } = await createOffersForReceipt(receiptDoc._id);
@@ -1010,6 +1608,11 @@ router.post('/:id/items/:itemId/confirm', staffOnly, asyncHandler(async (req, re
     if (io) {
       io.to(`receipt_${req.params.id}`).emit('receipt_item_confirmed', confirmedItem);
       io.emit('incoming_updated');
+      if (Number(confirmedItem?.supplementBatchVersion || 0) >= 1) {
+        io.emit('receipt_supplement_batch_changed', {
+          deliveryGroupId: confirmedItem?.routing?.supplementDeliveryGroupId || null,
+        });
+      }
     }
     res.json(confirmedItem);
   } finally {
@@ -1051,6 +1654,12 @@ router.post('/:id/items/:itemId/unconfirm', staffOnly, asyncHandler(async (req, 
         }
 
         item.status = 'draft';
+        // Re-confirming must never silently reopen/re-notify a previously
+        // published supplement. Once confirmation is removed, the item returns
+        // to the batch-ready state and needs an explicit batch publication again.
+        if (Number(item.supplementBatchVersion || 0) >= 1) {
+          item.supplementPublishRequestedAt = null;
+        }
         await item.save({ session });
         didUnconfirm = true;
       }
@@ -1075,6 +1684,11 @@ router.post('/:id/items/:itemId/unconfirm', staffOnly, asyncHandler(async (req, 
     if (io) {
       io.to(`receipt_${req.params.id}`).emit('receipt_item_confirmed', updatedItem);
       io.emit('incoming_updated');
+      if (Number(updatedItem?.supplementBatchVersion || 0) >= 1) {
+        io.emit('receipt_supplement_batch_changed', {
+          deliveryGroupId: updatedItem?.routing?.supplementDeliveryGroupId || null,
+        });
+      }
     }
 
     res.json(updatedItem);
@@ -1084,20 +1698,17 @@ router.post('/:id/items/:itemId/unconfirm', staffOnly, asyncHandler(async (req, 
 }));
 
 /**
- * GET /:id/supplement-targets — стан кожної групи доставки для модалки проведення.
+ * GET /:id/supplement-targets — інформаційний стан груп доставки.
  *
- * Живе на накладній, а не в /api/supplement, бо це крок ПРИЙМАННЯ: його бачить
- * склад, а не продавець, і питання тут одне — «кому відкрити цю хвилю».
- *
- * Стан кожної групи тут — ІНФОРМАЦІЯ для працівника, а не правило допуску:
- * вибрати можна будь-яку групу, у якої є активні магазини. Тому список не
- * «застаріває» — те, що вікно замовлень закриється через хвилину після
- * відкриття модалки, на можливість проведення більше не впливає.
+ * Legacy whole-receipt supplement still uses this in its commit modal. Current
+ * regular receipts pick the group per item. The displayed state is informative,
+ * while the current per-item WRITE path independently enforces the actual business
+ * gate: an offer never opens in parallel with ordinary ordering. Preparation may
+ * be saved earlier and the scheduler opens it after the ordinary window closes.
  */
 router.get('/:id/supplement-targets', staffOnly, asyncHandler(async (req, res) => {
   const receipt = await Receipt.findById(req.params.id, 'type status').lean();
   if (!receipt) throw appError('receipt_not_found');
-  if (receipt.type !== 'supplement') throw appError('receipt_not_supplement');
 
   const { describeSupplementTargets } = require('../services/supplementTargets');
   res.json(await describeSupplementTargets());
@@ -1109,6 +1720,75 @@ router.post('/:id/commit', staffOnly, asyncHandler(async (req, res) => {
   if (!receiptCheck) throw appError('receipt_not_found');
   if (receiptCheck.status === 'completed') throw appError('receipt_already_completed');
 
+  // Current regular receipts are receiving documents only. A routingVersion>=1
+  // row was created by the staged flow: Stage 1 (photo + received quantity) is
+  // enough to close the receipt itself. Commercial preparation, routing and
+  // publication remain on ReceiptItem and may happen later from the full-photo
+  // preparation feed. This keeps the receiving document independent from the
+  // product lifecycle while preserving the old commit path for legacy receipts.
+  if (receiptCheck.type === 'regular') {
+    const receivingItems = await ReceiptItem.find(
+      { receiptId: receiptCheck._id },
+      '_id photoUrl totalQty routingVersion',
+    ).lean();
+
+    const currentReceivingFlow = receivingItems.length > 0
+      && receivingItems.every((item) => Number(item.routingVersion || 0) >= 1);
+
+    if (currentReceivingFlow) {
+      const incomplete = receivingItems.find((item) => !item.photoUrl || !(Number(item.totalQty) >= 1));
+      if (incomplete) {
+        throw appError('receipt_item_incomplete', { fields: 'фото, кількість що приїхала' });
+      }
+
+      const receipt = await Receipt.findOneAndUpdate(
+        { _id: receiptCheck._id, status: 'draft' },
+        { $set: { status: 'completed', completedAt: new Date() } },
+        { new: true },
+      ).lean();
+      if (!receipt) throw appError('receipt_already_completed');
+
+      ReceiptItemLog.create({
+        receiptId: receipt._id,
+        itemName: receipt.receiptNumber,
+        action: 'receipt_complete',
+        actor: getActor(req),
+      }).catch(() => {});
+
+      // Some items may already have been prepared/routed/confirmed before the
+      // receiving document was closed. If any of those are supplement items,
+      // completion is the moment their offers are allowed to open. Unprepared
+      // rows are simply ignored and can be completed later from the photo feed.
+      let supplementOffersCount = 0;
+      try {
+        const { createOffersForReceipt } = require('../services/supplementOffers');
+        const { created: offers } = await createOffersForReceipt(receipt._id);
+        supplementOffersCount = offers.length;
+        if (offers.length) {
+          for (const offer of offers) {
+            try {
+              getIO()?.emit('supplement_opened', {
+                offerId: String(offer._id),
+                deliveryGroupId: String(offer.deliveryGroupId),
+              });
+            } catch (_) {}
+          }
+          require('../services/supplementNotify').notifyOffers(offers, 'opened').catch(() => {});
+        }
+      } catch (_) {
+        // Receipt completion is receiving-only and must not be rolled back by a
+        // non-critical supplement notification/reconciliation failure.
+      }
+
+      // Items confirmed before receiving completion become visible in the batch
+      // panel at this exact moment. Wake every open staff client immediately
+      // instead of waiting for the 20s query fallback.
+      try { getIO()?.emit('receipt_supplement_batch_changed', { receiptId: String(receipt._id) }); } catch (_) {}
+
+      return res.json({ receipt, createdProductsCount: 0, supplementOffersCount });
+    }
+  }
+
   // ── Ціль хвилі дозамовлення ───────────────────────────────────────────────
   // Працівник сам обирає будь-яку групу. Статуси груп — лише інформація.
   // Закриття дозамовлення виконується вручну складом/адміном, без дедлайну.
@@ -1117,6 +1797,25 @@ router.post('/:id/commit', staffOnly, asyncHandler(async (req, res) => {
     const { resolveSupplementTarget } = require('../services/supplementTargets');
     supplementTarget = await resolveSupplementTarget(req.body?.targetDeliveryGroupId);
     supplementTarget.openedAt = new Date();
+  } else {
+    // Current per-item supplements may be PREPARED while ordinary ordering is
+    // open, but the SupplementOffer itself may only OPEN after that window closes.
+    // Re-resolve groups here so a long-lived draft crossing a schedule boundary
+    // is still handled by the same deferred-open rule.
+    const supplementRows = await ReceiptItem.find(
+      { receiptId: receiptCheck._id, routingVersion: { $gte: 1 }, 'routing.supplement': true },
+      'routing.supplementDeliveryGroupId',
+    ).lean();
+    if (supplementRows.length) {
+      const { resolveSupplementTarget } = require('../services/supplementTargets');
+      const groupIds = [...new Set(supplementRows
+        .map((row) => row.routing?.supplementDeliveryGroupId)
+        .filter(Boolean)
+        .map(String))];
+      for (const groupId of groupIds) {
+        await resolveSupplementTarget(groupId, { requireOrderingClosed: true, allowDeferred: true });
+      }
+    }
   }
 
   const session = await mongoose.connection.startSession();
@@ -1166,12 +1865,17 @@ router.post('/:id/commit', staffOnly, asyncHandler(async (req, res) => {
       throw appError('receipt_items_not_all_confirmed', { pending: pendingConfirm });
     }
 
-    // Every item is already confirmed at this point, so the item-level
-    // completeness contract (photo + totalQty + price + qtyPerPackage) has
-    // already been enforced. Commit consumes that signed-off state.
+    // Re-validate the full publication contract at commit time as well. This is
+    // deliberately redundant with /confirm: V37 briefly allowed confirmations
+    // without price/package, and a confirmed row can also be edited later. A
+    // receipt must never complete while any item lacks price or package quantity.
+    for (const item of items) {
+      assertItemReadyToConfirm(item, receipt);
+    }
 
-    // destination='shops' may exist without delivery groups; distribution to
-    // sellers is a separate workflow and commit must not allocate automatically.
+    // Mandatory distribution is a separate/manual warehouse workflow. Commit
+    // creates the catalog artifact but MUST NOT auto-allocate shops or infer a
+    // remaining warehouse quantity from totalQty.
 
     const createdProducts = [];
 
@@ -1199,9 +1903,10 @@ router.post('/:id/commit', staffOnly, asyncHandler(async (req, res) => {
     let nextOrderNumber = 1;
 
     for (const item of items) {
-      // Shops items never create/update warehouse stock. Their shop-owned
-      // catalog entry was handled at confirm time.
-      if ((item.destination || 'shelf') === 'shops') continue;
+      const routing = normalizeReceiptItemRouting(item, receipt);
+      // Mandatory-only items never create/update warehouse stock. Their
+      // shop-owned catalog entry was handled at confirm time.
+      if (legacyDestinationForRouting(routing) === 'shops') continue;
 
       let currentProduct = null;
       const stockAlreadyApplied = !!item.stockApplied;
@@ -1211,7 +1916,11 @@ router.post('/:id/commit', staffOnly, asyncHandler(async (req, res) => {
         if (currentProduct) {
           if (item.price !== null) currentProduct.price = item.price;
           if (item.qtyPerPackage) currentProduct.quantityPerPackage = item.qtyPerPackage;
-          if (!stockAlreadyApplied) currentProduct.quantity = item.totalQty;
+          if (!stockAlreadyApplied) currentProduct.quantity = Number(item.routingVersion || 0) >= 1 ? 0 : item.totalQty;
+          currentProduct.orderingEnabled = isNormalOrderingEnabled(routing);
+          currentProduct.mandatoryDistribution = !!routing.mandatory;
+          currentProduct.mayNotReachAllShops = !!routing.mayNotReachAllShops;
+          currentProduct.receiptItemId = item._id;
           await currentProduct.save({ session });
           // Проведення дописує в товар ціну/упаковку — отже, дзеркало теж мусить
           // їх побачити. Без цього правка ціни між підтвердженням і проведенням
@@ -1228,7 +1937,7 @@ router.post('/:id/commit', staffOnly, asyncHandler(async (req, res) => {
         currentProduct = new Product({
           orderNumber: nextOrderNumber++,
           price: item.price ?? 0,
-          quantity: item.totalQty,
+          quantity: Number(item.routingVersion || 0) >= 1 ? 0 : item.totalQty,
           warehouse: '',
           category: '',
           name: item.name || '',
@@ -1236,6 +1945,11 @@ router.post('/:id/commit', staffOnly, asyncHandler(async (req, res) => {
           model: '',
           status: 'pending',
           source: 'receipt',
+          shelvedAt: new Date(),
+          orderingEnabled: isNormalOrderingEnabled(routing),
+          mandatoryDistribution: !!routing.mandatory,
+          mayNotReachAllShops: !!routing.mayNotReachAllShops,
+          receiptItemId: item._id,
           imageUrls: [item.photoUrl],
           imageNames: [item.photoName],
           originalImageUrl: item.originalPhotoUrl || '',
@@ -1268,9 +1982,11 @@ router.post('/:id/commit', staffOnly, asyncHandler(async (req, res) => {
     // Notify warehouse board that new products are available in the incoming strip
     try { getIO().emit('incoming_updated'); } catch (_) {}
 
-    // ── Дозамовлення: запускається ПІСЛЯ проведення ВСІЄЇ накладної ───────────
-    // Уся накладна — одна хвиля з одним дедлайном для однієї групи, тому
-    // пропозиції відкриваються тут, а не при підтвердженні окремої позиції.
+    // ── Дозамовлення після durable commit ───────────────────────────────────
+    // Legacy Receipt.type='supplement' лишається однією receipt-level хвилею.
+    // Current regular rows are batch-managed: unassigned V48.2 rows stay silent
+    // until a worker chooses one group for the whole batch in the photo feed.
+    // Grouped V47.16 rows remain readable/publishable during rollout.
     //
     // Поза транзакцією свідомо: створення ідемпотентне (унікальний індекс
     // {receiptItemId, deliveryGroupId}), тому повторний виклик нічого не
@@ -1278,12 +1994,11 @@ router.post('/:id/commit', staffOnly, asyncHandler(async (req, res) => {
     // Відповідь клієнту чекає на створення пропозицій (щоб «Проведено» і
     // «дозамовлення відкрито» не розповзалися в часі), а Telegram — ні.
     let supplementOffersCount = 0;
-    if (supplementTarget) try {
+    try {
       const { createOffersForReceipt } = require('../services/supplementOffers');
-      // Часткова невдача НЕ кидає помилку: створене лишається створеним, а
-      // накладна позначається supplementStatus:'pending' — звірятель у
-      // supplementScheduler добʼє решту. Провести накладну вдруге неможливо,
-      // тому «просто впасти тут» означало б втратити частину дозамовлень назавжди.
+      // Works for BOTH legacy supplement receipts and new per-item supplement
+      // routing in an ordinary receipt. Creation is idempotent by
+      // {receiptItemId, deliveryGroupId}.
       const { created: offers } = await createOffersForReceipt(receipt._id);
       supplementOffersCount = offers.length;
       if (offers.length) {
@@ -1293,17 +2008,15 @@ router.post('/:id/commit', staffOnly, asyncHandler(async (req, res) => {
               offerId: String(offer._id),
               deliveryGroupId: String(offer.deliveryGroupId),
             });
-          } catch (_) { /* сокет не критичний */ }
+          } catch (_) { /* socket is non-critical */ }
         }
-        // Розсилка — фоном: Telegram буває повільним, а склад не має чекати на
-        // нього, щоб побачити «Накладну проведено».
         require('../services/supplementNotify')
           .notifyOffers(offers, 'opened')
-          .catch((e) => {});
+          .catch(() => {});
       }
     } catch (err) {
-      // Накладна вже проведена і товар на складі — це головне. Провал відкриття
-      // дозамовлення логуємо, але не перетворюємо на помилку проведення.
+      // Receipt completion is durable even if supplement notification/opening
+      // needs the reconciler to retry later.
     }
 
     res.json({

@@ -44,7 +44,8 @@ describe('проведена накладна редагується далі', 
     expect(errors).toContain('receipt_item_in_use');
   });
 
-  test('кількість застосовується різницею, а не перезаписом залишку', () => {
+  test('legacy-позиції зберігають старе delta-оновлення кількості', () => {
+    expect(sync).toContain('if (Number(item.routingVersion || 0) < 1)');
     expect(sync).toContain('const delta = Number(item.totalQty || 0) - Number(prev.totalQty || 0)');
     expect(sync).toContain('product.quantity = Math.max(0, next)');
   });

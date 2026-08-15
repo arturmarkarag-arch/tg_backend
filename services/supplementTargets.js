@@ -111,9 +111,10 @@ async function describeGroup(group, now) {
       state: 'ordering_open',
       selectable: true,
       title: 'Замовлення активні',
+      orderingClosesAt: closeAt.toISOString(),
       details: [`Закриються через ${humanDuration(closeAt.getTime() - now.getTime())}`],
-      note: 'Магазини цієї групи зараз і так можуть замовляти. Товари з накладної '
-        + 'будуть додатково показані окремою секцією «Дозамовлення» та у віртуальному блоці складу.',
+      note: 'Дозамовлення можна підготувати зараз. Після підтвердження товари збираються в пачку без сповіщень. '
+        + 'Коли працівник натисне «Відкрити пачку», вона дочекається закриття звичайної сесії й відкриється автоматично одним повідомленням.',
     };
   }
 
@@ -188,16 +189,36 @@ async function describeSupplementTargets(now = new Date()) {
   };
 }
 
-/** Перевіряє лише коректність і існування вручну вибраної групи. */
-async function resolveSupplementTarget(deliveryGroupId) {
+/**
+ * Перевіряє коректність вручну вибраної групи. Legacy whole-receipt supplement
+ * може лишатися permissive. Current V48.2 flow викликає це на етапі публікації
+ * всієї пачки: allowDeferred=true дозволяє підтвердити пачку, поки звичайні
+ * замовлення ще відкриті, але жоден SupplementOffer не показується продавцям
+ * до фактичного закриття цього вікна.
+ */
+async function resolveSupplementTarget(
+  deliveryGroupId,
+  { requireOrderingClosed = false, allowDeferred = false, now = new Date() } = {},
+) {
   const gid = String(deliveryGroupId || '').trim();
   if (!gid || !mongoose.Types.ObjectId.isValid(gid)) throw appError('supplement_target_required');
 
   const group = await DeliveryGroup.findById(gid, 'name dayOfWeek orderingSchedule').lean();
   if (!group) throw appError('supplement_target_not_found');
 
-  // Ні сесія, ні вікно замовлень, ні кількість магазинів не блокують вибір.
-  return { deliveryGroupId: gid };
+  if (requireOrderingClosed && isOrderingOpen(group.orderingSchedule, now).isOpen) {
+    const closeAt = getOrderingWindowCloseAt(group.orderingSchedule, now);
+    if (!allowDeferred) {
+      throw appError('supplement_ordering_still_open', { group: group.name || '' });
+    }
+    return {
+      deliveryGroupId: gid,
+      deferred: true,
+      orderingClosesAt: closeAt?.toISOString?.() || null,
+    };
+  }
+
+  return { deliveryGroupId: gid, deferred: false, orderingClosesAt: null };
 }
 
 module.exports = {

@@ -1459,9 +1459,19 @@ router.get('/shift-board', requireTelegramRoles(['admin']), async (req, res, nex
     ]);
 
     // Merge with User collection for name fallback
-    const workerIds = workerStats.map((w) => w._id);
-    const activeIdsWithNoStats = [...activeWorkerIds].filter((id) => !workerIds.includes(id));
-    const allWorkerIds = [...new Set([...workerIds, ...activeIdsWithNoStats])];
+    const workerIds = workerStats.map((w) => String(w._id));
+    // A worker may have packed some shops and then handed the task to another
+    // worker without ever being the final completer. Keep those people in the
+    // roster too: per-checkbox authorship is real work and must not disappear
+    // just because completedBy belongs to somebody else.
+    const packedWorkerIds = sessionId
+      ? (await PickingTask.distinct('items.packedBy', {
+        orderingSessionId: sessionId,
+        deliveryGroupId: dgId,
+        'items.packedBy': { $ne: null },
+      })).map((value) => String(value || '')).filter(Boolean)
+      : [];
+    const allWorkerIds = [...new Set([...workerIds, ...activeWorkerIds, ...packedWorkerIds])];
 
     const users = allWorkerIds.length
       ? await User.find({ telegramId: { $in: allWorkerIds } }, 'telegramId firstName lastName').lean()
@@ -1484,82 +1494,6 @@ router.get('/shift-board', requireTelegramRoles(['admin']), async (req, res, nex
         isActive: activeWorkerIds.has(id),
       };
     }).sort((a, b) => b.tasksCompleted - a.tasksCompleted || (b.isActive ? 1 : 0) - (a.isActive ? 1 : 0));
-
-    // ── Історія збирання ПОТОЧНОЇ сесії ────────────────────────────────────
-    // Це навмисно НЕ окремий довічний audit-log. PickingTask уже є джерелом
-    // правди про роботу складу: sessionId + block/position + completedBy +
-    // per-checkbox packedBy. Тому «Зміна» просто проєктує задачі CURRENT session.
-    // Коли для цієї групи починається нова OrderingSession, sessionScope міняється
-    // і історія на екрані природно стартує з нуля — старий цикл сюди не протікає.
-    let pickingHistory = [];
-    try {
-      if (sessionId) {
-        const historyTasks = await PickingTask.find(
-          { orderingSessionId: sessionId, deliveryGroupId: dgId },
-          'productId blockId positionIndex status lockedBy lockedAt items completedBy completedByName completionReason updatedAt',
-        ).sort({ blockId: 1, positionIndex: 1 }).lean();
-
-        const productIds = [...new Set(historyTasks.map((t) => String(t.productId || '')).filter(Boolean))];
-        const products = productIds.length
-          ? await Product.find({ _id: { $in: productIds } }, '_id brand model category orderNumber').lean()
-          : [];
-        const productTitleMap = new Map(products.map((p) => [String(p._id), getProductTitle(p)]));
-
-        pickingHistory = historyTasks
-          .map((t) => {
-            const byWorker = new Map();
-            for (const item of t.items || []) {
-              if (!item.packed || !item.packedBy) continue;
-              const workerId = String(item.packedBy);
-              if (!byWorker.has(workerId)) {
-                byWorker.set(workerId, {
-                  telegramId: workerId,
-                  name: item.packedByName || userNameMap.get(workerId) || workerId,
-                  packedCount: 0,
-                  shops: [],
-                  lastAt: item.packedAt || null,
-                });
-              }
-              const row = byWorker.get(workerId);
-              row.packedCount += 1;
-              row.shops.push({
-                orderId: String(item.orderId || ''),
-                shopName: item.shopName || '—',
-                quantity: Number(item.packedQuantity ?? item.quantity ?? 0),
-                at: item.packedAt || null,
-              });
-              if (item.packedAt && (!row.lastAt || new Date(item.packedAt) > new Date(row.lastAt))) row.lastAt = item.packedAt;
-            }
-
-            const packedCount = (t.items || []).filter((i) => i.packed).length;
-            const hasHumanWork = packedCount > 0 || Boolean(t.completedBy) || (t.status === 'locked' && Boolean(t.lockedBy));
-            if (!hasHumanWork) return null;
-
-            return {
-              taskId: String(t._id),
-              productId: String(t.productId || ''),
-              productTitle: productTitleMap.get(String(t.productId || '')) || `Товар ${String(t.productId || '')}`,
-              blockId: t.blockId,
-              positionIndex: t.positionIndex,
-              status: t.status,
-              completionReason: t.completionReason || null,
-              completedBy: t.completedBy ? String(t.completedBy) : null,
-              completedByName: t.completedByName || (t.completedBy ? userNameMap.get(String(t.completedBy)) || String(t.completedBy) : ''),
-              activeWorker: t.status === 'locked' && t.lockedBy ? {
-                telegramId: String(t.lockedBy),
-                name: userNameMap.get(String(t.lockedBy)) || String(t.lockedBy),
-              } : null,
-              packedCount,
-              itemCount: (t.items || []).length,
-              workers: [...byWorker.values()],
-              at: t.status === 'completed' ? t.updatedAt : (t.lockedAt || t.updatedAt),
-            };
-          })
-          .filter(Boolean)
-          .sort((a, b) => new Date(b.at || 0) - new Date(a.at || 0));
-      }
-    } catch (e) {
-    }
 
     // ── Order-level "не завершено" aggregation (read-only data for the Зміна card) ──
     // Three views the operator wants visibility into, NO actions attached:
@@ -1749,7 +1683,144 @@ router.get('/shift-board', requireTelegramRoles(['admin']), async (req, res, nex
     } catch (e) {
     }
 
-    res.json({ groupName, sessionStart, lastActivity, workers, totalCompleted, totalPending, pickingHistory, unfinished, sessionClosure, catalogReview });
+    res.json({ groupName, sessionStart, lastActivity, workers, totalCompleted, totalPending, unfinished, sessionClosure, catalogReview });
+  } catch (err) {
+    if (err && (err.name === 'AppError' || err.name === 'CastError' || isTransientTx(err))) return next(err);
+    next(appError('picking_next_failed'));
+  }
+ });
+
+// ---------------------------------------------------------------------------
+// GET /api/picking/shift-board/worker-history
+// Paginated task history for ONE warehouse worker in the CURRENT ordering
+// session. Loaded only when the admin expands that worker on «Зміна», so the
+// 15-second shift-board poll stays small even after hundreds of tasks.
+// ---------------------------------------------------------------------------
+router.get('/shift-board/worker-history', requireTelegramRoles(['admin']), async (req, res, next) => {
+  try {
+    const deliveryGroupId = String(req.query.deliveryGroupId || '');
+    const workerTelegramId = String(req.query.workerTelegramId || '');
+    const limit = Math.min(50, Math.max(1, Number.parseInt(req.query.limit, 10) || 25));
+    const offset = Math.max(0, Number.parseInt(req.query.offset, 10) || 0);
+
+    if (!deliveryGroupId || !workerTelegramId) {
+      return res.status(400).json({ error: 'invalid_request', message: 'Потрібні deliveryGroupId і workerTelegramId.' });
+    }
+
+    const group = await DeliveryGroup.findById(deliveryGroupId, 'orderingSchedule').lean();
+    if (!group) return res.json({ items: [], total: 0, limit, offset, hasMore: false });
+
+    const sessionId = await findCurrentSessionId(deliveryGroupId, group.orderingSchedule);
+    if (!sessionId) return res.json({ items: [], total: 0, limit, offset, hasMore: false });
+
+    const workerMatch = {
+      orderingSessionId: sessionId,
+      deliveryGroupId,
+      $or: [
+        { completedBy: workerTelegramId },
+        { status: 'locked', lockedBy: workerTelegramId },
+        { items: { $elemMatch: { packed: true, packedBy: workerTelegramId } } },
+      ],
+    };
+
+    const [total, tasks] = await Promise.all([
+      PickingTask.countDocuments(workerMatch),
+      PickingTask.find(
+        workerMatch,
+        'productId blockId positionIndex status lockedBy lockedAt items completedBy completedByName completionReason updatedAt',
+      )
+        .sort({ updatedAt: -1, _id: -1 })
+        .skip(offset)
+        .limit(limit)
+        .lean(),
+    ]);
+
+    const productIds = [...new Set(tasks.map((task) => String(task.productId || '')).filter(Boolean))];
+    const [products, sessionMeta] = await Promise.all([
+      productIds.length
+        ? Product.find(
+          { _id: { $in: productIds } },
+          '_id brand model category orderNumber imageUrls localImageUrl',
+        ).lean()
+        : [],
+      OrderingSession.findById(sessionId, 'shopNumbers').lean(),
+    ]);
+    const productInfoMap = new Map(products.map((product) => [String(product._id), {
+      title: getProductTitle(product),
+      imageUrl: (Array.isArray(product.imageUrls) && product.imageUrls[0]) || product.localImageUrl || null,
+    }]));
+    const shopLookup = buildShopNumberLookup(sessionMeta?.shopNumbers);
+    const boxNumberFor = (item) =>
+      (item.shopId != null ? shopLookup.byId.get(String(item.shopId)) : undefined) ??
+      shopLookup.byName.get(String(item.shopName || '')) ??
+      null;
+
+    const items = tasks.map((task) => {
+      const workerPackedItems = (task.items || []).filter(
+        (item) => item.packed && String(item.packedBy || '') === workerTelegramId,
+      );
+      const workerPackedAt = workerPackedItems.reduce((latest, item) => {
+        if (!item.packedAt) return latest;
+        if (!latest || new Date(item.packedAt) > new Date(latest)) return item.packedAt;
+        return latest;
+      }, null);
+      const isActiveForWorker = task.status === 'locked' && String(task.lockedBy || '') === workerTelegramId;
+      const completedByWorker = String(task.completedBy || '') === workerTelegramId;
+      const at = [
+        workerPackedAt,
+        isActiveForWorker ? task.lockedAt : null,
+        completedByWorker ? task.updatedAt : null,
+      ].filter(Boolean).sort((a, b) => new Date(b) - new Date(a))[0] || task.updatedAt;
+      const productInfo = productInfoMap.get(String(task.productId || ''));
+      const shops = (task.items || [])
+        .map((item) => {
+          const packedBy = item.packedBy ? String(item.packedBy) : null;
+          const markedByWorker = Boolean(item.packed && packedBy === workerTelegramId);
+          return {
+            orderId: String(item.orderId || ''),
+            shopId: item.shopId ? String(item.shopId) : null,
+            shopName: item.shopName || '—',
+            shopNumber: boxNumberFor(item),
+            sellerName: item.sellerName || '',
+            quantity: Number(item.packedQuantity ?? item.quantity ?? 0),
+            packed: Boolean(item.packed),
+            packedBy,
+            packedByName: item.packedByName || '',
+            packedAt: item.packedAt || null,
+            markedByWorker,
+          };
+        })
+        .sort((a, b) =>
+          (a.shopNumber ?? Infinity) - (b.shopNumber ?? Infinity)
+          || String(a.shopName).localeCompare(String(b.shopName), 'uk'));
+
+      return {
+        taskId: String(task._id),
+        productId: String(task.productId || ''),
+        productTitle: productInfo?.title || `Товар ${String(task.productId || '')}`,
+        imageUrl: productInfo?.imageUrl || null,
+        blockId: task.blockId,
+        positionIndex: task.positionIndex,
+        status: task.status,
+        completionReason: task.completionReason || null,
+        packedCount: (task.items || []).filter((item) => item.packed).length,
+        itemCount: (task.items || []).length,
+        workerPackedCount: workerPackedItems.length,
+        shops,
+        isActiveForWorker,
+        completedByWorker,
+        at,
+      };
+    });
+
+    res.json({
+      items,
+      total,
+      limit,
+      offset,
+      hasMore: offset + items.length < total,
+      sessionId: String(sessionId),
+    });
   } catch (err) {
     if (err && (err.name === 'AppError' || err.name === 'CastError' || isTransientTx(err))) return next(err);
     next(appError('picking_next_failed'));

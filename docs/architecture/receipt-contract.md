@@ -1,93 +1,129 @@
-# Receipt contract
+# Receipt contract — current source of truth (V47.16)
 
 ## Purpose
 
-`Receipt` / `ReceiptItem` describe the physical acceptance of goods. The receipt is an
-acceptance record, not a product-matching form and not a pallet/box calculator.
+`Receipt` is the physical receiving document. `ReceiptItem` also carries the later
+product-preparation/publication state, but that later state is not part of the
+receipt UI itself.
 
-## Canonical ReceiptItem input
+## 1. Receiving document
 
-The receipt-facing fields are:
-
-- `photoUrl` / `originalPhotoUrl` + `photoMeta` (including the photo comment);
-- `totalQty` — the total physical quantity received, required and `>= 1`;
-- `destination` — current routing marker: exactly `shelf` OR `shops`;
-- `price`;
-- `qtyPerPackage`;
-- current shop-routing metadata (`deliveryGroupIds`, `qtyPerShop`) where that workflow uses it.
-
-`totalQty` is the only received-quantity field. There is no pallet/box structure and no
-derived warehouse/transit quantity copy.
-
-## Deliberately absent from the receipt form/model
-
-The receipt flow does NOT accept or persist receipt-specific versions of:
-
-- pallet / box structure or expected quantity;
-- separate shelf/transit quantities;
-- barcode;
-- a link to an existing Product;
-- a manually typed product name;
-- defect-photo collection;
-- free-form receipt notes.
-
-Product identity (`name`) and `aiDescription` may be generated internally from the photo in
-the background. They are implementation metadata for the Product/ShopProduct created from
-the receipt item and are not manual receipt fields.
-
-## Product creation
-
-A warehouse-routed (`destination='shelf'`) receipt item creates/owns its warehouse
-`Product` through `createdProductId`. The receipt flow no longer has an
-`existingProductId` matching/linking path.
-
-A shops-routed (`destination='shops'`) item does not create warehouse stock; it creates a
-shop-owned `ShopProduct`, anchored by `receiptItemId` / `createdShopProductId`.
-
-## Destination
-
-The current contract is intentionally mutually exclusive: `shelf | shops`.
-
-A future split such as `70 -> shops + 30 -> shelf` is NOT encoded yet. Do not simulate it
-with two booleans or duplicate `totalQty`; that requires a separate business decision and
-quantity-allocation contract.
-
-For `Receipt.type='supplement'`, every item is `destination='shelf'`.
-
-## Item mutation / concurrency
-
-A completed receipt is NOT read-only. Items may be edited, added and deleted at any time;
-see `docs/receipt/readme.md` §5 for the business rules.
-
-The gate is no longer the receipt status but the state of what the item created:
-
-- edits always propagate to the derived documents (`services/receiptSync.js`) inside the
-  SAME transaction as the item write — the receipt can never diverge from the warehouse;
-- `totalQty` is applied as a DELTA to `Product.quantity`, never as an overwrite;
-- deleting an item, unconfirming it, or switching its destination first calls
-  `describeItemUsage`; anything already in a block / order / picking task / accepted
-  supplement request rejects with `receipt_item_in_use`. Receipt editing never archives a
-  product and never cancels order items.
-
-PATCH re-reads the item inside its own transaction so concurrent edits serialise on the
-document instead of racing on a stale quantity.
-
-## Photo gallery
-
-`GET /receipts/items-gallery` is read-only and intentionally exposes:
+Current `regular` receipt UI records only:
 
 - photo;
-- `totalQty`;
-- `destination`;
-- `receiptType`.
+- `totalQty >= 1`.
 
-The gallery's `totalQty` contract remains canonical.
+No price, package quantity or routing is collected by the receiving modal.
+For `routingVersion >= 1`, `totalQty` is reference receiving metadata, never a
+formula input for automatic warehouse leftovers or routing.
 
-## Deferred decisions
+## 2. Receipt completion is independent from publication
 
-Not part of this contract yet:
+For current regular receipts (all rows `routingVersion >= 1`) the receipt may be
+completed once it contains valid receiving rows. Current receipt commit:
 
-- simultaneous `shops + shelf` allocation;
-- final semantics/UI for distributing one `totalQty` between those destinations;
-- deleting a completed receipt as a whole (only an empty draft can be deleted);
-- a correction/reversal document ("сторно") as an alternative to editing the original.
+- marks `Receipt.status='completed'`;
+- stamps `completedAt`;
+- does not require item confirmation;
+- does not require price/package/route;
+- does not create a product merely because the receiving document was closed.
+
+Legacy rows/whole-receipt supplement documents keep the previous commit contract.
+
+## 3. Commercial preparation under the full-photo feed
+
+`Накладні → Фото → Редагувати` expands the preparation controls inline under the
+selected photo. Stage 2 requires:
+
+- `price > 0`;
+- `qtyPerPackage >= 1`.
+
+The server enforces this with `assertItemReadyForRouting`. An annotated customer
+photo may be regenerated from `originalPhotoUrl`, but image rendering itself is
+not a business gate.
+
+## 4. Routing
+
+After Stage 2, current routing is stored in `ReceiptItem.routing`:
+
+```text
+warehouse
+mandatory
+supplement
+mayNotReachAllShops
+supplementDeliveryGroupId
+```
+
+Allowed: warehouse; mandatory; mandatory+warehouse; supplement;
+supplement+warehouse. Mandatory+supplement is forbidden.
+
+Route changes are atomic and only match `ReceiptItem.status='draft'`. Price and
+package predicates are repeated in the atomic update, closing readiness races.
+
+## 5. Publication boundary
+
+`POST /receipts/:id/items/:itemId/confirm` is the publication boundary. It can run
+before or after the parent Receipt is completed.
+
+Before confirm the item must have:
+
+- photo;
+- `totalQty >= 1`;
+- `price > 0`;
+- `qtyPerPackage >= 1`;
+- valid route;
+- supplement group when needed.
+
+Confirm creates/synchronizes the correct `Product` / `ShopProduct` artifacts and
+then marks the item confirmed. Unconfirm is the guarded rollback path. The single post-confirm exception is additive `POST /receipts/:id/items/:itemId/add-warehouse-remainder`: it only flips `routing.warehouse` false→true after an already-confirmed mandatory/supplement route and never recreates primary-route artifacts or notifications.
+
+## 6. Derived documents
+
+- warehouse → `Product` + linked `ShopProduct` mirror;
+- mandatory-only → standalone shop-owned `ShopProduct`;
+- mandatory+warehouse → one `Product` + mirror;
+- supplement-only → warehouse `Product`, `orderingEnabled=false`;
+- supplement+warehouse → same `Product`, also eligible for future normal flow.
+
+For new routing rows, warehouse `Product.quantity` starts at `0`; received quantity
+is not treated as an exact remaining stock counter.
+
+## 7. Supplement behavior
+
+Current supplement is per item + delivery group, but confirmation and publication
+are separate operations. New items are batch-managed (`supplementBatchVersion=1`):
+confirm makes the item ready but does not create a `SupplementOffer` and does not
+send Telegram.
+
+The photo feed groups ready items by delivery group. Explicit batch publication
+stamps `supplementPublishRequestedAt` for all selected items. If ordinary ordering
+is closed, offers open immediately and one grouped notification is sent. If it is
+still open, the publication request remains durable and the minute scheduler opens
+it after closure. Notification happens only after offer reconciliation, grouped by
+delivery group.
+
+Legacy `supplementBatchVersion=0` and `Receipt.type='supplement'` keep their old
+behaviour without a migration.
+
+## 8. Editing and concurrency
+
+A completed Receipt is not globally read-only. Receiving corrections and Stage 2
+updates remain allowed under ownership/in-use guards. Confirmed route changes require
+unconfirm first. Products already used by blocks/orders/picking cannot be silently
+rolled back.
+
+## 9. Full-photo UI projection
+
+`GET /receipts/items-gallery` remains a lightweight feed for the two-column photo
+view. It includes photo, received quantity, receipt id and normalized route inputs.
+The full item/receipt data needed for editing is fetched only when `Редагувати` is
+expanded, using the existing detail/items queries.
+
+This keeps the gallery light while the inline preparation panel has authoritative
+state from TanStack Query.
+
+## 10. Seller-session stability
+
+Normal seller catalogue membership remains frozen by the current ordering-cycle
+cutoff. Receiving/preparing a product does not inject it into an already-open normal
+seller session. Supplement has its separate group-scoped rules.

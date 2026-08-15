@@ -3,6 +3,7 @@
 const ShopProduct = require('../models/ShopProduct');
 const Product = require('../models/Product');
 const { embedShopProductAsync } = require('./shopProductEmbedding');
+const { labelPositionsFromPhotoMeta, photoCommentsText } = require('./receiptPhotoMeta');
 
 const MIRROR_MAX_RETRIES = 3;
 
@@ -75,6 +76,9 @@ async function upsertShopProductFromProduct(product, { session = null } = {}) {
       labelPositions:     product.labelPositions || {},
       aiDescription:      product.aiDescription || '',
       source:             'receive',
+      orderingEnabled:   product.orderingEnabled !== false,
+      mandatoryDistribution: !!product.mandatoryDistribution,
+      mayNotReachAllShops:   !!product.mayNotReachAllShops,
       barcode:            insertBarcode,
       // A mirror holds NO vector of its own — it references its warehouse owner's
       // ProductVector row at search time (same photo → same vector). Nothing to copy.
@@ -153,6 +157,9 @@ async function pushSharedFieldsToMirror(product, { session = null } = {}) {
     imageUrl,
     originalImageUrl:   product.originalImageUrl || imageUrl || '',
     labelPositions:     product.labelPositions || {},
+    orderingEnabled:   product.orderingEnabled !== false,
+    mandatoryDistribution: !!product.mandatoryDistribution,
+    mayNotReachAllShops:   !!product.mayNotReachAllShops,
   };
   if (computedName) $set.name = computedName;
   if (product.aiDescription) $set.aiDescription = product.aiDescription;
@@ -179,8 +186,9 @@ async function pushSharedFieldsToMirror(product, { session = null } = {}) {
   }
 }
 
-// Create/refresh the shop-OWNED ShopProduct for a brand-new `destination: 'shops'`
-// receipt item (goods that go straight to shops and never touch the warehouse).
+// Create/refresh the shop-OWNED ShopProduct for a current mandatory-only receipt
+// item (plus legacy destination='shops' compatibility rows). These goods go
+// straight to warehouse-directed shop distribution and do not create Product stock.
 // linkedProductId stays NULL → the record is OWNED by the shop catalog (editable
 // there), as opposed to a warehouse mirror. Idempotent — matched in this order:
 //   1. by receiptItemId (durable anchor for the same receipt item).
@@ -195,20 +203,24 @@ async function pushSharedFieldsToMirror(product, { session = null } = {}) {
 async function upsertShopOwnedFromReceiptItem(item, { session = null } = {}) {
   if (!item?._id) {  return null; }
   const pm = item.photoMeta || {};
-  const labelPositions = {};
-  if (pm.commentPos) { labelPositions.commentX = pm.commentPos.x; labelPositions.commentY = pm.commentPos.y; }
-  if (pm.pricePos)   { labelPositions.priceX   = pm.pricePos.x;   labelPositions.priceY   = pm.pricePos.y; }
-  if (pm.qtyPos)     { labelPositions.qtyX     = pm.qtyPos.x;     labelPositions.qtyY     = pm.qtyPos.y; }
+  const labelPositions = labelPositionsFromPhotoMeta(pm);
 
   const data = {
     name:               item.name || '',
     price:              item.price || 0,
     quantityPerPackage: item.qtyPerPackage || 0,
-    notes:              String(pm.comment || ''),
+    notes:              photoCommentsText(pm),
     originalImageUrl:   item.originalPhotoUrl || item.photoUrl || '',
     imageUrl:           item.photoUrl || '',
     labelPositions,
     source:             'receive',
+    // New mandatory-only receipt items are information/distribution records, not
+    // seller-choice catalogue goods. Staff and the "Нові товари" union can see
+    // them, but seller-facing ShopProduct browse/search must not present them as a
+    // normal selectable product. Legacy destination='shops' rows keep old visibility.
+    orderingEnabled:   Number(item.routingVersion || 0) >= 1 ? false : true,
+    mandatoryDistribution: !!item.routing?.mandatory,
+    mayNotReachAllShops:   !!item.routing?.mayNotReachAllShops,
     receiptItemId:      item._id,
     // linkedProductId intentionally NOT set → shop-owned (null).
   };

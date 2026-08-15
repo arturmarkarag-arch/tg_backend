@@ -31,15 +31,11 @@ const SupplementOffer   = require('../models/SupplementOffer');
 const SupplementRequest = require('../models/SupplementRequest');
 
 const { syncMirror, upsertShopOwnedFromReceiptItem } = require('../utils/upsertShopProduct');
+const { labelPositionsFromPhotoMeta, photoCommentsText } = require('../utils/receiptPhotoMeta');
 
-/** Підписи на фото (позиції ціни/кількості/коментаря) у формі товару. */
+/** Підписи на фото (позиції ціни/кількості/всіх коментарів) у формі товару. */
 function labelPositionsFromMeta(photoMeta) {
-  const pm = photoMeta || {};
-  const out = {};
-  if (pm.commentPos) { out.commentX = pm.commentPos.x; out.commentY = pm.commentPos.y; }
-  if (pm.pricePos)   { out.priceX   = pm.pricePos.x;   out.priceY   = pm.pricePos.y; }
-  if (pm.qtyPos)     { out.qtyX     = pm.qtyPos.x;     out.qtyY     = pm.qtyPos.y; }
-  return out;
+  return labelPositionsFromPhotoMeta(photoMeta);
 }
 
 /** Поля позиції, від яких залежать похідні документи. Знімається ДО правки. */
@@ -100,10 +96,10 @@ async function describeItemUsage(item, { session = null } = {}) {
 /**
  * Протягнути правку позиції в похідні документи.
  *
- * Позиція — джерело правди для того, ЩО приїхало. Тому її значення переписують
- * товар і дзеркало. Виняток один — кількість: залишок на складі відтоді вже
- * могли міняти вручну, тому застосовується РІЗНИЦЯ (приїхало не 10, а 12 → +2),
- * а не перезапис. Мінус у залишок не пускаємо: обрізаємо нулем і повідомляємо.
+ * Позиція — джерело правди для метаданих того, ЩО приїхало, але НЕ для
+ * автоматичного залишку нового routing flow. Для routingVersion>=1 totalQty є
+ * довідковою кількістю прийомки й не змінює Product.quantity. Лише legacy rows
+ * зберігають стару delta-синхронізацію кількості для сумісності.
  *
  * Викликати ЗАВЖДИ всередині транзакції позиції: товар, дзеркало і сама позиція
  * мусять комітитись разом.
@@ -141,12 +137,18 @@ async function propagateItemEdit(item, prev, { session = null } = {}) {
       product.quantityPerPackage = item.qtyPerPackage;
     }
 
-    const delta = Number(item.totalQty || 0) - Number(prev.totalQty || 0);
-    if (delta !== 0) {
-      const next = Number(product.quantity || 0) + delta;
-      product.quantity = Math.max(0, next);
-      out.quantityDelta = delta;
-      out.quantityClamped = next < 0;
+    // New receipt routing treats totalQty as reference metadata only. Do not
+    // pretend it equals warehouse leftovers (mandatory/supplement may consume an
+    // unknown part before the item becomes normally orderable). Legacy rows keep
+    // their historical delta-sync behavior.
+    if (Number(item.routingVersion || 0) < 1) {
+      const delta = Number(item.totalQty || 0) - Number(prev.totalQty || 0);
+      if (delta !== 0) {
+        const next = Number(product.quantity || 0) + delta;
+        product.quantity = Math.max(0, next);
+        out.quantityDelta = delta;
+        out.quantityClamped = next < 0;
+      }
     }
 
     if (photoChanged) {
@@ -155,7 +157,10 @@ async function propagateItemEdit(item, prev, { session = null } = {}) {
       product.originalImageUrl = item.originalPhotoUrl || '';
       if (vectorStale) out.reembed = 'warehouse';
     }
-    if (photoChanged || labelsChanged) product.labelPositions = nextLabelPositions;
+    if (photoChanged || labelsChanged) {
+      product.labelPositions = nextLabelPositions;
+      product.notes = photoCommentsText(item.photoMeta);
+    }
     if (item.aiDescription && !product.aiDescription) product.aiDescription = item.aiDescription;
 
     await product.save({ session });
@@ -232,6 +237,19 @@ async function hasOpenSupplementWave(receiptId, { session = null } = {}) {
   return !!(await (session ? q.session(session) : q));
 }
 
+/**
+ * Чи конкретна позиція вже показана продавцям у дозамовленні.
+ * Open і frozen обидва блокують підміну оригінального фото: продавці вже
+ * бачили саме цей товар, а frozen ще й може бути в процесі збирання.
+ */
+async function hasActiveSupplementItemWave(receiptItemId, { session = null } = {}) {
+  const q = SupplementOffer.exists({
+    receiptItemId,
+    status: { $in: SupplementOffer.ACTIVE_STATUSES },
+  });
+  return !!(await (session ? q.session(session) : q));
+}
+
 module.exports = {
   labelPositionsFromMeta,
   snapshotItem,
@@ -239,4 +257,5 @@ module.exports = {
   propagateItemEdit,
   rollbackItemArtifacts,
   hasOpenSupplementWave,
+  hasActiveSupplementItemWave,
 };
