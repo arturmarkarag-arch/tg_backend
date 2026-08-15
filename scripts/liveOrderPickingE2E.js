@@ -115,6 +115,16 @@ const { signSession } = require('../utils/jwt');
 const { auditSessionClosure } = require('../services/sessionClosure');
 const { archiveOrphanedOutOfStockProducts } = require('../services/pickingService');
 const { reconcileLateOrderStrict } = require('../services/lateOrderReconcile');
+const {
+  fetchWithTimeout,
+  createProgressWatchdog,
+  assertNoActiveGlobalHarnessLease,
+  acquireGlobalHarnessLease,
+  waitForStableZero,
+  fingerprintCollections,
+  compareFingerprints,
+  validateScenarioSelection,
+} = require('./helpers/liveHarnessSafety');
 
 const RUN_ID = `${new Date().toISOString().replace(/[-:.TZ]/g, '').slice(0, 14)}-${crypto.randomBytes(3).toString('hex')}`;
 const MARKER = `__LIVE_E2E__${RUN_ID}`;
@@ -138,6 +148,9 @@ const preservedWorlds = [];
 let localServer = null;
 let baseUrl = '';
 let manifestValue = null;
+let globalLease = null;
+let watchdog = null;
+let baselineFingerprint = null;
 
 async function initRunManifest() {
   manifestValue = {
@@ -384,71 +397,93 @@ async function createWorld(name, {
   }
 }
 
-async function cleanupWorld(world) {
-  if (!world) return;
-  const groupId = str(world.group?._id);
-  const userIds = (world.users || []).map((u) => str(u.telegramId)).filter(Boolean);
-  const shopIds = (world.shops || []).map((s) => s._id).filter(Boolean);
-  const productIds = (world.products || []).map((p) => p._id).filter(Boolean);
+function worldCleanupScope(world) {
+  const groupId = str(world?.group?._id);
+  const userIds = (world?.users || []).map((u) => str(u.telegramId)).filter(Boolean);
+  const shopIds = (world?.shops || []).map((s) => s._id).filter(Boolean);
+  const productIds = (world?.products || []).map((p) => p._id).filter(Boolean);
+  return { groupId, userIds, shopIds, productIds };
+}
 
-  // A first pass removes business data before parent fixtures.
-  if (groupId) {
-    const sessions = await OrderingSession.find({ groupId }, '_id').lean();
-    const sessionIds = sessions.map((s) => str(s._id));
-    await PickingTask.deleteMany({
-      $or: [
-        { deliveryGroupId: groupId },
-        ...(sessionIds.length ? [{ orderingSessionId: { $in: sessionIds } }] : []),
-        ...(productIds.length ? [{ productId: { $in: productIds } }] : []),
-      ],
+async function worldLeftoverCounts(world) {
+  if (!world) return {};
+  const { groupId, userIds, shopIds, productIds } = worldCleanupScope(world);
+  const liveSessionIds = groupId ? (await OrderingSession.find({ groupId }, '_id').lean()).map((x) => str(x._id)) : [];
+  const sessionIds = [...new Set([...(world.sessionIds || []), ...liveSessionIds].map(str).filter(Boolean))];
+  const taskOr = [
+    ...(groupId ? [{ deliveryGroupId: groupId }] : []),
+    ...(sessionIds.length ? [{ orderingSessionId: { $in: sessionIds } }] : []),
+    ...(productIds.length ? [{ productId: { $in: productIds } }] : []),
+  ];
+  const orderOr = [
+    ...(userIds.length ? [{ buyerTelegramId: { $in: userIds } }] : []),
+    ...(sessionIds.length ? [{ orderingSessionId: { $in: sessionIds } }] : []),
+  ];
+  return {
+    groups: groupId ? await DeliveryGroup.countDocuments({ _id: world.group._id }) : 0,
+    sessions: groupId ? await OrderingSession.countDocuments({ groupId }) : 0,
+    tasks: taskOr.length ? await PickingTask.countDocuments({ $or: taskOr }) : 0,
+    orders: orderOr.length ? await Order.countDocuments({ $or: orderOr }) : 0,
+    users: userIds.length ? await User.countDocuments({ telegramId: { $in: userIds } }) : 0,
+    shops: shopIds.length ? await Shop.countDocuments({ _id: { $in: shopIds } }) : 0,
+    products: productIds.length ? await Product.countDocuments({ _id: { $in: productIds } }) : 0,
+    blocks: world.block?._id ? await Block.countDocuments({ _id: world.block._id }) : 0,
+    auditLogs: userIds.length ? await ShopAuditLog.countDocuments({
+      $or: [{ sellerTelegramId: { $in: userIds } }, { actorTelegramId: { $in: userIds } }],
+    }) : 0,
+    counters: groupId ? await Counter.countDocuments({ name: `session-seq:${groupId}` }) : 0,
+  };
+}
+
+async function cleanupWorldPass(world) {
+  if (!world) return;
+  const { groupId, userIds, shopIds, productIds } = worldCleanupScope(world);
+  const liveSessionIds = groupId ? (await OrderingSession.find({ groupId }, '_id').lean()).map((s) => str(s._id)) : [];
+  const sessionIds = [...new Set([...(world.sessionIds || []), ...liveSessionIds].map(str).filter(Boolean))];
+  const taskOr = [
+    ...(groupId ? [{ deliveryGroupId: groupId }] : []),
+    ...(sessionIds.length ? [{ orderingSessionId: { $in: sessionIds } }] : []),
+    ...(productIds.length ? [{ productId: { $in: productIds } }] : []),
+  ];
+  const orderOr = [
+    ...(userIds.length ? [{ buyerTelegramId: { $in: userIds } }] : []),
+    ...(sessionIds.length ? [{ orderingSessionId: { $in: sessionIds } }] : []),
+  ];
+  if (taskOr.length) await PickingTask.deleteMany({ $or: taskOr });
+  if (orderOr.length) await Order.deleteMany({ $or: orderOr });
+  if (userIds.length) {
+    await ShopAuditLog.deleteMany({
+      $or: [{ sellerTelegramId: { $in: userIds } }, { actorTelegramId: { $in: userIds } }],
     });
+  }
+  if (sessionIds.length) await OrderingSession.deleteMany({ _id: { $in: sessionIds } });
+  if (groupId) {
     await OrderingSession.deleteMany({ groupId });
     await Counter.deleteMany({ name: `session-seq:${groupId}` });
-  }
-  if (userIds.length) {
-    await Order.deleteMany({ buyerTelegramId: { $in: userIds } });
-    await ShopAuditLog.deleteMany({
-      $or: [
-        { sellerTelegramId: { $in: userIds } },
-        { actorTelegramId: { $in: userIds } },
-      ],
-    });
   }
   if (world.block?._id) await Block.deleteOne({ _id: world.block._id });
   if (productIds.length) await Product.deleteMany({ _id: { $in: productIds } });
   if (userIds.length) await User.deleteMany({ telegramId: { $in: userIds } });
   if (shopIds.length) await Shop.deleteMany({ _id: { $in: shopIds } });
   if (groupId) await DeliveryGroup.deleteOne({ _id: world.group._id });
-
-  // Fire-and-forget ensureSessionSeq can finish just after an order response.
-  // Give it one beat, then scrub the group-scoped counter/session one more time.
-  await sleep(120);
-  if (groupId) {
-    await OrderingSession.deleteMany({ groupId });
-    await Counter.deleteMany({ name: `session-seq:${groupId}` });
-  }
   await cache.invalidate(cache.KEYS.DELIVERY_GROUPS);
 }
 
+async function cleanupWorld(world) {
+  if (!world) return;
+  await cleanupWorldPass(world);
+  await waitForStableZero(() => worldLeftoverCounts(world), {
+    label: `${world.name || 'scenario'} cleanup`,
+    quietMs: 700,
+    timeoutMs: 8_000,
+    intervalMs: 120,
+    onNonZero: () => cleanupWorldPass(world),
+  });
+}
+
 async function verifyWorldClean(world) {
-  if (!world) return true;
-  const groupId = str(world.group?._id);
-  const userIds = (world.users || []).map((u) => str(u.telegramId)).filter(Boolean);
-  const shopIds = (world.shops || []).map((s) => s._id).filter(Boolean);
-  const productIds = (world.products || []).map((p) => p._id).filter(Boolean);
-  const counts = await Promise.all([
-    groupId ? DeliveryGroup.countDocuments({ _id: world.group._id }) : 0,
-    groupId ? OrderingSession.countDocuments({ groupId }) : 0,
-    groupId ? PickingTask.countDocuments({ deliveryGroupId: groupId }) : 0,
-    userIds.length ? Order.countDocuments({ buyerTelegramId: { $in: userIds } }) : 0,
-    userIds.length ? User.countDocuments({ telegramId: { $in: userIds } }) : 0,
-    shopIds.length ? Shop.countDocuments({ _id: { $in: shopIds } }) : 0,
-    productIds.length ? Product.countDocuments({ _id: { $in: productIds } }) : 0,
-    world.block?._id ? Block.countDocuments({ _id: world.block._id }) : 0,
-    userIds.length ? ShopAuditLog.countDocuments({ sellerTelegramId: { $in: userIds } }) : 0,
-    groupId ? Counter.countDocuments({ name: `session-seq:${groupId}` }) : 0,
-  ]);
-  return counts.every((n) => Number(n) === 0);
+  const counts = await worldLeftoverCounts(world);
+  return Object.values(counts).every((n) => Number(n) === 0);
 }
 
 async function tokenFor(user) {
@@ -458,11 +493,12 @@ async function tokenFor(user) {
 async function api(method, urlPath, user = null, body = undefined) {
   const headers = { 'content-type': 'application/json' };
   if (user) headers.authorization = `Bearer ${await tokenFor(user)}`;
-  const res = await fetch(`${baseUrl}${urlPath}`, {
+  watchdog?.touch('http', `${method} ${urlPath.split('?')[0]}`);
+  const res = await fetchWithTimeout(`${baseUrl}${urlPath}`, {
     method,
     headers,
     body: body === undefined ? undefined : JSON.stringify(body),
-  });
+  }, { label: `${method} ${urlPath}`, parentSignal: watchdog?.signal });
   const text = await res.text();
   let data = null;
   try { data = text ? JSON.parse(text) : null; }
@@ -1630,9 +1666,11 @@ async function runScenario(name, fn) {
 
 async function preflight() {
   section('LIVE E2E PREFLIGHT');
-  await mongoose.connect(process.env.MONGODB_URI, { serverSelectionTimeoutMS: 15_000 });
+  await mongoose.connect(process.env.MONGODB_URI, { serverSelectionTimeoutMS: 15_000, socketTimeoutMS: 30_000 });
   assertConnectedHostAllowed(mongoose.connection.host);
   pass('MongoDB connection', `db=${mongoose.connection.db.databaseName} host=${mongoose.connection.host} allowed=${allowedSuffix()}`);
+  await assertNoActiveGlobalHarnessLease({ AppSetting });
+  pass('No active global live-harness lease');
 
   const synthetic = buildOpenClosedTestSchedules();
   check(isOrderingOpen(synthetic.openSchedule).isOpen, 'Synthetic per-group schedule can represent ordering-open phase');
@@ -1663,10 +1701,10 @@ async function preflight() {
     User.countDocuments({ lastName: /^\d{14}-[0-9a-f]{6}$/ }),
   ]);
   const existingTestRows = collisions.reduce((a, b) => a + b, 0);
-  if (existingTestRows) {
-    console.warn(`  ⚠️ Found ${existingTestRows} older __LIVE_E2E__/live_e2e rows. This run will NOT delete them automatically.`);
-    console.warn('     They are not production customers, but clean them by their old run id before final launch if needed.');
-  } else pass('No previous LIVE_E2E fixture leftovers detected');
+  const orphanManifests = await AppSetting.countDocuments({ key: /^live-e2e\.run\./ });
+  check(existingTestRows === 0 && orphanManifests === 0,
+    'No previous LIVE_E2E fixture leftovers or orphan manifests',
+    `rows=${existingTestRows} manifests=${orphanManifests}`);
 
   check(!hadRedis || !process.env.REDIS_URL, 'Live Redis is isolated from this suite', hadRedis ? 'REDIS_URL existed but is disabled in test process' : 'no REDIS_URL');
 }
@@ -1681,9 +1719,20 @@ async function startLocalApp() {
   });
   const address = localServer.address();
   baseUrl = `http://127.0.0.1:${address.port}`;
-  const health = await fetch(`${baseUrl}/api/health`).then((r) => r.json());
+  const health = await fetchWithTimeout(`${baseUrl}/api/health`, {}, { label: 'GET /api/health', parentSignal: watchdog?.signal }).then((r) => r.json());
   check(health?.status === 'ok', 'Ephemeral real Express app is writable', `status=${health?.status}`);
 }
+
+const FINGERPRINT_SPECS = [
+  { name: 'orders', model: Order, projection: '_id status orderingSessionId totalPrice updatedAt' },
+  { name: 'tasks', model: PickingTask, projection: '_id status deliveryGroupId orderingSessionId lockedBy lockedAt completionReason updatedAt' },
+  { name: 'sessions', model: OrderingSession, projection: '_id groupId openDate pickingStatus openNotifiedAt finalSummary updatedAt' },
+  { name: 'users', model: User, projection: '_id telegramId role shopId botBlocked updatedAt' },
+  { name: 'products', model: Product, projection: '_id status quantity blockId updatedAt' },
+  { name: 'blocks', model: Block, projection: '_id blockId productIds version updatedAt' },
+  { name: 'groups', model: DeliveryGroup, projection: '_id dayOfWeek orderingSchedule updatedAt' },
+  { name: 'shops', model: Shop, projection: '_id deliveryGroupId updatedAt' },
+];
 
 function writeReport() {
   const passedAssertions = assertions.filter((a) => a.ok).length;
@@ -1732,6 +1781,7 @@ function writeReport() {
 async function main() {
   let reportInfo = null;
   try {
+    validateScenarioSelection(requestedScenarios, SCENARIOS.map(([name]) => name));
     await preflight();
     if (!execute) {
       section('PREFLIGHT ONLY');
@@ -1740,15 +1790,28 @@ async function main() {
       return;
     }
 
+    globalLease = await acquireGlobalHarnessLease({ AppSetting, runId: RUN_ID, kind: 'contracts' });
+    watchdog = createProgressWatchdog({
+      name: `LIVE E2E ${RUN_ID}`,
+      stallMs: 120_000,
+      onStall: ({ error }) => console.error(`\n⏱️ ${error.message}\nCleanup: npm run test:live:e2e:cleanup -- --runId=${RUN_ID} --execute`),
+      exitOnStallCode: 124,
+    });
     await initRunManifest();
+    baselineFingerprint = await fingerprintCollections(FINGERPRINT_SPECS);
     section('RUN SAFETY');
     log(`RUN_ID: ${RUN_ID}`);
     log(`Marker: ${MARKER}`);
+    log('Global TEST-Atlas harness lease acquired — destructive live suites cannot overlap.');
     log('Якщо процес/SSH впаде, cleanup ТІЛЬКИ цього прогону:');
     log(`  node scripts/liveOrderPickingE2ECleanup.js --runId=${RUN_ID} --execute`);
 
     await startLocalApp();
-    for (const [name, fn] of SCENARIOS) await runScenario(name, fn);
+    for (const [name, fn] of SCENARIOS) {
+      watchdog.touch('scenario', name);
+      await runScenario(name, fn);
+      watchdog.assertHealthy();
+    }
   } finally {
     if (localServer) await new Promise((resolve) => localServer.close(resolve));
     try {
@@ -1757,6 +1820,20 @@ async function main() {
     } catch (e) {
       console.error(`Manifest finalize failed: ${e.message}`);
       assertions.push({ ok: false, name: 'run manifest cleanup', details: e.message });
+    }
+    try {
+      if (execute && baselineFingerprint && preservedWorlds.length === 0) {
+        const afterFingerprint = await fingerprintCollections(FINGERPRINT_SPECS);
+        const drift = compareFingerprints(baselineFingerprint, afterFingerprint);
+        check(drift.length === 0, 'No unrelated TEST data changed during live E2E', drift.length ? JSON.stringify(drift) : 'fingerprints identical');
+      }
+    } catch (e) {
+      assertions.push({ ok: false, name: 'unrelated TEST data fingerprint', details: e.message });
+      console.error(`❌ fingerprint verification failed: ${e.message}`);
+    }
+    watchdog?.stop();
+    try { if (globalLease) await globalLease.release(); } catch (e) {
+      assertions.push({ ok: false, name: 'global harness lease release', details: e.message });
     }
     try { reportInfo = writeReport(); } catch (e) { console.error('Report write failed:', e.message); }
     try { await mongoose.connection.close(false); } catch { /* noop */ }

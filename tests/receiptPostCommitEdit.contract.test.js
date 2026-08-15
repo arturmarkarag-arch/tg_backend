@@ -2,6 +2,7 @@ const fs = require('fs');
 const path = require('path');
 
 const read = (rel) => fs.readFileSync(path.join(__dirname, '..', rel), 'utf8');
+const { indexOrThrow, sliceIndexesOrThrow, sliceFromOrThrow, sliceBetweenOrThrow } = require('./helpers/sourceContract');
 
 const route  = read('routes/receipts.js');
 const sync   = read('services/receiptSync.js');
@@ -16,9 +17,7 @@ describe('проведена накладна редагується далі', 
       "router.post('/:id/items/:itemId/confirm'",
       "router.post('/:id/items/:itemId/unconfirm'",
     ]) {
-      const start = route.indexOf(marker);
-      expect(start).toBeGreaterThan(-1);
-      const handler = route.slice(start, route.indexOf('}));', start));
+      const handler = sliceBetweenOrThrow(route, marker, '}));', { label: `receipt handler ${marker}` });
       expect(handler).not.toContain("receipt.status !== 'draft'");
     }
     // Коди «накладну проведено — редагувати не можна» більше не існують.
@@ -39,29 +38,28 @@ describe('проведена накладна редагується далі', 
     // Не рахуємо глобальну кількість guard-ів: нове правило безпеки не повинно
     // ламати тест лише тому, що runtime став суворішим. Перевіряємо конкретні
     // переходи стану окремо, щоб зникнення будь-якого потрібного guard-а падало.
-    const editStart = route.indexOf("router.patch('/:id/items/:itemId'");
-    const routingStart = route.indexOf("router.patch('/:id/items/:itemId/routing'");
-    const editHandler = route.slice(editStart, routingStart);
+    const editStart = indexOrThrow(route, "router.patch('/:id/items/:itemId'");
+    const routingStart = indexOrThrow(route, "router.patch('/:id/items/:itemId/routing'", { from: editStart });
+    const editHandler = sliceIndexesOrThrow(route, editStart, routingStart, { label: 'receipt item PATCH' });
     expect(editHandler).toContain('criticalEditFields');
     expect(editHandler).toContain('describeItemUsage(item, { session: txSession })');
     expect(editHandler).toContain("appError('receipt_item_in_use'");
 
-    const rerouteStart = editHandler.indexOf('const rerouted =');
-    const rerouteEnd = editHandler.indexOf('const before = logSnapshot', rerouteStart);
-    const rerouteGuard = editHandler.slice(rerouteStart, rerouteEnd);
+    const rerouteStart = indexOrThrow(editHandler, 'const rerouted =');
+    const rerouteEnd = indexOrThrow(editHandler, 'const before = logSnapshot', { from: rerouteStart });
+    const rerouteGuard = sliceIndexesOrThrow(editHandler, rerouteStart, rerouteEnd, { label: 'receipt reroute guard' });
     expect(rerouteGuard).toContain('describeItemUsage(item, { session: txSession })');
     expect(rerouteGuard).toContain("appError('receipt_item_in_use'");
     expect(rerouteGuard).toContain('rollbackItemArtifacts(item, { session: txSession })');
 
-    const deleteStart = route.indexOf("router.delete('/:id/items/:itemId'");
-    const confirmStart = route.indexOf("router.post('/:id/items/:itemId/confirm'");
-    const deleteHandler = route.slice(deleteStart, confirmStart);
+    const deleteStart = indexOrThrow(route, "router.delete('/:id/items/:itemId'");
+    const confirmStart = indexOrThrow(route, "router.post('/:id/items/:itemId/confirm'", { from: deleteStart });
+    const deleteHandler = sliceIndexesOrThrow(route, deleteStart, confirmStart, { label: 'receipt item DELETE' });
     expect(deleteHandler).toContain('describeItemUsage(item, { session })');
     expect(deleteHandler).toContain("appError('receipt_item_in_use'");
     expect(deleteHandler).toContain('rollbackItemArtifacts(item, { session })');
 
-    const unconfirmStart = route.indexOf("router.post('/:id/items/:itemId/unconfirm'");
-    const unconfirmHandler = route.slice(unconfirmStart);
+    const unconfirmHandler = sliceFromOrThrow(route, "router.post('/:id/items/:itemId/unconfirm'", { label: 'receipt item unconfirm' });
     expect(unconfirmHandler).toContain('describeItemUsage(item, { session })');
     expect(unconfirmHandler).toContain("appError('receipt_item_in_use'");
     expect(unconfirmHandler).toContain('rollbackItemArtifacts(item, { session })');
@@ -83,8 +81,7 @@ describe('проведена накладна редагується далі', 
   });
 
   test('проведення теж синхронізує дзеркало (ціна не лишається старою)', () => {
-    const start = route.indexOf("router.post('/:id/commit'");
-    const commit = route.slice(start);
+    const commit = sliceFromOrThrow(route, "router.post('/:id/commit'", { label: 'receipt commit' });
     expect(commit).toContain('await syncMirror(currentProduct, { session })');
   });
 

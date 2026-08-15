@@ -57,7 +57,8 @@ for (const candidate of [
   if (loadEnvFile(candidate)) break;
 }
 
-const execute = process.argv.slice(2).includes('--execute');
+const argv = process.argv.slice(2);
+const execute = argv.includes('--execute');
 if (!process.env.MONGODB_URI) {
   console.error('❌ MONGODB_URI не заданий.');
   process.exit(2);
@@ -95,24 +96,55 @@ const { signSession } = require('../utils/jwt');
 const { auditSessionClosure } = require('../services/sessionClosure');
 const { reconcileLateOrderStrict } = require('../services/lateOrderReconcile');
 const { archiveOrphanedOutOfStockProducts } = require('../services/pickingService');
+const {
+  fetchWithTimeout,
+  createProgressWatchdog,
+  assertNoActiveGlobalHarnessLease,
+  acquireGlobalHarnessLease,
+  waitForStableZero,
+  fingerprintCollections,
+  compareFingerprints,
+  parseIntArg,
+} = require('./helpers/liveHarnessSafety');
 
 function intEnv(name, fallback, min, max) {
   const n = Number.parseInt(process.env[name] || '', 10);
   if (!Number.isFinite(n)) return fallback;
   return Math.max(min, Math.min(max, n));
 }
+function parseReplayConfig(argv) {
+  const rawArg = argv.find((arg) => arg.startsWith('--cfg='));
+  if (!rawArg) return null;
+  try {
+    const decoded = Buffer.from(rawArg.slice('--cfg='.length), 'base64url').toString('utf8');
+    const value = JSON.parse(decoded);
+    if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('config must be an object');
+    return value;
+  } catch (err) {
+    throw new Error(`Invalid --cfg replay token: ${err.message}`);
+  }
+}
+const REPLAY_CFG = parseReplayConfig(argv);
+function intCfg(key, envName, fallback, min, max) {
+  if (REPLAY_CFG && Object.prototype.hasOwnProperty.call(REPLAY_CFG, key)) {
+    const n = Number(REPLAY_CFG[key]);
+    if (!Number.isInteger(n) || n < min || n > max) throw new Error(`Invalid replay config ${key}=${REPLAY_CFG[key]}`);
+    return n;
+  }
+  return intEnv(envName, fallback, min, max);
+}
 const CFG = {
-  sellers: intEnv('LIVE_E2E_MASS_SELLERS', 100, 20, 300),
-  lateSellers: intEnv('LIVE_E2E_MASS_LATE_SELLERS', 8, 0, 30),
-  shops: intEnv('LIVE_E2E_MASS_SHOPS', 120, 40, 400),
-  products: intEnv('LIVE_E2E_MASS_PRODUCTS', 240, 40, 600),
-  blocks: intEnv('LIVE_E2E_MASS_BLOCKS', 12, 2, 30),
-  warehouses: intEnv('LIVE_E2E_MASS_WAREHOUSE', 12, 2, 30),
-  itemsPerOrder: intEnv('LIVE_E2E_MASS_ITEMS_PER_ORDER', 20, 5, 50),
-  orderConcurrency: intEnv('LIVE_E2E_MASS_ORDER_CONCURRENCY', 100, 2, 150),
-  mergeRaceSellers: intEnv('LIVE_E2E_MASS_MERGE_RACE_SELLERS', 25, 1, 80),
-  conflictShops: intEnv('LIVE_E2E_MASS_CONFLICT_SHOPS', 10, 1, 20),
-  oosBlocks: intEnv('LIVE_E2E_MASS_OOS_BLOCKS', 2, 1, 4),
+  sellers: intCfg('sellers', 'LIVE_E2E_MASS_SELLERS', 100, 20, 300),
+  lateSellers: intCfg('lateSellers', 'LIVE_E2E_MASS_LATE_SELLERS', 8, 0, 30),
+  shops: intCfg('shops', 'LIVE_E2E_MASS_SHOPS', 120, 40, 400),
+  products: intCfg('products', 'LIVE_E2E_MASS_PRODUCTS', 240, 40, 600),
+  blocks: intCfg('blocks', 'LIVE_E2E_MASS_BLOCKS', 12, 2, 30),
+  warehouses: intCfg('warehouses', 'LIVE_E2E_MASS_WAREHOUSE', 12, 2, 30),
+  itemsPerOrder: intCfg('itemsPerOrder', 'LIVE_E2E_MASS_ITEMS_PER_ORDER', 20, 5, 50),
+  orderConcurrency: intCfg('orderConcurrency', 'LIVE_E2E_MASS_ORDER_CONCURRENCY', 100, 2, 150),
+  mergeRaceSellers: intCfg('mergeRaceSellers', 'LIVE_E2E_MASS_MERGE_RACE_SELLERS', 25, 1, 80),
+  conflictShops: intCfg('conflictShops', 'LIVE_E2E_MASS_CONFLICT_SHOPS', 10, 1, 20),
+  oosBlocks: intCfg('oosBlocks', 'LIVE_E2E_MASS_OOS_BLOCKS', 2, 1, 4),
 };
 if (CFG.sellers < 80 || CFG.shops < CFG.sellers || CFG.products < CFG.blocks * 2) {
   console.error('❌ Mass config занадто малий/несумісний для realistic scenario.', CFG);
@@ -144,6 +176,9 @@ const world = {
 let manifest = null;
 let server = null;
 let baseUrl = '';
+let globalLease = null;
+let watchdog = null;
+let baselineFingerprint = null;
 const assertions = [];
 const metrics = { api: {}, phases: {}, counts: {}, races: {} };
 const startedAt = Date.now();
@@ -159,6 +194,7 @@ function terminal(i) { return Boolean(i?.packed || i?.cancelled || i?.skipped ||
 function log(s = '') { console.log(s); }
 function section(t) { log(`\n${'═'.repeat(90)}\n${t}\n${'═'.repeat(90)}`); }
 function check(cond, name, details = '') {
+  watchdog?.touch('assertion', name);
   assertions.push({ ok: Boolean(cond), name, details });
   if (!cond) {
     console.error(`  ❌ ${name}${details ? ` — ${details}` : ''}`);
@@ -173,11 +209,12 @@ function percentile(arr, p) {
   return s[Math.min(s.length - 1, Math.floor((s.length - 1) * p))];
 }
 function recordApi(label, ms, status) {
+  watchdog?.touch('http', `${label} status=${status}`);
   if (!metrics.api[label]) metrics.api[label] = { n: 0, ok: 0, fail: 0, ms: [] };
   const x = metrics.api[label]; x.n += 1; x.ms.push(ms); if (status >= 200 && status < 400) x.ok += 1; else x.fail += 1;
 }
-function phaseStart(name) { metrics.phases[name] = { startedAt: Date.now() }; }
-function phaseEnd(name) { metrics.phases[name].durationMs = Date.now() - metrics.phases[name].startedAt; delete metrics.phases[name].startedAt; }
+function phaseStart(name) { watchdog?.touch('phase', name); metrics.phases[name] = { startedAt: Date.now() }; }
+function phaseEnd(name) { watchdog?.touch('phase-end', name); metrics.phases[name].durationMs = Date.now() - metrics.phases[name].startedAt; delete metrics.phases[name].startedAt; }
 
 function seeded(seed) {
   let x = seed >>> 0;
@@ -186,7 +223,10 @@ function seeded(seed) {
     return (x >>> 0) / 4294967296;
   };
 }
-const seedNum = Number.parseInt(crypto.createHash('sha1').update(RUN_ID).digest('hex').slice(0, 8), 16) >>> 0;
+const generatedSeed = Number.parseInt(crypto.createHash('sha1').update(RUN_ID).digest('hex').slice(0, 8), 16) >>> 0;
+const seedNum = parseIntArg(argv, 'seed', generatedSeed, { min: 0, max: 0xFFFFFFFF }) >>> 0;
+const replayCfgToken = Buffer.from(JSON.stringify(CFG), 'utf8').toString('base64url');
+const replayCommand = `npm run test:live:e2e:mass -- --seed=${seedNum} --cfg=${replayCfgToken}`;
 const rnd = seeded(seedNum);
 
 function makeTelegramId(i) {
@@ -236,7 +276,10 @@ async function api(method, urlPath, user, body, label = `${method} ${urlPath.spl
   const t = Date.now();
   const headers = { 'content-type': 'application/json' };
   if (user) headers.authorization = `Bearer ${await tokenFor(user)}`;
-  const res = await fetch(`${baseUrl}${urlPath}`, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
+  const res = await fetchWithTimeout(`${baseUrl}${urlPath}`, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) }, {
+    label,
+    parentSignal: watchdog?.signal,
+  });
   const text = await res.text();
   let data = null; try { data = text ? JSON.parse(text) : null; } catch { data = { _raw: text }; }
   recordApi(label, Date.now() - t, res.status);
@@ -445,6 +488,9 @@ async function claimRace(task) {
   const results = await Promise.all(world.warehouses.map((wh) => api('POST', `/api/picking/tasks/${tid(task)}/claim`, wh, {}, 'POST claim-race')));
   const wins = results.map((r, i) => ({ ...r, i })).filter((r) => r.status === 200 && r.data?.task);
   eq(wins.length, 1, 'Exactly one warehouse worker wins an atomic claim race');
+  check(results.every((r) => r.status === 200 || r.status === 409),
+    'Claim-race losers fail only with expected conflict status',
+    `statuses=${results.map((r) => r.status).join(',')}`);
   metrics.races.claim = results.map((r) => r.status);
   return { wh: world.warehouses[wins[0].i], task: wins[0].data.task };
 }
@@ -462,6 +508,9 @@ async function progressCompleteRace(wh, task) {
     api('PATCH', `/api/picking/tasks/${tid(task)}/progress`, wh, { packedOrderIds: half }, 'PATCH progress-race'),
     fullComplete(wh, task),
   ]);
+  check([progress.status, done.status].every((status) => [200, 403, 409].includes(status)),
+    'Progress/complete race returns only expected success/conflict statuses',
+    `progress=${progress.status} complete=${done.status}`);
   check(done.status === 200 || progress.status === 200, 'At least one progress/complete contender succeeds');
   const final = await PickingTask.findById(tid(task)).lean();
   eq(final.status, 'completed', 'Progress/complete race leaves one terminal completed task');
@@ -539,7 +588,7 @@ async function pollDuringPicking(wh, stop) {
         api('GET', `/api/picking/session-closure?deliveryGroupId=${encodeURIComponent(str(world.group._id))}`, wh, undefined, 'GET closure-poll'),
         api('GET', `/api/picking/locked-tasks?deliveryGroupId=${encodeURIComponent(str(world.group._id))}`, wh, undefined, 'GET locked-poll'),
       ]);
-      if (closure.status >= 500 || locked.status >= 500) failures += 1;
+      if (closure.status !== 200 || locked.status !== 200) failures += 1;
     } catch (err) {
       // A worker assertion may abort runMass while pollers are in-flight. Do not
       // turn that into an unhandled `fetch failed` that bypasses the harness'
@@ -569,12 +618,13 @@ async function verifyOrderInvariants(sessionId) {
   return rows;
 }
 
-async function cleanup() {
+async function cleanupPass() {
   const groupId = str(world.group?._id);
   const userIds = world.users.map((u) => str(u.telegramId));
   const productIds = world.products.map((p) => p._id);
   const shopIds = world.shops.map((s) => s._id);
-  const sessionIds = groupId ? (await OrderingSession.find({ groupId }, '_id').lean()).map((s) => str(s._id)) : [];
+  const liveSessionIds = groupId ? (await OrderingSession.find({ groupId }, '_id').lean()).map((s) => str(s._id)) : [];
+  const sessionIds = [...new Set([...(world.sessionIds || []), ...liveSessionIds].map(str).filter(Boolean))];
   if (groupId || sessionIds.length || productIds.length) {
     const ors = [];
     if (groupId) ors.push({ deliveryGroupId: groupId });
@@ -591,9 +641,19 @@ async function cleanup() {
   if (userIds.length) await User.deleteMany({ telegramId: { $in: userIds } });
   if (shopIds.length) await Shop.deleteMany({ _id: { $in: shopIds } });
   if (groupId) await DeliveryGroup.deleteOne({ _id: world.group._id });
-  await sleep(150);
   if (groupId) { await OrderingSession.deleteMany({ groupId }); await Counter.deleteMany({ name: `session-seq:${groupId}` }); }
   await cache.invalidate(cache.KEYS.DELIVERY_GROUPS);
+}
+
+async function cleanup() {
+  await cleanupPass();
+  await waitForStableZero(async () => ({ total: await leftovers() }), {
+    label: 'MASS cleanup',
+    quietMs: 800,
+    timeoutMs: 10_000,
+    intervalMs: 150,
+    onNonZero: () => cleanupPass(),
+  });
 }
 
 async function leftovers() {
@@ -601,15 +661,27 @@ async function leftovers() {
   const userIds = world.users.map((u) => str(u.telegramId));
   const productIds = world.products.map((p) => p._id);
   const shopIds = world.shops.map((s) => s._id);
+  const liveSessionIds = groupId ? (await OrderingSession.find({ groupId }, '_id').lean()).map((s) => str(s._id)) : [];
+  const sessionIds = [...new Set([...(world.sessionIds || []), ...liveSessionIds].map(str).filter(Boolean))];
+  const taskOr = [
+    ...(groupId ? [{ deliveryGroupId: groupId }] : []),
+    ...(sessionIds.length ? [{ orderingSessionId: { $in: sessionIds } }] : []),
+    ...(productIds.length ? [{ productId: { $in: productIds } }] : []),
+  ];
+  const orderOr = [
+    ...(userIds.length ? [{ buyerTelegramId: { $in: userIds } }] : []),
+    ...(sessionIds.length ? [{ orderingSessionId: { $in: sessionIds } }] : []),
+  ];
   const vals = await Promise.all([
     groupId ? DeliveryGroup.countDocuments({ _id: world.group._id }) : 0,
     groupId ? OrderingSession.countDocuments({ groupId }) : 0,
-    groupId ? PickingTask.countDocuments({ deliveryGroupId: groupId }) : 0,
-    userIds.length ? Order.countDocuments({ buyerTelegramId: { $in: userIds } }) : 0,
+    taskOr.length ? PickingTask.countDocuments({ $or: taskOr }) : 0,
+    orderOr.length ? Order.countDocuments({ $or: orderOr }) : 0,
     userIds.length ? User.countDocuments({ telegramId: { $in: userIds } }) : 0,
     shopIds.length ? Shop.countDocuments({ _id: { $in: shopIds } }) : 0,
     productIds.length ? Product.countDocuments({ _id: { $in: productIds } }) : 0,
     world.blocks.length ? Block.countDocuments({ _id: { $in: world.blocks.map((b) => b._id) } }) : 0,
+    userIds.length ? ShopAuditLog.countDocuments({ $or: [{ sellerTelegramId: { $in: userIds } }, { actorTelegramId: { $in: userIds } }] }) : 0,
     groupId ? Counter.countDocuments({ name: `session-seq:${groupId}` }) : 0,
   ]);
   return vals.reduce((a, b) => a + Number(b || 0), 0);
@@ -617,8 +689,10 @@ async function leftovers() {
 
 async function preflight() {
   section('MASS LIVE E2E PREFLIGHT');
-  await mongoose.connect(process.env.MONGODB_URI, { serverSelectionTimeoutMS: 15_000 });
+  await mongoose.connect(process.env.MONGODB_URI, { serverSelectionTimeoutMS: 15_000, socketTimeoutMS: 30_000 });
   assertConnectedHostAllowed(mongoose.connection.host);
+  await assertNoActiveGlobalHarnessLease({ AppSetting });
+  check(true, 'No active global live-harness lease before MASS');
   log(`DB guard OK: db=${mongoose.connection.db.databaseName} host=${mongoose.connection.host} allowed=${allowedSuffix()}`);
   const synthetic = buildOpenClosedTestSchedules();
   check(isOrderingOpen(synthetic.openSchedule).isOpen, 'Mass preflight can create an ordering-open per-group schedule');
@@ -632,6 +706,14 @@ async function preflight() {
   try { await s.withTransaction(async () => mongoose.connection.db.collection('counters').findOne({ name: '__mass_tx_probe__' }, { session: s })); }
   finally { s.endSession(); }
   check(!process.env.REDIS_URL, 'Mass process is isolated from Redis', hadRedis ? 'REDIS_URL was configured and disabled for this process' : 'Redis not configured');
+  const [oldGroups, oldProducts, orphanManifests] = await Promise.all([
+    DeliveryGroup.countDocuments({ name: { $regex: '^__LIVE_E2E' } }),
+    Product.countDocuments({ source: 'live_e2e' }),
+    AppSetting.countDocuments({ key: /^live-e2e\.run\./ }),
+  ]);
+  check(oldGroups + oldProducts + orphanManifests === 0,
+    'No older live-E2E fixtures/manifests before MASS',
+    `groups=${oldGroups} products=${oldProducts} manifests=${orphanManifests}`);
 }
 
 async function startApp() {
@@ -639,7 +721,7 @@ async function startApp() {
   server = http.createServer(app);
   await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
   baseUrl = `http://127.0.0.1:${server.address().port}`;
-  const h = await fetch(`${baseUrl}/api/health`).then((r) => r.json());
+  const h = await fetchWithTimeout(`${baseUrl}/api/health`, {}, { label: 'GET /api/health', parentSignal: watchdog?.signal }).then((r) => r.json());
   check(h?.status === 'ok', 'Mass ephemeral real Express app is healthy');
 }
 
@@ -748,6 +830,9 @@ async function runMass() {
     api('POST', `/api/picking/tasks/${tid(raceTask)}/out-of-stock`, oosRaceWh, { packedOrderIds: racePackedIds }, 'POST OOS-race'),
     fullComplete(oosRaceWh, raceTask),
   ]);
+  check([raceOos.status, raceComplete.status].every((status) => [200, 403, 404, 409].includes(status)),
+    'OOS/complete race returns only expected success/conflict statuses',
+    `oos=${raceOos.status} complete=${raceComplete.status}`);
   check([raceOos.status, raceComplete.status].filter((x) => x === 200).length >= 1, 'OOS/complete race has a successful winner');
   const raceFinal = await PickingTask.findById(tid(raceTask)).lean();
   check(raceFinal.status === 'completed' && ['packed', 'out_of_stock'].includes(raceFinal.completionReason), 'OOS/complete race leaves one canonical completionReason', raceFinal.completionReason);
@@ -843,6 +928,7 @@ async function runMass() {
   const currentPending = await PickingTask.countDocuments({ orderingSessionId: str(currentSessionId), deliveryGroupId: str(world.group._id), status: { $in: ['pending', 'locked'] } });
   eq(currentPending, 0, 'All reachable current-group PickingTasks are terminal after concurrent workers');
 
+  phaseStart('post_picking_integrity');
   // Session MUST still be blocked by the deliberately injected integrity poison.
   const blockedClosure = await auditSessionClosure({ deliveryGroupId: str(world.group._id), orderingSessionId: str(currentSessionId) });
   const blockerCodes = blockedClosure.blockers.map((b) => b.code);
@@ -852,8 +938,10 @@ async function runMass() {
   check(blockerCodes.includes('session_task_group_mismatch'), 'Mass closure exposes wrong-group current-session task');
   check(blockerCodes.includes('session_order_group_mismatch'), 'Mass closure exposes wrong-group current-session Order');
   check(blockedClosure.warnings.some((w) => w.code === 'orphan_tasks') || !(await PickingTask.exists({ orderingSessionId: str(world.oldSessionId), status: { $in: ['pending', 'locked'] } })), 'Old-session debris is warning/repair territory, never a current blocker');
+  phaseEnd('post_picking_integrity');
 
   section('REPAIR FINAL POISON');
+  phaseStart('final_repair');
   await PickingTask.deleteOne({ _id: poisonTask._id });
   await Order.updateOne(
     { _id: poisonOrder._id },
@@ -878,7 +966,9 @@ async function runMass() {
     deliveryGroupId: str(world.group._id), productId: str(hiddenProduct._id),
   }, 'POST coverage-repair');
   check(repair.status === 200 && repair.data?.resolved === true, 'Mass hidden item repair resolves final coverage blocker');
+  phaseEnd('final_repair');
 
+  phaseStart('final_integrity');
   const finalClosure = await auditSessionClosure({ deliveryGroupId: str(world.group._id), orderingSessionId: str(currentSessionId) });
   check(finalClosure.ok, 'Mass current session has ZERO blockers after explicit repair', JSON.stringify(finalClosure.blockers));
   const finalSession = await OrderingSession.findById(currentSessionId).lean();
@@ -912,7 +1002,19 @@ async function runMass() {
     oldTasksRemaining: await PickingTask.countDocuments({ orderingSessionId: str(world.oldSessionId), status: { $in: ['pending', 'locked'] } }),
     emptyBlocks: emptyBlockCount, shortPickOrders: shortOrders,
   };
+  phaseEnd('final_integrity');
 }
+
+const FINGERPRINT_SPECS = [
+  { name: 'orders', model: Order, projection: '_id status orderingSessionId totalPrice updatedAt' },
+  { name: 'tasks', model: PickingTask, projection: '_id status deliveryGroupId orderingSessionId lockedBy lockedAt completionReason updatedAt' },
+  { name: 'sessions', model: OrderingSession, projection: '_id groupId openDate pickingStatus openNotifiedAt finalSummary updatedAt' },
+  { name: 'users', model: User, projection: '_id telegramId role shopId botBlocked updatedAt' },
+  { name: 'products', model: Product, projection: '_id status quantity updatedAt' },
+  { name: 'blocks', model: Block, projection: '_id blockId productIds version updatedAt' },
+  { name: 'groups', model: DeliveryGroup, projection: '_id dayOfWeek orderingSchedule updatedAt' },
+  { name: 'shops', model: Shop, projection: '_id deliveryGroupId updatedAt' },
+];
 
 function buildReport(error = null) {
   const apiSummary = {};
@@ -937,7 +1039,8 @@ function writeReport(error = null) {
     `- Assertions: **${report.summary.passed} passed / ${report.summary.failed} failed**`,
     `- Duration: **${Math.round(report.durationMs / 1000)}s**`,
     `- DB host: \`${report.host || 'unknown'}\``,
-    `- Seed: \`${seedNum}\``, '',
+    `- Seed: \`${seedNum}\``,
+    `- Replay: \`${replayCommand}\``, '',
     '## Load shape',
     `- Sellers ordering: ${CFG.sellers}`,
     `- Late sellers: ${CFG.lateSellers}`,
@@ -946,6 +1049,8 @@ function writeReport(error = null) {
     `- Blocks: ${CFG.blocks}`,
     `- Concurrent warehouse workers: ${CFG.warehouses}`,
     `- Items per initial Order: ${CFG.itemsPerOrder}`,
+    '', '## Phase durations',
+    ...Object.entries(report.metrics.phases).map(([k, v]) => `- ${k}: ${v.durationMs == null ? 'incomplete' : `${v.durationMs}ms`}`),
     '', '## API latency',
     ...Object.entries(report.metrics.api).map(([k, v]) => `- ${k}: n=${v.n}, fail=${v.fail}, p50=${v.p50Ms}ms, p95=${v.p95Ms}ms, p99=${v.p99Ms}ms, max=${v.maxMs}ms`),
     '', '## Failed assertions',
@@ -965,12 +1070,24 @@ async function main() {
       log('Execute: npm run test:live:e2e:mass');
       return;
     }
+    globalLease = await acquireGlobalHarnessLease({ AppSetting, runId: RUN_ID, kind: 'mass', ttlMs: 60 * 60 * 1000 });
+    watchdog = createProgressWatchdog({
+      name: `MASS ${RUN_ID}`,
+      stallMs: 120_000,
+      onStall: ({ error }) => console.error(`\n⏱️ ${error.message}\nCleanup: npm run test:live:e2e:cleanup -- --runId=${RUN_ID} --execute`),
+      exitOnStallCode: 124,
+    });
     await AppSetting.findOneAndUpdate({ key: MANIFEST_KEY }, { $set: { value: { runId: RUN_ID, marker: MARKER, status: 'starting', worlds: {} } } }, { upsert: true });
+    baselineFingerprint = await fingerprintCollections(FINGERPRINT_SPECS);
     section('MASS RUN SAFETY');
-    log(`RUN_ID=${RUN_ID}`);
+    log(`RUN_ID=${RUN_ID} seed=${seedNum}`);
+    log(`Replay exact randomness + config: ${replayCommand}`);
+    log('Global TEST-Atlas harness lease acquired — no contracts/receipt/MASS overlap.');
     log(`If process dies: npm run test:live:e2e:cleanup -- --runId=${RUN_ID} --execute`);
     await startApp();
+    watchdog.touch('mass', 'runMass');
     await runMass();
+    watchdog.assertHealthy();
   } catch (err) {
     fatal = err;
     assertions.push({ ok: false, name: err.assertionName || 'fatal', details: err.message });
@@ -991,6 +1108,19 @@ async function main() {
       }
     }
     if (execute && clean) await AppSetting.deleteOne({ key: MANIFEST_KEY }).catch(() => {});
+    if (execute && clean && baselineFingerprint) {
+      try {
+        const afterFingerprint = await fingerprintCollections(FINGERPRINT_SPECS);
+        const drift = compareFingerprints(baselineFingerprint, afterFingerprint);
+        check(drift.length === 0, 'MASS changed no unrelated TEST data', drift.length ? JSON.stringify(drift) : 'fingerprints identical');
+      } catch (e) {
+        assertions.push({ ok: false, name: 'MASS unrelated TEST data fingerprint', details: e.message });
+      }
+    }
+    watchdog?.stop();
+    try { if (globalLease) await globalLease.release(); } catch (e) {
+      assertions.push({ ok: false, name: 'global harness lease release', details: e.message });
+    }
     const reportBase = writeReport(fatal);
     log(`Report: ${reportBase}.md`);
     try { await mongoose.connection.close(false); } catch { /* noop */ }

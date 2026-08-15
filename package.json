@@ -48,7 +48,15 @@
     "test:egress:photo:preflight": "node -r ../dev-use-test-db.js scripts/livePhotoEgressProbeV48_11.js",
     "test:egress:photo:live": "node -r ../dev-use-test-db.js scripts/livePhotoEgressProbeV48_11.js --execute",
     "test:picking:authority": "vitest run tests/pickingServerAuthority.test.js tests/pickingServerAuthority.contract.test.js --hookTimeout=180000 --testTimeout=120000 --no-file-parallelism",
-    "test:picking:readiness": "vitest run tests/pickingReadinessBoundary.test.js tests/pickingReadinessAuthority.contract.test.js --hookTimeout=180000 --testTimeout=120000 --no-file-parallelism"
+    "test:picking:readiness": "vitest run tests/pickingReadinessBoundary.test.js tests/pickingReadinessAuthority.contract.test.js --hookTimeout=180000 --testTimeout=120000 --no-file-parallelism",
+    "test:harness:static": "node scripts/checkLiveHarnessV48_18.js",
+    "test:harness": "vitest run tests/liveHarnessV4818.contract.test.js tests/liveHarnessSafetyV4818.test.js tests/perGroupTestSchedule.test.js --hookTimeout=180000 --testTimeout=120000 --no-file-parallelism",
+    "test:server-authority:boot": "vitest run tests/serverBootInfraV4818.contract.test.js tests/pickingServerAuthority.test.js --hookTimeout=180000 --testTimeout=120000 --no-file-parallelism",
+    "test:live:gate:v48.18": "node -r ../dev-use-test-db.js scripts/runLiveReleaseGateV48_18.js",
+    "test:live:contracts:full:preflight": "node -r ../dev-use-test-db.js scripts/liveOrderPickingE2E.js",
+    "test:live:contracts:full": "node -r ../dev-use-test-db.js scripts/liveOrderPickingE2E.js --execute",
+    "test:live:boot:v48.18:preflight": "node -r ../dev-use-test-db.js scripts/liveServerBootV48_18.js",
+    "test:live:boot:v48.18": "node -r ../dev-use-test-db.js scripts/liveServerBootV48_18.js --execute"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1030.0",

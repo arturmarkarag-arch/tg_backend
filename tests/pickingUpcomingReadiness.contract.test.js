@@ -6,6 +6,7 @@ const {
 } = require('../services/sessionPresentation');
 
 const read = (rel) => fs.readFileSync(path.resolve(process.cwd(), rel), 'utf8');
+const { indexOrThrow, sliceBetweenOrThrow } = require('./helpers/sourceContract');
 
 describe('picking upcoming-session readiness contract', () => {
   it('treats completed AND empty/idle terminal cycles as readiness candidates', () => {
@@ -51,20 +52,16 @@ describe('picking upcoming-session readiness contract', () => {
 
   it('checks readiness before any session-creating or lock-mutating operation', () => {
     const source = read('routes/picking.js');
-    const preflight = source.indexOf("if (presentationMode === 'upcoming_preflight')");
-    const mutate = source.indexOf('await releaseWorkerAndStaleLocks', preflight);
-    const create = source.indexOf('await getOrCreateSessionId', preflight);
-
-    expect(preflight).toBeGreaterThan(-1);
+    const preflight = indexOrThrow(source, "if (presentationMode === 'upcoming_preflight')");
+    const mutate = indexOrThrow(source, 'await releaseWorkerAndStaleLocks', { from: preflight });
+    const create = indexOrThrow(source, 'await getOrCreateSessionId', { from: preflight });
     expect(mutate).toBeGreaterThan(preflight);
     expect(create).toBeGreaterThan(preflight);
   });
 
   it('readiness shop view remains assignment-only and does not materialise a future OrderingSession', () => {
     const source = read('routes/deliveryGroups.js');
-    const start = source.indexOf("const readinessOnly = req.query.view === 'readiness'");
-    const end = source.indexOf('const currentSessionId = await findCurrentSessionId', start);
-    const readinessBranch = source.slice(start, end);
+    const readinessBranch = sliceBetweenOrThrow(source, "const readinessOnly = req.query.view === 'readiness'", 'const currentSessionId = await findCurrentSessionId', { label: 'readiness-only shop view' });
 
     expect(readinessBranch).toContain("view: 'readiness'");
     expect(readinessBranch).toContain('currentSessionId: null');

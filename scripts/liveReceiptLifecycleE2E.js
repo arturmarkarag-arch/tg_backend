@@ -37,11 +37,22 @@ const PickingTask = require('../models/PickingTask');
 const SupplementOffer = require('../models/SupplementOffer');
 const SupplementRequest = require('../models/SupplementRequest');
 const DeliveryGroup = require('../models/DeliveryGroup');
+const AppSetting = require('../models/AppSetting');
 const ReceiptItemLog = require('../models/ReceiptItemLog');
 const { signSession } = require('../utils/jwt');
+const {
+  fetchWithTimeout,
+  assertNoActiveGlobalHarnessLease,
+  acquireGlobalHarnessLease,
+  waitForStableZero,
+  fingerprintCollections,
+  compareFingerprints,
+  createProgressWatchdog,
+} = require('./helpers/liveHarnessSafety');
 
-const RUN_ID = `${Date.now()}-${crypto.randomBytes(3).toString('hex')}`;
+const RUN_ID = `${new Date().toISOString().replace(/[-:.TZ]/g, '').slice(0, 14)}-${crypto.randomBytes(3).toString('hex')}`;
 const MARKER = `__LIVE_RECEIPT_E2E__${RUN_ID}`;
+const MANIFEST_KEY = `live-e2e.run.${RUN_ID}`;
 const ids = {
   users: [], receipts: [], items: [], products: [], groups: [], blocks: [], offers: [], orders: [], tasks: [],
 };
@@ -49,17 +60,36 @@ let server = null;
 let baseUrl = '';
 let admin = null;
 let assertions = 0;
+let globalLease = null;
+let baselineFingerprint = null;
+let watchdog = null;
 
 function ok(condition, name, details = '') {
+  watchdog?.touch('assertion', name);
   if (!condition) throw new Error(`${name}${details ? ` — ${details}` : ''}`);
   assertions += 1;
   console.log(`  ✅ ${name}${details ? ` — ${details}` : ''}`);
 }
 function eq(actual, expected, name) { ok(actual === expected, name, `actual=${JSON.stringify(actual)} expected=${JSON.stringify(expected)}`); }
 function remember(bucket, doc) { if (doc?._id) ids[bucket].push(doc._id); return doc; }
+async function saveManifest(phase) {
+  await AppSetting.findOneAndUpdate(
+    { key: MANIFEST_KEY },
+    { $set: { value: {
+      kind: 'receipt', runId: RUN_ID, marker: MARKER, phase, updatedAt: new Date().toISOString(),
+      receipt: {
+        userIds: ids.users.map(String), receiptIds: ids.receipts.map(String), itemIds: ids.items.map(String),
+        productIds: ids.products.map(String), groupIds: ids.groups.map(String), blockIds: ids.blocks.map(String),
+        offerIds: ids.offers.map(String), orderIds: ids.orders.map(String), taskIds: ids.tasks.map(String),
+      },
+    } } },
+    { upsert: true, new: true, setDefaultsOnInsert: true },
+  );
+}
 
 async function token() { return signSession(String(admin.telegramId)); }
 async function api(method, route, { json, fields } = {}) {
+  watchdog?.touch('http', `${method} ${route}`);
   const headers = { authorization: `Bearer ${await token()}` };
   let body;
   if (fields) {
@@ -70,7 +100,7 @@ async function api(method, route, { json, fields } = {}) {
     headers['content-type'] = 'application/json';
     body = JSON.stringify(json);
   }
-  const res = await fetch(`${baseUrl}${route}`, { method, headers, body });
+  const res = await fetchWithTimeout(`${baseUrl}${route}`, { method, headers, body }, { label: `${method} ${route}`, parentSignal: watchdog?.signal });
   const text = await res.text();
   let data = null;
   try { data = text ? JSON.parse(text) : null; } catch { data = { _raw: text }; }
@@ -95,6 +125,7 @@ async function seedDraft() {
     originalPhotoUrl: 'https://example.invalid/live-receipt-original.jpg',
     totalQty: 12, price: null, qtyPerPackage: null,
   }));
+  await saveManifest('seed_draft');
   return { receipt, item };
 }
 
@@ -127,6 +158,7 @@ async function seedConfirmed({ supplement = false, publishRequested = false, war
   }));
   product.receiptItemId = item._id;
   await product.save();
+  await saveManifest('seed_confirmed');
   return { receipt, item, product };
 }
 
@@ -138,11 +170,11 @@ async function startApp() {
     server.listen(0, '127.0.0.1', resolve);
   });
   baseUrl = `http://127.0.0.1:${server.address().port}`;
-  const health = await fetch(`${baseUrl}/api/health`).then((r) => r.json());
+  const health = await fetchWithTimeout(`${baseUrl}/api/health`, {}, { label: 'GET /api/health', parentSignal: watchdog?.signal }).then((r) => r.json());
   eq(health.status, 'ok', 'ephemeral Express app is writable');
 }
 
-async function cleanup() {
+async function cleanupPass() {
   const itemIds = ids.items;
   const dynamicProducts = await Product.find({ receiptItemId: { $in: itemIds } }, '_id').lean();
   const productIds = [...new Set([...ids.products, ...dynamicProducts.map((row) => row._id)].map(String))]
@@ -164,9 +196,40 @@ async function cleanup() {
   ]);
 }
 
+async function receiptLeftoverCounts() {
+  const itemIds = ids.items;
+  const dynamicProducts = itemIds.length ? await Product.find({ receiptItemId: { $in: itemIds } }, '_id').lean() : [];
+  const productIds = [...new Set([...ids.products, ...dynamicProducts.map((row) => row._id)].map(String))]
+    .filter(Boolean).map((id) => new mongoose.Types.ObjectId(id));
+  return {
+    users: ids.users.length ? await User.countDocuments({ _id: { $in: ids.users } }) : 0,
+    receipts: ids.receipts.length ? await Receipt.countDocuments({ _id: { $in: ids.receipts } }) : 0,
+    items: itemIds.length ? await ReceiptItem.countDocuments({ _id: { $in: itemIds } }) : 0,
+    products: productIds.length ? await Product.countDocuments({ $or: [{ _id: { $in: productIds } }, { receiptItemId: { $in: itemIds } }] }) : 0,
+    vectors: productIds.length ? await ProductVector.countDocuments({ productId: { $in: productIds } }) : 0,
+    shopProducts: productIds.length || itemIds.length ? await ShopProduct.countDocuments({ $or: [{ linkedProductId: { $in: productIds } }, { receiptItemId: { $in: itemIds } }] }) : 0,
+    blocks: productIds.length || ids.blocks.length ? await Block.countDocuments({ $or: [{ _id: { $in: ids.blocks } }, { productIds: { $in: productIds } }] }) : 0,
+    orders: productIds.length || ids.orders.length ? await Order.countDocuments({ $or: [{ _id: { $in: ids.orders } }, { 'items.productId': { $in: productIds } }] }) : 0,
+    tasks: productIds.length || ids.tasks.length ? await PickingTask.countDocuments({ $or: [{ _id: { $in: ids.tasks } }, { productId: { $in: productIds } }] }) : 0,
+    offers: itemIds.length || ids.offers.length ? await SupplementOffer.countDocuments({ $or: [{ _id: { $in: ids.offers } }, { receiptItemId: { $in: itemIds } }] }) : 0,
+    logs: ids.receipts.length ? await ReceiptItemLog.countDocuments({ receiptId: { $in: ids.receipts } }) : 0,
+    groups: ids.groups.length ? await DeliveryGroup.countDocuments({ _id: { $in: ids.groups } }) : 0,
+  };
+}
+
+async function cleanup() {
+  await cleanupPass();
+  await waitForStableZero(receiptLeftoverCounts, {
+    label: 'Receipt E2E cleanup', quietMs: 700, timeoutMs: 8_000, intervalMs: 120,
+    onNonZero: () => cleanupPass(),
+  });
+}
+
 async function preflight() {
-  await mongoose.connect(process.env.MONGODB_URI, { serverSelectionTimeoutMS: 15_000 });
+  await mongoose.connect(process.env.MONGODB_URI, { serverSelectionTimeoutMS: 15_000, socketTimeoutMS: 30_000 });
   assertConnectedHostAllowed(mongoose.connection.host);
+  await assertNoActiveGlobalHarnessLease({ AppSetting });
+  ok(true, 'No active global live-harness lease');
   console.log(`DB: ${mongoose.connection.db.databaseName} @ ${mongoose.connection.host} (${allowedSuffix()})`);
   ok(!hadRedis || !process.env.REDIS_URL, 'Redis isolated');
 
@@ -183,12 +246,27 @@ async function preflight() {
     ok(true, 'Mongo transaction round-trip');
   } finally { session.endSession(); }
 
-  const leftovers = await Receipt.countDocuments({ receiptNumber: { $regex: '^__LIVE_RECEIPT_E2E__' } });
-  eq(leftovers, 0, 'No previous receipt E2E leftovers');
+  const [leftovers, orphanManifests] = await Promise.all([
+    Receipt.countDocuments({ receiptNumber: { $regex: '^__LIVE_RECEIPT_E2E__' } }),
+    AppSetting.countDocuments({ key: /^live-e2e\.run\./ }),
+  ]);
+  eq(leftovers + orphanManifests, 0, 'No previous receipt/live-E2E leftovers or orphan manifests');
 }
+
+const FINGERPRINT_SPECS = [
+  { name: 'orders', model: Order, projection: '_id status orderingSessionId totalPrice updatedAt' },
+  { name: 'tasks', model: PickingTask, projection: '_id status deliveryGroupId orderingSessionId lockedBy lockedAt completionReason updatedAt' },
+  { name: 'users', model: User, projection: '_id telegramId role shopId botBlocked updatedAt' },
+  { name: 'products', model: Product, projection: '_id status quantity receiptItemId updatedAt' },
+  { name: 'blocks', model: Block, projection: '_id blockId productIds version updatedAt' },
+  { name: 'groups', model: DeliveryGroup, projection: '_id dayOfWeek orderingSchedule updatedAt' },
+  { name: 'receipts', model: Receipt, projection: '_id receiptNumber status updatedAt' },
+  { name: 'receiptItems', model: ReceiptItem, projection: '_id receiptId status routing stockApplied updatedAt' },
+];
 
 async function run() {
   admin = remember('users', await User.create({ telegramId: `-98${Date.now()}`, role: 'admin', firstName: 'LiveReceipt', lastName: RUN_ID }));
+  await saveManifest('admin_created');
   await startApp();
 
   console.log('\nScenario 0: real draft -> preparation -> routing -> confirm -> edit -> rollback');
@@ -278,7 +356,7 @@ async function run() {
       DeliveryGroup.create({ name: `${MARKER}-A`, dayOfWeek: deliveryDay, orderingSchedule: openSchedule }),
       DeliveryGroup.create({ name: `${MARKER}-B`, dayOfWeek: deliveryDay, orderingSchedule: openSchedule }),
     ]);
-    remember('groups', a); remember('groups', b);
+    remember('groups', a); remember('groups', b); await saveManifest('groups_seeded');
     const { item } = await seedConfirmed({ supplement: true, publishRequested: false, warehouse: false });
     const [ra, rb] = await Promise.all([
       api('POST', `/api/receipts/supplement-batches/${a._id}/publish`),
@@ -352,6 +430,7 @@ async function run() {
     const group = remember('groups', await DeliveryGroup.create({
       name: `${MARKER}-RACE-U`, dayOfWeek: deliveryDay, orderingSchedule: openSchedule,
     }));
+    await saveManifest('race_unconfirm_group');
     const { receipt, item } = await seedConfirmed({ supplement: true, publishRequested: false, warehouse: false });
     const [publish, rollback] = await Promise.all([
       api('POST', `/api/receipts/supplement-batches/${group._id}/publish`),
@@ -377,6 +456,7 @@ async function run() {
     const group = remember('groups', await DeliveryGroup.create({
       name: `${MARKER}-RACE-D`, dayOfWeek: deliveryDay, orderingSchedule: openSchedule,
     }));
+    await saveManifest('race_delete_group');
     const { receipt, item } = await seedConfirmed({ supplement: true, publishRequested: false, warehouse: false });
     const [publish, remove] = await Promise.all([
       api('POST', `/api/receipts/supplement-batches/${group._id}/publish`),
@@ -397,6 +477,7 @@ async function run() {
 }
 
 async function main() {
+  let scenarioRunPassed = false;
   try {
     await preflight();
     if (!execute) {
@@ -404,16 +485,52 @@ async function main() {
       console.log('Run with --execute through test DB preload to execute receipt lifecycle scenarios.');
       return;
     }
+    globalLease = await acquireGlobalHarnessLease({ AppSetting, runId: RUN_ID, kind: 'receipt' });
+    watchdog = createProgressWatchdog({
+      name: `LIVE RECEIPT ${RUN_ID}`, stallMs: 120_000, exitOnStallCode: 124,
+      onStall: ({ error }) => console.error(`\n⏱️ ${error.message}\nCleanup: npm run test:live:e2e:cleanup -- --runId=${RUN_ID} --execute`),
+    });
+    await saveManifest('starting');
+    baselineFingerprint = await fingerprintCollections(FINGERPRINT_SPECS);
+    console.log(`RUN_ID=${RUN_ID} · global TEST-Atlas harness lease acquired`);
+    console.log(`If process dies: npm run test:live:e2e:cleanup -- --runId=${RUN_ID} --execute`);
     await run();
-    console.log(`\n✅ LIVE RECEIPT E2E PASS — ${assertions} assertions`);
+    scenarioRunPassed = true;
+    console.log(`\n✅ LIVE RECEIPT scenarios completed — ${assertions} assertions; cleanup/fingerprint pending`);
   } catch (err) {
     console.error(`\n❌ LIVE RECEIPT E2E FAIL — ${err.stack || err.message}`);
     process.exitCode = 1;
   } finally {
     if (server) await new Promise((resolve) => server.close(resolve));
     if (execute) {
-      try { await cleanup(); console.log('🧹 Synthetic receipt fixtures cleaned'); }
-      catch (err) { console.error(`❌ cleanup failed: ${err.stack || err.message}`); process.exitCode = 1; }
+      let clean = false;
+      try {
+        await cleanup();
+        clean = true;
+        console.log('🧹 Synthetic receipt fixtures cleaned and stable-zero verified');
+      } catch (err) {
+        console.error(`❌ cleanup failed: ${err.stack || err.message}`);
+        process.exitCode = 1;
+      }
+      if (clean && baselineFingerprint) {
+        try {
+          const afterFingerprint = await fingerprintCollections(FINGERPRINT_SPECS);
+          const drift = compareFingerprints(baselineFingerprint, afterFingerprint);
+          ok(drift.length === 0, 'Receipt E2E changed no unrelated TEST data', drift.length ? JSON.stringify(drift) : 'fingerprints identical');
+        } catch (err) {
+          console.error(`❌ fingerprint verification failed: ${err.message}`);
+          process.exitCode = 1;
+        }
+      }
+      if (clean) await AppSetting.deleteOne({ key: MANIFEST_KEY }).catch(() => {});
+      watchdog?.stop();
+      try { if (globalLease) await globalLease.release(); } catch (err) {
+        console.error(`❌ global harness lease release failed: ${err.message}`);
+        process.exitCode = 1;
+      }
+      if (scenarioRunPassed && !process.exitCode) {
+        console.log(`\n✅ LIVE RECEIPT E2E PASS — ${assertions} assertions · cleanup stable · unrelated data unchanged`);
+      }
     }
     try { await mongoose.connection.close(false); } catch (_) {}
   }

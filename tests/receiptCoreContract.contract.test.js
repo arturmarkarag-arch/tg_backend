@@ -2,6 +2,7 @@ const fs = require('fs');
 const path = require('path');
 
 const read = (rel) => fs.readFileSync(path.join(__dirname, '..', rel), 'utf8');
+const { sliceBetweenOrThrow } = require('./helpers/sourceContract');
 
 const model = read('models/ReceiptItem.js');
 const route = read('routes/receipts.js');
@@ -49,9 +50,7 @@ describe('receipt core contract', () => {
   // PATCH тримається не на статусі, а на транзакції: позиція перечитується
   // всередині неї, і в ній же правка доходить до товару й дзеркала.
   test('PATCH re-reads the item and propagates inside one write transaction', () => {
-    const start = route.indexOf("router.patch('/:id/items/:itemId'");
-    const end = route.indexOf('// ВИДАЛЕННЯ ПОЗИЦІЇ (DELETE)', start);
-    const patch = route.slice(start, end);
+    const patch = sliceBetweenOrThrow(route, "router.patch('/:id/items/:itemId'", '// ВИДАЛЕННЯ ПОЗИЦІЇ (DELETE)', { label: 'receipt item PATCH' });
     expect(patch).toContain('.session(txSession)');
     expect(patch).toContain('await item.save({ session: txSession })');
     expect(patch).toContain('await propagateItemEdit(item, prev, { session: txSession })');
@@ -60,9 +59,7 @@ describe('receipt core contract', () => {
   });
 
   test('supplement offers project the receipt-created product identity even as the projection grows', () => {
-    const start = supplement.indexOf('const items = await ReceiptItem.find');
-    const end = supplement.indexOf(').lean();', start);
-    const projection = supplement.slice(start, end);
+    const projection = sliceBetweenOrThrow(supplement, 'const items = await ReceiptItem.find', ').lean();', { label: 'supplement receipt item projection' });
     for (const field of ['createdProductId', 'name', 'routing', 'routingVersion']) {
       expect(projection).toContain(field);
     }
@@ -70,9 +67,7 @@ describe('receipt core contract', () => {
   });
 
   test('photo gallery carries display, inline-preparation and edit-navigation context', () => {
-    const start = route.indexOf("router.get('/items-gallery'");
-    const end = route.indexOf("router.get('/:id'", start);
-    const gallery = route.slice(start, end);
+    const gallery = sliceBetweenOrThrow(route, "router.get('/items-gallery'", "router.get('/:id'", { label: 'receipt gallery route' });
     for (const field of [
       'receiptId', 'photoUrl', 'originalPhotoUrl', 'totalQty', 'destination',
       'routingVersion', 'routing', 'price', 'qtyPerPackage', 'status', 'createdBy',

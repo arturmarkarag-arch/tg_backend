@@ -2,12 +2,11 @@
 
 const fs = require('fs');
 const path = require('path');
+const { sliceBetweenOrThrow } = require('./helpers/sourceContract');
 
 describe('mini-app navigation state contract', () => {
   const source = fs.readFileSync(path.join(__dirname, '../routes/v1/telegram.js'), 'utf8');
-  const start = source.indexOf("router.post('/mini-app/state'");
-  const end = source.indexOf("router.post('/mini-app/reset-state'", start);
-  const route = source.slice(start, end);
+  const route = sliceBetweenOrThrow(source, "router.post('/mini-app/state'", "router.post('/mini-app/reset-state'", { label: 'mini-app state route' });
 
   it('keeps ordering-session mismatch as the hard concurrency guard', () => {
     expect(route).toContain('ordering_session_changed');

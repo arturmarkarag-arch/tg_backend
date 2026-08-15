@@ -23,6 +23,7 @@ const checks = [
   'scripts/checkPhotoEgressV48_12.js',
   'scripts/checkPickingServerAuthorityV48_13.js',
   'scripts/checkPickingReadinessV48_14.js',
+  'scripts/checkLiveHarnessV48_18.js',
 ];
 
 let failed = 0;

@@ -5,6 +5,7 @@ const path = require('node:path');
 
 const ROOT = path.resolve(__dirname, '..');
 const read = (rel) => fs.readFileSync(path.join(ROOT, rel), 'utf8');
+const { indexOrThrow, sliceBetweenOrThrow } = require('./helpers/sourceContract');
 
 function routeSlices(source, method) {
   const re = new RegExp(`router\\.${method}\\('([^']+)'`, 'g');
@@ -24,9 +25,12 @@ describe('V48.13 picking server authority contract', () => {
     expect(picking).toContain("router.get('/session-snapshot'");
     expect(picking).toContain('buildReadOnlyPickingSessionSnapshot');
 
-    const start = picking.indexOf('async function buildReadOnlyPickingSessionSnapshot');
-    const end = picking.indexOf('\nasync function buildTaskResponse', start);
-    const snapshot = picking.slice(start, end);
+    const snapshot = sliceBetweenOrThrow(
+      picking,
+      'async function buildReadOnlyPickingSessionSnapshot',
+      '\nasync function buildTaskResponse',
+      { label: 'read-only picking snapshot' },
+    );
     for (const forbidden of [
       'getOrCreateSessionId(',
       'releaseWorkerAndStaleLocks(',
@@ -47,20 +51,19 @@ describe('V48.13 picking server authority contract', () => {
 
   it('start-session only materialises operational state after explicit confirm:true', () => {
     const picking = read('routes/picking.js');
-    const start = picking.indexOf("router.post('/start-session'");
-    const end = picking.indexOf("router.post('/cancel-start'", start);
-    const body = picking.slice(start, end);
-
-    const readFallback = body.indexOf('if (!confirm)');
-    const firstMutation = Math.min(
-      ...[
-        body.indexOf('await releaseWorkerAndStaleLocks'),
-        body.indexOf('await getOrCreateSessionId'),
-        body.indexOf('await archiveOrphanedOutOfStockProducts'),
-        body.indexOf('await reconcileActiveTasksForSession'),
-      ].filter((n) => n >= 0),
+    const body = sliceBetweenOrThrow(
+      picking, "router.post('/start-session'", "router.post('/cancel-start'",
+      { label: 'start-session route' },
     );
-    expect(readFallback).toBeGreaterThan(-1);
+
+    const readFallback = indexOrThrow(body, 'if (!confirm)');
+    const mutationAnchors = [
+      'await releaseWorkerAndStaleLocks',
+      'await getOrCreateSessionId',
+      'await archiveOrphanedOutOfStockProducts',
+      'await reconcileActiveTasksForSession',
+    ].map((token) => indexOrThrow(body, token, { label: `start-session mutation ${token}` }));
+    const firstMutation = Math.min(...mutationAnchors);
     expect(firstMutation).toBeGreaterThan(readFallback);
     expect(body).toContain('return res.json(await buildReadOnlyPickingSessionSnapshot(deliveryGroupId));');
   });
@@ -108,8 +111,8 @@ describe('V48.13 picking server authority contract', () => {
     const picking = read('routes/picking.js');
     const calls = [...picking.matchAll(/await\s+getOrCreateSessionId\s*\(/g)];
     expect(calls).toHaveLength(1);
-    const start = picking.indexOf("router.post('/start-session'");
-    const cancel = picking.indexOf("router.post('/cancel-start'", start);
+    const start = indexOrThrow(picking, "router.post('/start-session'", { label: 'start-session route' });
+    const cancel = indexOrThrow(picking, "router.post('/cancel-start'", { from: start, label: 'cancel-start route' });
     expect(calls[0].index).toBeGreaterThan(start);
     expect(calls[0].index).toBeLessThan(cancel);
   });
@@ -140,9 +143,7 @@ describe('V48.13 picking server authority contract', () => {
       ["router.post('/cancel-start'", "router.post('/resolve-coverage-gap'"],
       ["router.post('/resolve-coverage-gap'", "router.get('/my-task'"],
     ]) {
-      const start = picking.indexOf(startToken);
-      const end = picking.indexOf(endToken, start);
-      const block = picking.slice(start, end);
+      const block = sliceBetweenOrThrow(picking, startToken, endToken, { label: `${startToken} command` });
       expect(block).toContain('findCurrentSessionId(');
       expect(block).not.toContain('getOrCreateSessionId(');
     }
@@ -153,9 +154,8 @@ describe('V48.13 picking server authority contract', () => {
     expect(scheduler).toContain('async function materializeOpenOrderingSessions');
     expect(scheduler).toContain('isOrderingOpen(group.orderingSchedule, now).isOpen');
     expect(scheduler).toContain('getOrCreateSessionId(String(group._id), group.orderingSchedule)');
-    const materializeCall = scheduler.indexOf('materializeOpenOrderingSessions({ now })');
-    const notifyCall = scheduler.indexOf('notifyOrderingOpen({ now })');
-    expect(materializeCall).toBeGreaterThan(-1);
+    const materializeCall = indexOrThrow(scheduler, 'materializeOpenOrderingSessions({ now })', { label: 'scheduler materialize call' });
+    const notifyCall = indexOrThrow(scheduler, 'notifyOrderingOpen({ now })', { from: materializeCall, label: 'scheduler notify call' });
     expect(notifyCall).toBeGreaterThan(materializeCall);
   });
 

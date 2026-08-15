@@ -4,11 +4,10 @@ const fs = require('node:fs');
 const path = require('node:path');
 const ROOT = path.resolve(__dirname, '..');
 const read = (rel) => fs.readFileSync(path.join(ROOT, rel), 'utf8');
+const { indexOrThrow, sliceBetweenOrThrow } = require('./helpers/sourceContract');
 
 function routeBlock(source, token, nextToken) {
-  const start = source.indexOf(token);
-  const end = source.indexOf(nextToken, start);
-  return source.slice(start, end > start ? end : source.length);
+  return sliceBetweenOrThrow(source, token, nextToken, { label: token });
 }
 
 describe('V48.14 ordering/picking time authority contract', () => {
@@ -21,9 +20,7 @@ describe('V48.14 ordering/picking time authority contract', () => {
 
   it('authenticated app profile resolution also reads an existing session instead of creating one', () => {
     const telegram = read('routes/v1/telegram.js');
-    const start = telegram.indexOf('async function resolveOrderingSessionContext');
-    const end = telegram.indexOf('\n// shopId', start);
-    const block = telegram.slice(start, end);
+    const block = sliceBetweenOrThrow(telegram, 'async function resolveOrderingSessionContext', '\n// shopId', { label: 'resolveOrderingSessionContext' });
     expect(block).toContain('findCurrentSessionId(');
     expect(block).not.toContain('getOrCreateSessionId(');
   });
@@ -31,17 +28,16 @@ describe('V48.14 ordering/picking time authority contract', () => {
   it('start-session enforces pickingReadyAt before every operational mutation', () => {
     const picking = read('routes/picking.js');
     const block = routeBlock(picking, "router.post('/start-session'", "router.post('/cancel-start'");
-    const readyCalc = block.indexOf('getPickingReadiness(group.orderingSchedule, commandNow)');
-    const readyGate = block.indexOf('if (!readiness.pickingReady)');
+    const readyCalc = indexOrThrow(block, 'getPickingReadiness(group.orderingSchedule, commandNow)');
+    const readyGate = indexOrThrow(block, 'if (!readiness.pickingReady)', { from: readyCalc });
     const mutationCandidates = [
       'await releaseWorkerAndStaleLocks',
       'await getOrCreateSessionId',
       'await archiveOrphanedOutOfStockProducts',
       'await reconcileActiveTasksForSession',
       'await reconcileLateOrdersForSession',
-    ].map((token) => block.indexOf(token)).filter((index) => index >= 0);
+    ].map((token) => indexOrThrow(block, token, { label: `readiness mutation ${token}` }));
     const firstMutation = Math.min(...mutationCandidates);
-    expect(readyCalc).toBeGreaterThan(-1);
     expect(readyGate).toBeGreaterThan(readyCalc);
     expect(firstMutation).toBeGreaterThan(readyGate);
     expect(block).toContain('pickingNotReady: true');
@@ -50,9 +46,7 @@ describe('V48.14 ordering/picking time authority contract', () => {
 
   it('read-only snapshot and queue stats expose the same server readiness timestamp', () => {
     const picking = read('routes/picking.js');
-    const snapshotStart = picking.indexOf('async function buildReadOnlyPickingSessionSnapshot');
-    const snapshotEnd = picking.indexOf('\nasync function buildTaskResponse', snapshotStart);
-    const snapshot = picking.slice(snapshotStart, snapshotEnd);
+    const snapshot = sliceBetweenOrThrow(picking, 'async function buildReadOnlyPickingSessionSnapshot', '\nasync function buildTaskResponse', { label: 'read-only picking snapshot' });
     expect(snapshot).toContain('getPickingReadiness(group.orderingSchedule, now)');
     expect(snapshot).toContain('pickingReadyAt: readiness.pickingReadyAt.toISOString()');
     const queue = routeBlock(picking, "router.get('/queue-stats'", "router.post('/tasks/:taskId/complete'");

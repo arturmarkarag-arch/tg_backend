@@ -2,13 +2,11 @@ const fs = require('fs');
 const path = require('path');
 
 const source = fs.readFileSync(path.join(__dirname, '..', 'routes', 'receipts.js'), 'utf8');
+const { indexOrThrow, sliceBetweenOrThrow } = require('./helpers/sourceContract');
 
 describe('receipt photo gallery contract', () => {
   test('gallery is read-only, projects the fields used by inline preparation, and is newest-first', () => {
-    const start = source.indexOf("router.get('/items-gallery'");
-    const end = source.indexOf("router.get('/:id'", start);
-    const gallery = source.slice(start, end);
-    expect(start).toBeGreaterThan(-1);
+    const gallery = sliceBetweenOrThrow(source, "router.get('/items-gallery'", "router.get('/:id'", { label: 'receipt gallery route' });
     for (const field of [
       'receiptId', 'photoUrl', 'originalPhotoUrl', 'totalQty', 'routingVersion',
       'routing', 'price', 'qtyPerPackage', 'status', 'createdBy',
@@ -17,18 +15,14 @@ describe('receipt photo gallery contract', () => {
   });
 
   test('gallery includes receipt context required below a photo and for edit navigation', () => {
-    const start = source.indexOf("router.get('/items-gallery'");
-    const end = source.indexOf("router.get('/:id'", start);
-    const gallery = source.slice(start, end);
+    const gallery = sliceBetweenOrThrow(source, "router.get('/items-gallery'", "router.get('/:id'", { label: 'receipt gallery route' });
     expect(gallery).toContain('receiptType');
     expect(gallery).toContain('receiptTargetDeliveryGroupId');
     expect(gallery).toContain('receiptId');
   });
 
   test('gallery accepts the same receipt-created date range as the receipts list', () => {
-    const start = source.indexOf("router.get('/items-gallery'");
-    const end = source.indexOf("router.get('/:id'", start);
-    const gallery = source.slice(start, end);
+    const gallery = sliceBetweenOrThrow(source, "router.get('/items-gallery'", "router.get('/:id'", { label: 'receipt gallery route' });
     expect(gallery).toContain('buildWarsawDateRange({');
     expect(gallery).toContain('dateFrom: req.query.dateFrom');
     expect(gallery).toContain('dateTo: req.query.dateTo');
@@ -39,6 +33,6 @@ describe('receipt photo gallery contract', () => {
   });
 
   test('gallery route is declared before /:id so Express does not swallow it as an id', () => {
-    expect(source.indexOf("router.get('/items-gallery'")).toBeLessThan(source.indexOf("router.get('/:id'"));
+    expect(indexOrThrow(source, "router.get('/items-gallery'")).toBeLessThan(indexOrThrow(source, "router.get('/:id'"));
   });
 });

@@ -1,6 +1,6 @@
 'use strict';
 
-const { buildOpenClosedTestSchedules } = require('../scripts/helpers/perGroupTestSchedule');
+const { buildOpenClosedTestSchedules, buildScheduleGuardTestSchedules } = require('../scripts/helpers/perGroupTestSchedule');
 const {
   isOrderingOpen,
   getOpenDateWarsaw,
@@ -53,4 +53,31 @@ describe('live E2E per-group schedule fixture', () => {
     expectValidPair(new Date('2026-10-25T00:59:00Z'));
     expectValidPair(new Date('2026-10-25T01:01:00Z'));
   });
+});
+
+
+describe('V48.18 schedule-guard fixture', () => {
+  function expectGuard(now) {
+    const { closedA, closedB, openNow, deliveryDay } = buildScheduleGuardTestSchedules(now);
+    for (const schedule of [closedA, closedB, openNow]) {
+      expect(() => validateOrderingScheduleDeliveryDay(schedule, deliveryDay)).not.toThrow();
+    }
+    expect(isOrderingOpen(closedA, now).isOpen).toBe(false);
+    expect(isOrderingOpen(closedB, now).isOpen).toBe(false);
+    expect(getPickingReadiness(closedA, now).pickingReady).toBe(true);
+    expect(getPickingReadiness(closedB, now).pickingReady).toBe(true);
+    expect(isOrderingOpen(openNow, now).isOpen).toBe(true);
+    const openDate = getOpenDateWarsaw(openNow, now);
+    expect(getOpenDateWarsaw(closedA, now)).toBe(openDate);
+    expect(getOpenDateWarsaw(closedB, now)).toBe(openDate);
+  }
+
+  it.each([
+    new Date('2026-08-10T08:15:01Z'),
+    new Date('2026-08-10T21:59:30Z'),
+    new Date('2026-03-29T00:59:00Z'),
+    new Date('2026-03-29T01:01:00Z'),
+    new Date('2026-10-25T00:59:00Z'),
+    new Date('2026-10-25T01:01:00Z'),
+  ])('keeps guard schedules deterministic at %s', (now) => expectGuard(now));
 });

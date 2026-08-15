@@ -4,14 +4,15 @@ const fs = require('fs');
 const path = require('path');
 
 const read = (rel) => fs.readFileSync(path.join(__dirname, '..', rel), 'utf8');
+const { indexOrThrow, sliceBetweenOrThrow } = require('./helpers/sourceContract');
 
 describe('read-only session materialization contract', () => {
   it('picking readiness/queue/shift reads do not create OrderingSession documents', () => {
     const picking = read('routes/picking.js');
     expect(picking).toContain('findCurrentSessionId(dgId, group.orderingSchedule)');
     expect(picking).toContain('findCurrentSessionId(String(deliveryGroupId), groupDoc.orderingSchedule)');
-    expect(picking.indexOf("presentationMode === 'upcoming_preflight'")).toBeLessThan(
-      picking.indexOf('releaseWorkerAndStaleLocks(user.telegramId, deliveryGroupId'),
+    expect(indexOrThrow(picking, "presentationMode === 'upcoming_preflight'")).toBeLessThan(
+      indexOrThrow(picking, 'releaseWorkerAndStaleLocks(user.telegramId, deliveryGroupId'),
     );
   });
 
@@ -35,9 +36,7 @@ describe('read-only session materialization contract', () => {
   });
   it('seller session-status polling is also pure read and cannot materialize an empty session', () => {
     const picking = read('routes/picking.js');
-    const start = picking.indexOf("router.get('/session-status'");
-    const end = picking.indexOf("router.get('/schedule'", start);
-    const body = picking.slice(start, end);
+    const body = sliceBetweenOrThrow(picking, "router.get('/session-status'", "router.get('/schedule'", { label: 'session-status route' });
     expect(body).toContain('findCurrentSessionId(String(groupId), group.orderingSchedule)');
     expect(body).not.toContain('getOrCreateSessionId(');
   });

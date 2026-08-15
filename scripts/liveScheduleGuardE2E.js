@@ -60,39 +60,49 @@ const Order = require('../models/Order');
 const PickingTask = require('../models/PickingTask');
 const User = require('../models/User');
 const Counter = require('../models/Counter');
+const AppSetting = require('../models/AppSetting');
 const { signSession } = require('../utils/jwt');
+const { buildScheduleGuardTestSchedules } = require('./helpers/perGroupTestSchedule');
+const { fetchWithTimeout, assertNoActiveGlobalHarnessLease, acquireGlobalHarnessLease, waitForStableZero, fingerprintCollections, compareFingerprints, createProgressWatchdog } = require('./helpers/liveHarnessSafety');
 const {
-  getWarsawNow,
   getOpenDateWarsaw,
   normalizeOrderingSchedule,
   validateOrderingScheduleDeliveryDay,
-  isOrderingOpen,
 } = require('../utils/orderingSchedule');
 
 const RUN_ID = `${new Date().toISOString().replace(/[-:.TZ]/g, '').slice(0, 14)}-${crypto.randomBytes(3).toString('hex')}`;
 const MARKER = `__V35_GUARD__${RUN_ID}`;
+const MANIFEST_KEY = `live-e2e.run.${RUN_ID}`;
 const ADMIN_TELEGRAM_ID = `v35guard-${RUN_ID}`;
 
-const DAY_MINUTES = 24 * 60;
-const WEEK_MINUTES = 7 * DAY_MINUTES;
-const created = { groupIds: [], userIds: [] };
+const created = { groupIds: [], userIds: [], sessionIds: [], orderIds: [], taskIds: [] };
 const assertions = [];
 let baseUrl = '';
 let localServer = null;
 let syntheticOrderNumber = 940_000_000 + Math.floor(Math.random() * 1_000_000);
+let watchdog = null;
+
+async function saveGuardManifest(phase) {
+  await AppSetting.findOneAndUpdate(
+    { key: MANIFEST_KEY },
+    { $set: { value: {
+      kind: 'schedule_guard', runId: RUN_ID, marker: MARKER, phase, updatedAt: new Date().toISOString(),
+      guard: {
+        groupIds: [...created.groupIds], userIds: [...created.userIds], sessionIds: [...created.sessionIds],
+        orderIds: [...created.orderIds], taskIds: [...created.taskIds],
+      },
+    } } },
+    { upsert: true, new: true, setDefaultsOnInsert: true },
+  );
+}
 
 function check(ok, label, detail = '') {
+  watchdog?.touch('assertion', label);
   assertions.push({ ok: !!ok, label, detail });
   console.log(`  ${ok ? '✅' : '❌'} ${label}${detail ? ` — ${detail}` : ''}`);
   return !!ok;
 }
 
-function splitWeekMinute(total) {
-  const n = ((total % WEEK_MINUTES) + WEEK_MINUTES) % WEEK_MINUTES;
-  const day = Math.floor(n / DAY_MINUTES);
-  const dm = n % DAY_MINUTES;
-  return { day, hour: Math.floor(dm / 60), minute: dm % 60 };
-}
 
 /**
  * Three schedules sharing ONE weekly start boundary (⇒ one openDate/session
@@ -102,29 +112,7 @@ function splitWeekMinute(total) {
  *   openNow — window still open (must be refused after a completed cycle)
  */
 function buildGuardSchedules(nowDate = new Date()) {
-  const now = getWarsawNow(nowDate);
-  const q = Math.floor((now.dayOfWeek * DAY_MINUTES + now.hour * 60 + now.minute) / 15) * 15;
-  const start = splitWeekMinute(q - 120);
-  const mk = (endMinuteOffset) => {
-    const end = splitWeekMinute(q + endMinuteOffset);
-    return normalizeOrderingSchedule({
-      startDay: start.day, startHour: start.hour, startMinute: start.minute,
-      endDay: end.day, endHour: end.hour, endMinute: end.minute,
-    });
-  };
-  const closedA = mk(-60);
-  const closedB = mk(-30);
-  const openNow = mk(+60);
-  const deliveryDay = splitWeekMinute(q + 60).day;
-
-  for (const [name, schedule] of [['closedA', closedA], ['closedB', closedB], ['openNow', openNow]]) {
-    validateOrderingScheduleDeliveryDay(schedule, deliveryDay);
-    const open = isOrderingOpen(schedule, nowDate).isOpen;
-    if (name === 'openNow' ? !open : open) {
-      throw new Error(`buildGuardSchedules: ${name} має бути ${name === 'openNow' ? 'відкритим' : 'закритим'} зараз`);
-    }
-  }
-  return { closedA, closedB, openNow, deliveryDay };
+  return buildScheduleGuardTestSchedules(nowDate);
 }
 
 function shiftScheduleDays(schedule, delta) {
@@ -137,11 +125,12 @@ function shiftScheduleDays(schedule, delta) {
 }
 
 async function api(method, urlPath, body) {
-  const res = await fetch(`${baseUrl}${urlPath}`, {
+  watchdog?.touch('http', `${method} ${urlPath}`);
+  const res = await fetchWithTimeout(`${baseUrl}${urlPath}`, {
     method,
     headers: { 'content-type': 'application/json', authorization: `Bearer ${signSession(ADMIN_TELEGRAM_ID)}` },
     body: body === undefined ? undefined : JSON.stringify(body),
-  });
+  }, { label: `${method} ${urlPath}`, parentSignal: watchdog?.signal });
   const text = await res.text();
   let data = null;
   try { data = text ? JSON.parse(text) : null; } catch { data = { _raw: text }; }
@@ -155,19 +144,23 @@ async function makeGroup(name, schedule, deliveryDay) {
     orderingSchedule: schedule,
   });
   created.groupIds.push(String(group._id));
+  await saveGuardManifest('group_created');
   return group;
 }
 
 async function makeSession(group, schedule, pickingStatus, openDate = null) {
-  return OrderingSession.create({
+  const session = await OrderingSession.create({
     groupId: String(group._id),
     openDate: openDate || getOpenDateWarsaw(schedule),
     pickingStatus,
   });
+  created.sessionIds.push(String(session._id));
+  await saveGuardManifest('session_created');
+  return session;
 }
 
 async function makeOrder(group, session, status) {
-  return Order.create({
+  const order = await Order.create({
     buyerTelegramId: `${MARKER}-buyer-${crypto.randomBytes(2).toString('hex')}`,
     orderingSessionId: String(session._id),
     orderNumber: ++syntheticOrderNumber,
@@ -177,10 +170,13 @@ async function makeOrder(group, session, status) {
     items: [{ productId: new mongoose.Types.ObjectId(), name: `${MARKER}-item`, price: 1, quantity: 1 }],
     history: [{ action: 'v35_guard_fixture' }],
   });
+  created.orderIds.push(String(order._id));
+  await saveGuardManifest('order_created');
+  return order;
 }
 
 async function makeTask(group, session, status) {
-  return PickingTask.create({
+  const task = await PickingTask.create({
     productId: new mongoose.Types.ObjectId(),
     deliveryGroupId: String(group._id),
     orderingSessionId: String(session._id),
@@ -190,6 +186,9 @@ async function makeTask(group, session, status) {
     completionReason: status === 'completed' ? 'packed' : null,
     items: [],
   });
+  created.taskIds.push(String(task._id));
+  await saveGuardManifest('task_created');
+  return task;
 }
 
 // AppError serialises as { error: <code>, message: <resolved uk text> } — the
@@ -304,19 +303,29 @@ async function startLocalApp() {
     localServer.listen(0, '127.0.0.1', resolve);
   });
   baseUrl = `http://127.0.0.1:${localServer.address().port}`;
-  const health = await fetch(`${baseUrl}/api/health`).then((r) => r.json()).catch(() => null);
+  const health = await fetchWithTimeout(`${baseUrl}/api/health`, {}, { label: 'GET /api/health', parentSignal: watchdog?.signal }).then((r) => r.json()).catch(() => null);
   check(health?.status === 'ok', 'ефемерний Express піднято', baseUrl);
 }
 
-async function cleanup() {
+async function cleanupPass() {
   if (!created.groupIds.length && !created.userIds.length) return;
   const gids = created.groupIds;
   const sessions = await OrderingSession.find({ groupId: { $in: gids } }, '_id').lean();
-  const sids = sessions.map((s) => String(s._id));
+  const sids = [...new Set([...created.sessionIds, ...sessions.map((row) => String(row._id))])];
   const res = await Promise.all([
-    Order.deleteMany({ orderingSessionId: { $in: sids } }),
-    PickingTask.deleteMany({ deliveryGroupId: { $in: gids } }),
-    OrderingSession.deleteMany({ groupId: { $in: gids } }),
+    Order.deleteMany({ $or: [
+      ...(created.orderIds.length ? [{ _id: { $in: created.orderIds } }] : []),
+      ...(sids.length ? [{ orderingSessionId: { $in: sids } }] : []),
+    ] }),
+    PickingTask.deleteMany({ $or: [
+      ...(created.taskIds.length ? [{ _id: { $in: created.taskIds } }] : []),
+      ...(gids.length ? [{ deliveryGroupId: { $in: gids } }] : []),
+      ...(sids.length ? [{ orderingSessionId: { $in: sids } }] : []),
+    ] }),
+    OrderingSession.deleteMany({ $or: [
+      ...(sids.length ? [{ _id: { $in: sids } }] : []),
+      ...(gids.length ? [{ groupId: { $in: gids } }] : []),
+    ] }),
     DeliveryGroup.deleteMany({ _id: { $in: gids } }),
     User.deleteMany({ _id: { $in: created.userIds } }),
     Counter.deleteMany({ name: { $in: gids.map((g) => `session-seq:${g}`) } }),
@@ -331,9 +340,56 @@ async function cleanup() {
   check(leftovers.every((n) => n === 0), 'жодного залишку фікстур у базі', `group=${leftovers[0]} order=${leftovers[1]} user=${leftovers[2]}`);
 }
 
+async function guardLeftovers() {
+  const gids = created.groupIds;
+  const sessions = gids.length ? await OrderingSession.find({ groupId: { $in: gids } }, '_id').lean() : [];
+  const sids = [...new Set([...created.sessionIds, ...sessions.map((x) => String(x._id))])];
+  const vals = await Promise.all([
+    gids.length ? DeliveryGroup.countDocuments({ _id: { $in: gids } }) : 0,
+    sids.length ? OrderingSession.countDocuments({ $or: [{ _id: { $in: sids } }, { groupId: { $in: gids } }] }) : 0,
+    gids.length || sids.length || created.taskIds.length ? PickingTask.countDocuments({ $or: [
+      ...(created.taskIds.length ? [{ _id: { $in: created.taskIds } }] : []),
+      ...(gids.length ? [{ deliveryGroupId: { $in: gids } }] : []),
+      ...(sids.length ? [{ orderingSessionId: { $in: sids } }] : []),
+    ] }) : 0,
+    sids.length || created.orderIds.length ? Order.countDocuments({ $or: [
+      ...(created.orderIds.length ? [{ _id: { $in: created.orderIds } }] : []),
+      ...(sids.length ? [{ orderingSessionId: { $in: sids } }] : []),
+    ] }) : 0,
+    created.userIds.length ? User.countDocuments({ _id: { $in: created.userIds } }) : 0,
+    gids.length ? Counter.countDocuments({ name: { $in: gids.map((g) => `session-seq:${g}`) } }) : 0,
+  ]);
+  return vals.reduce((a, b) => a + Number(b || 0), 0);
+}
+
+async function cleanup() {
+  await cleanupPass();
+  await waitForStableZero(async () => ({ total: await guardLeftovers() }), {
+    label: 'V35 guard cleanup', quietMs: 700, timeoutMs: 8_000, intervalMs: 120,
+    onNonZero: () => cleanupPass(),
+  });
+}
+
+const FINGERPRINT_SPECS = [
+  { name: 'orders', model: Order, projection: '_id status orderingSessionId updatedAt' },
+  { name: 'tasks', model: PickingTask, projection: '_id status deliveryGroupId orderingSessionId lockedBy updatedAt' },
+  { name: 'sessions', model: OrderingSession, projection: '_id groupId openDate pickingStatus updatedAt' },
+  { name: 'users', model: User, projection: '_id telegramId role shopId botBlocked updatedAt' },
+  { name: 'groups', model: DeliveryGroup, projection: '_id dayOfWeek orderingSchedule updatedAt' },
+];
+
 async function main() {
-  await mongoose.connect(process.env.MONGODB_URI, { serverSelectionTimeoutMS: 20_000 });
+  await mongoose.connect(process.env.MONGODB_URI, { serverSelectionTimeoutMS: 20_000, socketTimeoutMS: 30_000 });
   assertConnectedHostAllowed(mongoose.connection.host);
+  await assertNoActiveGlobalHarnessLease({ AppSetting });
+  const [oldGroups, oldUsers, orphanManifests] = await Promise.all([
+    DeliveryGroup.countDocuments({ name: { $regex: '^__V35_GUARD__' } }),
+    User.countDocuments({ telegramId: { $regex: '^v35guard-' } }),
+    AppSetting.countDocuments({ key: /^live-e2e\.run\./ }),
+  ]);
+  if (oldGroups + oldUsers + orphanManifests !== 0) {
+    throw new Error(`V35 guard preflight found leftovers: groups=${oldGroups} users=${oldUsers} manifests=${orphanManifests}`);
+  }
   console.log(`\n🧪 V35 schedule-guard live test · db=${mongoose.connection.name} · host=${mongoose.connection.host}`);
   console.log(`   run=${RUN_ID} · режим: ${EXECUTE ? '⚠️  ЗАПИС (--execute)' : 'PREFLIGHT (нічого не пишу)'}`);
 
@@ -346,6 +402,14 @@ async function main() {
     return;
   }
 
+  const lease = await acquireGlobalHarnessLease({ AppSetting, runId: RUN_ID, kind: 'schedule-guard' });
+  watchdog = createProgressWatchdog({
+    name: `V35 GUARD ${RUN_ID}`, stallMs: 120_000, exitOnStallCode: 124,
+    onStall: ({ error }) => console.error(`\n⏱️ ${error.message}\nCleanup: npm run test:live:e2e:cleanup -- --runId=${RUN_ID} --execute`),
+  });
+  await saveGuardManifest('starting');
+  const baseline = await fingerprintCollections(FINGERPRINT_SPECS);
+
   const admin = await User.create({
     telegramId: ADMIN_TELEGRAM_ID,
     firstName: 'V35',
@@ -353,6 +417,7 @@ async function main() {
     role: 'admin',
   });
   created.userIds.push(String(admin._id));
+  await saveGuardManifest('admin_created');
 
   await startLocalApp();
   try {
@@ -363,7 +428,25 @@ async function main() {
     await scenarioUsedTargetBlocks(schedules);
     await scenarioReopenCompletedBlocks(schedules);
   } finally {
-    await cleanup();
+    let clean = false;
+    try {
+      await cleanup();
+      clean = true;
+      // Once exact fixture cleanup is stable, remove the recovery manifest even
+      // if the later unrelated-data fingerprint fails. Keeping an already-clean
+      // run manifest would only poison the next preflight without restoring the
+      // unrelated document that triggered the fingerprint failure.
+      await AppSetting.deleteOne({ key: MANIFEST_KEY });
+      const after = await fingerprintCollections(FINGERPRINT_SPECS);
+      const drift = compareFingerprints(baseline, after);
+      check(drift.length === 0, 'V35 guard changed no unrelated TEST data', drift.length ? JSON.stringify(drift) : 'fingerprints identical');
+    } finally {
+      // Never strand the global lease on an assertion/cleanup failure. If cleanup
+      // failed, the exact manifest stays behind for the crash-cleanup command.
+      watchdog?.stop();
+      await lease.release().catch(() => {});
+      if (!clean) console.error(`Cleanup manifest preserved: npm run test:live:e2e:cleanup -- --runId=${RUN_ID} --execute`);
+    }
   }
 }
 
