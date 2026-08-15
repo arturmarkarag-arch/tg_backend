@@ -173,6 +173,7 @@ const ERRORS = {
   picking_block_invalid:          { status: 400, message: 'blockId має бути додатнім цілим числом' },
   picking_delivery_group_required:{ status: 400, message: 'Для старту сесії збирання потрібно передати deliveryGroupId' },
   picking_session_failed:         { status: 500, message: 'Помилка запуску сесії збирання' },
+  picking_session_not_found:      { status: 409, message: 'Поточну сесію збирання не знайдено' },
   picking_next_failed:            { status: 500, message: 'Помилка отримання задачі' },
   picking_block_tasks_failed:     { status: 500, message: 'Помилка отримання задач блоку' },
   picking_complete_failed:        { status: 500, message: 'Помилка завершення задачі' },

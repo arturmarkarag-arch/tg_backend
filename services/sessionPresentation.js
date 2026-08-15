@@ -136,16 +136,8 @@ async function buildSessionSummary(phase, { deliveryGroupId, sessionId, session 
   const frozen = target.finalSummary?.finalizedAt ? target.finalSummary : null;
   const stats = frozen || await loadSessionSummaryStats(targetId);
 
-  // Lazy repair for sessions completed before finalSummary existed (or when the
-  // original best-effort snapshot transiently failed). Safe/idempotent and only
-  // runs while historical task rows are still present.
-  if (!frozen && target.pickingStatus === 'completed') {
-    OrderingSession.updateOne(
-      { _id: targetId, pickingStatus: 'completed', 'finalSummary.finalizedAt': null },
-      { $set: { finalSummary: { ...stats, finalizedAt: new Date() } } },
-    ).catch((err) => {});
-  }
-
+  // Presentation is deliberately read-only. Legacy/missed finalSummary repair
+  // is owned by the server maintenance scheduler, never by a GET/page render.
   return {
     current,
     seq: target.seq ?? null,

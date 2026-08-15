@@ -25,6 +25,7 @@ const Block = require('./models/Block');
 const { startRetentionScheduler } = require('./services/retention');
 const { startSupplementScheduler } = require('./services/supplementScheduler');
 const { startOrderingOpenScheduler } = require('./services/orderingOpenScheduler');
+const { startPickingMaintenanceScheduler } = require('./services/pickingMaintenanceScheduler');
 const { enterMaintenance, isMaintenanceActive } = require('./services/maintenanceState');
 
 let httpServer = null;
@@ -219,6 +220,7 @@ async function startServer() {
       startRetentionScheduler();
       startSupplementScheduler();
       startOrderingOpenScheduler();
+      startPickingMaintenanceScheduler();
     }
 
     server.on('error', (err) => {

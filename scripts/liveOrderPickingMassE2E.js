@@ -476,7 +476,10 @@ async function processTask(wh, task, oosProductIds, shortProductIds, progressPro
 }
 
 async function nextTask(wh, blockId) {
-  return api('GET', `/api/picking/next-task?currentBlock=${encodeURIComponent(blockId)}&deliveryGroupId=${encodeURIComponent(str(world.group._id))}`, wh, undefined, 'GET next-task');
+  return api('POST', '/api/picking/next-task', wh, {
+    currentBlock: blockId,
+    deliveryGroupId: str(world.group._id),
+  }, 'POST next-task');
 }
 
 async function runWorker(wh, initialBlockId, sessionId, outcomeSets, stop) {

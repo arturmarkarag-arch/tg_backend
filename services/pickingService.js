@@ -316,7 +316,7 @@ async function releaseWorkerAndStaleLocks(userTelegramId, deliveryGroupId = null
   const conditions = [{ lockedAt: { $lt: staleLockedAt } }];
   if (releaseOwnLocks && userTelegramId) conditions.unshift({ lockedBy: String(userTelegramId) });
 
-  await PickingTask.updateMany(
+  return PickingTask.updateMany(
     {
       status: 'locked',
       ...(deliveryGroupId ? { deliveryGroupId: String(deliveryGroupId) } : {}),
@@ -324,6 +324,63 @@ async function releaseWorkerAndStaleLocks(userTelegramId, deliveryGroupId = null
     },
     { $set: { status: 'pending', lockedBy: null, lockedAt: null } },
   );
+}
+
+/**
+ * Server-owned stale-lock sweep. Background maintenance calls this on a timer,
+ * so read-only picking endpoints never need to mutate queue state just because
+ * somebody opened a page or switched delivery groups.
+ */
+async function releaseStalePickingLocks({ now = new Date(), deliveryGroupId = null } = {}) {
+  const staleLockedAt = new Date(new Date(now).getTime() - LOCK_TIMEOUT_MS);
+  return PickingTask.updateMany(
+    {
+      status: 'locked',
+      lockedAt: { $lt: staleLockedAt },
+      ...(deliveryGroupId ? { deliveryGroupId: String(deliveryGroupId) } : {}),
+    },
+    { $set: { status: 'pending', lockedBy: null, lockedAt: null } },
+  );
+}
+
+/**
+ * Repair legacy duplicate locks without coupling the repair to GET /my-task.
+ * Current claim paths already enforce one-task-per-worker; this handles only
+ * historical/interrupted states. The lockedAt compare is a CAS guard so a
+ * heartbeat that refreshed the lease after our read wins over the repair.
+ */
+async function repairDuplicateWorkerLocks() {
+  const locked = await PickingTask.find(
+    { status: 'locked', lockedBy: { $nin: [null, ''] } },
+    '_id lockedBy lockedAt',
+  ).lean();
+
+  const byWorker = new Map();
+  for (const task of locked) {
+    const workerId = String(task.lockedBy || '');
+    if (!workerId) continue;
+    if (!byWorker.has(workerId)) byWorker.set(workerId, []);
+    byWorker.get(workerId).push(task);
+  }
+
+  let released = 0;
+  for (const [workerId, tasks] of byWorker) {
+    if (tasks.length <= 1) continue;
+    tasks.sort((a, b) => new Date(b.lockedAt || 0) - new Date(a.lockedAt || 0));
+    for (const duplicate of tasks.slice(1)) {
+      const result = await PickingTask.updateOne(
+        {
+          _id: duplicate._id,
+          status: 'locked',
+          lockedBy: workerId,
+          lockedAt: duplicate.lockedAt || null,
+        },
+        { $set: { status: 'pending', lockedBy: null, lockedAt: null } },
+      );
+      released += result.modifiedCount ?? result.nModified ?? 0;
+    }
+  }
+  return { released };
 }
 
 /**
@@ -904,6 +961,8 @@ module.exports = {
   markOrderItemsPacked,
   findAndLockNext,
   releaseWorkerAndStaleLocks,
+  releaseStalePickingLocks,
+  repairDuplicateWorkerLocks,
   releaseOtherLocksOfWorker,
   releasePickingTask,
   markSessionInProgress,

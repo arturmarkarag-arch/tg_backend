@@ -1,0 +1,55 @@
+{
+  "runId": "20260815210540-c1b790",
+  "marker": "__LIVE_E2E_MASS__20260815210540-c1b790",
+  "seed": 2638898416,
+  "config": {
+    "sellers": 100,
+    "lateSellers": 8,
+    "shops": 120,
+    "products": 240,
+    "blocks": 12,
+    "warehouses": 12,
+    "itemsPerOrder": 20,
+    "orderConcurrency": 100,
+    "mergeRaceSellers": 25,
+    "conflictShops": 10,
+    "oosBlocks": 2
+  },
+  "db": "tg_manager",
+  "host": "ac-hq2xfhf-shard-00-02.epfky0s.mongodb.net",
+  "execute": true,
+  "durationMs": 1205,
+  "summary": {
+    "passed": 2,
+    "failed": 2,
+    "error": "Mass critical Order unique index exists"
+  },
+  "metrics": {
+    "api": {},
+    "phases": {},
+    "counts": {},
+    "races": {}
+  },
+  "assertions": [
+    {
+      "ok": true,
+      "name": "Mass preflight can create an ordering-open per-group schedule",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "Mass preflight can create a picking-allowed per-group schedule",
+      "details": ""
+    },
+    {
+      "ok": false,
+      "name": "Mass critical Order unique index exists",
+      "details": ""
+    },
+    {
+      "ok": false,
+      "name": "Mass critical Order unique index exists",
+      "details": "Mass critical Order unique index exists"
+    }
+  ]
+}
