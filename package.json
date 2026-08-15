@@ -38,8 +38,11 @@
     "test:v36.4:hardening": "vitest run tests/securityBoundary.test.js tests/maintenance.test.js tests/pickingUpcomingReadiness.contract.test.js tests/readOnlySessionMaterialization.contract.test.js tests/orderTaskDetachScope.contract.test.js tests/sessionFinalSummary.contract.test.js tests/schedulerLeader.contract.test.js",
     "test:v38:routing": "node scripts/checkReceiptRoutingV38.js",
     "test:release": "vitest run --hookTimeout=180000 --testTimeout=120000 --no-file-parallelism",
-    "test:release:static": "node scripts/checkReleaseStaticV48_4.js",
-    "test:db:readiness:preflight": "node scripts/liveOrderPickingE2E.js"
+    "test:release:static": "node scripts/checkReleaseStaticV48_5.js",
+    "test:receipt:cross": "vitest run tests/receiptPostCommitEdit.test.js tests/receiptLifecycleCrossGuards.contract.test.js tests/receiptLifecycleCrossHttp.test.js --hookTimeout=180000 --testTimeout=120000 --no-file-parallelism",
+    "test:db:readiness:preflight": "node -r ../dev-use-test-db.js scripts/liveOrderPickingE2E.js",
+    "test:live:receipt:preflight": "node -r ../dev-use-test-db.js scripts/liveReceiptLifecycleE2E.js",
+    "test:live:receipt": "node -r ../dev-use-test-db.js scripts/liveReceiptLifecycleE2E.js --execute"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1030.0",

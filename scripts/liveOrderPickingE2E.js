@@ -107,6 +107,7 @@ const ShopAuditLog = require('../models/ShopAuditLog');
 const AppSetting = require('../models/AppSetting');
 const cache = require('../utils/cache');
 const { isOrderingOpen, getOrderingWindowOpenAt } = require('../utils/orderingSchedule');
+const { addDaysToDateKey } = require('../utils/warsawDateTime');
 const { buildOpenClosedTestSchedules } = require('./helpers/perGroupTestSchedule');
 const { getOrCreateSessionId, getOrCreateNextSessionId } = require('../utils/getOrCreateSession');
 const { buildPickingTasksFromOrders } = require('../services/taskBuilder');
@@ -1236,9 +1237,7 @@ async function scenarioIsolation() {
     const currentSid = str(currentOrder.orderingSessionId);
 
     const curSession = await OrderingSession.findById(currentSid).lean();
-    const oldDate = new Date(`${curSession.openDate}T00:00:00.000Z`);
-    oldDate.setUTCDate(oldDate.getUTCDate() - 7);
-    const oldOpenDate = oldDate.toISOString().slice(0, 10);
+    const oldOpenDate = addDaysToDateKey(curSession.openDate, -7);
     const oldSession = await OrderingSession.create({
       groupId: str(world.group._id), openDate: oldOpenDate,
       openAt: new Date(Date.now() - 7 * 24 * 3600 * 1000), pickingStatus: 'confirmed',

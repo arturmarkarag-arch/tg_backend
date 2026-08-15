@@ -417,6 +417,7 @@ module.exports = {
   getPreviousOrderingCloseAt,
   getOpenDateWarsaw,
   getOrderingWindowBoundsForOpenDate,
+  warsawWallClockToUTC,
   getSessionDeliveryDate,
   normalizeOrderingSchedule,
   validateOrderingScheduleDeliveryDay,

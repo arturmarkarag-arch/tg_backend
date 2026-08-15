@@ -22,6 +22,7 @@ const { describeImageUrl } = require('../utils/productDescribe');
 const { appError, asyncHandler } = require('../utils/errors');
 const { withLock } = require('../utils/lock');
 const { normalizeReceiptPhotoMeta, photoCommentsText } = require('../utils/receiptPhotoMeta');
+const { buildWarsawDateRange } = require('../utils/warsawDateTime');
 const {
   blankRouting,
   normalizeReceiptItemRouting,
@@ -306,12 +307,13 @@ router.get('/', staffOnly, asyncHandler(async (req, res) => {
   const query = {};
   if (statusFilter) query.status = statusFilter;
 
-  // Date range filter on createdAt. dateTo is treated as inclusive end-of-day.
-  const createdAt = {};
-  const fromMs = Date.parse(req.query.dateFrom || '');
-  const toMs = Date.parse(req.query.dateTo || '');
-  if (Number.isFinite(fromMs)) createdAt.$gte = new Date(fromMs);
-  if (Number.isFinite(toMs)) createdAt.$lte = new Date(toMs + 24 * 60 * 60 * 1000 - 1);
+  // UI dates are Warsaw calendar days. Do not let Date.parse() interpret
+  // YYYY-MM-DD as UTC midnight: around local midnight that leaks receipts into
+  // the adjacent day. The helper also handles 23/25-hour DST days correctly.
+  const createdAt = buildWarsawDateRange({
+    dateFrom: req.query.dateFrom,
+    dateTo: req.query.dateTo,
+  });
   if (Object.keys(createdAt).length) query.createdAt = createdAt;
 
   // Free-text search by receipt number (escaped, case-insensitive).
@@ -365,14 +367,12 @@ router.get('/items-gallery', staffOnly, asyncHandler(async (req, res) => {
   const pageSize = Math.min(50, Math.max(1, parseInt(req.query.pageSize) || 20));
   const query = { photoUrl: { $exists: true, $nin: ['', null] } };
 
-  // Keep the photo feed on the same calendar semantics as the receipt list:
-  // filter by the parent Receipt.createdAt, not by when an individual photo row
-  // happened to be added/edited. dateTo is inclusive end-of-day.
-  const receiptCreatedAt = {};
-  const fromMs = Date.parse(req.query.dateFrom || '');
-  const toMs = Date.parse(req.query.dateTo || '');
-  if (Number.isFinite(fromMs)) receiptCreatedAt.$gte = new Date(fromMs);
-  if (Number.isFinite(toMs)) receiptCreatedAt.$lte = new Date(toMs + 24 * 60 * 60 * 1000 - 1);
+  // Same Warsaw calendar semantics as the receipt list; filter by the
+  // parent Receipt.createdAt, not by when an individual photo row was edited.
+  const receiptCreatedAt = buildWarsawDateRange({
+    dateFrom: req.query.dateFrom,
+    dateTo: req.query.dateTo,
+  });
 
   if (Object.keys(receiptCreatedAt).length) {
     const receiptIds = await Receipt.distinct('_id', { createdAt: receiptCreatedAt });
@@ -534,6 +534,11 @@ router.post('/supplement-batches/:deliveryGroupId/publish', staffOnly, asyncHand
     await ReceiptItem.updateMany(
       {
         _id: { $in: ids },
+        status: 'confirmed',
+        routingVersion: { $gte: 1 },
+        'routing.supplement': true,
+        createdProductId: { $ne: null },
+        supplementBatchVersion: { $gte: 1 },
         supplementPublishRequestedAt: null,
         $or: [
           { 'routing.supplementDeliveryGroupId': deliveryGroupId },
@@ -552,6 +557,9 @@ router.post('/supplement-batches/:deliveryGroupId/publish', staffOnly, asyncHand
 
     const selectedRows = await ReceiptItem.find({
       _id: { $in: ids },
+      status: 'confirmed',
+      'routing.supplement': true,
+      createdProductId: { $ne: null },
       'routing.supplementDeliveryGroupId': deliveryGroupId,
       supplementPublishRequestedAt: now,
     }, '_id receiptId createdProductId').lean();
@@ -1069,6 +1077,24 @@ router.patch('/:id/items/:itemId', staffOnly, asyncHandler(async (req, res) => {
 
       assertCanEditItem(req.user, item, changedFields);
 
+      // Once a product has entered an operational flow, the receipt must not be
+      // used as a back door to change what sellers/warehouse are working with.
+      // Cosmetic overlay/comment edits remain allowed because they do not change
+      // product identity or commercial terms. totalQty is receiving metadata for
+      // routingVersion>=1 and is intentionally not treated as live stock.
+      const criticalEditFields = new Set([
+        'price',
+        'qtyPerPackage',
+        'originalPhotoUrl',
+        'destination',
+        'deliveryGroupIds',
+        'qtyPerShop',
+      ]);
+      if (item.status === 'confirmed' && changedFields.some((field) => criticalEditFields.has(field))) {
+        const usage = await describeItemUsage(item, { session: txSession });
+        if (usage.inUse) throw appError('receipt_item_in_use', { reasons: usage.reasons.join('; ') });
+      }
+
       // ── Зміна призначення вже створеної позиції ─────────────────────────────
       // Складський товар і товар магазину — РІЗНІ сутності, а не прапорець на
       // одній. Перемкнути призначення можна, лише поки створеним товаром ще
@@ -1207,10 +1233,12 @@ router.delete('/:id/items/:itemId', staffOnly, asyncHandler(async (req, res) => 
       // between the check and the delete.
       assertCanDeleteItem(req.user, item);
 
-      // Позиція без створених документів (не підтверджена) — просто зникає.
+      // Publication markers/offers are usage too, even if an inconsistent row has
+      // already lost its product back-reference. Never skip the usage gate based
+      // only on createdProductId/createdShopProductId.
+      const usage = await describeItemUsage(item, { session });
+      if (usage.inUse) throw appError('receipt_item_in_use', { reasons: usage.reasons.join('; ') });
       if (item.createdProductId || item.createdShopProductId) {
-        const usage = await describeItemUsage(item, { session });
-        if (usage.inUse) throw appError('receipt_item_in_use', { reasons: usage.reasons.join('; ') });
         removedArtifacts = await rollbackItemArtifacts(item, { session });
       }
 
@@ -1647,9 +1675,9 @@ router.post('/:id/items/:itemId/unconfirm', staffOnly, asyncHandler(async (req, 
       assertCanConfirmItem(req.user, item);
 
       if (item.status === 'confirmed') {
+        const usage = await describeItemUsage(item, { session });
+        if (usage.inUse) throw appError('receipt_item_in_use', { reasons: usage.reasons.join('; ') });
         if (item.createdProductId || item.createdShopProductId) {
-          const usage = await describeItemUsage(item, { session });
-          if (usage.inUse) throw appError('receipt_item_in_use', { reasons: usage.reasons.join('; ') });
           removedArtifacts = await rollbackItemArtifacts(item, { session });
         }
 

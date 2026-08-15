@@ -29,8 +29,11 @@ describe('receipt photo gallery contract', () => {
     const start = source.indexOf("router.get('/items-gallery'");
     const end = source.indexOf("router.get('/:id'", start);
     const gallery = source.slice(start, end);
-    expect(gallery).toContain("Date.parse(req.query.dateFrom || '')");
-    expect(gallery).toContain("Date.parse(req.query.dateTo || '')");
+    expect(gallery).toContain('buildWarsawDateRange({');
+    expect(gallery).toContain('dateFrom: req.query.dateFrom');
+    expect(gallery).toContain('dateTo: req.query.dateTo');
+    expect(gallery).not.toContain('Date.parse(req.query.dateFrom');
+    expect(gallery).not.toContain('Date.parse(req.query.dateTo');
     expect(gallery).toContain("Receipt.distinct('_id', { createdAt: receiptCreatedAt })");
     expect(gallery).toContain('query.receiptId = { $in: receiptIds }');
   });

@@ -16,6 +16,7 @@ const { getOrCreateSessionId } = require('../../utils/getOrCreateSession');
 const Order = require('../../models/Order');
 const { getIO } = require('../../socket');
 const { appError, asyncHandler } = require('../../utils/errors');
+const { formatWarsawDateTime } = require('../../utils/warsawDateTime');
 const { getSupportAdmins, toPublicSupportAdmins } = require('../../utils/telegramSupportAdmins');
 const { withLock } = require('../../utils/lock');
 const { getShop, getDeliveryGroup } = require('../../utils/modelCache');
@@ -865,7 +866,7 @@ router.post('/register-request', asyncHandler(async (req, res) => {
     `Прізвище: ${lastName}\n` +
     (cleanPhone ? `Телефон: ${cleanPhone}\n` : '') +
     `Роль: Склад\n` +
-    `Запит створено: ${new Date().toLocaleString()}`;
+    `Запит створено: ${formatWarsawDateTime(new Date())}`;
 
   sendAdminNotification(message, request._id.toString()).catch(() => {});
 

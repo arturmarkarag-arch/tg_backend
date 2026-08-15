@@ -6,6 +6,7 @@ const { buildUnreconciledOosTaskFilter } = require('../utils/pickingOosRecovery'
 const { getIO } = require('../socket');
 const { telegramAuth, requireTelegramRoles } = require('../middleware/telegramAuth');
 const { appError, asyncHandler } = require('../utils/errors');
+const { formatWarsawDateKey } = require('../utils/warsawDateTime');
 
 const router = express.Router();
 
@@ -32,12 +33,13 @@ router.get('/', asyncHandler(async (req, res) => {
     .skip((page - 1) * pageSize)
     .limit(pageSize);
 
-  // Group by calendar day (UTC date string)
+  // Group by Warsaw calendar day so items around local midnight never appear
+  // under yesterday/tomorrow just because Mongo stores timestamps in UTC.
   const grouped = [];
   const dayMap = new Map();
   for (const p of products) {
     const day = p.archivedAt
-      ? p.archivedAt.toISOString().slice(0, 10)
+      ? formatWarsawDateKey(p.archivedAt)
       : 'невідомо';
     if (!dayMap.has(day)) {
       dayMap.set(day, []);

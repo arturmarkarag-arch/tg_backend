@@ -19,6 +19,8 @@ const Product       = require('../models/Product');
 const ProductVector = require('../models/ProductVector');
 const ReceiptItem   = require('../models/ReceiptItem');
 const ShopProduct   = require('../models/ShopProduct');
+const SupplementOffer   = require('../models/SupplementOffer');
+const SupplementRequest = require('../models/SupplementRequest');
 
 const {
   snapshotItem,
@@ -50,6 +52,8 @@ beforeEach(async () => {
     ProductVector.deleteMany({}),
     ReceiptItem.deleteMany({}),
     ShopProduct.deleteMany({}),
+    SupplementOffer.deleteMany({}),
+    SupplementRequest.deleteMany({}),
   ]);
 });
 
@@ -247,5 +251,82 @@ describe('прибрати позицію можна лише поки това�
     const freshItem = await ReceiptItem.findById(item._id).lean();
     expect(freshItem.createdProductId).toBeNull();
     expect(freshItem.stockApplied).toBe(false);
+  });
+});
+
+
+describe('перехресні guard-и прийомки ↔ дозамовлення', () => {
+  async function seedSupplementItem() {
+    const { product, item } = await seedShelfItem();
+    item.routingVersion = 1;
+    item.routing = {
+      warehouse: false,
+      mandatory: false,
+      supplement: true,
+      mayNotReachAllShops: false,
+      supplementDeliveryGroupId: null,
+    };
+    item.supplementBatchVersion = 2;
+    await item.save();
+    return { product, item };
+  }
+
+  it('confirmed supplement до publish ще можна відкотити', async () => {
+    const { item } = await seedSupplementItem();
+    const usage = await describeItemUsage(item, {});
+    expect(usage.inUse).toBe(false);
+  });
+
+  it('deferred publish блокує відкат навіть коли SupplementOffer ще не створено', async () => {
+    const { item } = await seedSupplementItem();
+    item.supplementPublishRequestedAt = new Date();
+    await item.save();
+
+    const usage = await describeItemUsage(item, {});
+    expect(usage.inUse).toBe(true);
+    expect(usage.reasons.join(' ')).toContain('передано на публікацію');
+    expect(await SupplementOffer.countDocuments({ receiptItemId: item._id })).toBe(0);
+  });
+
+  for (const status of ['open', 'frozen', 'completed']) {
+    it(`offer ${status} блокує відкат навіть з 0 заявок`, async () => {
+      const { product, item } = await seedSupplementItem();
+      await SupplementOffer.create({
+        receiptId,
+        receiptItemId: item._id,
+        productId: product._id,
+        deliveryGroupId: 'g-test',
+        status,
+      });
+
+      const usage = await describeItemUsage(item, {});
+      expect(usage.inUse).toBe(true);
+      expect(await SupplementRequest.countDocuments({})).toBe(0);
+      if (status === 'open') expect(usage.reasons.join(' ')).toContain('відкрито');
+      if (status === 'frozen') expect(usage.reasons.join(' ')).toContain('закрито');
+      if (status === 'completed') expect(usage.reasons.join(' ')).toContain('завершено');
+    });
+  }
+
+  it('заявка магазину лишається додатковою причиною блокування', async () => {
+    const { product, item } = await seedSupplementItem();
+    const offer = await SupplementOffer.create({
+      receiptId,
+      receiptItemId: item._id,
+      productId: product._id,
+      deliveryGroupId: 'g-test',
+      status: 'open',
+    });
+    await SupplementRequest.create({
+      offerId: offer._id,
+      shopId: new mongoose.Types.ObjectId(),
+      shopName: 'Тестовий магазин',
+      deliveryGroupId: 'g-test',
+      quantity: 2,
+    });
+
+    const usage = await describeItemUsage(item, {});
+    expect(usage.inUse).toBe(true);
+    expect(usage.reasons.join(' ')).toContain('магазини вже дозамовили');
   });
 });

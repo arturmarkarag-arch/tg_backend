@@ -35,12 +35,37 @@ describe('проведена накладна редагується далі', 
     expect(sync).not.toContain('order.save');
   });
 
-  test('прибрати створене можна лише після перевірки використання', () => {
-    // Кожен виклик відкату йде після describeItemUsage з відмовою receipt_item_in_use.
-    const rollbacks = route.split('rollbackItemArtifacts(').length - 1;
-    expect(rollbacks).toBe(3); // зміна призначення, видалення, зняття підтвердження
-    const guards = route.split("appError('receipt_item_in_use'").length - 1;
-    expect(guards).toBe(3);
+  test('кожна небезпечна дія має власний usage-guard перед відкатом/зміною', () => {
+    // Не рахуємо глобальну кількість guard-ів: нове правило безпеки не повинно
+    // ламати тест лише тому, що runtime став суворішим. Перевіряємо конкретні
+    // переходи стану окремо, щоб зникнення будь-якого потрібного guard-а падало.
+    const editStart = route.indexOf("router.patch('/:id/items/:itemId'");
+    const routingStart = route.indexOf("router.patch('/:id/items/:itemId/routing'");
+    const editHandler = route.slice(editStart, routingStart);
+    expect(editHandler).toContain('criticalEditFields');
+    expect(editHandler).toContain('describeItemUsage(item, { session: txSession })');
+    expect(editHandler).toContain("appError('receipt_item_in_use'");
+
+    const rerouteStart = editHandler.indexOf('const rerouted =');
+    const rerouteEnd = editHandler.indexOf('const before = logSnapshot', rerouteStart);
+    const rerouteGuard = editHandler.slice(rerouteStart, rerouteEnd);
+    expect(rerouteGuard).toContain('describeItemUsage(item, { session: txSession })');
+    expect(rerouteGuard).toContain("appError('receipt_item_in_use'");
+    expect(rerouteGuard).toContain('rollbackItemArtifacts(item, { session: txSession })');
+
+    const deleteStart = route.indexOf("router.delete('/:id/items/:itemId'");
+    const confirmStart = route.indexOf("router.post('/:id/items/:itemId/confirm'");
+    const deleteHandler = route.slice(deleteStart, confirmStart);
+    expect(deleteHandler).toContain('describeItemUsage(item, { session })');
+    expect(deleteHandler).toContain("appError('receipt_item_in_use'");
+    expect(deleteHandler).toContain('rollbackItemArtifacts(item, { session })');
+
+    const unconfirmStart = route.indexOf("router.post('/:id/items/:itemId/unconfirm'");
+    const unconfirmHandler = route.slice(unconfirmStart);
+    expect(unconfirmHandler).toContain('describeItemUsage(item, { session })');
+    expect(unconfirmHandler).toContain("appError('receipt_item_in_use'");
+    expect(unconfirmHandler).toContain('rollbackItemArtifacts(item, { session })');
+
     expect(errors).toContain('receipt_item_in_use');
   });
 

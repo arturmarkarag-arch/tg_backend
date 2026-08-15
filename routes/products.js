@@ -28,6 +28,7 @@ const { embedProductAsync } = require('../utils/productEmbedding');
 const { getOrCreateSessionId, findCurrentSessionId } = require('../utils/getOrCreateSession');
 const { normalizeDeliveryGroup } = require('../utils/deliveryGroupHelpers');
 const { getOrderingWindowOpenAt, getOpenDateWarsaw } = require('../utils/orderingSchedule');
+const { formatWarsawDateKey, warsawDateKeyToUtcRange } = require('../utils/warsawDateTime');
 const cache = require('../utils/cache');
 const { buildWarehouseStockEstimate } = require('../utils/warehouseStockEstimate');
 const { getSellerVisualOrder } = require('../services/sellerVisualOrdering');
@@ -46,7 +47,7 @@ async function getSellerCatalogCycleContext(req) {
     // presentation isolated from seller-group cycles and refresh it daily.
     return {
       cutoff: null,
-      cacheScope: `staff:${new Date().toISOString().slice(0, 10)}`,
+      cacheScope: `staff:${formatWarsawDateKey(new Date())}`,
     };
   }
   const shop = await Shop.findById(req.telegramUser.shopId, 'deliveryGroupId').lean();
@@ -650,12 +651,8 @@ router.get('/', async (req, res) => {
   }
 
   if (dateFilter) {
-    const parsedDate = new Date(dateFilter);
-    if (!Number.isNaN(parsedDate.getTime())) {
-      const nextDay = new Date(parsedDate);
-      nextDay.setUTCDate(nextDay.getUTCDate() + 1);
-      query.createdAt = { $gte: parsedDate, $lt: nextDay };
-    }
+    const range = warsawDateKeyToUtcRange(dateFilter);
+    if (range) query.createdAt = { $gte: range.start, $lt: range.endExclusive };
   }
 
   const isV1 = String(req.baseUrl || '').includes('/api/v1') || String(req.originalUrl || '').startsWith('/api/v1');

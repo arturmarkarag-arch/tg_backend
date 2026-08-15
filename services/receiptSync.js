@@ -82,8 +82,26 @@ async function describeItemUsage(item, { session = null } = {}) {
     if (taskCount > 0) reasons.push('товар уже потрапив у збирання');
   }
 
-  const offers = await ses(SupplementOffer.find({ receiptItemId: item._id }, '_id').lean());
+  // Publication itself is irreversible from the receipt editor. A deferred batch
+  // has already been assigned to a delivery group and will be opened by the
+  // scheduler; letting unconfirm/delete clear it would silently move a product
+  // between groups. This guard intentionally applies even before an Offer exists.
+  if (item.supplementPublishRequestedAt) {
+    reasons.push('дозамовлення вже передано на публікацію');
+  }
+
+  // An offer means sellers have already been exposed to this product. Zero
+  // requests is NOT a reason to roll it back: open/frozen/completed are all
+  // downstream business states. Requests are reported additionally for diagnosis.
+  const offers = await ses(
+    SupplementOffer.find({ receiptItemId: item._id }, '_id status deliveryGroupId').lean(),
+  );
   if (offers.length > 0) {
+    const statuses = new Set(offers.map((offer) => String(offer.status || '')));
+    if (statuses.has('completed')) reasons.push('дозамовлення вже завершено');
+    else if (statuses.has('frozen')) reasons.push('дозамовлення вже закрито для нових заявок');
+    else reasons.push('дозамовлення вже відкрито для магазинів');
+
     const requestCount = await ses(
       SupplementRequest.countDocuments({ offerId: { $in: offers.map((o) => o._id) } }),
     );
