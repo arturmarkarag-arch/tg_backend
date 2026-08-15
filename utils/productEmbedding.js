@@ -14,9 +14,15 @@ const ProductVector = require('../models/ProductVector');
 
 const GEMINI_EMBED_ENABLED = String(process.env.GEMINI_EMBED_ENABLED ?? 'true') !== 'false';
 
+// Same-process single-flight: repeated triggers for the same owner/source share one
+// Gemini request instead of racing before ProductVector has been written. The key
+// includes the source URL and force mode so a genuinely newer photo never joins an
+// older in-flight embed.
+const embeddingInFlight = new Map();
+
 // Clean original = originalImageUrl when it differs from the annotated photo
 // (imageUrls[0]); otherwise fall back to whatever photo exists and flag it.
-function pickSource(doc) {
+function getProductEmbeddingSource(doc) {
   const labeled = (Array.isArray(doc.imageUrls) && doc.imageUrls[0]) || doc.localImageUrl || '';
   const clean = doc.originalImageUrl && doc.originalImageUrl !== labeled ? doc.originalImageUrl : '';
   const url = clean || doc.originalImageUrl || labeled || '';
@@ -29,24 +35,40 @@ function pickSource(doc) {
 async function embedProduct(product, { force = false } = {}) {
   if (!product?._id) return false;
   if (!GEMINI_EMBED_ENABLED || !getGeminiStatus().connected) return false;
-  if (!force && (await ProductVector.exists({ productId: product._id }))) return false;
-  const { url, fromLabeled } = pickSource(product);
+  const { url, fromLabeled } = getProductEmbeddingSource(product);
   if (!url) return false;
-  const { embedding, model, dimensions } = await geminiEmbedImageUrl(url);
-  if (!embedding) return false;
-  await ProductVector.updateOne(
-    { productId: product._id },
-    { $set: {
-      productId:            product._id,
-      geminiVector:         embedding,
-      geminiEmbeddingModel: model,
-      geminiEmbeddingDim:   dimensions,
-      geminiEmbeddedAt:     new Date(),
-      geminiFromLabeled:    fromLabeled,
-    } },
-    { upsert: true },
-  );
-  return true;
+
+  const key = `${String(product._id)}|${url}|${force ? 'force' : 'normal'}`;
+  const existingJob = embeddingInFlight.get(key);
+  if (existingJob) return existingJob;
+
+  const job = (async () => {
+    // Keep the DB guard INSIDE the single-flight section; otherwise two callers can
+    // both observe "missing" before either one writes the vector.
+    if (!force && (await ProductVector.exists({ productId: product._id }))) return false;
+    const { embedding, model, dimensions } = await geminiEmbedImageUrl(url);
+    if (!embedding) return false;
+    await ProductVector.updateOne(
+      { productId: product._id },
+      { $set: {
+        productId:            product._id,
+        geminiVector:         embedding,
+        geminiEmbeddingModel: model,
+        geminiEmbeddingDim:   dimensions,
+        geminiEmbeddedAt:     new Date(),
+        geminiFromLabeled:    fromLabeled,
+      } },
+      { upsert: true },
+    );
+    return true;
+  })();
+
+  embeddingInFlight.set(key, job);
+  try {
+    return await job;
+  } finally {
+    if (embeddingInFlight.get(key) === job) embeddingInFlight.delete(key);
+  }
 }
 
 // Fire-and-forget for request handlers: never throws, never blocks the response.
@@ -56,4 +78,4 @@ function embedProductAsync(product, ctx = '', opts = undefined) {
     .catch((err) => {});
 }
 
-module.exports = { embedProduct, embedProductAsync };
+module.exports = { embedProduct, embedProductAsync, getProductEmbeddingSource };

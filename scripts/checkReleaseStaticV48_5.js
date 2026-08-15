@@ -19,6 +19,10 @@ const checks = [
   'scripts/checkV48_5TestDbSafety.js',
   'scripts/checkV48_7ReceiptCrossLifecycle.js',
   'scripts/checkV48_8WarsawDatePolicy.js',
+  'scripts/checkPhotoEgressV48_11.js',
+  'scripts/checkPhotoEgressV48_12.js',
+  'scripts/checkPickingServerAuthorityV48_13.js',
+  'scripts/checkPickingReadinessV48_14.js',
 ];
 
 let failed = 0;

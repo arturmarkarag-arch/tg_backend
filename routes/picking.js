@@ -13,7 +13,7 @@ const { getProductTitle } = require('../services/archiveProduct');
 const { buildPickingTasksFromOrders } = require('../services/taskBuilder');
 const { auditSessionCoverage, resolveCoverageGap } = require('../services/sessionCoverage');
 const { auditSessionClosure } = require('../services/sessionClosure');
-const { isOrderingOpen, getOrderingWindowCloseAt, getOrderingWindowOpenAt, getNextOrderingWindowOpenAt, getOpenDateWarsaw } = require('../utils/orderingSchedule');
+const { isOrderingOpen, getOrderingWindowCloseAt, getOrderingWindowOpenAt, getNextOrderingWindowOpenAt, getOpenDateWarsaw, getPickingReadiness } = require('../utils/orderingSchedule');
 const { getOrCreateSessionId, findCurrentSessionId } = require('../utils/getOrCreateSession');
 const { ensureSessionSeq } = require('../utils/sessionSeq');
 const { normalizeDeliveryGroup } = require('../utils/deliveryGroupHelpers');
@@ -117,6 +117,109 @@ async function resolveCurrentPickingSession(deliveryGroupId) {
   return { group, sessionId, schedule: group.orderingSchedule };
 }
 
+/**
+ * Pure presentation snapshot for a selected delivery group.
+ *
+ * IMPORTANT: this function is a READ boundary. It must never materialise an
+ * OrderingSession, release/claim locks, reconcile tasks/orders, archive products
+ * or repair historical rows. Browser navigation may call it freely.
+ */
+async function buildReadOnlyPickingSessionSnapshot(deliveryGroupId, { now = new Date() } = {}) {
+  const groupId = String(deliveryGroupId || '');
+  if (!groupId) throw appError('picking_delivery_group_required');
+
+  const group = normalizeDeliveryGroup(await DeliveryGroup.findById(
+    groupId,
+    'dayOfWeek name orderingSchedule',
+  ).lean());
+  if (!group) throw appError('group_not_found');
+
+  const windowState = isOrderingOpen(group.orderingSchedule, now);
+  const nextOrderingOpenAt = getNextOrderingWindowOpenAt(group.orderingSchedule, now);
+  const readiness = getPickingReadiness(group.orderingSchedule, now);
+  const readinessEnvelope = {
+    serverNow: readiness.serverNow.toISOString(),
+    pickingReadyAt: readiness.pickingReadyAt.toISOString(),
+    pickingReady: readiness.pickingReady,
+    pickingReadyInMs: readiness.pickingReadyInMs,
+  };
+  const supplementCount = await countActiveOffersForGroup(groupId);
+
+  if (windowState.isOpen) {
+    return {
+      windowOpen: true,
+      message: windowState.message || '',
+      windowCloseAt: getOrderingWindowCloseAt(group.orderingSchedule, now).toISOString(),
+      pickingStatus: null,
+      phase: 'ordering_open',
+      presentationMode: 'ordering_open',
+      nextOrderingOpenAt: nextOrderingOpenAt.toISOString(),
+      sessionSummary: null,
+      groupDayOfWeek: group.dayOfWeek,
+      events: [],
+      vocab: getSessionVocab(),
+      supplementCount,
+      ...readinessEnvelope,
+    };
+  }
+
+  const sessionId = await findCurrentSessionId(groupId, group.orderingSchedule);
+  const session = sessionId
+    ? await OrderingSession.findById(sessionId, 'pickingStatus events seq openDate finalSummary').lean()
+    : null;
+  const pickingStatus = session?.pickingStatus || null;
+  const phase = sessionId
+    ? await computeSessionPhase({
+      deliveryGroupId: groupId,
+      sessionId,
+      pickingStatus: pickingStatus || 'pending',
+      orderingSchedule: group.orderingSchedule,
+    })
+    : 'idle';
+  const presentationMode = deriveSessionPresentationMode({
+    phase,
+    nextOrderingOpenAt,
+    now,
+  });
+  const sessionSummary = await buildSessionSummary(phase, {
+    deliveryGroupId: groupId,
+    sessionId,
+    session,
+  });
+  const baseEnvelope = {
+    pickingStatus,
+    phase,
+    presentationMode,
+    nextOrderingOpenAt: nextOrderingOpenAt.toISOString(),
+    sessionSummary,
+    groupDayOfWeek: group.dayOfWeek,
+    events: (session?.events || []).slice(-10),
+    vocab: getSessionVocab(),
+    supplementCount,
+    ...readinessEnvelope,
+  };
+
+  if (presentationMode === 'upcoming_preflight') {
+    return {
+      upcomingPreflight: true,
+      ...baseEnvelope,
+    };
+  }
+
+  if (session && session.pickingStatus !== 'pending') {
+    const pendingCount = await PickingTask.countDocuments({ orderingSessionId: sessionId, status: 'pending' });
+    return {
+      alreadyStarted: true,
+      taskCount: pendingCount,
+      sessionActive: session.pickingStatus === 'in_progress',
+      sessionConfirmed: true,
+      ...baseEnvelope,
+    };
+  }
+
+  return { preStart: true, ...baseEnvelope };
+}
+
 async function buildTaskResponse(task, { isSecondChance = false } = {}) {
   if (!task) return null;
   const product = await Product.findById(task.productId).lean();
@@ -213,6 +316,16 @@ router.get('/schedule', requireTelegramRoles(['warehouse', 'admin']), async (req
 });
 
 // ---------------------------------------------------------------------------
+// GET /api/picking/session-snapshot?deliveryGroupId=...
+// Pure read used when opening/switching delivery groups. It is intentionally
+// separate from the start command so navigation can never create a session.
+// ---------------------------------------------------------------------------
+router.get('/session-snapshot', requireTelegramRoles(['warehouse', 'admin']), asyncHandler(async (req, res) => {
+  const snapshot = await buildReadOnlyPickingSessionSnapshot(req.query.deliveryGroupId || null);
+  res.json(snapshot);
+}));
+
+// ---------------------------------------------------------------------------
 // POST /api/picking/start-session
 // Body: { deliveryGroupId, confirm? }
 //
@@ -230,6 +343,13 @@ router.post('/start-session', requireTelegramRoles(['warehouse', 'admin']), asyn
       return next(appError('picking_delivery_group_required'));
     }
 
+    // Backward compatibility for an older client that POSTed start-session as a
+    // read probe. confirm=false is now guaranteed read-only; the current client
+    // uses GET /session-snapshot and only POSTs here for an explicit Start action.
+    if (!confirm) {
+      return res.json(await buildReadOnlyPickingSessionSnapshot(deliveryGroupId));
+    }
+
     const actor = {
       by: String(user.telegramId || ''),
       byName: [user.firstName, user.lastName].filter(Boolean).join(' '),
@@ -239,12 +359,30 @@ router.post('/start-session', requireTelegramRoles(['warehouse', 'admin']), asyn
     const group = normalizeDeliveryGroup(await DeliveryGroup.findById(deliveryGroupId, 'dayOfWeek name orderingSchedule').lean());
     if (!group) throw appError('group_not_found');
 
-    const { isOpen, message } = isOrderingOpen(group.orderingSchedule);
+    const commandNow = new Date();
+    const { isOpen, message } = isOrderingOpen(group.orderingSchedule, commandNow);
+    const readiness = getPickingReadiness(group.orderingSchedule, commandNow);
+    const readinessEnvelope = {
+      serverNow: readiness.serverNow.toISOString(),
+      pickingReadyAt: readiness.pickingReadyAt.toISOString(),
+      pickingReady: readiness.pickingReady,
+      pickingReadyInMs: readiness.pickingReadyInMs,
+    };
     if (isOpen) {
-      const windowCloseAt = getOrderingWindowCloseAt(group.orderingSchedule).toISOString();
-      return res.json({ windowOpen: true, message, windowCloseAt });
+      const windowCloseAt = getOrderingWindowCloseAt(group.orderingSchedule, commandNow).toISOString();
+      return res.json({ windowOpen: true, message, windowCloseAt, ...readinessEnvelope });
     }
-    // Window closed. Before touching any operational state, resolve the
+    // The one-minute close→picking gap is enforced HERE, before any lock cleanup,
+    // session materialisation, archive/reconcile or task mutation. A stale/buggy
+    // client cannot bypass the server by POSTing confirm:true at 07:30:01.
+    if (!readiness.pickingReady) {
+      return res.json({
+        pickingNotReady: true,
+        message: 'Збирання ще не готове до старту.',
+        ...readinessEnvelope,
+      });
+    }
+    // Window closed and picking-ready. Before touching any operational state, resolve the
     // PRESENTATION read-only. During the final 24h before the next ordering
     // window, a terminal previous cycle (completed OR empty/idle) must show the
     // same readiness board. This check deliberately happens before
@@ -369,11 +507,6 @@ router.post('/start-session', requireTelegramRoles(['warehouse', 'admin']), asyn
         sessionConfirmed: true,
         ...baseEnvelope,
       });
-    }
-
-    if (!confirm) {
-      // Pending session, button not pressed yet.
-      return res.json({ preStart: true, ...baseEnvelope });
     }
 
     // 5. Confirm flow — block on unresolved cross-seller conflicts.
@@ -542,8 +675,8 @@ router.post('/cancel-start', requireTelegramRoles(['warehouse', 'admin']), async
   const group = await DeliveryGroup.findById(deliveryGroupId, 'dayOfWeek name orderingSchedule').lean();
   if (!group) throw appError('group_not_found');
 
-  const sessionId = await getOrCreateSessionId(String(deliveryGroupId), group.orderingSchedule);
-  const session = await OrderingSession.findById(sessionId).lean();
+  const sessionId = await findCurrentSessionId(String(deliveryGroupId), group.orderingSchedule);
+  const session = sessionId ? await OrderingSession.findById(sessionId).lean() : null;
 
   if (!session || session.pickingStatus !== 'confirmed') {
     return res.status(409).json({ error: 'Скасування можливе лише поки жоден товар ще не зібраний.' });
@@ -619,7 +752,8 @@ router.post('/resolve-coverage-gap', requireTelegramRoles(['warehouse', 'admin']
   const group = await DeliveryGroup.findById(deliveryGroupId, 'dayOfWeek name orderingSchedule').lean();
   if (!group) throw appError('group_not_found');
 
-  const sessionId = await getOrCreateSessionId(String(deliveryGroupId), group.orderingSchedule);
+  const sessionId = await findCurrentSessionId(String(deliveryGroupId), group.orderingSchedule);
+  if (!sessionId) throw appError('picking_session_not_found');
 
   const { getBot } = require('../telegramBot');
   const { cancelledCount, archived } = await resolveCoverageGap({
@@ -634,62 +768,12 @@ router.post('/resolve-coverage-gap', requireTelegramRoles(['warehouse', 'admin']
   res.json({ ok: true, cancelledCount, archived, gaps: coverage.gaps, resolved: coverage.ok });
 }));
 
-// ---------------------------------------------------------------------------
-// GET /api/picking/my-task?deliveryGroupId=...
-// Returns the worker's currently locked task without releasing anything.
-// Used on page load to restore interrupted picking sessions.
-// ---------------------------------------------------------------------------
-router.get('/my-task', requireTelegramRoles(['warehouse', 'admin']), async (req, res, next) => {
+async function handleNextTaskCommand(req, res, next) {
   try {
     const user = req.telegramUser;
-    const deliveryGroupId = req.query.deliveryGroupId || null;
-    if (!deliveryGroupId) return res.json({ task: null });
-    const { sessionId } = await resolveCurrentPickingSession(deliveryGroupId);
-    if (!sessionId) return res.json({ task: null });
-
-    // Sorted by lockedAt DESC: with the one-task invariant there is at most one
-    // match, but a doc left over from before the invariant existed must resolve
-    // DETERMINISTICALLY to the most recently claimed task — an unsorted findOne
-    // could resume the worker onto a task they are not physically holding.
-    const [task, ...stale] = await PickingTask.find({
-      status: 'locked',
-      lockedBy: String(user.telegramId),
-      deliveryGroupId: String(deliveryGroupId),
-      orderingSessionId: String(sessionId),
-    })
-      .sort({ lockedAt: -1 })
-      .lean();
-
-    // Self-heal legacy duplicates: release the older ones (progress preserved).
-    // Scoped to this group only — a page load must not silently abandon a task
-    // the worker holds in another group; that is /claim's job.
-    if (stale.length) {
-      await PickingTask.updateMany(
-        { _id: { $in: stale.map((t) => t._id) }, status: 'locked', lockedBy: String(user.telegramId) },
-        { $set: { status: 'pending', lockedBy: null, lockedAt: null } },
-      );
-    }
-
-    if (!task) return res.json({ task: null });
-
-    const taskData = await buildTaskResponse(task);
-    if (!taskData) return res.json({ task: null });
-
-    res.json({ task: taskData });
-  } catch (err) {
-    if (err && (err.name === 'AppError' || err.name === 'CastError' || isTransientTx(err))) return next(err);
-    next(appError('picking_next_failed'));
-  }
-});
-
-// ---------------------------------------------------------------------------
-// GET /api/picking/next-task?currentBlock=N
-// ---------------------------------------------------------------------------
-router.get('/next-task', requireTelegramRoles(['warehouse', 'admin']), async (req, res, next) => {
-  try {
-    const user = req.telegramUser;
-    const currentBlock = parseInt(req.query.currentBlock, 10);
-    const deliveryGroupId = req.query.deliveryGroupId || null;
+    const input = req.method === 'GET' ? req.query : req.body;
+    const currentBlock = parseInt(input?.currentBlock, 10);
+    const deliveryGroupId = input?.deliveryGroupId || null;
 
     if (!Number.isInteger(currentBlock) || currentBlock < 1) {
       return next(appError('picking_current_block_invalid'));
@@ -763,7 +847,59 @@ router.get('/next-task', requireTelegramRoles(['warehouse', 'admin']), async (re
     if (err && (err.name === 'AppError' || err.name === 'CastError' || isTransientTx(err))) return next(err);
     next(appError('picking_next_failed'));
   }
+}
+
+
+// ---------------------------------------------------------------------------
+// GET /api/picking/my-task?deliveryGroupId=...
+// Returns the worker's currently locked task without releasing anything.
+// Used on page load to restore interrupted picking sessions.
+// ---------------------------------------------------------------------------
+router.get('/my-task', requireTelegramRoles(['warehouse', 'admin']), async (req, res, next) => {
+  try {
+    const user = req.telegramUser;
+    const deliveryGroupId = req.query.deliveryGroupId || null;
+    if (!deliveryGroupId) return res.json({ task: null });
+    const { sessionId } = await resolveCurrentPickingSession(deliveryGroupId);
+    if (!sessionId) return res.json({ task: null });
+
+    // Sorted by lockedAt DESC: with the one-task invariant there is at most one
+    // match, but a doc left over from before the invariant existed must resolve
+    // DETERMINISTICALLY to the most recently claimed task — an unsorted findOne
+    // could resume the worker onto a task they are not physically holding.
+    const task = await PickingTask.findOne({
+      status: 'locked',
+      lockedBy: String(user.telegramId),
+      deliveryGroupId: String(deliveryGroupId),
+      orderingSessionId: String(sessionId),
+    })
+      .sort({ lockedAt: -1 })
+      .lean();
+
+    // Legacy duplicate-lock repair belongs to the server maintenance scheduler.
+    // A page read only reports the newest authoritative lock and never changes it.
+    if (!task) return res.json({ task: null });
+
+    const taskData = await buildTaskResponse(task);
+    if (!taskData) return res.json({ task: null });
+
+    res.json({ task: taskData });
+  } catch (err) {
+    if (err && (err.name === 'AppError' || err.name === 'CastError' || isTransientTx(err))) return next(err);
+    next(appError('picking_next_failed'));
+  }
 });
+
+// ---------------------------------------------------------------------------
+// POST /api/picking/next-task
+// Body: { currentBlock, deliveryGroupId }
+// Command: deliberately mutates task ownership.
+// A deprecated GET alias is kept for one rolling-deploy cycle so an already-open
+// old Mini App does not break during Monday deployment. New clients use POST only.
+// ---------------------------------------------------------------------------
+const nextTaskRoleGuard = requireTelegramRoles(['warehouse', 'admin']);
+router.post('/next-task', nextTaskRoleGuard, handleNextTaskCommand);
+router.get('/next-task', nextTaskRoleGuard, handleNextTaskCommand); // deprecated rolling-deploy alias
 
 // ---------------------------------------------------------------------------
 // GET /api/picking/block-tasks?blockId=N&deliveryGroupId=...
@@ -782,13 +918,8 @@ router.get('/block-tasks', requireTelegramRoles(['warehouse', 'admin']), async (
     const { sessionId } = await resolveCurrentPickingSession(deliveryGroupId);
     if (!sessionId) return res.json({ tasks: [] });
 
-    // Do NOT release the caller's own lock here. The block picker is polled every
-    // 5s while open and is reachable from the toolbar WHILE a task is active
-    // (ReadyToolbar renders even with a locked task). With releaseOwnLocks=true a
-    // worker who opened the picker to glance at another block had their active
-    // task quietly released mid-pick → another worker grabbed it → the first got
-    // `expired_lock` on complete. Stale locks of OTHER workers are still swept.
-    await releaseWorkerAndStaleLocks(user.telegramId, deliveryGroupId, { releaseOwnLocks: false });
+    // Pure read. Stale/duplicate lease cleanup is owned by the server
+    // picking-maintenance scheduler, never by a modal poll.
 
     const filter = {
       blockId,
@@ -913,9 +1044,8 @@ router.get('/queue-stats', requireTelegramRoles(['warehouse', 'admin']), async (
 
     const { sessionId: currentSessionId } = await resolveCurrentPickingSession(deliveryGroupId);
 
-    // Queue polling must NOT release current worker's active lock.
-    // Otherwise the worker gets `expired_lock` while completing a task.
-    await releaseWorkerAndStaleLocks(user.telegramId, deliveryGroupId, { releaseOwnLocks: false });
+    // Pure read. Stale/duplicate leases are cleaned by the server maintenance
+    // scheduler so a five-second UI poll cannot mutate warehouse state.
 
     const base = currentSessionId
       ? { deliveryGroupId: String(deliveryGroupId), orderingSessionId: String(currentSessionId) }
@@ -949,19 +1079,29 @@ router.get('/queue-stats', requireTelegramRoles(['warehouse', 'admin']), async (
     let windowOpen = false;
     let windowCloseAt = null;
     let windowMessage = '';
+    let serverNow = new Date().toISOString();
+    let pickingReadyAt = null;
+    let pickingReady = false;
+    let pickingReadyInMs = null;
     // Лічильник дозамовлень оновлюється незалежно від OrderingSession.
     const supplementCount = await countActiveOffersForGroup(deliveryGroupId);
     try {
       const groupDoc = await DeliveryGroup.findById(deliveryGroupId, 'dayOfWeek orderingSchedule').lean();
       if (groupDoc) {
         groupDayOfWeek = groupDoc.dayOfWeek;
-        const windowState = isOrderingOpen(groupDoc.orderingSchedule);
+        const statusNow = new Date();
+        const windowState = isOrderingOpen(groupDoc.orderingSchedule, statusNow);
+        const readiness = getPickingReadiness(groupDoc.orderingSchedule, statusNow);
+        serverNow = readiness.serverNow.toISOString();
+        pickingReadyAt = readiness.pickingReadyAt.toISOString();
+        pickingReady = readiness.pickingReady;
+        pickingReadyInMs = readiness.pickingReadyInMs;
         windowOpen = !!windowState.isOpen;
         windowMessage = windowState.message || '';
         windowCloseAt = windowOpen
-          ? getOrderingWindowCloseAt(groupDoc.orderingSchedule).toISOString()
+          ? getOrderingWindowCloseAt(groupDoc.orderingSchedule, statusNow).toISOString()
           : null;
-        nextOrderingOpenAt = getNextOrderingWindowOpenAt(groupDoc.orderingSchedule).toISOString();
+        nextOrderingOpenAt = getNextOrderingWindowOpenAt(groupDoc.orderingSchedule, statusNow).toISOString();
             // findCurrentSessionId, НЕ getOrCreate: це опитування раз на 5 секунд для
         // ПОКАЗУ сторінки. Створювати сесію тут означало, що достатньо відкрити
         // «Збирання» на групі з ще відкритим вікном замовлень — і в базі
@@ -1000,6 +1140,7 @@ router.get('/queue-stats', requireTelegramRoles(['warehouse', 'admin']), async (
       pendingCount, lockedByMeCount, lockedByOtherCount, activeCount,
       orderedPositions, pickingStatus, events, phase, sessionSummary, groupDayOfWeek,
       presentationMode, nextOrderingOpenAt, windowOpen, windowCloseAt, windowMessage,
+      serverNow, pickingReadyAt, pickingReady, pickingReadyInMs,
       supplementCount,
     });
   } catch (err) {

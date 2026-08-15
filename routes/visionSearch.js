@@ -133,8 +133,9 @@ router.post('/embed-all', adminOnly, asyncHandler(async (req, res) => {
 
 // ─── POST /query-vector — photo similarity search (Gemini) ────────────────────
 // Body: { key, threshold? }. The query photo was uploaded straight to R2 (vision-tmp/);
-// Gemini reads it by URL (no bytes through us), then we delete it. The photo's pixels
-// become a vector directly (native multimodal) and rank the catalogue via Atlas
+// The browser uploads the query photo straight to R2. The embedding endpoint still
+// requires image bytes today, so geminiClient fetches this temporary R2 object through
+// Render for the embedding call, then we delete it. The resulting vector ranks via Atlas
 // $vectorSearch over productvectors. Allowed for sellers (PhotoSearchModal).
 router.post('/query-vector', anyRole, asyncHandler(async (req, res) => {
   const key = req.body?.key;

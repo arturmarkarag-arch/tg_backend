@@ -383,14 +383,12 @@ router.get('/ordering-status', telegramAuth, async (req, res) => {
   const window = getWindowDescription(group.orderingSchedule);
   const sessionOpenAt = getOrderingWindowOpenAt(group.orderingSchedule).toISOString();
 
-  // Resolve the session once and return its id to the client. While ordering is
-  // open we materialise it if needed, so a resumed/old WebView can proactively
-  // detect the NEW weekly session before its next navigation/order write.
+  // Pure read: opening/refocusing a seller UI must never materialise a weekly
+  // OrderingSession. The server scheduler owns cycle creation; this endpoint only
+  // reports the session that already exists for the current cycle.
   let sessionId = null;
   try {
-    sessionId = status.isOpen
-      ? await getOrCreateSessionId(String(group._id), group.orderingSchedule)
-      : await findCurrentSessionId(String(group._id), group.orderingSchedule);
+    sessionId = await findCurrentSessionId(String(group._id), group.orderingSchedule);
   } catch (e) {
     sessionId = null;
   }

@@ -24,7 +24,7 @@ const { requireTelegramRoles } = require('../middleware/telegramAuth');
 const { appError, asyncHandler } = require('../utils/errors');
 const { getGeminiStatus } = require('../geminiClient');
 const { describeImageUrl } = require('../utils/productDescribe');
-const { embedProductAsync } = require('../utils/productEmbedding');
+const { embedProductAsync, getProductEmbeddingSource } = require('../utils/productEmbedding');
 const { getOrCreateSessionId, findCurrentSessionId } = require('../utils/getOrCreateSession');
 const { normalizeDeliveryGroup } = require('../utils/deliveryGroupHelpers');
 const { getOrderingWindowOpenAt, getOpenDateWarsaw } = require('../utils/orderingSchedule');
@@ -1364,6 +1364,7 @@ router.patch('/:id', staffOnly, asyncHandler(async (req, res) => {
   if (!product) throw appError('product_not_found');
 
   const fields = req.body;
+  const previousEmbeddingSource = getProductEmbeddingSource(product).url;
 
   const { orderNumber, name, category, brand, model, warehouse, status, price, quantity } = fields;
   const parsedOrderNumber = orderNumber !== undefined ? Number(orderNumber) : product.orderNumber;
@@ -1533,14 +1534,14 @@ router.patch('/:id', staffOnly, asyncHandler(async (req, res) => {
   } catch (e) {
   }
 
-  // Photo changed → its warehouse vector is stale; re-index in the background.
-  // force:true because the ProductVector row already exists — we must overwrite it
-  // (the mirror references this same row, so refreshing it updates the mirror too).
-  // CHAINED after the mirror push so the card's displayed photo (mirror.imageUrl) and
-  // the search vector are refreshed in a deterministic order rather than racing as two
-  // independent fire-and-forget tasks (one failing left card ≠ search-result photo).
-  if (patchFilenames.length > 0 && (product.originalImageUrl || product.imageUrls?.[0])) {
-    mirrorSynced.then(() => embedProductAsync(product, 'patch', { force: true }));
+  // Re-index only when the image that embeddings ACTUALLY consume changed. Editing
+  // labels/price on products/ while a clean originals/ photo stays identical must not
+  // resend the same JPEG to Gemini. A non-forced call is still useful here: if the
+  // previous embedding attempt failed and no ProductVector exists, it retries once.
+  const nextEmbeddingSource = getProductEmbeddingSource(product).url;
+  if (patchFilenames.length > 0 && nextEmbeddingSource) {
+    const embeddingSourceChanged = nextEmbeddingSource !== previousEmbeddingSource;
+    mirrorSynced.then(() => embedProductAsync(product, 'patch', { force: embeddingSourceChanged }));
   }
 
   res.json(product);

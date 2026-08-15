@@ -15,6 +15,7 @@ const TIMEZONE = 'Europe/Warsaw';
 const DAY_MINUTES = 24 * 60;
 const WEEK_MINUTES = 7 * DAY_MINUTES;
 const ALLOWED_MINUTES = new Set([0, 15, 30, 45]);
+const PICKING_READY_DELAY_MS = 60 * 1000;
 
 const DAY_SHORT_UK = ['Нд', 'Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб'];
 const DAY_FULL_UK  = ['неділю', 'понеділок', 'вівторок', 'середу', 'четвер', "п\'ятницю", 'суботу'];
@@ -368,6 +369,29 @@ function getOrderingWindowBoundsForOpenDate(openDate, schedule) {
 }
 
 /**
+ * Server-authoritative moment when warehouse picking may be started for the
+ * CURRENT ordering cycle. The one-minute safety gap is business policy, not UI
+ * decoration: every command path must enforce this same absolute timestamp.
+ */
+function getPickingReadyAt(schedule, now = new Date()) {
+  const openDate = getOpenDateWarsaw(schedule, now);
+  const { closeAt } = getOrderingWindowBoundsForOpenDate(openDate, schedule);
+  return new Date(closeAt.getTime() + PICKING_READY_DELAY_MS);
+}
+
+function getPickingReadiness(schedule, now = new Date()) {
+  const serverNow = new Date(now);
+  const pickingReadyAt = getPickingReadyAt(schedule, serverNow);
+  const remainingMs = Math.max(0, pickingReadyAt.getTime() - serverNow.getTime());
+  return {
+    serverNow,
+    pickingReadyAt,
+    pickingReady: remainingMs === 0,
+    pickingReadyInMs: remainingMs,
+  };
+}
+
+/**
  * Calendar delivery date for a concrete ordering session.
  *
  * Delivery weekday is independent from orderingSchedule.endDay. The delivery
@@ -417,6 +441,8 @@ module.exports = {
   getPreviousOrderingCloseAt,
   getOpenDateWarsaw,
   getOrderingWindowBoundsForOpenDate,
+  getPickingReadyAt,
+  getPickingReadiness,
   warsawWallClockToUTC,
   getSessionDeliveryDate,
   normalizeOrderingSchedule,
@@ -426,4 +452,5 @@ module.exports = {
   DAY_SHORT_UK,
   DAY_FULL_UK,
   ALLOWED_MINUTES,
+  PICKING_READY_DELAY_MS,
 };

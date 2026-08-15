@@ -12,7 +12,7 @@ const RegistrationToken = require('../../models/RegistrationToken');
 const { issueGoogleLinkToken } = require('../../services/googleLinkToken');
 const { getOrderingWindowOpenAt } = require('../../utils/orderingSchedule');
 const { normalizeDeliveryGroup } = require('../../utils/deliveryGroupHelpers');
-const { getOrCreateSessionId } = require('../../utils/getOrCreateSession');
+const { findCurrentSessionId } = require('../../utils/getOrCreateSession');
 const Order = require('../../models/Order');
 const { getIO } = require('../../socket');
 const { appError, asyncHandler } = require('../../utils/errors');
@@ -105,7 +105,7 @@ async function resolveOrderingSessionContext(user, userShop = null) {
   }
 
   const sessionOpenAt = getOrderingWindowOpenAt(group.orderingSchedule).toISOString();
-  const orderingSessionId = await getOrCreateSessionId(
+  const orderingSessionId = await findCurrentSessionId(
     String(resolvedGroupId),
     group.orderingSchedule,
   );

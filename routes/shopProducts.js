@@ -5,8 +5,8 @@ const { requireTelegramRoles } = require('../middleware/telegramAuth');
 const { appError, asyncHandler } = require('../utils/errors');
 const ShopProduct = require('../models/ShopProduct');
 const Product     = require('../models/Product');
-const { embedShopProductAsync } = require('../utils/shopProductEmbedding');
-const { embedProductAsync } = require('../utils/productEmbedding');
+const { embedShopProductAsync, getShopProductEmbeddingSource } = require('../utils/shopProductEmbedding');
+const { embedProductAsync, getProductEmbeddingSource } = require('../utils/productEmbedding');
 const { syncMirror } = require('../utils/upsertShopProduct');
 const { repriceActiveOrders } = require('../utils/repriceActiveOrders');
 const { getIO } = require('../socket');
@@ -172,6 +172,7 @@ router.post('/', staffOnly, asyncHandler(async (req, res) => {
 // with no two-master conflicts or sync loops (every write funnels to the Product).
 async function editMirrorThroughToWarehouse(product, fields, res) {
   const previousPrice = Number(product.price || 0);
+  const previousEmbeddingSource = getProductEmbeddingSource(product).url;
 
   if (fields.name               !== undefined) product.name               = String(fields.name).trim();
   if (fields.barcode            !== undefined) product.barcode            = String(fields.barcode).trim();
@@ -211,10 +212,13 @@ async function editMirrorThroughToWarehouse(product, fields, res) {
   // shop page expects.
   const mirror = await syncMirror(product);
 
-  // Photo changed → the warehouse vector (which the mirror references) is stale.
-  // Re-embed AFTER the mirror push so card photo + search vector refresh in order.
-  if (photoChanged && (product.originalImageUrl || product.imageUrls?.[0])) {
-    embedProductAsync(product, 'shop-writethrough', { force: true });
+  // Only force a vector refresh when the clean embedding source changed. A label-only
+  // redraw keeps the same originals/ URL and therefore must not resend that JPEG.
+  const nextEmbeddingSource = getProductEmbeddingSource(product).url;
+  if (photoChanged && nextEmbeddingSource) {
+    embedProductAsync(product, 'shop-writethrough', {
+      force: nextEmbeddingSource !== previousEmbeddingSource,
+    });
   }
 
   try {
@@ -249,6 +253,7 @@ router.patch('/:id', staffOnly, asyncHandler(async (req, res) => {
   }
 
   const fields = req.body;
+  const previousEmbeddingSource = getShopProductEmbeddingSource(item).url;
 
   // ── Scalar fields ──────────────────────────────────────────────────────────
   if (fields.name               !== undefined) item.name               = String(fields.name).trim();
@@ -296,9 +301,12 @@ router.patch('/:id', staffOnly, asyncHandler(async (req, res) => {
   } catch (e) {}
 
   res.json(item.toObject());
-  // New photo → the existing ProductVector row is stale; force a re-embed in the
-  // background (force:true overwrites it — plain calls skip when a row exists).
-  if (photoChanged && (item.imageUrl || item.originalImageUrl)) embedShopProductAsync(item, 'patch', { force: true });
+  const nextEmbeddingSource = getShopProductEmbeddingSource(item).url;
+  if (photoChanged && nextEmbeddingSource) {
+    embedShopProductAsync(item, 'patch', {
+      force: nextEmbeddingSource !== previousEmbeddingSource,
+    });
+  }
 }));
 
 // ── POST /:id/describe — generate + cache the human-friendly card description ──

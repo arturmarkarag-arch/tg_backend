@@ -84,9 +84,11 @@ async function embedImageBuffer(buffer, mimeType = 'image/jpeg', { extraText = '
   return { embedding, model: GEMINI_EMBEDDING_MODEL, dimensions: embedding.length };
 }
 
-// Fetches an image by URL (e.g. an R2 public original) and embeds it. Unlike the
-// old OpenAI path, Gemini's embedContent has no "fetch by URL" mode — we must
-// pull the bytes ourselves and inline them, so the image DOES transit our server.
+// Fetches an image by URL (e.g. an R2 public original) and embeds it.
+// IMPORTANT: gemini-embedding-2 currently documents image input as inline bytes or
+// Files API input, so the embedding path still downloads the image on Render and
+// sends it inline. Keep this isolated here so the remaining photo paths can avoid
+// server byte transit independently.
 async function embedImageUrl(imageUrl, { extraText = '' } = {}) {
   if (!apiKey) throw new Error(geminiStatus.error || 'GEMINI_API_KEY not configured');
   if (!imageUrl) {
@@ -108,30 +110,42 @@ async function embedText(text) {
   return { embedding, model: GEMINI_EMBEDDING_MODEL, dimensions: embedding.length };
 }
 
-// ─── Generative: describe a product photo in plain language ──────────────────
-// Uses the generative model (generateContent), NOT the embedding model. Fetches
-// the image bytes (Gemini has no fetch-by-URL) and returns the generated text.
+// ─── Generative: describe/translate/ask about a product photo ────────────────
+// Uses the Interactions API with the existing public R2 URL. Gemini fetches the
+// image from R2 itself, so the JPEG no longer travels R2 → Render → Google.
+// `store:false` keeps these one-shot product-photo requests stateless.
+function extractInteractionText(data) {
+  const steps = Array.isArray(data?.steps) ? data.steps : [];
+  return steps
+    .filter((step) => step?.type === 'model_output' && Array.isArray(step.content))
+    .flatMap((step) => step.content)
+    .filter((part) => part?.type === 'text')
+    .map((part) => String(part.text || ''))
+    .join('')
+    .trim();
+}
+
 async function generateTextFromImageUrl(imageUrl, prompt) {
   if (!apiKey) throw new Error(geminiStatus.error || 'GEMINI_API_KEY not configured');
   if (!imageUrl) return { text: '' };
-  const imgRes = await axios.get(imageUrl, { responseType: 'arraybuffer', timeout: 30000 });
-  const buffer = Buffer.from(imgRes.data);
-  const mimeType = imgRes.headers?.['content-type'] || guessMimeFromUrl(imageUrl);
-  const url = `${GEMINI_BASE_URL}/models/${GEMINI_TEXT_MODEL}:generateContent`;
+  const mimeType = guessMimeFromUrl(imageUrl);
+  const url = `${GEMINI_BASE_URL}/interactions`;
   const body = {
-    contents: [{
-      parts: [
-        { text: String(prompt || '') },
-        { inline_data: { mime_type: mimeType || 'image/jpeg', data: buffer.toString('base64') } },
-      ],
-    }],
+    model: GEMINI_TEXT_MODEL,
+    input: [
+      { type: 'text', text: String(prompt || '') },
+      { type: 'image', uri: String(imageUrl), mime_type: mimeType || 'image/jpeg' },
+    ],
+    store: false,
   };
   const res = await axios.post(url, body, {
     headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey },
     timeout: 45000,
   });
-  const parts = res.data?.candidates?.[0]?.content?.parts || [];
-  const text = parts.map((p) => p?.text || '').join('').trim();
+  const text = extractInteractionText(res.data);
+  if (!text && res.data?.status === 'completed') {
+    throw new Error('gemini_empty_text_response');
+  }
   return { text };
 }
 

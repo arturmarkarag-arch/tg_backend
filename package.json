@@ -42,7 +42,13 @@
     "test:receipt:cross": "vitest run tests/receiptPostCommitEdit.test.js tests/receiptLifecycleCrossGuards.contract.test.js tests/receiptLifecycleCrossHttp.test.js --hookTimeout=180000 --testTimeout=120000 --no-file-parallelism",
     "test:db:readiness:preflight": "node -r ../dev-use-test-db.js scripts/liveOrderPickingE2E.js",
     "test:live:receipt:preflight": "node -r ../dev-use-test-db.js scripts/liveReceiptLifecycleE2E.js",
-    "test:live:receipt": "node -r ../dev-use-test-db.js scripts/liveReceiptLifecycleE2E.js --execute"
+    "test:live:receipt": "node -r ../dev-use-test-db.js scripts/liveReceiptLifecycleE2E.js --execute",
+    "test:egress:photo:static": "node scripts/checkPhotoEgressV48_12.js",
+    "test:egress:photo:race": "node scripts/probeEmbeddingConcurrencyV48_11.js",
+    "test:egress:photo:preflight": "node -r ../dev-use-test-db.js scripts/livePhotoEgressProbeV48_11.js",
+    "test:egress:photo:live": "node -r ../dev-use-test-db.js scripts/livePhotoEgressProbeV48_11.js --execute",
+    "test:picking:authority": "vitest run tests/pickingServerAuthority.test.js tests/pickingServerAuthority.contract.test.js --hookTimeout=180000 --testTimeout=120000 --no-file-parallelism",
+    "test:picking:readiness": "vitest run tests/pickingReadinessBoundary.test.js tests/pickingReadinessAuthority.contract.test.js --hookTimeout=180000 --testTimeout=120000 --no-file-parallelism"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1030.0",
