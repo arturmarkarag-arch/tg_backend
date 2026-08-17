@@ -104,7 +104,6 @@ check(String(pkg.scripts['test:live:boot:v48.18'] || '').includes('-r ../dev-use
 const testFiles = walk(path.join(ROOT, 'tests')).filter((file) => /(?:\.contract)?\.test\.js$/.test(file));
 const unsafeIndexFiles = [];
 for (const file of testFiles) {
-  if (file.endsWith(`${path.sep}sellerVisualOrderingAlgo.test.js`)) continue;
   const source = fs.readFileSync(file, 'utf8');
   if (source.includes('.indexOf(')) unsafeIndexFiles.push(path.relative(ROOT, file));
 }

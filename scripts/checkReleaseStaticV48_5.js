@@ -13,7 +13,7 @@ const checks = [
   'scripts/checkV47_14ReceiptPhotoComments.js',
   'scripts/checkV47_15WarehouseRemainder.js',
   'scripts/checkV47_16ReceiptBatchAndIncoming.js',
-  'scripts/checkSellerVisualOrderingV48_1.js',
+  'scripts/checkSellerCatalogOrdering.js',
   'scripts/checkV48_2SupplementGroupAtBatch.js',
   'scripts/checkV48_4LiveHarness.js',
   'scripts/checkV48_5TestDbSafety.js',

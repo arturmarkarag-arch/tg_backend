@@ -28,11 +28,10 @@ const { describeImageUrl } = require('../utils/productDescribe');
 const { embedProductAsync, getProductEmbeddingSource } = require('../utils/productEmbedding');
 const { getOrCreateSessionId, findCurrentSessionId } = require('../utils/getOrCreateSession');
 const { normalizeDeliveryGroup } = require('../utils/deliveryGroupHelpers');
-const { getOrderingWindowOpenAt, getOpenDateWarsaw } = require('../utils/orderingSchedule');
-const { formatWarsawDateKey, warsawDateKeyToUtcRange } = require('../utils/warsawDateTime');
+const { getOrderingWindowOpenAt } = require('../utils/orderingSchedule');
+const { warsawDateKeyToUtcRange } = require('../utils/warsawDateTime');
 const cache = require('../utils/cache');
 const { buildWarehouseStockEstimate } = require('../utils/warehouseStockEstimate');
-const { getSellerVisualOrder } = require('../services/sellerVisualOrdering');
 const { appendProductsToBlockDocument } = require('../services/blockMembershipPrimitives');
 
 const staffOnly = requireTelegramRoles(['admin', 'warehouse']);
@@ -45,28 +44,21 @@ const registeredOnly = requireTelegramRoles(['seller', 'admin', 'warehouse']);
 // advances and the product becomes part of the ordinary catalogue automatically.
 async function getSellerCatalogCycleContext(req) {
   if (req.telegramUser?.role !== 'seller' || !req.telegramUser?.shopId) {
-    // Staff can open the same "Товари" screen for diagnostics. Keep that
-    // presentation isolated from seller-group cycles and refresh it daily.
-    return {
-      cutoff: null,
-      cacheScope: `staff:${formatWarsawDateKey(new Date())}`,
-    };
+    return { cutoff: null, orderingSessionId: null };
   }
   const shop = await Shop.findById(req.telegramUser.shopId, 'deliveryGroupId').lean();
   if (!shop?.deliveryGroupId) {
-    return { cutoff: null, cacheScope: `seller:${req.telegramUser.id || req.telegramId || 'no-shop'}` };
+    return { cutoff: null, orderingSessionId: null };
   }
   const group = normalizeDeliveryGroup(await DeliveryGroup.findById(shop.deliveryGroupId).lean());
   if (!group?.orderingSchedule) {
-    return { cutoff: null, cacheScope: `group:${String(shop.deliveryGroupId)}:no-schedule` };
+    return { cutoff: null, orderingSessionId: null };
   }
   let orderingSessionId = null;
   try { orderingSessionId = await findCurrentSessionId(String(shop.deliveryGroupId), group.orderingSchedule); } catch (_) {}
   return {
     cutoff: getOrderingWindowOpenAt(group.orderingSchedule),
-    deliveryGroupId: String(shop.deliveryGroupId),
     orderingSessionId: orderingSessionId ? String(orderingSessionId) : null,
-    cacheScope: `group:${String(shop.deliveryGroupId)}:${getOpenDateWarsaw(group.orderingSchedule)}`,
   };
 }
 
@@ -447,18 +439,20 @@ router.get('/drafts', staffOnly, asyncHandler(async (req, res) => {
   res.json(products);
 }));
 
-// Seller ordering catalogue — presentation-only visual sequence.
+// Seller ordering catalogue — ordinary stable warehouse sequence.
 //
 // IMPORTANT scope:
 //   - ONLY Product.status=active;
 //   - ONLY products physically present in Block.productIds;
 //   - ONLY ordinary-order-enabled products;
 //   - seller cycle cutoff remains authoritative;
-//   - embeddings/order never mutate Block, PickingTask, Product.orderNumber or session data.
+//   - products published through SupplementWave for this exact session stay excluded.
 //
-// The frontend receives ONE already-ordered `items` array. It never receives
-// embeddings or a second array telling React how to sort.
-async function getEligibleSellerCatalogProducts(req) {
+// Mongo owns ordering and pagination. The HTTP path never loads ProductVector,
+// never builds an all-products distance matrix and never acquires a Redis lock.
+const SELLER_CATALOG_SORT = Object.freeze({ orderNumber: 1, createdAt: -1, _id: 1 });
+
+async function getSellerCatalogBasePipeline(req) {
   const context = await getSellerCatalogCycleContext(req);
   const match = {
     status: 'active',
@@ -475,7 +469,7 @@ async function getEligibleSellerCatalogProducts(req) {
   }
 
   applySellerCycleCutoff(match, context.cutoff);
-  const products = await Product.aggregate([
+  return [
     { $match: match },
     {
       $lookup: {
@@ -487,37 +481,25 @@ async function getEligibleSellerCatalogProducts(req) {
       },
     },
     { $match: { '_block.0': { $exists: true } } },
-    { $project: { _id: 1, orderNumber: 1, createdAt: 1 } },
-    { $sort: { orderNumber: 1, createdAt: -1, _id: 1 } },
-  ]);
-  return { context, products };
-}
-
-async function getOrderedSellerCatalogIds(req) {
-  const { context, products } = await getEligibleSellerCatalogProducts(req);
-  const visual = await getSellerVisualOrder({
-    cacheScope: context.cacheScope,
-    eligibleProducts: products,
-  });
-  return { ids: visual.ids, meta: visual.meta };
+  ];
 }
 
 router.get('/catalog', registeredOnly, asyncHandler(async (req, res) => {
   const limit = Math.min(50, Math.max(1, Number(req.query.limit) || 24));
   const offset = Math.max(0, Number(req.query.offset) || 0);
-  const { ids } = await getOrderedSellerCatalogIds(req);
-  const total = ids.length;
-  const pageIds = ids.slice(offset, offset + limit);
-  if (!pageIds.length) {
-    return res.json({ items: [], offset, limit, total, hasMore: false });
-  }
+  const basePipeline = await getSellerCatalogBasePipeline(req);
+  const countRows = await Product.aggregate([...basePipeline, { $count: 'total' }]);
+  const total = countRows[0]?.total ?? 0;
+  const products = await Product.aggregate([
+    ...basePipeline,
+    { $project: { _block: 0 } },
+    { $sort: SELLER_CATALOG_SORT },
+    { $skip: offset },
+    { $limit: limit },
+  ]);
 
-  const docs = await Product.find({ _id: { $in: pageIds } }).lean();
-  const byId = new Map(docs.map((product) => [String(product._id), product]));
-  const products = pageIds.map((id) => byId.get(String(id))).filter(Boolean);
-  // Preserve the existing seller-card shape exactly; only the ORDER of rows is
-  // new. This keeps order-save snapshots, "new" badges and image rendering
-  // independent from the visual-order rollout.
+  // Preserve the seller-card response shape while returning the ordinary
+  // warehouse order directly from MongoDB.
   const items = products.map((product) => ({
     id: product._id,
     title: getProductTitle(product),
@@ -554,15 +536,39 @@ router.get('/catalog/:id/position', registeredOnly, asyncHandler(async (req, res
   if (!mongoose.Types.ObjectId.isValid(id)) {
     return res.status(400).json({ error: 'invalid_id' });
   }
-  const { ids } = await getOrderedSellerCatalogIds(req);
-  const position = ids.indexOf(String(id));
-  if (position < 0) return res.status(404).json({ error: 'not_in_catalog' });
-  return res.json({ position, total: ids.length });
+  const target = await Product.findById(id, 'orderNumber createdAt').lean();
+  if (!target) return res.status(404).json({ error: 'not_in_catalog' });
+
+  const basePipeline = await getSellerCatalogBasePipeline(req);
+  const targetObjectId = new mongoose.Types.ObjectId(id);
+  const [selfResult] = await Product.aggregate([
+    ...basePipeline,
+    { $match: { _id: targetObjectId } },
+    { $count: 'count' },
+  ]);
+  if (!selfResult?.count) return res.status(404).json({ error: 'not_in_catalog' });
+
+  const targetOrderNumber = target.orderNumber ?? 0;
+  const beforeMatch = {
+    $or: [
+      { orderNumber: { $lt: targetOrderNumber } },
+      { orderNumber: targetOrderNumber, createdAt: { $gt: target.createdAt } },
+      { orderNumber: targetOrderNumber, createdAt: target.createdAt, _id: { $lt: targetObjectId } },
+    ],
+  };
+  const [beforeRows, totalRows] = await Promise.all([
+    Product.aggregate([...basePipeline, { $match: beforeMatch }, { $count: 'count' }]),
+    Product.aggregate([...basePipeline, { $count: 'count' }]),
+  ]);
+  return res.json({
+    position: beforeRows[0]?.count ?? 0,
+    total: totalRows[0]?.count ?? 0,
+  });
 }));
 
 // Legacy orderNumber-position resolver for callers of the generic /v1/products list.
 // Seller Товари → Товари deep-links use /catalog/:id/position above so their
-// position always matches the backend visual sequence. Matches the GET / filter
+// position always matches the dedicated seller eligibility rules. Matches the GET / filter
 // (not archived + in a block) and sort (orderNumber asc, createdAt desc,
 // _id asc) exactly, so the returned `position` lines up with the `offset`
 // clients use to page in.
