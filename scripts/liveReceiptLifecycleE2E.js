@@ -29,14 +29,18 @@ const User = require('../models/User');
 const Receipt = require('../models/Receipt');
 const ReceiptItem = require('../models/ReceiptItem');
 const Product = require('../models/Product');
+const Shop = require('../models/Shop');
 const ShopProduct = require('../models/ShopProduct');
 const ProductVector = require('../models/ProductVector');
 const Block = require('../models/Block');
 const Order = require('../models/Order');
 const PickingTask = require('../models/PickingTask');
 const SupplementOffer = require('../models/SupplementOffer');
+const SupplementWave = require('../models/SupplementWave');
 const SupplementRequest = require('../models/SupplementRequest');
 const DeliveryGroup = require('../models/DeliveryGroup');
+const OrderingSession = require('../models/OrderingSession');
+const { getOrCreateSessionId } = require('../utils/getOrCreateSession');
 const AppSetting = require('../models/AppSetting');
 const ReceiptItemLog = require('../models/ReceiptItemLog');
 const { signSession } = require('../utils/jwt');
@@ -54,7 +58,7 @@ const RUN_ID = `${new Date().toISOString().replace(/[-:.TZ]/g, '').slice(0, 14)}
 const MARKER = `__LIVE_RECEIPT_E2E__${RUN_ID}`;
 const MANIFEST_KEY = `live-e2e.run.${RUN_ID}`;
 const ids = {
-  users: [], receipts: [], items: [], products: [], groups: [], blocks: [], offers: [], orders: [], tasks: [],
+  users: [], receipts: [], items: [], products: [], groups: [], shops: [], sessions: [], waves: [], blocks: [], offers: [], orders: [], tasks: [],
 };
 let server = null;
 let baseUrl = '';
@@ -79,8 +83,9 @@ async function saveManifest(phase) {
       kind: 'receipt', runId: RUN_ID, marker: MARKER, phase, updatedAt: new Date().toISOString(),
       receipt: {
         userIds: ids.users.map(String), receiptIds: ids.receipts.map(String), itemIds: ids.items.map(String),
-        productIds: ids.products.map(String), groupIds: ids.groups.map(String), blockIds: ids.blocks.map(String),
-        offerIds: ids.offers.map(String), orderIds: ids.orders.map(String), taskIds: ids.tasks.map(String),
+        productIds: ids.products.map(String), groupIds: ids.groups.map(String), shopIds: ids.shops.map(String), sessionIds: ids.sessions.map(String),
+        waveIds: ids.waves.map(String), blockIds: ids.blocks.map(String), offerIds: ids.offers.map(String),
+        orderIds: ids.orders.map(String), taskIds: ids.tasks.map(String),
       },
     } } },
     { upsert: true, new: true, setDefaultsOnInsert: true },
@@ -105,6 +110,22 @@ async function api(method, route, { json, fields } = {}) {
   let data = null;
   try { data = text ? JSON.parse(text) : null; } catch { data = { _raw: text }; }
   return { status: res.status, data };
+}
+
+async function retireTargetNeutralFixture(itemOrId) {
+  const itemId = itemOrId?._id || itemOrId;
+  if (!itemId) return;
+  // Unlike Vitest, this live harness executes every scenario in one shared DB run.
+  // Modern v2 supplement items are intentionally target-neutral, so a confirmed
+  // item from an earlier scenario would be picked up by every later synthetic
+  // delivery-group publication. Retiring only the harness batch-eligibility bit
+  // after that scenario's assertions gives the live suite the same isolation as
+  // per-test database cleanup without changing production publication logic.
+  await ReceiptItem.updateOne(
+    { _id: itemId },
+    { $set: { supplementBatchVersion: 0 } },
+  );
+  watchdog?.touch('fixture-isolation', String(itemId));
 }
 
 async function seedDraft() {
@@ -162,6 +183,29 @@ async function seedConfirmed({ supplement = false, publishRequested = false, war
   return { receipt, item, product };
 }
 
+async function createCurrentDeliveryGroup(name, { open = false } = {}) {
+  const { deliveryDay, openSchedule, closedSchedule } = buildOpenClosedTestSchedules(new Date());
+  const schedule = open ? openSchedule : closedSchedule;
+  const group = remember('groups', await DeliveryGroup.create({ name, dayOfWeek: deliveryDay, orderingSchedule: schedule }));
+  remember('shops', await Shop.create({
+    name: `${MARKER}:${name}:shop`,
+    address: 'TEST receipt harness',
+    deliveryGroupId: String(group._id),
+    isActive: true,
+  }));
+  const sessionId = await getOrCreateSessionId(String(group._id), schedule);
+  ids.sessions.push(new mongoose.Types.ObjectId(sessionId));
+  group.orderingSessionId = sessionId;
+  await saveManifest('delivery_group_session_seeded');
+  return group;
+}
+
+async function publishGroup(group) {
+  return api('POST', `/api/receipts/supplement-batches/${group._id}/publish`, {
+    json: { orderingSessionId: String(group.orderingSessionId) },
+  });
+}
+
 async function startApp() {
   const app = require('../app');
   server = http.createServer(app);
@@ -176,12 +220,19 @@ async function startApp() {
 
 async function cleanupPass() {
   const itemIds = ids.items;
+  const linkedOffers = itemIds.length
+    ? await SupplementOffer.find({ receiptItemId: { $in: itemIds } }, '_id waveId').lean()
+    : [];
+  const dynamicWaveIds = linkedOffers.map((row) => row.waveId).filter(Boolean);
+  const waveIds = [...new Set([...ids.waves, ...dynamicWaveIds].map(String))]
+    .filter(Boolean).map((id) => new mongoose.Types.ObjectId(id));
   const dynamicProducts = await Product.find({ receiptItemId: { $in: itemIds } }, '_id').lean();
   const productIds = [...new Set([...ids.products, ...dynamicProducts.map((row) => row._id)].map(String))]
     .map((id) => new mongoose.Types.ObjectId(id));
   await Promise.all([
-    SupplementRequest.deleteMany({ offerId: { $in: ids.offers } }),
-    SupplementOffer.deleteMany({ $or: [{ _id: { $in: ids.offers } }, { receiptItemId: { $in: itemIds } }] }),
+    SupplementRequest.deleteMany({ $or: [{ offerId: { $in: ids.offers } }, { waveId: { $in: waveIds } }] }),
+    SupplementOffer.deleteMany({ $or: [{ _id: { $in: ids.offers } }, { receiptItemId: { $in: itemIds } }, { waveId: { $in: waveIds } }] }),
+    SupplementWave.deleteMany({ _id: { $in: waveIds } }),
     PickingTask.deleteMany({ $or: [{ _id: { $in: ids.tasks } }, { productId: { $in: productIds } }] }),
     Order.deleteMany({ $or: [{ _id: { $in: ids.orders } }, { 'items.productId': { $in: productIds } }] }),
     Block.deleteMany({ $or: [{ _id: { $in: ids.blocks } }, { productIds: { $in: productIds } }] }),
@@ -191,6 +242,8 @@ async function cleanupPass() {
     ReceiptItem.deleteMany({ _id: { $in: itemIds } }),
     Product.deleteMany({ $or: [{ _id: { $in: productIds } }, { receiptItemId: { $in: itemIds } }] }),
     Receipt.deleteMany({ _id: { $in: ids.receipts } }),
+    OrderingSession.deleteMany({ _id: { $in: ids.sessions } }),
+    Shop.deleteMany({ _id: { $in: ids.shops } }),
     DeliveryGroup.deleteMany({ _id: { $in: ids.groups } }),
     User.deleteMany({ _id: { $in: ids.users } }),
   ]);
@@ -198,6 +251,9 @@ async function cleanupPass() {
 
 async function receiptLeftoverCounts() {
   const itemIds = ids.items;
+  const linkedOffers = itemIds.length ? await SupplementOffer.find({ receiptItemId: { $in: itemIds } }, '_id waveId').lean() : [];
+  const waveIds = [...new Set([...ids.waves, ...linkedOffers.map((row) => row.waveId).filter(Boolean)].map(String))]
+    .filter(Boolean).map((id) => new mongoose.Types.ObjectId(id));
   const dynamicProducts = itemIds.length ? await Product.find({ receiptItemId: { $in: itemIds } }, '_id').lean() : [];
   const productIds = [...new Set([...ids.products, ...dynamicProducts.map((row) => row._id)].map(String))]
     .filter(Boolean).map((id) => new mongoose.Types.ObjectId(id));
@@ -211,8 +267,11 @@ async function receiptLeftoverCounts() {
     blocks: productIds.length || ids.blocks.length ? await Block.countDocuments({ $or: [{ _id: { $in: ids.blocks } }, { productIds: { $in: productIds } }] }) : 0,
     orders: productIds.length || ids.orders.length ? await Order.countDocuments({ $or: [{ _id: { $in: ids.orders } }, { 'items.productId': { $in: productIds } }] }) : 0,
     tasks: productIds.length || ids.tasks.length ? await PickingTask.countDocuments({ $or: [{ _id: { $in: ids.tasks } }, { productId: { $in: productIds } }] }) : 0,
-    offers: itemIds.length || ids.offers.length ? await SupplementOffer.countDocuments({ $or: [{ _id: { $in: ids.offers } }, { receiptItemId: { $in: itemIds } }] }) : 0,
+    offers: itemIds.length || ids.offers.length || waveIds.length ? await SupplementOffer.countDocuments({ $or: [{ _id: { $in: ids.offers } }, { receiptItemId: { $in: itemIds } }, { waveId: { $in: waveIds } }] }) : 0,
+    waves: waveIds.length ? await SupplementWave.countDocuments({ _id: { $in: waveIds } }) : 0,
+    sessions: ids.sessions.length ? await OrderingSession.countDocuments({ _id: { $in: ids.sessions } }) : 0,
     logs: ids.receipts.length ? await ReceiptItemLog.countDocuments({ receiptId: { $in: ids.receipts } }) : 0,
+    shops: ids.shops.length ? await Shop.countDocuments({ _id: { $in: ids.shops } }) : 0,
     groups: ids.groups.length ? await DeliveryGroup.countDocuments({ _id: { $in: ids.groups } }) : 0,
   };
 }
@@ -235,6 +294,8 @@ async function preflight() {
 
   const offerIndexes = await SupplementOffer.collection.indexes();
   ok(offerIndexes.some((idx) => idx.unique && idx.key?.receiptItemId === 1 && idx.key?.deliveryGroupId === 1), 'SupplementOffer item+group unique index exists');
+  const waveIndexes = await SupplementWave.collection.indexes();
+  ok(waveIndexes.some((idx) => idx.unique && idx.key?.publicationKey === 1), 'SupplementWave publicationKey unique index exists');
   const blockIndexes = await Block.collection.indexes();
   ok(blockIndexes.some((idx) => idx.name === 'one_product_per_nonempty_block' && idx.unique), 'Block membership unique index exists');
 
@@ -245,6 +306,22 @@ async function preflight() {
     });
     ok(true, 'Mongo transaction round-trip');
   } finally { session.endSession(); }
+
+  // Publishing a v2 supplement batch is deliberately global over the current
+  // target-neutral ready pool. A live harness must therefore refuse to start if
+  // TEST already contains an unrelated publishable v2 item; otherwise the suite
+  // could attach real TEST data to its synthetic Waves.
+  const ambientCandidates = await ReceiptItem.find({
+    status: 'confirmed',
+    routingVersion: { $gte: 1 },
+    'routing.supplement': true,
+    supplementBatchVersion: { $gte: 2 },
+  }, 'receiptId').lean();
+  const ambientReceiptIds = [...new Set(ambientCandidates.map((row) => String(row.receiptId)).filter(Boolean))];
+  const ambientPublishableReceipts = ambientReceiptIds.length
+    ? await Receipt.countDocuments({ _id: { $in: ambientReceiptIds }, status: 'completed' })
+    : 0;
+  eq(ambientPublishableReceipts, 0, 'No unrelated target-neutral supplement items are publishable before receipt live E2E');
 
   const [leftovers, orphanManifests] = await Promise.all([
     Receipt.countDocuments({ receiptNumber: { $regex: '^__LIVE_RECEIPT_E2E__' } }),
@@ -260,6 +337,8 @@ const FINGERPRINT_SPECS = [
   { name: 'products', model: Product, projection: '_id status quantity receiptItemId updatedAt' },
   { name: 'blocks', model: Block, projection: '_id blockId productIds version updatedAt' },
   { name: 'groups', model: DeliveryGroup, projection: '_id dayOfWeek orderingSchedule updatedAt' },
+  { name: 'sessions', model: OrderingSession, projection: '_id groupId openDate pickingStatus updatedAt' },
+  { name: 'supplementWaves', model: SupplementWave, projection: '_id deliveryGroupId orderingSessionId status publicationKey updatedAt' },
   { name: 'receipts', model: Receipt, projection: '_id receiptNumber status updatedAt' },
   { name: 'receiptItems', model: ReceiptItem, projection: '_id receiptId status routing stockApplied updatedAt' },
 ];
@@ -331,6 +410,7 @@ async function run() {
     const edit = await api('PATCH', `/api/receipts/${receipt._id}/items/${item._id}`, { fields: { price: 3 } });
     eq(edit.status, 409, 'deferred publish blocks price edit');
     eq((await Product.findById(product._id).lean()).price, 2, 'product price unchanged');
+    await retireTargetNeutralFixture(item);
   }
 
   console.log('\nScenario 3: every published offer state is irreversible even with zero requests');
@@ -347,32 +427,36 @@ async function run() {
     eq(remove.status, 409, `${status} offer blocks delete`);
     const edit = await api('PATCH', `/api/receipts/${receipt._id}/items/${item._id}`, { fields: { qtyPerPackage: 24 } });
     eq(edit.status, 409, `${status} offer blocks commercial edit`);
+    await retireTargetNeutralFixture(item);
   }
 
-  console.log('\nScenario 4: concurrent batch assignment chooses one group');
+  console.log('\nScenario 4: one item can publish independently into multiple current delivery sessions');
   {
-    const { deliveryDay, openSchedule } = buildOpenClosedTestSchedules();
     const [a, b] = await Promise.all([
-      DeliveryGroup.create({ name: `${MARKER}-A`, dayOfWeek: deliveryDay, orderingSchedule: openSchedule }),
-      DeliveryGroup.create({ name: `${MARKER}-B`, dayOfWeek: deliveryDay, orderingSchedule: openSchedule }),
+      createCurrentDeliveryGroup(`${MARKER}-A`, { open: true }),
+      createCurrentDeliveryGroup(`${MARKER}-B`, { open: true }),
     ]);
-    remember('groups', a); remember('groups', b); await saveManifest('groups_seeded');
-    const { item } = await seedConfirmed({ supplement: true, publishRequested: false, warehouse: false });
-    const [ra, rb] = await Promise.all([
-      api('POST', `/api/receipts/supplement-batches/${a._id}/publish`),
-      api('POST', `/api/receipts/supplement-batches/${b._id}/publish`),
-    ]);
+    const { item, product } = await seedConfirmed({ supplement: true, publishRequested: false, warehouse: false });
+    // Modern supplement-only publication has no warehouse Product dependency.
+    await Product.deleteOne({ _id: product._id });
+    await ReceiptItem.updateOne({ _id: item._id }, { $set: { createdProductId: null } });
+    const [ra, rb] = await Promise.all([publishGroup(a), publishGroup(b)]);
     eq(ra.status, 200, 'batch publish A returned');
     eq(rb.status, 200, 'batch publish B returned');
-    eq(Number(ra.data.selectedCount || 0) + Number(rb.data.selectedCount || 0), 1, 'only one concurrent group claims item');
+    eq(Number(ra.data.selectedCount || 0), 1, 'group A receives its own Wave item');
+    eq(Number(rb.data.selectedCount || 0), 1, 'group B receives its own Wave item');
     const fresh = await ReceiptItem.findById(item._id).lean();
-    const chosen = String(fresh.routing.supplementDeliveryGroupId || '');
-    ok([String(a._id), String(b._id)].includes(chosen), 'item assigned to exactly one requested group');
-    ok(fresh.supplementPublishRequestedAt, 'publication marker persisted');
-    eq(await SupplementOffer.countDocuments({ receiptItemId: item._id }), 0, 'open ordinary window defers offer creation');
-    const other = chosen === String(a._id) ? b : a;
-    const retry = await api('POST', `/api/receipts/supplement-batches/${other._id}/publish`);
-    eq(retry.data.selectedCount, 0, 'second group cannot reassign claimed item');
+    ok(fresh.supplementPublishRequestedAt, 'first-publication audit marker persisted');
+    eq(await SupplementOffer.countDocuments({ receiptItemId: item._id }), 2, 'one ReceiptItem has independent Wave children for two groups');
+    eq(await SupplementWave.countDocuments({}), 2, 'each group/session publication owns its own Wave');
+    const waveA = await SupplementWave.findOne({ deliveryGroupId: String(a._id) }).lean();
+    const waveB = await SupplementWave.findOne({ deliveryGroupId: String(b._id) }).lean();
+    remember('waves', waveA); remember('waves', waveB);
+    eq(String(waveA.orderingSessionId), String(a.orderingSessionId), 'Wave A pins exact current OrderingSession');
+    eq(String(waveB.orderingSessionId), String(b.orderingSessionId), 'Wave B pins exact current OrderingSession');
+    const retry = await publishGroup(a);
+    eq(retry.data.selectedCount, 0, 'same exact session is idempotent on retry');
+    await retireTargetNeutralFixture(item);
   }
 
   console.log('\nScenario 5: block membership freezes receipt rollback and commercial edit');
@@ -422,18 +506,16 @@ async function run() {
     eq(res.status, 200, 'additive remainder succeeds after supplement publication');
     ok(res.data.routing?.warehouse && res.data.routing?.supplement, 'primary supplement route preserved with warehouse=true');
     eq(await SupplementOffer.countDocuments({ receiptItemId: item._id }), 1, 'supplement offer preserved');
+    await retireTargetNeutralFixture(item);
   }
 
   console.log('\nScenario 9: publication races cannot split receipt state');
   {
-    const { deliveryDay, openSchedule } = buildOpenClosedTestSchedules();
-    const group = remember('groups', await DeliveryGroup.create({
-      name: `${MARKER}-RACE-U`, dayOfWeek: deliveryDay, orderingSchedule: openSchedule,
-    }));
+    const group = await createCurrentDeliveryGroup(`${MARKER}-RACE-U`, { open: true });
     await saveManifest('race_unconfirm_group');
     const { receipt, item } = await seedConfirmed({ supplement: true, publishRequested: false, warehouse: false });
     const [publish, rollback] = await Promise.all([
-      api('POST', `/api/receipts/supplement-batches/${group._id}/publish`),
+      publishGroup(group),
       api('POST', `/api/receipts/${receipt._id}/items/${item._id}/unconfirm`),
     ]);
     eq(publish.status, 200, 'publish/unconfirm race publish endpoint returns');
@@ -449,17 +531,15 @@ async function run() {
       ok(fresh.supplementPublishRequestedAt, 'publish winner keeps publication marker');
       eq(String(fresh.routing.supplementDeliveryGroupId), String(group._id), 'publish winner keeps selected group');
     }
+    await retireTargetNeutralFixture(item);
   }
 
   {
-    const { deliveryDay, openSchedule } = buildOpenClosedTestSchedules();
-    const group = remember('groups', await DeliveryGroup.create({
-      name: `${MARKER}-RACE-D`, dayOfWeek: deliveryDay, orderingSchedule: openSchedule,
-    }));
+    const group = await createCurrentDeliveryGroup(`${MARKER}-RACE-D`, { open: true });
     await saveManifest('race_delete_group');
     const { receipt, item } = await seedConfirmed({ supplement: true, publishRequested: false, warehouse: false });
     const [publish, remove] = await Promise.all([
-      api('POST', `/api/receipts/supplement-batches/${group._id}/publish`),
+      publishGroup(group),
       api('DELETE', `/api/receipts/${receipt._id}/items/${item._id}`),
     ]);
     eq(publish.status, 200, 'publish/delete race publish endpoint returns');
@@ -473,6 +553,7 @@ async function run() {
       ok(fresh?.supplementPublishRequestedAt, 'published item survives delete race');
       eq(String(fresh.routing.supplementDeliveryGroupId), String(group._id), 'published item keeps selected group after delete race');
     }
+    if (fresh) await retireTargetNeutralFixture(item);
   }
 }
 

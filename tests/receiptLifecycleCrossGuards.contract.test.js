@@ -63,19 +63,20 @@ describe('V48.7 receipt cross-lifecycle guards', () => {
   it('batch publish cannot steal an item that was concurrently unconfirmed/deleted or reassign an already claimed item', () => {
     const publishRoute = sliceBetweenOrThrow(receipts, "router.post('/supplement-batches/:deliveryGroupId/publish'", "router.get('/:id'", { label: 'supplement batch publish route' });
 
-    const updateStart = indexOrThrow(publishRoute, 'await ReceiptItem.updateMany(');
-    const selectedStart = indexOrThrow(publishRoute, 'const selectedRows = await ReceiptItem.find(', { from: updateStart });
-    const claim = sliceIndexesOrThrow(publishRoute, updateStart, selectedStart, { label: 'supplement batch claim update' });
-    expect(claim).toContain("status: 'confirmed'");
-    expect(claim).toContain("'routing.supplement': true");
-    expect(claim).toContain('createdProductId: { $ne: null }');
-    expect(claim).toContain('supplementPublishRequestedAt: null');
+    const candidatesStart = indexOrThrow(publishRoute, 'const candidates = await ReceiptItem.find(');
+    const existingStart = indexOrThrow(publishRoute, "const existingTargetItems = await SupplementOffer.distinct", { from: candidatesStart });
+    const candidates = sliceIndexesOrThrow(publishRoute, candidatesStart, existingStart, { label: 'supplement candidate fence' });
+    expect(candidates).toContain("status: 'confirmed'");
+    expect(candidates).toContain("'routing.supplement': true");
+    expect(candidates).toContain('routingVersion: { $gte: 1 }');
+    expect(candidates).toContain('supplementBatchVersion: { $gte: 1 }');
+    expect(candidates).not.toContain('createdProductId: { $ne: null }');
 
+    const selectedStart = indexOrThrow(publishRoute, 'const selectedRows = publishable.filter', { from: existingStart });
     const selectedEnd = indexOrThrow(publishRoute, 'if (!selectedRows.length)', { from: selectedStart });
-    const selected = sliceIndexesOrThrow(publishRoute, selectedStart, selectedEnd, { label: 'supplement batch selected rows' });
-    expect(selected).toContain("status: 'confirmed'");
-    expect(selected).toContain('createdProductId: { $ne: null }');
-    expect(selected).toContain("'routing.supplementDeliveryGroupId': deliveryGroupId");
-    expect(selected).toContain('supplementPublishRequestedAt: now');
+    const selected = sliceIndexesOrThrow(publishRoute, existingStart, selectedEnd, { label: 'exact-session publication fence' });
+    expect(selected).toContain('orderingSessionId: target.orderingSessionId');
+    expect(selected).toContain('waveId: { $ne: null }');
+    expect(selected).toContain('existingSet');
   });
 });

@@ -21,6 +21,7 @@ const state = {
   tokenUsed: false,
   committed: false,
   migrateCalled: false,
+  published: null,
 };
 
 const nextShop   = () => (state.shopReads.length > 1 ? state.shopReads.shift() : state.shopReads[0]);
@@ -47,6 +48,12 @@ stub('./models/User', {
 
 stub('./utils/lock', { withLock: (_key, fn) => fn() });
 stub('./utils/modelCache', { invalidateShop: async () => {} });
+
+stub('./services/shopAssignmentCommand', {
+  publishShopAssignmentTransition: async (transition) => {
+    state.published = transition;
+  },
+});
 
 stub('./services/migrateSellerShop', {
   migrateSellerShop: async () => {
@@ -89,6 +96,7 @@ beforeEach(() => {
   state.tokenUsed = false;
   state.committed = false;
   state.migrateCalled = false;
+  state.published = null;
 });
 
 describe('redeemShopInvite — the code survives every refusal', () => {
@@ -97,6 +105,8 @@ describe('redeemShopInvite — the code survives every refusal', () => {
     expect(res.ok).toBe(true);
     expect(state.migrateCalled).toBe(true);
     expect(state.tokenUsed).toBe(true);
+    expect(state.published?.assignmentChanged).toBe(true);
+    expect(state.published?.toShopId).toBe('shop-1');
   });
 
   it('keeps the code alive when the shop went inactive mid-flight', async () => {

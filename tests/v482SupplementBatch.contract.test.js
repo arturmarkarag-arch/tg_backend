@@ -10,22 +10,21 @@ const model = read('models/ReceiptItem.js');
 describe('V48.2 supplement batch-group release contract', () => {
   test('current regular supplement items can confirm unassigned and are marked batch v2', () => {
     expect(model).toContain('Version 2 = current flow');
-    expect(model).toContain('unassigned until batch publication');
+    expect(receipts).toContain('v2 is target-neutral and may be published independently');
     expect(permissions).toContain('allowSupplementWithoutGroup: currentBatchSupplement');
     expect(receipts).toContain('routing.supplementDeliveryGroupId ? 1 : 2');
   });
 
-  test('one global publish lock assigns one selected group to the ready unassigned pool', () => {
+  test('one global publish lock pins one exact group/session while keeping the item target-neutral', () => {
     expect(receipts).toContain("withLock('supplement-batch:publish'");
-    expect(receipts).toContain("'routing.supplementDeliveryGroupId': null");
-    expect(receipts).toContain("'routing.supplementDeliveryGroupId': deliveryGroupId");
-    expect(receipts).toContain('readyCount');
-    expect(receipts).toContain('targets: targets.groups || []');
+    expect(receipts).toContain('existingTargetItems');
+    expect(receipts).toContain('orderingSessionId: target.orderingSessionId');
+    expect(receipts).toContain('readyCount: readyCountForTarget');
   });
 
-  test('offers and grouped notification are created only after batch group assignment/publication', () => {
-    expect(offers).toContain('if (!routing.supplement || !item.createdProductId || !routing.supplementDeliveryGroupId) continue;');
-    expect(receipts).toContain("notifyOffers(notificationOffers, 'opened')");
-    expect(receipts).toContain('if (!result.failed)');
+  test('modern offers are created only through Wave publication with grouped notification', () => {
+    expect(offers).toContain('if (Number(item.supplementBatchVersion || 0) >= 1) continue');
+    expect(receipts).toContain('createWaveWithItems({');
+    expect(receipts).toContain("notifyWaves([result.wave], 'opened')");
   });
 });

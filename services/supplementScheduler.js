@@ -3,7 +3,7 @@
 // Фонові задачі дозамовлень: docs/supplement/readme.md
 
 const { autoCompleteEmptyOffers, reconcilePendingReceipts, freezeOffersForActiveOrderingWindows } = require('./supplementOffers');
-const { notifyOffers, findDueReminders } = require('./supplementNotify');
+const { notifyOffers, findDueReminders, notifyWaves, findDueWaveNotifications } = require('./supplementNotify');
 const { runAsSchedulerLeader } = require('./schedulerLeader');
 
 const TICK_MS = 60 * 1000;
@@ -22,6 +22,12 @@ async function runSupplementTick(now = new Date()) {
   }
 
   try {
+    // V48.S2 lifecycle notifications are Wave-level. Legacy offers without a
+    // waveId keep the old notifier until historical rows age out.
+    const waveDue = await findDueWaveNotifications(now);
+    if (waveDue.opened.length) await notifyWaves(waveDue.opened, 'opened', { now });
+    if (waveDue.reminder.length) await notifyWaves(waveDue.reminder, 'reminder', { now });
+
     const due = await findDueReminders(now);
     if (due.opened.length) await notifyOffers(due.opened, 'opened', { now });
     if (due.reminder.length) await notifyOffers(due.reminder, 'reminder', { now });

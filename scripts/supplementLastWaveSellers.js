@@ -1,40 +1,41 @@
 'use strict';
 
 /**
- * supplementLastWaveSellers — READ-ONLY: хто з продавців замовив товари на
- * ОСТАННЬОМУ дозамовленні.
+ * supplementLastWaveSellers — READ-ONLY diagnostics for supplement history.
  *
- * «Одне дозамовлення» = одна хвиля = одна проведена накладна типу `supplement`
- * (docs/supplement/readme.md §3). Вона відкриває пропозиції (SupplementOffer)
- * рівно для однієї групи доставки; заявка магазину (SupplementRequest) зберігає
- * автора в `createdBy` — це telegramId продавця.
+ * V48.S2 vocabulary:
+ *   SupplementWave   = one publication to one DeliveryGroup + OrderingSession.
+ *   SupplementOffer  = one item inside the Wave (legacy rows may have no waveId).
+ *   SupplementRequest= one Shop request for one item.
  *
- *   node scripts/supplementLastWaveSellers.js                  # остання хвиля (будь-яка група)
- *   node scripts/supplementLastWaveSellers.js --list           # останні 15 хвиль, щоб обрати
- *   node scripts/supplementLastWaveSellers.js --list=40
- *   node scripts/supplementLastWaveSellers.js --group=Четвер   # остання хвиля конкретної групи
- *   node scripts/supplementLastWaveSellers.js --group=66f0...  # або по ObjectId групи
- *   node scripts/supplementLastWaveSellers.js --receipt=SUP-12 # конкретна накладна (номер або _id)
- *   node scripts/supplementLastWaveSellers.js --active         # усі активні хвилі (open + frozen)
- *   node scripts/supplementLastWaveSellers.js --json           # машинний вивід
+ * Modern Wave rows are preferred. Old receipt-grouped rows remain readable as
+ * a legacy fallback so historical production data is not made invisible.
+ *
+ * Examples:
+ *   node scripts/supplementLastWaveSellers.js
+ *   node scripts/supplementLastWaveSellers.js --list=20
+ *   node scripts/supplementLastWaveSellers.js --group=Четвер
+ *   node scripts/supplementLastWaveSellers.js --wave=<ObjectId>
+ *   node scripts/supplementLastWaveSellers.js --receipt=<number-or-id>
+ *   node scripts/supplementLastWaveSellers.js --active
+ *   node scripts/supplementLastWaveSellers.js --json
  *   node scripts/supplementLastWaveSellers.js --csv=sellers.csv
  *
- * Нічого не пише в базу.
+ * This script performs no writes.
  */
 
 require('dotenv').config({ path: require('path').join(__dirname, '..', '..', '.env') });
 const fs = require('fs');
 const mongoose = require('mongoose');
 
-const SupplementOffer   = require('../models/SupplementOffer');
+const SupplementWave = require('../models/SupplementWave');
+const SupplementOffer = require('../models/SupplementOffer');
 const SupplementRequest = require('../models/SupplementRequest');
-const Receipt       = require('../models/Receipt');
+const Receipt = require('../models/Receipt');
 const DeliveryGroup = require('../models/DeliveryGroup');
-const Shop    = require('../models/Shop');
-const User    = require('../models/User');
+const Shop = require('../models/Shop');
+const User = require('../models/User');
 const Product = require('../models/Product');
-
-// ─── Аргументи ───────────────────────────────────────────────────────────────
 
 const argv = process.argv.slice(2);
 const hasFlag = (name) => argv.some((a) => a === `--${name}` || a.startsWith(`--${name}=`));
@@ -42,373 +43,276 @@ const optOf = (name) => {
   const hit = argv.find((a) => a.startsWith(`--${name}=`));
   return hit ? hit.slice(name.length + 3) : null;
 };
-
 const OPT = {
-  list:    hasFlag('list') ? (Number.parseInt(optOf('list'), 10) || 15) : 0,
-  group:   optOf('group'),
+  list: hasFlag('list') ? (Number.parseInt(optOf('list'), 10) || 15) : 0,
+  group: optOf('group'),
+  wave: optOf('wave'),
   receipt: optOf('receipt'),
-  active:  hasFlag('active'),
-  json:    hasFlag('json'),
-  csv:     optOf('csv'),
+  active: hasFlag('active'),
+  json: hasFlag('json'),
+  csv: optOf('csv'),
 };
 
-// ─── Форматування ────────────────────────────────────────────────────────────
-
+const str = (v) => (v == null ? '' : String(v));
 const fmtDT = (d) => (d
   ? new Intl.DateTimeFormat('uk-UA', {
       timeZone: 'Europe/Warsaw', day: '2-digit', month: '2-digit', year: 'numeric',
       hour: '2-digit', minute: '2-digit', hour12: false,
     }).format(new Date(d))
   : '—');
-
 const fullName = (u) => [u?.firstName, u?.lastName].filter(Boolean).join(' ').trim();
-const plural = (n, one, few, many) => {
-  const m10 = Math.abs(n) % 10;
-  const m100 = Math.abs(n) % 100;
-  if (m100 >= 11 && m100 <= 14) return many;
-  if (m10 === 1) return one;
-  if (m10 >= 2 && m10 <= 4) return few;
-  return many;
-};
 
-// ─── Пошук хвилі ─────────────────────────────────────────────────────────────
-
-/** Останні хвилі: групуємо пропозиції по накладній. */
-async function listWaves(limit, match = {}) {
-  return SupplementOffer.aggregate([
-    { $match: match },
-    {
-      $group: {
-        _id: '$receiptId',
-        deliveryGroupId: { $first: '$deliveryGroupId' },
-        openedAt: { $max: '$openedAt' },
-        createdAt: { $max: '$createdAt' },
-        offers: { $sum: 1 },
-        open:      { $sum: { $cond: [{ $eq: ['$status', 'open'] }, 1, 0] } },
-        frozen:    { $sum: { $cond: [{ $eq: ['$status', 'frozen'] }, 1, 0] } },
-        completed: { $sum: { $cond: [{ $eq: ['$status', 'completed'] }, 1, 0] } },
-      },
-    },
-    { $sort: { openedAt: -1, createdAt: -1 } },
-    ...(limit ? [{ $limit: limit }] : []),
-  ]);
-}
-
-/** Група за _id або за назвою (без урахування регістру). */
 async function resolveGroup(raw) {
-  const val = String(raw || '').trim();
+  const val = str(raw).trim();
   if (!val) return null;
   if (mongoose.Types.ObjectId.isValid(val)) {
     const byId = await DeliveryGroup.findById(val, 'name dayOfWeek').lean();
     if (byId) return byId;
   }
-  const byName = await DeliveryGroup.find(
-    { name: new RegExp(`^${val.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') },
-    'name dayOfWeek',
-  ).lean();
-  if (byName.length === 1) return byName[0];
-  if (byName.length > 1) throw new Error(`Назва групи «${val}» неоднозначна: знайдено ${byName.length}`);
+  const escaped = val.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const rows = await DeliveryGroup.find({ name: new RegExp(`^${escaped}$`, 'i') }, 'name dayOfWeek').lean();
+  if (rows.length === 1) return rows[0];
+  if (rows.length > 1) throw new Error(`Назва групи «${val}» неоднозначна: знайдено ${rows.length}`);
   return null;
 }
 
-/** Накладна за receiptNumber або _id. */
 async function resolveReceipt(raw) {
-  const val = String(raw || '').trim();
+  const val = str(raw).trim();
+  if (!val) return null;
   if (mongoose.Types.ObjectId.isValid(val)) {
-    const byId = await Receipt.findById(val).lean();
+    const byId = await Receipt.findById(val, 'receiptNumber').lean();
     if (byId) return byId;
   }
-  return Receipt.findOne({ receiptNumber: val }).lean();
+  return Receipt.findOne({ receiptNumber: val }, 'receiptNumber').lean();
 }
 
-/** Які хвилі показувати за поточними опціями. @returns {Promise<string[]>} receiptId[] */
-async function pickWaves() {
-  if (OPT.receipt) {
-    const receipt = await resolveReceipt(OPT.receipt);
-    if (!receipt) throw new Error(`Накладну «${OPT.receipt}» не знайдено`);
-    return [String(receipt._id)];
+async function modernWaveFilter() {
+  const filter = {};
+  if (OPT.wave) {
+    if (!mongoose.Types.ObjectId.isValid(OPT.wave)) throw new Error('Некоректний --wave ObjectId');
+    filter._id = OPT.wave;
   }
-
-  if (OPT.active) {
-    const waves = await listWaves(0, { status: { $in: SupplementOffer.ACTIVE_STATUSES } });
-    return waves.map((w) => String(w._id));
-  }
-
-  const match = {};
+  if (OPT.active) filter.status = { $in: SupplementWave.ACTIVE_STATUSES };
   if (OPT.group) {
     const group = await resolveGroup(OPT.group);
     if (!group) throw new Error(`Групу доставки «${OPT.group}» не знайдено`);
-    match.deliveryGroupId = String(group._id);
+    filter.deliveryGroupId = str(group._id);
   }
-  const waves = await listWaves(1, match);
-  return waves.map((w) => String(w._id));
+  if (OPT.receipt) {
+    const receipt = await resolveReceipt(OPT.receipt);
+    if (!receipt) throw new Error(`Накладну «${OPT.receipt}» не знайдено`);
+    const waveIds = await SupplementOffer.distinct('waveId', { receiptId: receipt._id, waveId: { $ne: null } });
+    filter._id = { $in: waveIds };
+  }
+  return filter;
 }
 
-// ─── Збір даних однієї хвилі ─────────────────────────────────────────────────
+async function listModernWaves(limit = 15) {
+  const filter = await modernWaveFilter();
+  return SupplementWave.find(filter)
+    .sort({ openedAt: -1, createdAt: -1 })
+    .limit(limit || 0)
+    .lean();
+}
 
-async function collectWave(receiptId) {
-  const offers = await SupplementOffer.find({ receiptId }).sort({ createdAt: 1 }).lean();
+async function listLegacyWaves(limit = 15) {
+  const match = { waveId: null };
+  if (OPT.active) match.status = { $in: SupplementOffer.ACTIVE_STATUSES };
+  if (OPT.group) {
+    const group = await resolveGroup(OPT.group);
+    if (!group) throw new Error(`Групу доставки «${OPT.group}» не знайдено`);
+    match.deliveryGroupId = str(group._id);
+  }
+  if (OPT.receipt) {
+    const receipt = await resolveReceipt(OPT.receipt);
+    if (!receipt) throw new Error(`Накладну «${OPT.receipt}» не знайдено`);
+    match.receiptId = receipt._id;
+  }
+  return SupplementOffer.aggregate([
+    { $match: match },
+    { $group: {
+      _id: '$receiptId',
+      deliveryGroupId: { $first: '$deliveryGroupId' },
+      openedAt: { $max: '$openedAt' },
+      createdAt: { $max: '$createdAt' },
+      itemCount: { $sum: 1 },
+    } },
+    { $sort: { openedAt: -1, createdAt: -1 } },
+    ...(limit ? [{ $limit: limit }] : []),
+  ]);
+}
+
+function productLabel(offer, productById) {
+  if (offer.productId) {
+    const p = productById.get(str(offer.productId));
+    if (p) return p.name || [p.brand, p.model].filter(Boolean).join(' ') || p.barcode || str(p._id);
+  }
+  return offer.sourceSnapshot?.title || `позиція накладної ${str(offer.receiptItemId)}`;
+}
+
+async function collect({ wave = null, legacyReceiptId = null }) {
+  const offerFilter = wave
+    ? { waveId: wave._id }
+    : { receiptId: legacyReceiptId, waveId: null };
+  const offers = await SupplementOffer.find(offerFilter).sort({ createdAt: 1 }).lean();
   if (!offers.length) return null;
 
-  const [receipt, group] = await Promise.all([
-    Receipt.findById(receiptId, 'receiptNumber completedAt supplementOpenedAt createdBy status').lean(),
-    DeliveryGroup.findById(offers[0].deliveryGroupId, 'name dayOfWeek').lean(),
+  const groupId = str(wave?.deliveryGroupId || offers[0].deliveryGroupId);
+  const [group, requests] = await Promise.all([
+    DeliveryGroup.findById(groupId, 'name dayOfWeek').lean(),
+    SupplementRequest.find({ offerId: { $in: offers.map((o) => o._id) } }).sort({ createdAt: 1 }).lean(),
   ]);
 
-  const requests = await SupplementRequest
-    .find({ offerId: { $in: offers.map((o) => o._id) } })
-    .sort({ createdAt: 1 })
-    .lean();
+  const productIds = offers.map((o) => o.productId).filter(Boolean);
+  const products = productIds.length
+    ? await Product.find({ _id: { $in: productIds } }, 'name brand model barcode').lean()
+    : [];
+  const productById = new Map(products.map((p) => [str(p._id), p]));
+  const offerById = new Map(offers.map((o) => [str(o._id), o]));
 
-  const products = await Product.find(
-    { _id: { $in: offers.map((o) => o.productId) } },
-    'name brand model barcode',
-  ).lean();
-  const productById = new Map(products.map((p) => [String(p._id), p]));
-  const offerById = new Map(offers.map((o) => [String(o._id), o]));
-
-  // Магазини: і ті, що замовили, і всі активні магазини групи (для «не замовили»).
-  const groupId = String(offers[0].deliveryGroupId);
+  const requestShopIds = [...new Set(requests.map((r) => str(r.shopId)).filter(Boolean))];
   const shops = await Shop.find(
-    { $or: [{ _id: { $in: requests.map((r) => r.shopId) } }, { deliveryGroupId: groupId, isActive: true }] },
+    { $or: [{ _id: { $in: requestShopIds } }, { deliveryGroupId: groupId, isActive: true }] },
     'name deliveryGroupId isActive',
   ).lean();
-  const shopById = new Map(shops.map((s) => [String(s._id), s]));
+  const shopById = new Map(shops.map((shop) => [str(shop._id), shop]));
 
-  // Продавці: автори заявок + усі приписані до магазинів групи.
-  const authorIds = [...new Set(requests.flatMap((r) => [r.createdBy, r.updatedBy]).filter(Boolean).map(String))];
+  const actorIds = [...new Set(requests.flatMap((r) => [r.createdBy, r.updatedBy, r.packedBy]).filter(Boolean).map(str))];
   const users = await User.find(
-    { $or: [{ telegramId: { $in: authorIds } }, { shopId: { $in: shops.map((s) => s._id) } }] },
-    'telegramId role firstName lastName shopId botBlocked lastActive',
+    { $or: [{ telegramId: { $in: actorIds } }, { shopId: { $in: shops.map((s) => s._id) } }] },
+    'telegramId role firstName lastName shopId botBlocked',
   ).lean();
-  const userByTgId = new Map(users.map((u) => [String(u.telegramId), u]));
+  const userByTg = new Map(users.map((u) => [str(u.telegramId), u]));
 
-  const productLabel = (offer) => {
-    const p = productById.get(String(offer.productId));
-    if (!p) return `товар ${String(offer.productId)} (видалений?)`;
-    return p.name || [p.brand, p.model].filter(Boolean).join(' ') || p.barcode || String(p._id);
-  };
-
-  // ── Групування по продавцях (createdBy = автор заявки) ──────────────────────
   const sellers = new Map();
-  for (const r of requests) {
-    const key = String(r.createdBy || '') || `anon:${String(r.shopId)}`;
+  for (const request of requests) {
+    const key = str(request.createdBy) || `shop:${str(request.shopId)}`;
     if (!sellers.has(key)) {
-      const u = userByTgId.get(String(r.createdBy || ''));
+      const u = userByTg.get(str(request.createdBy));
       sellers.set(key, {
-        telegramId: String(r.createdBy || ''),
-        name: fullName(u) || r.createdByName || '(ім’я невідоме)',
+        telegramId: str(request.createdBy),
+        name: fullName(u) || request.createdByName || '(ім’я невідоме)',
         role: u?.role || '—',
-        accountExists: Boolean(u),
-        botBlocked: Boolean(u?.botBlocked),
         shops: new Set(),
         items: [],
         totalQty: 0,
         packedQty: 0,
-        firstAt: r.createdAt,
-        lastAt: r.updatedAt || r.createdAt,
       });
     }
-    const s = sellers.get(key);
-    const offer = offerById.get(String(r.offerId));
-    const shop = shopById.get(String(r.shopId));
-
-    s.shops.add(shop?.name || r.shopName || String(r.shopId));
-    s.items.push({
-      product: offer ? productLabel(offer) : `пропозиція ${String(r.offerId)}`,
-      productId: offer ? String(offer.productId) : '',
-      shopName: shop?.name || r.shopName || String(r.shopId),
-      quantity: r.quantity,
-      packed: Boolean(r.packed),
-      packedByName: r.packedByName || '',
-      createdAt: r.createdAt,
-      updatedAt: r.updatedAt,
-      updatedBy: String(r.updatedBy || ''),
-      updatedByName: r.updatedByName || '',
-      offerStatus: offer?.status || '—',
+    const row = sellers.get(key);
+    const offer = offerById.get(str(request.offerId));
+    const shop = shopById.get(str(request.shopId));
+    row.shops.add(shop?.name || request.shopName || str(request.shopId));
+    row.items.push({
+      product: offer ? productLabel(offer, productById) : str(request.offerId),
+      shopName: shop?.name || request.shopName || str(request.shopId),
+      quantity: Number(request.quantity || 0),
+      status: request.status || 'active',
+      packed: Boolean(request.packed),
+      packedByName: request.packedByName || fullName(userByTg.get(str(request.packedBy))) || '',
+      createdAt: request.createdAt,
+      updatedAt: request.updatedAt,
     });
-    s.totalQty += r.quantity || 0;
-    if (r.packed) s.packedQty += r.quantity || 0;
-    if (r.createdAt < s.firstAt) s.firstAt = r.createdAt;
-    const touched = r.updatedAt || r.createdAt;
-    if (touched > s.lastAt) s.lastAt = touched;
+    row.totalQty += Number(request.quantity || 0);
+    if (request.packed) row.packedQty += Number(request.quantity || 0);
   }
-
-  // ── Магазини групи, які нічого не замовили ────────────────────────────────
-  const orderedShopIds = new Set(requests.map((r) => String(r.shopId)));
-  const silentShops = shops
-    .filter((s) => s.isActive && String(s.deliveryGroupId) === groupId && !orderedShopIds.has(String(s._id)))
-    .map((s) => ({
-      shopId: String(s._id),
-      name: s.name,
-      sellers: users
-        .filter((u) => String(u.shopId || '') === String(s._id))
-        .map((u) => ({
-          telegramId: String(u.telegramId),
-          name: fullName(u) || '(ім’я невідоме)',
-          role: u.role,
-          botBlocked: Boolean(u.botBlocked),
-        })),
-    }))
-    .sort((a, b) => a.name.localeCompare(b.name, 'uk'));
 
   return {
-    receiptId: String(receiptId),
-    receiptNumber: receipt?.receiptNumber || '(накладну видалено)',
-    openedAt: offers[0].openedAt || receipt?.supplementOpenedAt || receipt?.completedAt || null,
-    group: {
-      deliveryGroupId: groupId,
-      name: group?.name || '(групу видалено)',
-      dayOfWeek: group?.dayOfWeek ?? null,
-    },
-    offers: {
-      total: offers.length,
-      open: offers.filter((o) => o.status === 'open').length,
-      frozen: offers.filter((o) => o.status === 'frozen').length,
-      completed: offers.filter((o) => o.status === 'completed').length,
-      products: offers.map((o) => ({ productId: String(o.productId), name: productLabel(o), status: o.status })),
-    },
-    sellers: [...sellers.values()]
-      .map((s) => ({ ...s, shops: [...s.shops] }))
-      .sort((a, b) => b.totalQty - a.totalQty || a.name.localeCompare(b.name, 'uk')),
+    kind: wave ? 'wave' : 'legacy_receipt_wave',
+    waveId: wave ? str(wave._id) : null,
+    orderingSessionId: wave ? str(wave.orderingSessionId) : null,
+    status: wave?.status || null,
+    openedAt: wave?.openedAt || offers[0]?.openedAt || null,
+    deliveryGroupId: groupId,
+    groupName: group?.name || '(групу видалено)',
+    itemCount: offers.length,
     requestCount: requests.length,
-    shopCount: orderedShopIds.size,
-    silentShops,
+    sellers: [...sellers.values()].map((row) => ({ ...row, shops: [...row.shops] })),
   };
 }
 
-// ─── Вивід ───────────────────────────────────────────────────────────────────
-
-function printWave(w) {
+function printWave(row) {
   console.log('\n═══════════════════════════════════════════════════════════════');
-  console.log(`📦 ХВИЛЯ ДОЗАМОВЛЕННЯ — накладна ${w.receiptNumber}`);
-  console.log(`   відкрита: ${fmtDT(w.openedAt)}   група: ${w.group.name}   (${w.group.deliveryGroupId})`);
-  console.log(`   пропозицій: ${w.offers.total}  [open ${w.offers.open} / frozen ${w.offers.frozen} / completed ${w.offers.completed}]`);
-  console.log(`   товари: ${w.offers.products.map((p) => p.name).join(', ') || '—'}`);
-
-  const totalQty = w.sellers.reduce((sum, s) => sum + s.totalQty, 0);
-  console.log(`\n🛒 ЗАМОВИЛИ: ${w.sellers.length} ${plural(w.sellers.length, 'продавець', 'продавці', 'продавців')}`
-    + ` · ${w.shopCount} ${plural(w.shopCount, 'магазин', 'магазини', 'магазинів')}`
-    + ` · ${w.requestCount} ${plural(w.requestCount, 'заявка', 'заявки', 'заявок')}`
-    + ` · ${totalQty} шт`);
-
-  if (!w.sellers.length) {
-    console.log('   —  на цій хвилі не замовив ніхто');
-  }
-
-  for (const s of w.sellers) {
-    const warn = [
-      !s.accountExists ? 'акаунт видалено' : null,
-      s.botBlocked ? 'бот заблокований' : null,
-      s.role !== 'seller' && s.accountExists ? `роль: ${s.role}` : null,
-    ].filter(Boolean);
-    console.log(`\n   👤 ${s.name}   tg ${s.telegramId || '—'}${warn.length ? `   ⚠️ ${warn.join(', ')}` : ''}`);
-    console.log(`      магазин: ${s.shops.join(', ')}`);
-    console.log(`      позицій: ${s.items.length}   штук: ${s.totalQty}   спаковано: ${s.packedQty}/${s.totalQty}`);
-    console.log(`      перша заявка: ${fmtDT(s.firstAt)}   остання зміна: ${fmtDT(s.lastAt)}`);
-    for (const it of s.items) {
-      const marks = [
-        it.packed ? `спаковано${it.packedByName ? ` (${it.packedByName})` : ''}` : 'не спаковано',
-        it.updatedBy && it.updatedBy !== s.telegramId ? `змінив ${it.updatedByName || it.updatedBy}` : null,
-      ].filter(Boolean);
-      console.log(`        • ${it.product} — ${it.quantity} шт   [${marks.join(' · ')}]`);
-    }
-  }
-
-  if (w.silentShops.length) {
-    console.log(`\n🔕 НЕ ЗАМОВИЛИ (активні магазини групи): ${w.silentShops.length}`);
-    for (const s of w.silentShops) {
-      const who = s.sellers.length
-        ? s.sellers.map((u) => `${u.name} tg ${u.telegramId}${u.botBlocked ? ' ⚠️бот заблокований' : ''}`).join('; ')
-        : '— продавця не призначено';
-      console.log(`   • ${s.name}: ${who}`);
+  console.log(`📦 ${row.kind === 'wave' ? 'SUPPLEMENT WAVE' : 'LEGACY ДОЗАМОВЛЕННЯ'}`);
+  console.log(`   ${row.waveId ? `wave: ${row.waveId}` : ''}${row.orderingSessionId ? `  session: ${row.orderingSessionId}` : ''}`);
+  console.log(`   група: ${row.groupName}  відкрита: ${fmtDT(row.openedAt)}  статус: ${row.status || 'legacy'}`);
+  console.log(`   товарів: ${row.itemCount}  заявок: ${row.requestCount}`);
+  for (const seller of row.sellers) {
+    console.log(`\n   👤 ${seller.name}  tg ${seller.telegramId || '—'}  магазин: ${seller.shops.join(', ')}`);
+    console.log(`      штук: ${seller.totalQty}  спаковано: ${seller.packedQty}`);
+    for (const item of seller.items) {
+      console.log(`      • ${item.product}: ${item.quantity} шт · ${item.status}${item.packed ? ' · packed' : ''}`);
     }
   }
 }
 
-function toCsv(waves) {
+function toCsv(rows) {
   const esc = (v) => {
-    const s = String(v ?? '');
+    const s = str(v);
     return /[",;\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
   };
-  const rows = [[
-    'накладна', 'група', 'відкрита', 'telegramId', 'продавець', 'роль',
-    'магазин', 'товар', 'кількість', 'спаковано', 'створено', 'останнязміна', 'змінив',
-  ]];
-  for (const w of waves) {
-    for (const s of w.sellers) {
-      for (const it of s.items) {
-        rows.push([
-          w.receiptNumber, w.group.name, fmtDT(w.openedAt),
-          s.telegramId, s.name, s.role,
-          it.shopName, it.product, it.quantity, it.packed ? 'так' : 'ні',
-          fmtDT(it.createdAt), fmtDT(it.updatedAt),
-          it.updatedBy && it.updatedBy !== s.telegramId ? (it.updatedByName || it.updatedBy) : '',
-        ]);
+  const out = [['waveId', 'orderingSessionId', 'група', 'статус', 'telegramId', 'продавець', 'магазин', 'товар', 'кількість', 'packed']];
+  for (const row of rows) {
+    for (const seller of row.sellers) {
+      for (const item of seller.items) {
+        out.push([row.waveId, row.orderingSessionId, row.groupName, row.status || 'legacy', seller.telegramId, seller.name,
+          item.shopName, item.product, item.quantity, item.packed ? 'так' : 'ні']);
       }
     }
   }
-  // BOM — щоб Excel на Windows не ламав кирилицю.
-  return '﻿' + rows.map((r) => r.map(esc).join(';')).join('\r\n') + '\r\n';
+  return '\ufeff' + out.map((r) => r.map(esc).join(';')).join('\r\n') + '\r\n';
 }
-
-// ─── main ────────────────────────────────────────────────────────────────────
 
 async function main() {
   await mongoose.connect(process.env.MONGODB_URI);
-  const db = mongoose.connection.db;
-  if (!OPT.json) {
-    console.log(`\n🔍 READ-ONLY: продавці останнього дозамовлення`);
-    console.log(`   база: ${db.databaseName}   host: ${mongoose.connection.host}`);
-  }
+  if (!OPT.json) console.log('\n🔍 READ-ONLY: історія дозамовлення');
 
-  // --list: показати останні хвилі й вийти.
   if (OPT.list) {
-    const waves = await listWaves(OPT.list);
-    const receipts = await Receipt.find(
-      { _id: { $in: waves.map((w) => w._id) } }, 'receiptNumber',
-    ).lean();
-    const numberById = new Map(receipts.map((r) => [String(r._id), r.receiptNumber]));
-    const groups = await DeliveryGroup.find({}, 'name').lean();
-    const groupName = new Map(groups.map((g) => [String(g._id), g.name]));
-
-    console.log(`\n📜 ОСТАННІ ХВИЛІ ДОЗАМОВЛЕНЬ (${waves.length}):`);
-    for (const w of waves) {
-      console.log(`   ${fmtDT(w.openedAt || w.createdAt)}  накладна ${numberById.get(String(w._id)) || String(w._id)}`
-        + `  група ${groupName.get(String(w.deliveryGroupId)) || w.deliveryGroupId}`
-        + `  пропозицій ${w.offers} [open ${w.open}/frozen ${w.frozen}/completed ${w.completed}]`);
+    const modern = await listModernWaves(OPT.list);
+    console.log(`\n📜 СУЧАСНІ ХВИЛІ (${modern.length}):`);
+    for (const wave of modern) {
+      console.log(`   ${fmtDT(wave.openedAt || wave.createdAt)}  ${str(wave._id)}  session ${str(wave.orderingSessionId)}  ${wave.status}`);
     }
-    console.log('\n   Деталі конкретної: --receipt=<номер накладної>');
+    if (modern.length < OPT.list) {
+      const legacy = await listLegacyWaves(OPT.list - modern.length);
+      if (legacy.length) {
+        console.log(`\n📜 LEGACY (${legacy.length}):`);
+        for (const row of legacy) console.log(`   ${fmtDT(row.openedAt || row.createdAt)}  receipt ${str(row._id)}  items ${row.itemCount}`);
+      }
+    }
     await mongoose.disconnect();
     return;
   }
 
-  const receiptIds = await pickWaves();
-  if (!receiptIds.length) {
-    console.log('\n   Хвиль дозамовлення не знайдено (жодної пропозиції в базі за цим фільтром).');
-    await mongoose.disconnect();
-    return;
+  let modern = await listModernWaves(OPT.active ? 0 : 1);
+  const rows = [];
+  for (const wave of modern) {
+    const collected = await collect({ wave });
+    if (collected) rows.push(collected);
   }
 
-  const waves = [];
-  for (const id of receiptIds) {
-    const wave = await collectWave(id);
-    if (wave) waves.push(wave);
+  // Historical compatibility: if no modern Wave matches a receipt/group request,
+  // expose the old receipt-grouped rows instead of pretending history disappeared.
+  if (!rows.length && !OPT.wave) {
+    const legacy = await listLegacyWaves(OPT.active ? 0 : 1);
+    for (const row of legacy) {
+      const collected = await collect({ legacyReceiptId: row._id });
+      if (collected) rows.push(collected);
+    }
   }
 
-  if (OPT.json) {
-    console.log(JSON.stringify(waves, null, 2));
-  } else {
-    for (const w of waves) printWave(w);
-    console.log('');
-  }
+  if (OPT.json) console.log(JSON.stringify(rows, null, 2));
+  else if (!rows.length) console.log('\n   Хвиль дозамовлення не знайдено.');
+  else rows.forEach(printWave);
 
   if (OPT.csv) {
-    fs.writeFileSync(OPT.csv, toCsv(waves), 'utf8');
-    if (!OPT.json) console.log(`💾 CSV збережено: ${OPT.csv}\n`);
+    fs.writeFileSync(OPT.csv, toCsv(rows), 'utf8');
+    if (!OPT.json) console.log(`\n💾 CSV: ${OPT.csv}`);
   }
-
   await mongoose.disconnect();
 }
 
-main().catch((e) => { console.error('FAILED:', e); process.exit(1); });
+main().catch((error) => {
+  console.error('FAILED:', error);
+  process.exit(1);
+});

@@ -7,6 +7,7 @@ const DeliveryGroup = require('./models/DeliveryGroup');
 const Shop = require('./models/Shop');
 const GroupMember = require('./models/GroupMember');
 const { redeemShopInvite } = require('./services/redeemShopInvite');
+const { publishShopAssignmentTransition } = require('./services/shopAssignmentCommand');
 const { getSupportAdmins, toPublicSupportAdmins } = require('./utils/telegramSupportAdmins');
 const { isRemovedUser, activeUserFilter } = require('./utils/userAccountState');
 const { trackMemberFromMessage, handleChatMemberUpdate, setMemberPhoto } = require('./services/groupMemberSync');
@@ -920,7 +921,7 @@ async function initBot(token) {
             // group → zone). No session here — the inline-button flow isn't
             // transactional; the existingUser check above guards the common case.
             const { resolveAndCreateUser } = require('./services/createUserFromRequest');
-            await resolveAndCreateUser({
+            const resolution = await resolveAndCreateUser({
               telegramId: request.telegramId,
               role: request.role,
               firstName: request.firstName,
@@ -930,6 +931,9 @@ async function initBot(token) {
               deliveryGroupId: request.deliveryGroupId,
             });
             await RegistrationRequest.findByIdAndDelete(requestId);
+            if (resolution.assignmentTransition) {
+              await publishShopAssignmentTransition(resolution.assignmentTransition);
+            }
             deleteWelcomeFor(request.telegramId).catch(() => {});
             await bot.answerCallbackQuery(query.id, { text: 'Заявку схвалено', show_alert: false });
             await sendRegistrationApprovedMessage(request.telegramId, request.role);

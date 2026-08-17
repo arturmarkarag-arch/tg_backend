@@ -40,7 +40,7 @@ describe('picking upcoming-session readiness contract', () => {
   });
 
   it('publishes one server-authoritative presentation mode in group list and picking reads', () => {
-    const groups = read('routes/deliveryGroups.js');
+    const groups = read('services/readModels/deliveryGroupCatalogReadModel.js');
     const picking = read('routes/picking.js');
 
     expect(groups).toContain('presentationMode: presentations[index]?.presentationMode');
@@ -59,15 +59,17 @@ describe('picking upcoming-session readiness contract', () => {
     expect(create).toBeGreaterThan(preflight);
   });
 
-  it('readiness shop view remains assignment-only and does not materialise a future OrderingSession', () => {
-    const source = read('routes/deliveryGroups.js');
-    const readinessBranch = sliceBetweenOrThrow(source, "const readinessOnly = req.query.view === 'readiness'", 'const currentSessionId = await findCurrentSessionId', { label: 'readiness-only shop view' });
+  it('readiness shop view remains assignment-only and structurally cannot read session/history models', () => {
+    const facade = read('services/readModels/deliveryGroupShopStatusReadModel.js');
+    const readiness = read('services/readModels/currentShopTopologyReadModel.js');
 
-    expect(readinessBranch).toContain("view: 'readiness'");
-    expect(readinessBranch).toContain('currentSessionId: null');
-    expect(readinessBranch).toContain('hasMultipleSellers: assignedStaff.length > 1');
-    expect(readinessBranch).not.toContain('getOrCreateSessionId(');
-    expect(readinessBranch).not.toContain('CatalogReview.find(');
-    expect(readinessBranch).not.toContain('Order.find(');
+    expect(facade).toContain("view: SHOP_STATUS_VIEWS.READINESS");
+    expect(facade).toContain('currentSessionId: null');
+    expect(readiness).toContain('buildReadinessShopProjection');
+    expect(readiness).not.toContain("require('../../models/Order')");
+    expect(readiness).not.toContain("require('../../models/OrderingSession')");
+    expect(readiness).not.toContain("require('../../models/PickingTask')");
+    expect(readiness).not.toContain("require('../../models/CatalogReview')");
+    expect(readiness).not.toContain('getOrCreateSessionId(');
   });
 });

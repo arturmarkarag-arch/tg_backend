@@ -1,6 +1,7 @@
 'use strict';
 const Order = require('../models/Order');
 const User = require('../models/User');
+const Shop = require('../models/Shop');
 const PickingTask = require('../models/PickingTask');
 const { logShopTransition } = require('./shopAudit');
 const { activeOrderShopFilter } = require('../utils/orderShopFilter');
@@ -15,6 +16,10 @@ const { getOrderOwnershipState } = require('../utils/orderOwnership');
 // All writes are scoped to the passed Mongo session.
 async function unassignSellerAndPark({ session, seller, fromShopId, actor, reason, allowFrozenOrderPark = false }) {
   const shopIdStr = fromShopId ? String(fromShopId) : (seller.shopId ? String(seller.shopId) : '');
+  const fromShop = shopIdStr
+    ? await Shop.findById(shopIdStr, 'deliveryGroupId').session(session).lean()
+    : null;
+  const prevGroupId = fromShop?.deliveryGroupId ? String(fromShop.deliveryGroupId) : null;
 
   const parkedIds = [];
   const leftInPipelineIds = [];
@@ -100,6 +105,19 @@ async function unassignSellerAndPark({ session, seller, fromShopId, actor, reaso
       shopOwnedIds.length ? `shopOwnedStayed=[${shopOwnedIds.join(',')}]` : '',
     ].filter(Boolean).join(' '),
   });
+
+  return {
+    fromShopId: shopIdStr || null,
+    toShopId: null,
+    sellerTelegramId: String(seller.telegramId),
+    assignmentChanged: Boolean(shopIdStr),
+    orderChanged: parkedIds.length > 0,
+    prevGroupId,
+    newGroupId: null,
+    parkedOrderIds: parkedIds,
+    leftInPipelineOrderIds: leftInPipelineIds,
+    shopOwnedOrderIds: shopOwnedIds,
+  };
 }
 
 module.exports = { unassignSellerAndPark };

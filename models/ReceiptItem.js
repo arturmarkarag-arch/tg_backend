@@ -57,9 +57,22 @@ const ReceiptItemSchema = new mongoose.Schema(
     // Version 0 = legacy auto-open behaviour. Version 1 = older batch flow where
     // the group was stored per item. Version 2 = current flow: the item may stay
     // unassigned until batch publication atomically sets the group for the batch.
-    // `supplementPublishRequestedAt` is the durable publish/deferred marker.
+    // `supplementPublishRequestedAt` is compatibility/audit only: first successful
+    // publication time. Per-target eligibility belongs to exact-session Wave items.
     supplementBatchVersion: { type: Number, default: 0 },
     supplementPublishRequestedAt: { type: Date, default: null },
+
+    // V48.S2 compensating correction metadata. The full timeline stays in
+    // ReceiptItemLog; this small CURRENT/FUTURE hint prevents a corrected
+    // mandatory flow from duplicating shops that were already physically packed
+    // by an earlier, mistaken supplement route.
+    routingCorrection: {
+      correctedAt: { type: Date, default: null },
+      correctedBy: { type: String, default: '' },
+      reason: { type: String, default: '' },
+      alreadyFulfilledShopIds: { type: [String], default: [] },
+      sourceWaveIds: { type: [mongoose.Schema.Types.ObjectId], default: [] },
+    },
 
     photoUrl: { type: String, default: '' },
     photoName: { type: String, default: '' },

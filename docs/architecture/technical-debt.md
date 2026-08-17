@@ -41,3 +41,21 @@ session-isolation контракту.
 - OOS і часткове виконання;
 - адміністративне скасування;
 - окремі Telegram-групи для безпеки та службових повідомлень.
+
+### Operational read models — ЗАКРИТО (16.08.2026, V48.21)
+
+Великий `routes/deliveryGroups.js` більше не є місцем, де GET endpoints самостійно
+змішують CURRENT topology, current-session Orders, CatalogReview history і DISPLAY.
+Operational query logic винесена в `services/readModels/`.
+
+Ключові гарантії:
+
+- readiness має окремий CURRENT-only dependency graph без Order/Session/History моделей;
+- current assignment і session participants передаються окремо;
+- GET read models не можуть матеріалізувати OrderingSession або робити domain writes;
+- group selector phase лишається за `sessionPresentation`;
+- Express route є transport/facade шаром.
+
+Відкладені F-09/F-10/F-11/F-12/F-15 залишаються окремими задачами й не вважаються
+закритими цим рефактором.
+

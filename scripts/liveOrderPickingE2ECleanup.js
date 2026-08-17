@@ -85,6 +85,7 @@ const ReceiptItemLog = require('../models/ReceiptItemLog');
 const ProductVector = require('../models/ProductVector');
 const ShopProduct = require('../models/ShopProduct');
 const SupplementOffer = require('../models/SupplementOffer');
+const SupplementWave = require('../models/SupplementWave');
 const SupplementRequest = require('../models/SupplementRequest');
 const { GLOBAL_LOCK_KEY, DEFAULT_LOCK_HEARTBEAT_MS, waitForStableZero, releaseGlobalHarnessLeaseIfOwned } = require('./helpers/liveHarnessSafety');
 
@@ -259,8 +260,11 @@ async function collectReceipt(manifest) {
   const itemIds = oidList(r.itemIds || []);
   let productIds = oidList(r.productIds || []);
   let groupIds = oidList(r.groupIds || []);
+  let shopIds = oidList(r.shopIds || []);
   const blockIds = oidList(r.blockIds || []);
   let offerIds = oidList(r.offerIds || []);
+  let waveIds = oidList(r.waveIds || []);
+  let sessionIds = oidList(r.sessionIds || []);
   const orderIds = oidList(r.orderIds || []);
   const taskIds = oidList(r.taskIds || []);
 
@@ -268,30 +272,42 @@ async function collectReceipt(manifest) {
   // manifest save. Receipt fixtures deliberately carry the full random run
   // marker in their receipt/product/group/user identity, so this stays exact to
   // one run and never broadens into normal TEST data.
-  const [markerReceipts, markerProducts, markerGroups, markerUsers] = await Promise.all([
+  const [markerReceipts, markerProducts, markerGroups, markerShops, markerUsers] = await Promise.all([
     Receipt.find({ receiptNumber: { $regex: `^${escRe(marker)}` } }, '_id').lean(),
     Product.find({ $or: [{ name: marker }, { brand: marker }] }, '_id').lean(),
     DeliveryGroup.find({ name: { $regex: `^${escRe(marker)}` } }, '_id').lean(),
+    Shop.find({ name: { $regex: `^${escRe(marker)}` } }, '_id').lean(),
     User.find({ firstName: 'LiveReceipt', lastName: runId }, '_id').lean(),
   ]);
   for (const x of markerReceipts) receiptIds.push(x._id);
   productIds = oidList([...productIds, ...markerProducts.map((x) => x._id)]);
   groupIds = oidList([...groupIds, ...markerGroups.map((x) => x._id)]);
+  shopIds = oidList([...shopIds, ...markerShops.map((x) => x._id)]);
   userIds = oidList([...userIds, ...markerUsers.map((x) => x._id)]);
   const dynamicItems = receiptIds.length ? await ReceiptItem.find({ receiptId: { $in: receiptIds } }, '_id').lean() : [];
   for (const x of dynamicItems) itemIds.push(x._id);
+  if (groupIds.length) {
+    const dynamicSessions = await OrderingSession.find({ groupId: { $in: groupIds.map(String) } }, '_id').lean();
+    sessionIds = oidList([...sessionIds, ...dynamicSessions.map((x) => x._id)]);
+  }
   if (itemIds.length) {
     const [dynamicProducts, dynamicOffers] = await Promise.all([
       Product.find({ receiptItemId: { $in: itemIds } }, '_id').lean(),
-      SupplementOffer.find({ receiptItemId: { $in: itemIds } }, '_id').lean(),
+      SupplementOffer.find({ receiptItemId: { $in: itemIds } }, '_id waveId').lean(),
     ]);
     productIds = oidList([...productIds, ...dynamicProducts.map((x) => x._id)]);
     offerIds = oidList([...offerIds, ...dynamicOffers.map((x) => x._id)]);
+    waveIds = oidList([...waveIds, ...dynamicOffers.map((x) => x.waveId).filter(Boolean)]);
+  }
+  if (sessionIds.length) {
+    const dynamicWaves = await SupplementWave.find({ orderingSessionId: { $in: sessionIds.map(String) } }, '_id').lean();
+    waveIds = oidList([...waveIds, ...dynamicWaves.map((x) => x._id)]);
   }
   return {
     kind: 'receipt', marker,
     userIds: oidList(userIds), receiptIds: oidList(receiptIds), itemIds: oidList(itemIds), productIds,
-    groupIds: oidList(groupIds), blockIds: oidList(blockIds), offerIds: oidList(offerIds), orderIds: oidList(orderIds), taskIds: oidList(taskIds),
+    groupIds: oidList(groupIds), shopIds: oidList(shopIds), sessionIds: oidList(sessionIds), waveIds: oidList(waveIds), blockIds: oidList(blockIds),
+    offerIds: oidList(offerIds), orderIds: oidList(orderIds), taskIds: oidList(taskIds),
   };
 }
 
@@ -299,6 +315,8 @@ async function countsReceipt(ids) {
   const pids = ids.productIds;
   const iids = ids.itemIds;
   const offersOr = [];
+  const waveIds = ids.waveIds || [];
+  const sessionIds = ids.sessionIds || [];
   if (ids.offerIds.length) offersOr.push({ _id: { $in: ids.offerIds } });
   if (iids.length) offersOr.push({ receiptItemId: { $in: iids } });
   const taskOr = [];
@@ -318,8 +336,14 @@ async function countsReceipt(ids) {
     orders: orderOr.length ? await Order.countDocuments({ $or: orderOr }) : 0,
     tasks: taskOr.length ? await PickingTask.countDocuments({ $or: taskOr }) : 0,
     offers: offersOr.length ? await SupplementOffer.countDocuments({ $or: offersOr }) : 0,
-    requests: ids.offerIds.length ? await SupplementRequest.countDocuments({ offerId: { $in: ids.offerIds } }) : 0,
+    requests: (ids.offerIds.length || waveIds.length) ? await SupplementRequest.countDocuments({ $or: [
+      ...(ids.offerIds.length ? [{ offerId: { $in: ids.offerIds } }] : []),
+      ...(waveIds.length ? [{ waveId: { $in: waveIds } }] : []),
+    ] }) : 0,
+    waves: waveIds.length ? await SupplementWave.countDocuments({ _id: { $in: waveIds } }) : 0,
+    sessions: sessionIds.length ? await OrderingSession.countDocuments({ _id: { $in: sessionIds } }) : 0,
     logs: ids.receiptIds.length ? await ReceiptItemLog.countDocuments({ receiptId: { $in: ids.receiptIds } }) : 0,
+    shops: ids.shopIds.length ? await Shop.countDocuments({ _id: { $in: ids.shopIds } }) : 0,
     groups: ids.groupIds.length ? await DeliveryGroup.countDocuments({ _id: { $in: ids.groupIds } }) : 0,
   };
 }
@@ -327,11 +351,18 @@ async function countsReceipt(ids) {
 async function removeReceipt(ids) {
   const pids = ids.productIds;
   const iids = ids.itemIds;
-  if (ids.offerIds.length) await SupplementRequest.deleteMany({ offerId: { $in: ids.offerIds } });
-  if (ids.offerIds.length || iids.length) await SupplementOffer.deleteMany({ $or: [
+  const waveIds = ids.waveIds || [];
+  const sessionIds = ids.sessionIds || [];
+  if (ids.offerIds.length || waveIds.length) await SupplementRequest.deleteMany({ $or: [
+    ...(ids.offerIds.length ? [{ offerId: { $in: ids.offerIds } }] : []),
+    ...(waveIds.length ? [{ waveId: { $in: waveIds } }] : []),
+  ] });
+  if (ids.offerIds.length || iids.length || waveIds.length) await SupplementOffer.deleteMany({ $or: [
     ...(ids.offerIds.length ? [{ _id: { $in: ids.offerIds } }] : []),
     ...(iids.length ? [{ receiptItemId: { $in: iids } }] : []),
+    ...(waveIds.length ? [{ waveId: { $in: waveIds } }] : []),
   ] });
+  if (waveIds.length) await SupplementWave.deleteMany({ _id: { $in: waveIds } });
   if (ids.taskIds.length || pids.length) await PickingTask.deleteMany({ $or: [
     ...(ids.taskIds.length ? [{ _id: { $in: ids.taskIds } }] : []),
     ...(pids.length ? [{ productId: { $in: pids } }] : []),
@@ -356,6 +387,8 @@ async function removeReceipt(ids) {
     ...(iids.length ? [{ receiptItemId: { $in: iids } }] : []),
   ] });
   if (ids.receiptIds.length) await Receipt.deleteMany({ _id: { $in: ids.receiptIds } });
+  if (sessionIds.length) await OrderingSession.deleteMany({ _id: { $in: sessionIds } });
+  if (ids.shopIds.length) await Shop.deleteMany({ _id: { $in: ids.shopIds } });
   if (ids.groupIds.length) await DeliveryGroup.deleteMany({ _id: { $in: ids.groupIds } });
   if (ids.userIds.length) await User.deleteMany({ _id: { $in: ids.userIds } });
 }

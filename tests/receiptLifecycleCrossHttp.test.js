@@ -20,9 +20,13 @@ const Block = require('../models/Block');
 const Order = require('../models/Order');
 const PickingTask = require('../models/PickingTask');
 const SupplementOffer = require('../models/SupplementOffer');
+const SupplementWave = require('../models/SupplementWave');
 const SupplementRequest = require('../models/SupplementRequest');
 const DeliveryGroup = require('../models/DeliveryGroup');
-const { getWarsawNow } = require('../utils/orderingSchedule');
+const Shop = require('../models/Shop');
+const OrderingSession = require('../models/OrderingSession');
+const { getOrCreateSessionId } = require('../utils/getOrCreateSession');
+const { buildOpenClosedTestSchedules } = require('../scripts/helpers/perGroupTestSchedule');
 
 let mongod;
 let admin;
@@ -58,6 +62,9 @@ beforeEach(async () => {
     PickingTask.deleteMany({}),
     SupplementOffer.deleteMany({}),
     SupplementRequest.deleteMany({}),
+    SupplementWave.deleteMany({}),
+    OrderingSession.deleteMany({}),
+    Shop.deleteMany({}),
     DeliveryGroup.deleteMany({}),
   ]);
 });
@@ -116,16 +123,27 @@ async function seedConfirmed({ supplement = false, publishRequested = false, war
 
 
 async function createClosedGroup(name) {
-  const today = getWarsawNow(new Date()).dayOfWeek;
-  const day = (today + 3) % 7;
-  return DeliveryGroup.create({
+  const { deliveryDay, closedSchedule } = buildOpenClosedTestSchedules(new Date());
+  const group = await DeliveryGroup.create({
     name,
-    dayOfWeek: day,
-    orderingSchedule: {
-      startDay: day, startHour: 10, startMinute: 0,
-      endDay: day, endHour: 10, endMinute: 15,
-    },
+    dayOfWeek: deliveryDay,
+    orderingSchedule: closedSchedule,
   });
+  // The production server proactively materialises current sessions. The HTTP
+  // test does the same explicitly because app.js (unlike index.js) does not run
+  // schedulers.
+  group.orderingSessionId = await getOrCreateSessionId(String(group._id), closedSchedule);
+  await Shop.create({
+    name: `${name} Shop`,
+    deliveryGroupId: String(group._id),
+    isActive: true,
+  });
+  return group;
+}
+
+function publishToGroup(group) {
+  return post(`/api/receipts/supplement-batches/${group._id}/publish`)
+    .send({ orderingSessionId: String(group.orderingSessionId) });
 }
 
 function post(url) {
@@ -349,33 +367,54 @@ describe('receipt lifecycle HTTP cross guards', () => {
     expect(fresh.photoMeta.comments[0].text).toBe('Магніти');
   });
 
-  it('two concurrent batch publications cannot assign the same ready item to two delivery groups', async () => {
-    const { receipt, item } = await seedConfirmed({ supplement: true, publishRequested: false, warehouse: false });
+  it('modern supplement-only publication creates a Wave item without requiring a warehouse Product', async () => {
+    const { receipt, item, product } = await seedConfirmed({ supplement: true, publishRequested: false, warehouse: false });
+    // Simulate the canonical standalone state created by current routing: no
+    // warehouse Product exists because warehouse=false.
+    await Product.deleteOne({ _id: product._id });
+    await ReceiptItem.updateOne({ _id: item._id }, { $set: { createdProductId: null } });
+
+    const group = await createClosedGroup(`Cross Standalone ${seq}`);
+    const publish = await publishToGroup(group);
+    expect(publish.status).toBe(200);
+    expect(publish.body.selectedCount).toBe(1);
+
+    const [wave, offer] = await Promise.all([
+      SupplementWave.findOne({ orderingSessionId: String(group.orderingSessionId) }).lean(),
+      SupplementOffer.findOne({ receiptItemId: item._id }).lean(),
+    ]);
+    expect(wave).toBeTruthy();
+    expect(String(wave.deliveryGroupId)).toBe(String(group._id));
+    expect(offer).toBeTruthy();
+    expect(offer.productId).toBeNull();
+    expect(offer.sourceSnapshot).toBeTruthy();
+  });
+
+  it('one ready item may publish independently into two current delivery sessions', async () => {
+    const { item } = await seedConfirmed({ supplement: true, publishRequested: false, warehouse: false });
     const [groupA, groupB] = await Promise.all([
       createClosedGroup('Cross A'),
       createClosedGroup('Cross B'),
     ]);
 
     const [a, b] = await Promise.all([
-      post(`/api/receipts/supplement-batches/${groupA._id}/publish`),
-      post(`/api/receipts/supplement-batches/${groupB._id}/publish`),
+      publishToGroup(groupA),
+      publishToGroup(groupB),
     ]);
     expect(a.status).toBe(200);
     expect(b.status).toBe(200);
-    expect(Number(a.body.selectedCount || 0) + Number(b.body.selectedCount || 0)).toBe(1);
+    expect(Number(a.body.selectedCount || 0)).toBe(1);
+    expect(Number(b.body.selectedCount || 0)).toBe(1);
 
     const fresh = await ReceiptItem.findById(item._id).lean();
-    const chosen = String(fresh.routing.supplementDeliveryGroupId || '');
-    expect([String(groupA._id), String(groupB._id)]).toContain(chosen);
     expect(fresh.supplementPublishRequestedAt).toBeTruthy();
-    expect(await SupplementOffer.countDocuments({ receiptItemId: item._id })).toBe(1);
+    expect(await SupplementOffer.countDocuments({ receiptItemId: item._id })).toBe(2);
+    expect(await SupplementWave.countDocuments({})).toBe(2);
 
-    const otherGroup = chosen === String(groupA._id) ? groupB : groupA;
-    const retry = await post(`/api/receipts/supplement-batches/${otherGroup._id}/publish`);
+    const retry = await publishToGroup(groupA);
     expect(retry.status).toBe(200);
     expect(retry.body.selectedCount).toBe(0);
-    expect(await SupplementOffer.countDocuments({ receiptItemId: item._id })).toBe(1);
-    expect(String((await ReceiptItem.findById(item._id).lean()).routing.supplementDeliveryGroupId)).toBe(chosen);
+    expect(await SupplementOffer.countDocuments({ receiptItemId: item._id })).toBe(2);
   });
 
   it('publish vs unconfirm race has only two valid outcomes and never leaves a split state', async () => {
@@ -383,7 +422,7 @@ describe('receipt lifecycle HTTP cross guards', () => {
     const group = await createClosedGroup(`Cross Race U ${seq}`);
 
     const [publish, rollback] = await Promise.all([
-      post(`/api/receipts/supplement-batches/${group._id}/publish`),
+      publishToGroup(group),
       post(`/api/receipts/${receipt._id}/items/${item._id}/unconfirm`),
     ]);
 
@@ -401,7 +440,7 @@ describe('receipt lifecycle HTTP cross guards', () => {
       expect(rollback.body.error).toBe('receipt_item_in_use');
       expect(publish.body.selectedCount).toBe(1);
       expect(fresh.status).toBe('confirmed');
-      expect(String(fresh.routing.supplementDeliveryGroupId)).toBe(String(group._id));
+      expect(fresh.routing.supplement).toBe(true);
       expect(fresh.supplementPublishRequestedAt).toBeTruthy();
       expect(await SupplementOffer.countDocuments({ receiptItemId: item._id })).toBe(1);
     }
@@ -412,7 +451,7 @@ describe('receipt lifecycle HTTP cross guards', () => {
     const group = await createClosedGroup(`Cross Race D ${seq}`);
 
     const [publish, remove] = await Promise.all([
-      post(`/api/receipts/supplement-batches/${group._id}/publish`),
+      publishToGroup(group),
       del(`/api/receipts/${receipt._id}/items/${item._id}`),
     ]);
 
@@ -428,7 +467,7 @@ describe('receipt lifecycle HTTP cross guards', () => {
       expect(remove.body.error).toBe('receipt_item_in_use');
       expect(publish.body.selectedCount).toBe(1);
       expect(fresh.status).toBe('confirmed');
-      expect(String(fresh.routing.supplementDeliveryGroupId)).toBe(String(group._id));
+      expect(fresh.routing.supplement).toBe(true);
       expect(await SupplementOffer.countDocuments({ receiptItemId: item._id })).toBe(1);
     }
   });

@@ -1,0 +1,18 @@
+{
+  "runId": "20260816224357-225bba",
+  "marker": "__LIVE_E2E__20260816224357-225bba",
+  "createdAt": "2026-08-16T22:44:20.297Z",
+  "db": null,
+  "redisWasConfiguredButIsolated": true,
+  "execute": false,
+  "requestedScenarios": "all",
+  "summary": {
+    "passedScenarios": 0,
+    "failedScenarios": 0,
+    "passedAssertions": 0,
+    "failedAssertions": 0
+  },
+  "scenarios": [],
+  "assertions": [],
+  "preserved": []
+}

@@ -13,6 +13,7 @@ const Order = require('../models/Order');
 const PickingTask = require('../models/PickingTask');
 const OrderingSession = require('../models/OrderingSession');
 const Product = require('../models/Product');
+const SupplementWave = require('../models/SupplementWave');
 const { auditSessionCoverage } = require('./sessionCoverage');
 const { isTerminalOrderItem } = require('../utils/orderItemState');
 
@@ -53,6 +54,19 @@ async function auditSessionClosure({ deliveryGroupId, orderingSessionId }) {
     taskId: str(t._id), productId: str(t.productId), blockId: t.blockId,
     positionIndex: t.positionIndex, status: t.status, lockedBy: str(t.lockedBy) || null,
     lockedAt: t.lockedAt || null,
+  }))));
+
+  const activeSupplementWaves = await SupplementWave.find({
+    orderingSessionId: sessionId,
+    status: { $in: SupplementWave.ACTIVE_STATUSES },
+  }, '_id deliveryGroupId status openedAt frozenAt').sort({ openedAt: 1 }).lean();
+  const supplementGroupMismatches = activeSupplementWaves.filter((wave) => str(wave.deliveryGroupId) !== groupId);
+  const supplementForGroup = activeSupplementWaves.filter((wave) => str(wave.deliveryGroupId) === groupId);
+  if (supplementForGroup.length) blockers.push(issue('active_supplement_waves', supplementForGroup.map((wave) => ({
+    waveId: str(wave._id), status: wave.status, openedAt: wave.openedAt || null, frozenAt: wave.frozenAt || null,
+  }))));
+  if (supplementGroupMismatches.length) blockers.push(issue('session_supplement_group_mismatch', supplementGroupMismatches.map((wave) => ({
+    waveId: str(wave._id), deliveryGroupId: str(wave.deliveryGroupId), expectedDeliveryGroupId: groupId, status: wave.status,
   }))));
   if (taskGroupMismatches.length) blockers.push(issue('session_task_group_mismatch', taskGroupMismatches.map((t) => ({
     taskId: str(t._id), productId: str(t.productId), deliveryGroupId: str(t.deliveryGroupId) || null,

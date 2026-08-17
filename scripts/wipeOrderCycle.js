@@ -12,7 +12,7 @@
  *
  * ІНДЕКСИ скидати не треба: deleteMany видаляє документи, а індекси лишає, і
  * сервер на старті все одно робить syncIndexes() для Order / PickingTask /
- * SupplementOffer / SupplementRequest / User (server/index.js). Прапорець
+ * SupplementWave / SupplementOffer / SupplementRequest / User (server/index.js). Прапорець
  * --sync-indexes лише дає зробити те саме без перезапуску сервера.
  *
  * БЕЗПЕЧНО ЗА ЗАМОВЧУВАННЯМ: без --execute це dry-run, який тільки рахує.
@@ -49,7 +49,8 @@ const CORE = [
   // вході в мініапку. Це нормально — нова сесія порожня (seq: null, pending).
   ['orderingsessions',   'сесії замовлення (номери «Сесія №X»)'],
   ['catalogreviews',     'позначки «я переглянув каталог»'],
-  ['supplementoffers',   'пропозиції дозамовлення'],
+  ['supplementwaves',    'хвилі дозамовлення'],
+  ['supplementoffers',   'позиції/legacy-пропозиції дозамовлення'],
   ['supplementrequests', 'заявки магазинів на дозамовлення'],
   ['clearedcarts',       'знімки очищених кошиків'],
 ];
@@ -213,6 +214,7 @@ async function main() {
       ['Order',             require('../models/Order')],
       ['PickingTask',       require('../models/PickingTask')],
       ['OrderingSession',   require('../models/OrderingSession')],
+      ['SupplementWave',    require('../models/SupplementWave')],
       ['SupplementOffer',   require('../models/SupplementOffer')],
       ['SupplementRequest', require('../models/SupplementRequest')],
       ['CatalogReview',     require('../models/CatalogReview')],

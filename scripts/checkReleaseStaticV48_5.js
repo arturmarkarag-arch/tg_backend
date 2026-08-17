@@ -24,6 +24,10 @@ const checks = [
   'scripts/checkPickingServerAuthorityV48_13.js',
   'scripts/checkPickingReadinessV48_14.js',
   'scripts/checkLiveHarnessV48_18.js',
+  'scripts/checkDataStateArchitectureV48_19.js',
+  'scripts/checkMutationAuthorityV48_20.js',
+  'scripts/checkOperationalReadModelsV48_21.js',
+  'scripts/checkSupplementWaveArchitectureV48_S2.js',
 ];
 
 let failed = 0;

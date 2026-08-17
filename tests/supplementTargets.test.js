@@ -1,101 +1,48 @@
 'use strict';
 
-// Legacy вибір групи лишається permissive, але current per-item supplement може
-// попросити строгий business gate: ordinary ordering window already closed.
+const fs = require('fs');
+const path = require('path');
 
-const { humanDuration } = require('../services/supplementTargets');
-const {
-  getPreviousOrderingCloseAt,
-  getOrderingWindowCloseAt,
-  getWarsawNow,
-} = require('../utils/orderingSchedule');
+const ROOT = path.resolve(__dirname, '..');
+const read = (rel) => fs.readFileSync(path.join(ROOT, rel), 'utf8');
+const targets = read('services/supplementTargets.js');
+const executableTargets = targets
+  .replace(/\/\*[\s\S]*?\*\//g, '')
+  .replace(/\/\/.*$/gm, '');
 
-const MIN = 60 * 1000;
-const HOUR = 60 * MIN;
-const DAY = 24 * HOUR;
-
-// Для tripwire-тестів будуємо явний розклад конкретної групи.
-// Runtime v24 більше не виводить його з dayOfWeek і не читає global setting.
-const scheduleForEndDay = (endDay) => ({
-  startDay: (endDay - 1 + 7) % 7,
-  startHour: 16,
-  startMinute: 30,
-  endDay,
-  endHour: 7,
-  endMinute: 30,
-});
-
-describe("TRIPWIRE: supplement target не прив'язується до конкретного OrderingSession", () => {
-  const mod = require('../services/supplementTargets');
-
-  it('ціль хвилі — лише група, без сесії', () => {
-    // Поява orderingSessionId означала б, що хвилю знову прив'язали до
-    // конкретної доставки. Current gate перевіряє лише weekly window open/closed.
-    expect(String(mod.resolveSupplementTarget)).not.toMatch(/orderingSessionId/);
-  });
-});
-
-describe('getPreviousOrderingCloseAt — «замовлення закрилися N тому»', () => {
-  const now = Date.now();
-
-  for (let dayOfWeek = 0; dayOfWeek <= 6; dayOfWeek += 1) {
-    it(`день ${dayOfWeek}: попереднє закриття в минулому, наступне в майбутньому`, () => {
-      const schedule = scheduleForEndDay(dayOfWeek);
-      const prev = getPreviousOrderingCloseAt(schedule);
-      const next = getOrderingWindowCloseAt(schedule);
-      expect(prev.getTime()).toBeLessThanOrEqual(now);
-      expect(next.getTime()).toBeGreaterThan(now);
-    });
-
-    it(`день ${dayOfWeek}: між сусідніми закриттями рівно тиждень (± година на DST)`, () => {
-      const schedule = scheduleForEndDay(dayOfWeek);
-      const prev = getPreviousOrderingCloseAt(schedule);
-      const next = getOrderingWindowCloseAt(schedule);
-      const gap = next.getTime() - prev.getTime();
-      // Саме через цю годину значення НЕ рахується як «наступне − 7 днів»:
-      // на переході DST така арифметика показала б «закрилося 4 години тому»
-      // замість трьох.
-      expect(Math.abs(gap - 7 * DAY)).toBeLessThanOrEqual(HOUR);
-    });
-  }
-
-  it('у день доставки до 07:30 попереднє закриття — тиждень тому, а не сьогодні', () => {
-    const { dayOfWeek, hour, minute } = getWarsawNow();
-    const beforeClose = hour * 60 + minute < 7 * 60 + 30;
-    if (!beforeClose) return; // тест має сенс лише вранці — інакше просто пропускаємо
-
-    const prev = getPreviousOrderingCloseAt(scheduleForEndDay(dayOfWeek));
-    expect(Date.now() - prev.getTime()).toBeGreaterThan(6 * DAY);
-  });
-});
-
-describe('humanDuration — так, як це вимовляє людина', () => {
-  it('менше хвилини не перетворюється на «0 хвилин»', () => {
-    expect(humanDuration(10 * 1000)).toBe('менше хвилини');
+describe('V48.S2 supplement target contract', () => {
+  it('pins a supplement target to the current OrderingSession', () => {
+    expect(targets).toContain('findCurrentSessionId');
+    expect(targets).toContain('expectedOrderingSessionId');
+    expect(targets).toContain('orderingSessionId: str(session._id)');
+    expect(targets).toContain('supplement_target_session_changed');
   });
 
-  it('хвилини відмінюються', () => {
-    expect(humanDuration(1 * MIN)).toBe('1 хвилину');
-    expect(humanDuration(3 * MIN)).toBe('3 хвилини');
-    expect(humanDuration(45 * MIN)).toBe('45 хвилин');
-    expect(humanDuration(11 * MIN)).toBe('11 хвилин');
+  it('does not invent time-of-day / recent-close heuristics', () => {
+    expect(executableTargets).not.toMatch(/humanDuration/);
+    expect(executableTargets).not.toMatch(/getPreviousOrderingCloseAt/);
+    expect(executableTargets).not.toMatch(/closed.{0,30}(minutes|min|хв)/i);
+    expect(executableTargets).not.toMatch(/morning|ранок/i);
   });
 
-  it('рівні години йдуть без хвилин', () => {
-    expect(humanDuration(3 * HOUR)).toBe('3 години');
-    expect(humanDuration(1 * HOUR)).toBe('1 годину');
+  it('rejects a delivery cycle that has not started yet', () => {
+    expect(targets).toContain('supplement_target_session_not_started');
+    expect(targets).toContain('new Date(session.openAt).getTime() > now.getTime()');
   });
 
-  it('неповні години показують і хвилини', () => {
-    expect(humanDuration(2 * HOUR + 15 * MIN)).toBe('2 години 15 хвилин');
+  it('rejects completed delivery cycles', () => {
+    expect(targets).toContain("session.pickingStatus === 'completed'");
+    expect(targets).toContain('supplement_target_session_completed');
   });
 
-  it('від доби рахуємо днями', () => {
-    expect(humanDuration(4 * DAY)).toBe('4 дні');
-    expect(humanDuration(7 * DAY)).toBe('7 днів');
+  it('allows current delivery states before and during warehouse picking', () => {
+    expect(targets).toContain("isOrderingOpen(group.orderingSchedule, now).isOpen ? 'ordering_open' : 'awaiting_picking'");
+    expect(targets).toContain("return 'picking'");
   });
 
-  it('відʼємний час не дає «-5 хвилин»', () => {
-    expect(humanDuration(-5 * MIN)).toBe('менше хвилини');
+  it('target discovery is read-only with respect to session identity', () => {
+    expect(targets).not.toContain('getOrCreateSessionId');
+    expect(targets).not.toContain('OrderingSession.create');
+    expect(targets).not.toMatch(/findOneAndUpdate|updateOne|updateMany|deleteOne|deleteMany/);
   });
 });

@@ -16,6 +16,7 @@ const { invalidateShop } = require('../utils/modelCache');
 const { logShopTransition } = require('./shopAudit');
 const { activeOrderShopFilter } = require('../utils/orderShopFilter');
 const { getOrderOwnershipState } = require('../utils/orderOwnership');
+const { assertOperationalShop, assertAssignableShopRole } = require('../utils/shopOperationalState');
 
 async function ensureOrderNotInPickingPipeline(orderId, session) {
   const exists = await PickingTask.exists({
@@ -49,6 +50,23 @@ async function migrateSellerShop({
   updateLastSeller = true,
   allowFrozenOrderTransfer = false,
 }) {
+  // This is the canonical CURRENT assignment command. Enforce both ends here,
+  // not merely in the HTTP caller: every transport (admin route, transfer flow,
+  // registration reactivation) gets identical role/shop invariants.
+  assertAssignableShopRole(existingUser?.role, appError);
+  const requestedShopId = newShopFull?._id ? String(newShopFull._id) : '';
+  if (!requestedShopId) throw appError('shop_not_found');
+
+  // Re-read the target inside the caller's transaction/session. A route-level
+  // `isActive` check can become stale before the write; the command boundary is
+  // the last authority before User.shopId changes.
+  const freshTargetShop = await Shop.findById(requestedShopId)
+    .populate('cityId', 'name')
+    .session(session)
+    .lean();
+  assertOperationalShop(freshTargetShop, appError);
+  newShopFull = freshTargetShop;
+
   const oldShopId = existingUser.shopId ? String(existingUser.shopId) : '';
   const newShopId = String(newShopFull._id);
   const newShopName = newShopFull.name || '';
@@ -118,7 +136,10 @@ async function migrateSellerShop({
   // 1. Migrate active order FIRST so a downstream write failure aborts the whole tx
   let movedOrder = null;
   let shopOwnedOrder = null;
-  let prevGroupId = null;
+  // Assignment topology exists independently of whether an Order moves. Keep the
+  // old group in the command result so post-commit publication can refresh
+  // dashboards even for a seller with no active order.
+  let prevGroupId = oldShopFull?.deliveryGroupId ? String(oldShopFull.deliveryGroupId) : null;
 
   if (oldShopId !== newShopId) {
     let activeOrder = null;
@@ -166,10 +187,6 @@ async function migrateSellerShop({
         shopOwnedOrder = activeOrder;
       } else {
         await ensureOrderNotInPickingPipeline(activeOrder._id, session);
-
-        prevGroupId = activeOrder.buyerSnapshot?.deliveryGroupId
-          ? String(activeOrder.buyerSnapshot.deliveryGroupId)
-          : null;
 
         activeOrder.shopId = newShopFull._id;
         if (!activeOrder.buyerSnapshot) activeOrder.buyerSnapshot = {};
@@ -313,6 +330,11 @@ async function migrateSellerShop({
     updatedUser,
     movedOrder,
     shopOwnedOrder,
+    fromShopId: oldShopId || null,
+    toShopId: newShopId || null,
+    sellerTelegramId: String(existingUser.telegramId),
+    assignmentChanged: oldShopId !== newShopId,
+    orderChanged: Boolean(movedOrder),
     prevGroupId,
     newGroupId: newDeliveryGroupId || null,
     invalidate: async () => {

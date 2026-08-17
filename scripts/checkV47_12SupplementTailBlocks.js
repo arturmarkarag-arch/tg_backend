@@ -12,12 +12,12 @@ const scheduler = read('services/supplementScheduler.js');
 const blocks = read('routes/blocks.js');
 const errors = read('utils/errors.js');
 
-check(targets.includes('allowDeferred = false'), 'supplement target resolver supports deferred preparation');
-check(targets.includes("state: 'ordering_open'") && targets.includes('Дозамовлення можна підготувати зараз'), 'open ordinary session is informational, not a UI prohibition');
-check(offers.includes('if (target.deferred)') && offers.includes("supplementStatus: 'pending'"), 'offer creation defers while ordinary ordering is open');
-check(offers.includes('deferred === 0'), 'receipt remains pending until every deferred offer can open');
-check(receipts.match(/allowDeferred:\s*true/g)?.length >= 3, 'routing/confirm/commit all allow deferred supplement preparation');
-check(scheduler.includes('reconcilePendingReceipts') && scheduler.includes('60 * 1000'), 'minute scheduler retries deferred supplement receipts automatically');
+check(targets.includes('findCurrentSessionId') && targets.includes('expectedOrderingSessionId'), 'supplement target resolver pins the current delivery session');
+check(targets.includes("return isOrderingOpen(group.orderingSchedule, now).isOpen ? 'ordering_open' : 'awaiting_picking'"), 'open ordinary session is an eligible current-delivery state, not a prohibition');
+check(receipts.includes('createWaveWithItems({') && receipts.includes('orderingSessionId: target.orderingSessionId'), 'modern batch publication creates the Wave immediately in the selected current session');
+check(receipts.includes('withSessionLifecycleLock(firstTarget.orderingSessionId'), 'publication is serialized with session completion');
+check(offers.includes('if (Number(item.supplementBatchVersion || 0) >= 1) continue'), 'legacy reconciliation cannot consume modern Wave rows');
+check(scheduler.includes('reconcilePendingReceipts') && scheduler.includes('freezeOffersForActiveOrderingWindows'), 'minute scheduler keeps legacy supplement compatibility isolated');
 check(blocks.includes("withLock('blocks:sequence'"), 'block create/delete share sequence lock');
 check(blocks.includes("Number(maxBlock.blockId) !== num") && blocks.includes("block_delete_tail_only"), 'only current tail block can be deleted');
 check(blocks.includes("(block.productIds || []).length > 0") && blocks.includes("block_not_empty"), 'tail deletion requires literally empty stored product sequence');

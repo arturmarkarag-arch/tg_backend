@@ -8,14 +8,17 @@ const PickingTask = require('../models/PickingTask');
 const { telegramAuth, requireTelegramRole } = require('../middleware/telegramAuth');
 const { isOrderingOpen, getOrderingWindowOpenAt, isOrderingOpeningSoon } = require('../utils/orderingSchedule');
 const ClearedCart = require('../models/ClearedCart');
-const { migrateSellerShop } = require('../services/migrateSellerShop');
-const { unassignSellerAndPark } = require('../services/unassignSeller');
+const {
+  assignUserToShopCommand,
+  unassignUserFromShopCommand,
+  buildInitialAssignmentTransition,
+  publishShopAssignmentTransition,
+} = require('../services/shopAssignmentCommand');
 const { appError, asyncHandler } = require('../utils/errors');
-const { withLock } = require('../utils/lock');
-const { invalidateShop } = require('../utils/modelCache');
 const { getIO } = require('../socket');
 const { softRemoveUser } = require('../services/softRemoveUser');
 const { getTelegramUsernameMap } = require('../utils/telegramUsername');
+const { isAssignedShopRole, assertOperationalShop } = require('../utils/shopOperationalState');
 
 const router = express.Router();
 router.use(telegramAuth);
@@ -45,7 +48,7 @@ async function sanitizeUserPayload(payload, existing = null) {
   // Seller-specific fields. Група доставки НЕ пишеться в User — вона живе на
   // магазині (Shop.deliveryGroupId), тож призначення магазину саме по собі й
   // визначає групу.
-  if (role === 'seller') {
+  if (isAssignedShopRole(role)) {
     if (payload.shopId !== undefined) data.shopId = payload.shopId || null;
     if (payload.shopNumber !== undefined) data.shopNumber = payload.shopNumber;
   } else {
@@ -424,17 +427,25 @@ router.post('/', asyncHandler(async (req, res) => {
   const telegramId = req.body.telegramId;
   if (!telegramId) throw appError('auth_telegram_id_missing');
 
-  const existing = await User.findOne({ telegramId });
-  const payload = await sanitizeUserPayload(req.body, existing);
+  // CREATE means create. Updating an existing identity through POST used to be a
+  // second mutation path that could raw-write shopId and bypass migrateSellerShop.
+  // Existing users must go through PATCH, where assignment/unassignment has one
+  // canonical transactional workflow.
+  const existing = await User.findOne({ telegramId }).select('_id').lean();
+  if (existing) throw appError('user_telegram_id_taken', { telegramId });
 
-  if (existing) {
-    const user = await User.findByIdAndUpdate(existing._id, payload, { new: true, runValidators: true });
-    return res.status(200).json(user);
-  }
-
+  const payload = await sanitizeUserPayload(req.body, null);
   payload.telegramId = telegramId;
+  let targetShop = null;
+  if (payload.shopId) {
+    targetShop = await Shop.findById(payload.shopId).lean();
+    assertOperationalShop(targetShop, appError);
+  }
   try {
     const user = await User.create(payload);
+    if (targetShop) {
+      await publishShopAssignmentTransition(buildInitialAssignmentTransition({ user, shop: targetShop }));
+    }
     return res.status(201).json(user);
   } catch (err) {
     // Race: another request created the same telegramId between findOne and create.
@@ -445,107 +456,30 @@ router.post('/', asyncHandler(async (req, res) => {
   }
 }));
 
-// Lightweight endpoint — updates shopId using migrateSellerShop for full consistency
+// Lightweight endpoint — one external assignment command for full consistency.
 router.patch('/:telegramId/shop', asyncHandler(async (req, res) => {
-  const existing = await User.findOne({ telegramId: req.params.telegramId });
+  const existing = await User.findOne({ telegramId: req.params.telegramId }).lean();
   if (!existing) throw appError('user_not_found');
-  if (!['seller', 'admin'].includes(existing.role)) {
+  if (!isAssignedShopRole(existing.role)) {
     throw appError('validation_failed', { field: 'role' });
   }
 
-  const { shopId } = req.body;
-  if (!shopId) {
-    // Unassign from shop. CRITICAL: the seller's active (not-yet-picked) order
-    // MUST be parked (shopId=null) here — otherwise it stays stranded on the old
-    // shop and a later assignment via migrateSellerShop (which only picks up
-    // PARKED orders when the seller has no shop) can never reunite them.
-    const actor = req.telegramUser || { telegramId: 'admin', firstName: 'Admin', lastName: '', role: 'admin' };
-    const user = await withLock(`user:${req.params.telegramId}:shop`, async () => {
-      const session = await mongoose.connection.startSession();
-      try {
-        let updated;
-        await session.withTransaction(async () => {
-          const now = new Date();
-          const freshSeller = await User.findOne({ telegramId: req.params.telegramId }).session(session);
-          if (!freshSeller) throw appError('user_not_found');
-          const oldShopId = freshSeller.shopId ? String(freshSeller.shopId) : null;
-
-          await unassignSellerAndPark({
-            session,
-            seller: freshSeller,
-            fromShopId: oldShopId,
-            actor,
-            reason: 'admin_unassign_shop',
-          });
-
-          if (oldShopId) {
-            await Shop.findByIdAndUpdate(
-              oldShopId,
-              {
-                lastSellerChangedAt: now,
-                lastSeller: {
-                  telegramId: freshSeller.telegramId,
-                  firstName: freshSeller.firstName || '',
-                  lastName: freshSeller.lastName || '',
-                  unassignedAt: now,
-                },
-              },
-              { session }
-            );
-          }
-
-          updated = await User.findOne({ telegramId: req.params.telegramId }).session(session).lean();
-        });
-        return updated;
-      } finally {
-        session.endSession();
-      }
-    });
-    if (existing.shopId) await invalidateShop(existing.shopId);
-    return res.json(user);
-  }
-
-  const newShopFull = await Shop.findById(shopId).populate('cityId', 'name').lean();
-  if (!newShopFull) throw appError('shop_not_found');
-
   const actor = req.telegramUser || { telegramId: 'admin', firstName: 'Admin', lastName: '', role: 'admin' };
+  const { shopId } = req.body;
 
-  const result = await withLock(`user:${req.params.telegramId}:shop`, async () => {
-    const session = await mongoose.connection.startSession();
-    try {
-      let out;
-      await session.withTransaction(async () => {
-        // Re-read inside the lock so two queued admins do not both act on a stale snapshot
-        const freshExisting = await User.findOne({ telegramId: req.params.telegramId }).session(session).lean();
-        if (!freshExisting) throw appError('user_not_found');
-        out = await migrateSellerShop({
-          session,
-          existingUser: freshExisting,
-          newShopFull,
-          actor,
-          reason: 'admin_shop_assignment',
-        });
+  const result = shopId
+    ? await assignUserToShopCommand({
+        telegramId: req.params.telegramId,
+        shopId,
+        actor,
+        reason: 'admin_shop_assignment',
+      })
+    : await unassignUserFromShopCommand({
+        telegramId: req.params.telegramId,
+        actor,
+        reason: 'admin_unassign_shop',
+        updateLastSeller: true,
       });
-      return out;
-    } finally {
-      session.endSession();
-    }
-  });
-
-  const io = getIO();
-  // Realtime notifications are best-effort. The HTTP/Mongo operation above is
-  // authoritative and must not turn into a 500 when Socket.IO is unavailable
-  // (for example in integration-test harnesses or during socket startup).
-  if (result.movedOrder && io) {
-    if (result.prevGroupId) io.to(`picking_group_${result.prevGroupId}`).emit('shop_status_changed', { groupId: result.prevGroupId });
-    if (result.newGroupId && result.newGroupId !== result.prevGroupId) {
-      io.to(`picking_group_${result.newGroupId}`).emit('shop_status_changed', { groupId: result.newGroupId });
-    }
-    io.emit('user_order_updated', { buyerTelegramId: existing.telegramId });
-  }
-
-  if (existing.shopId) await invalidateShop(existing.shopId);
-  await invalidateShop(newShopFull._id);
 
   res.json(result.updatedUser);
 }));
@@ -556,100 +490,52 @@ router.patch('/:telegramId', asyncHandler(async (req, res) => {
 
   const payload = await sanitizeUserPayload(req.body, existing);
 
-  // If shopId is changing for a seller, use migrateSellerShop for full consistency
+  // Existing-user assignment is an application command, not a raw User update.
   const oldShopId = existing.shopId ? String(existing.shopId) : null;
   const newShopId = payload.shopId ? String(payload.shopId) : null;
   const shopChanging = payload.shopId !== undefined && newShopId !== oldShopId && newShopId;
 
-  if (shopChanging && ['seller', 'admin'].includes(payload.role ?? existing.role)) {
-    const newShopFull = await Shop.findById(payload.shopId).populate('cityId', 'name').lean();
-    if (!newShopFull) throw appError('shop_not_found');
-
+  if (shopChanging && isAssignedShopRole(payload.role ?? existing.role)) {
     const actor = req.telegramUser || { telegramId: 'admin', firstName: 'Admin', lastName: '', role: 'admin' };
-    // Apply non-shop fields first, then run migration for shop-related fields
     const nonShopPayload = { ...payload };
     delete nonShopPayload.shopId;
 
-    const result = await withLock(`user:${req.params.telegramId}:shop`, async () => {
-      const session = await mongoose.connection.startSession();
-      try {
-        let out;
-        await session.withTransaction(async () => {
-          if (Object.keys(nonShopPayload).length > 0) {
-            await User.findOneAndUpdate({ telegramId: req.params.telegramId }, nonShopPayload, { session });
-          }
-          const freshExisting = await User.findOne({ telegramId: req.params.telegramId }).session(session).lean();
-          if (!freshExisting) throw appError('user_not_found');
-          out = await migrateSellerShop({
-            session,
-            existingUser: freshExisting,
-            newShopFull,
-            actor,
-            reason: 'admin_general_patch',
-          });
-        });
-        return out;
-      } finally {
-        session.endSession();
-      }
+    const result = await assignUserToShopCommand({
+      telegramId: req.params.telegramId,
+      shopId: newShopId,
+      actor,
+      reason: 'admin_general_patch',
+      userPatch: nonShopPayload,
     });
-
-    const io = getIO();
-    // Same best-effort rule as the dedicated shop-assignment endpoint: a
-    // missing Socket.IO instance must never roll a successful HTTP/Mongo move
-    // into a 500 after the transaction has already committed.
-    if (result.movedOrder && io) {
-      if (result.prevGroupId) io.to(`picking_group_${result.prevGroupId}`).emit('shop_status_changed', { groupId: result.prevGroupId });
-      if (result.newGroupId && result.newGroupId !== result.prevGroupId) {
-        io.to(`picking_group_${result.newGroupId}`).emit('shop_status_changed', { groupId: result.newGroupId });
-      }
-      io.emit('user_order_updated', { buyerTelegramId: existing.telegramId });
-    }
-    if (oldShopId) await invalidateShop(oldShopId);
-    await invalidateShop(newShopFull._id);
     return res.json(result.updatedUser);
   }
 
-  // Unassign via the generic edit form (shopId cleared) for a seller/admin:
-  // MUST park the active order, otherwise it is stranded on the old shop.
+  // Unassign through the same application command. Non-shop profile/role
+  // edits are committed in the same transaction as the relation transition.
   const shopClearing = payload.shopId !== undefined && !newShopId && oldShopId
-    && ['seller', 'admin'].includes(payload.role ?? existing.role);
+    && isAssignedShopRole(existing.role);
   if (shopClearing) {
     const actor = req.telegramUser || { telegramId: 'admin', firstName: 'Admin', lastName: '', role: 'admin' };
     const nonShopPayload = { ...payload };
     delete nonShopPayload.shopId;
-    const updated = await withLock(`user:${req.params.telegramId}:shop`, async () => {
-      const session = await mongoose.connection.startSession();
-      try {
-        let out;
-        await session.withTransaction(async () => {
-          if (Object.keys(nonShopPayload).length > 0) {
-            await User.findOneAndUpdate({ telegramId: req.params.telegramId }, nonShopPayload, { session });
-          }
-          const freshSeller = await User.findOne({ telegramId: req.params.telegramId }).session(session);
-          if (!freshSeller) throw appError('user_not_found');
-          await unassignSellerAndPark({
-            session, seller: freshSeller, fromShopId: oldShopId, actor,
-            reason: 'admin_general_patch_unassign',
-          });
-          out = await User.findOne({ telegramId: req.params.telegramId }).session(session).lean();
-        });
-        return out;
-      } finally {
-        session.endSession();
-      }
+
+    const result = await unassignUserFromShopCommand({
+      telegramId: req.params.telegramId,
+      actor,
+      reason: 'admin_general_patch_unassign',
+      userPatch: nonShopPayload,
+      updateLastSeller: true,
     });
-    await invalidateShop(oldShopId);
-    return res.json(updated);
+    return res.json(result.updatedUser);
   }
 
-  // Raw fallback. If a seller/admin's shopId somehow changes here it bypasses
-  // order migration — log it loudly so the leak is visible instead of silent.
+  // Defensive invariant: no shopId transition is allowed to fall through to a
+  // generic raw update. Every assignment/unassignment must pass the canonical
+  // transactional migration path above.
   const rawShopLeak = payload.shopId !== undefined
-    && (payload.shopId ? String(payload.shopId) : null) !== oldShopId
-    && ['seller', 'admin'].includes(payload.role ?? existing.role);
+    && (payload.shopId ? String(payload.shopId) : null) !== oldShopId;
   if (rawShopLeak) {
-    // Хто саме і на який магазин — лежить у ShopAuditLog; у консоль іде лише факт.
+    throw appError('validation_failed', { field: 'shopId', details: 'canonical_assignment_required' });
   }
 
   const user = await User.findOneAndUpdate(

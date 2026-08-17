@@ -9,6 +9,7 @@ const Shop = require('../models/Shop');
 const User = require('../models/User');
 const Product = require('../models/Product');
 const Block = require('../models/Block');
+const { pruneInvalidBlockProductIds, appendProductsToBlockDocument } = require('../services/blockMembershipPrimitives');
 const Order = require('../models/Order');
 const PickingTask = require('../models/PickingTask');
 const { buildPickingTasksFromOrders } = require('../services/taskBuilder');
@@ -193,14 +194,6 @@ router.post('/cleanup', asyncHandler(async (req, res) => {
     // Delete test products created by image-upload test
     testProductIds.length ? Product.deleteMany({ _id: { $in: testProductIds } }) : Promise.resolve({ deletedCount: 0 }),
   ]);
-
-  // Pull deleted test product IDs from real block productIds arrays
-  if (testProductIds.length) {
-    await Block.updateMany(
-      { blockId: { $lt: TEST_BLOCK_BASE }, productIds: { $in: testProductIds } },
-      { $pull: { productIds: { $in: testProductIds } } },
-    );
-  }
 
   try {
     await cache.invalidate(cache.KEYS.DELIVERY_GROUPS);
@@ -1234,18 +1227,14 @@ router.post('/test-upload-image', express.raw({ type: () => true, limit: '30mb' 
       const block = await Block.findOne({ blockId: targetBlockMeta.blockId }).session(session);
       if (!block) throw new Error('block_disappeared');
 
-      // Clean stale/missing product refs before computing position and appending.
-      if (block.productIds.length > 0) {
-        const existingProducts = await Product.find({ _id: { $in: block.productIds } }, '_id').session(session).lean();
-        const existingIds = new Set(existingProducts.map((p) => String(p._id)));
-        const filteredIds = block.productIds.filter((id) => existingIds.has(String(id)));
-        if (filteredIds.length !== block.productIds.length) {
-          block.productIds = filteredIds;
-        }
-      }
+      // Clean stale/missing product refs through the same membership primitive
+      // used by production maintenance before computing the append position.
+      await pruneInvalidBlockProductIds({ blockId: block.blockId, session, removeArchived: false });
+      const freshBlock = await Block.findById(block._id).session(session);
+      if (!freshBlock) throw new Error('block_disappeared');
 
-      // Resolve how many valid product slots are currently in the block
-      blockProductCount = block.productIds.length;
+      // Resolve how many valid product slots are currently in the block.
+      blockProductCount = freshBlock.productIds.length;
 
       const maxDoc = await Product.findOne({ status: { $ne: 'archived' } }, 'orderNumber')
         .sort({ orderNumber: -1 }).session(session).lean();
@@ -1263,13 +1252,12 @@ router.post('/test-upload-image', express.raw({ type: () => true, limit: '30mb' 
         originalImageUrl: imageUrl,
       }], { session });
 
-      // Append to end — positionIndex is 1-based
-      block.productIds.push(product._id);
-      block.version = (block.version || 0) + 1;
-      await block.save({ session });
+      // Append to end — positionIndex is 1-based. Even the admin test route
+      // uses the canonical membership primitive instead of writing productIds itself.
+      await appendProductsToBlockDocument({ block: freshBlock, productIds: [product._id], session });
 
       productId = String(product._id);
-      positionIndex = block.productIds.length; // position after push = last slot
+      positionIndex = freshBlock.productIds.length; // position after push = last slot
     });
   } finally {
     session.endSession();

@@ -55,12 +55,15 @@ const receipts = read('routes/receipts.js');
 const products = read('routes/products.js');
 const orders = read('routes/orders.js');
 const blocks = read('routes/blocks.js');
+const blockMoveCommand = read('services/blockMoveCommand.js');
 const shopUpsert = read('utils/upsertShopProduct.js');
 const itemLog = read('models/ReceiptItemLog.js');
 const supplementRoute = read('routes/supplement.js');
 const supplementService = read('services/supplementOffers.js');
 const supplementTargets = read('services/supplementTargets.js');
 const supplementScheduler = read('services/supplementScheduler.js');
+const supplementWaveService = read('services/supplementWaveService.js');
+const supplementExclusion = read('services/supplementSessionExclusion.js');
 
 assert(receipts.includes("router.patch('/:id/items/:itemId/routing'"));
 assert(receipts.includes("status: 'draft'"));
@@ -68,22 +71,26 @@ assert(receipts.includes("action: 'routing_change'"));
 assert(itemLog.includes("'routing_change'"));
 assert(receipts.includes('Number(item.routingVersion || 0) >= 1 ? 0 : item.totalQty'));
 assert(products.includes('firstBlockPlacedAt: { $lte: cutoff }'));
-assert(blocks.includes('activationSet.firstBlockPlacedAt = new Date()'));
+assert(blockMoveCommand.includes('activationSet.firstBlockPlacedAt = new Date()'));
 assert(blocks.includes("{ source: 'receipt' }"), 'receipt products with quantity=0 must stay visible in incoming');
 assert(orders.includes('product.firstBlockPlacedAt || product.shelvedAt || product.createdAt'));
 assert(shopUpsert.includes('Number(item.routingVersion || 0) >= 1 ? false : true'));
 assert(supplementRoute.includes('req.body?.deliveryGroupId'));
 assert(supplementService.includes('filter.deliveryGroupId = String(deliveryGroupId)'));
-assert(supplementTargets.includes('requireOrderingClosed'));
-assert(supplementTargets.includes('supplement_ordering_still_open'));
-assert(receipts.includes('requireOrderingClosed: true'));
-assert(receipts.includes('allowDeferred: true')); // may prepare now; offer still opens only after ordinary session closes
-assert(supplementService.includes('requireOrderingClosed: true'), 'offer creation must re-check the ordinary ordering boundary');
-assert(supplementService.includes('allowDeferred: true'), 'offer creation may defer while ordinary ordering is open');
-assert(supplementService.includes('freezeOffersForActiveOrderingWindows'));
-assert(supplementService.includes('ordinary_ordering_opened'));
+// V48.S2: target identity is an exact current OrderingSession, not the old
+// "ordinary ordering must already be closed" rule. OPEN ordering is a valid current
+// delivery target; future/completed cycles are rejected by the target resolver.
+assert(supplementTargets.includes('findCurrentSessionId'));
+assert(supplementTargets.includes('expectedOrderingSessionId'));
+assert(supplementTargets.includes('supplement_target_session_not_started'));
+assert(supplementTargets.includes('supplement_target_session_completed'));
+assert(receipts.includes('expectedOrderingSessionId'));
+assert(receipts.includes('createWaveWithItems({'));
+assert(supplementWaveService.includes("status = 'frozen'"), 'modern Wave has explicit server freeze');
+assert(supplementService.includes("status: 'open', waveId: null"), 'automatic ordinary-window freeze is legacy-only');
 assert(supplementScheduler.includes('freezeOffersForActiveOrderingWindows(now)'));
-assert(supplementRoute.includes('isOrdinaryOrderingOpenForSeller'));
+assert(supplementExclusion.includes("itemStatus: 'active'"), 'same-session ordinary exclusion uses active Wave item relation');
+assert(orders.includes('assertProductOrdinaryOrderable'), 'ordinary order write boundary must enforce supplement session exclusion');
 
 const galleryStart = receipts.indexOf("router.get('/items-gallery'");
 assert(galleryStart >= 0, 'photo gallery route missing');
@@ -101,4 +108,4 @@ assert(permissions.includes("missing.push('кількість в упаковц�
 assert(receipts.includes('for (const item of items) {\n      assertItemReadyToConfirm(item, receipt);'), 'commit must revalidate readiness');
 assert(receipts.includes("if (item.status === 'confirmed') {\n        assertItemReadyToConfirm(item, liveReceipt);"), 'confirmed edits must preserve readiness');
 
-console.log('PASS receipt routing V38: routing matrix, quantity semantics, readiness gates, incoming visibility, atomic routing, seller gates, session freeze, supplement timing/group freeze, photo context/edit jump');
+console.log('PASS receipt routing V38+: routing matrix, quantity semantics, readiness gates, incoming visibility, atomic routing, Wave/session supplement target, server freeze, ordinary-order exclusion, photo context/edit jump');

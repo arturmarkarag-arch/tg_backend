@@ -8,6 +8,7 @@ const read = (rel) => fs.readFileSync(path.join(root, rel), 'utf8');
 
 const orders = read('routes/orders.js');
 const deliveryGroups = read('routes/deliveryGroups.js');
+const sellerOrderingStatus = read('services/readModels/sellerOrderingStatusReadModel.js');
 const supplementRoute = read('routes/supplement.js');
 const supplementService = read('services/supplementOffers.js');
 
@@ -19,14 +20,16 @@ assert.match(orders, /mutationLockKey = `order:upsert:/);
 assert.match(orders, /withLock\(mutationLockKey/);
 assert.match(orders, /orderingSessionId: String\(currentSessionId \|\| ''\)/);
 
-// ordering-status exposes the authoritative session identity to resumed tabs.
-assert.match(deliveryGroups, /orderingSessionId:\s*sessionId \? String\(sessionId\) : ''/);
-assert.match(deliveryGroups, /getOrCreateSessionId/);
-assert.match(deliveryGroups, /findCurrentSessionId/);
+// ordering-status exposes the authoritative session identity to resumed tabs,
+// while the GET read model remains incapable of materialising a session.
+assert.match(deliveryGroups, /buildSellerOrderingStatusReadModel\(req\.telegramUser\)/);
+assert.match(sellerOrderingStatus, /orderingSessionId:\s*sessionId \? String\(sessionId\) : ''/);
+assert.match(sellerOrderingStatus, /findCurrentSessionId/);
+assert.doesNotMatch(sellerOrderingStatus, /getOrCreateSessionId/);
 
 // SUPPLEMENT PICKING — heartbeat endpoint and one shared offer critical section.
 assert.match(supplementRoute, /\/offers\/:offerId\/heartbeat/);
-assert.match(supplementRoute, /heartbeatOffer\(req\.params\.offerId, me\)/);
+assert.match(supplementRoute, /heartbeatOffer\(req\.params\.offerId, req\.telegramUser\?\.telegramId\)/);
 assert.match(supplementRoute, /lockedAt: new Date\(\)/);
 assert.doesNotMatch(supplementRoute, /const holder = await SupplementOffer\.findById\(req\.params\.offerId/);
 

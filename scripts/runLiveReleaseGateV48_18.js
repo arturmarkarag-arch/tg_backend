@@ -24,9 +24,14 @@ const steps = [
 
 for (const [label, script] of steps) {
   console.log(`\n${'='.repeat(88)}\nV48.18 LIVE GATE: ${label} (${script})\n${'='.repeat(88)}`);
-  const result = spawnSync(process.platform === 'win32' ? 'npm.cmd' : 'npm', ['run', script], {
+  const isWindows = process.platform === 'win32';
+  const result = spawnSync(isWindows ? 'npm.cmd' : 'npm', ['run', script], {
     stdio: 'inherit',
     env: process.env,
+    // Node >= 18.20/20.12 refuses to spawn .cmd without a shell (EINVAL, the
+    // CVE-2024-27980 hardening). Script names here are fixed literals, so there
+    // is nothing user-controlled to quote/inject.
+    shell: isWindows,
   });
   if (result.status !== 0) {
     console.error(`\n❌ V48.18 LIVE GATE stopped at ${label}: exit=${result.status ?? 'unknown'}`);

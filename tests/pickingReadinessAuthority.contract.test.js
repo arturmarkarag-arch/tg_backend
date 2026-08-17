@@ -12,10 +12,12 @@ function routeBlock(source, token, nextToken) {
 
 describe('V48.14 ordering/picking time authority contract', () => {
   it('ordering-status is a pure session read and cannot materialise a cycle', () => {
-    const groups = read('routes/deliveryGroups.js');
-    const block = routeBlock(groups, "router.get('/ordering-status'", "router.post('/catalog-reviewed'");
-    expect(block).toContain('findCurrentSessionId(String(group._id), group.orderingSchedule)');
-    expect(block).not.toContain('getOrCreateSessionId(');
+    const route = read('routes/deliveryGroups.js');
+    const statusReadModel = read('services/readModels/sellerOrderingStatusReadModel.js');
+    const block = routeBlock(route, "router.get('/ordering-status'", "router.post('/catalog-reviewed'");
+    expect(block).toContain('buildSellerOrderingStatusReadModel(req.telegramUser)');
+    expect(statusReadModel).toContain('findCurrentSessionId(String(group._id), group.orderingSchedule)');
+    expect(statusReadModel).not.toContain('getOrCreateSessionId(');
   });
 
   it('authenticated app profile resolution also reads an existing session instead of creating one', () => {

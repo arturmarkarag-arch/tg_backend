@@ -88,12 +88,22 @@ function normalizeReceiptItemRouting(item, receipt = null) {
   return blankRouting();
 }
 
+function needsWarehouseProduct(routing) {
+  const r = routing || blankRouting();
+  return !!r.warehouse;
+}
+
+function needsStandaloneShopProduct(routing) {
+  const r = routing || blankRouting();
+  return !!(r.mandatory && !r.warehouse && !r.supplement);
+}
+
 function legacyDestinationForRouting(routing) {
   const r = routing || blankRouting();
-  // The only route that must NOT create a warehouse Product is mandatory-only.
-  // Everything involving warehouse OR supplement needs a Product (supplement
-  // picking needs a stable productId even when the item is hidden from normal ordering).
-  return r.mandatory && !r.warehouse && !r.supplement ? 'shops' : 'shelf';
+  // This field is compatibility-only. New artifact creation MUST use the explicit
+  // helpers above because supplement-only is neither warehouse nor mandatory-shop
+  // ownership. Keep `shelf` as the least destructive legacy representation.
+  return needsStandaloneShopProduct(r) ? 'shops' : 'shelf';
 }
 
 function validateReceiptItemRouting(
@@ -129,10 +139,6 @@ function validateReceiptItemRouting(
 
 function isNormalOrderingEnabled(routing) {
   const r = routing || blankRouting();
-  // A supplement-only Product exists for physical handling / supplement picking,
-  // but must not leak into the ordinary seller catalogue. Warehouse explicitly
-  // opted-in means it may participate in the normal warehouse ordering flow.
-  if (r.supplement && !r.warehouse) return false;
   return !!r.warehouse;
 }
 
@@ -141,6 +147,8 @@ module.exports = {
   hasExplicitRouting,
   normalizeReceiptItemRouting,
   legacyDestinationForRouting,
+  needsWarehouseProduct,
+  needsStandaloneShopProduct,
   validateReceiptItemRouting,
   isNormalOrderingEnabled,
 };

@@ -15,6 +15,7 @@ const { repriceActiveOrders } = require('../utils/repriceActiveOrders');
 const Order = require('../models/Order');
 const ReceiptItem = require('../models/ReceiptItem');
 const SupplementOffer = require('../models/SupplementOffer');
+const { getSupplementExcludedProductIds } = require('../services/supplementSessionExclusion');
 const SupplementRequest = require('../models/SupplementRequest');
 const User = require('../models/User');
 const Shop = require('../models/Shop');
@@ -32,6 +33,7 @@ const { formatWarsawDateKey, warsawDateKeyToUtcRange } = require('../utils/warsa
 const cache = require('../utils/cache');
 const { buildWarehouseStockEstimate } = require('../utils/warehouseStockEstimate');
 const { getSellerVisualOrder } = require('../services/sellerVisualOrdering');
+const { appendProductsToBlockDocument } = require('../services/blockMembershipPrimitives');
 
 const staffOnly = requireTelegramRoles(['admin', 'warehouse']);
 const registeredOnly = requireTelegramRoles(['seller', 'admin', 'warehouse']);
@@ -58,8 +60,12 @@ async function getSellerCatalogCycleContext(req) {
   if (!group?.orderingSchedule) {
     return { cutoff: null, cacheScope: `group:${String(shop.deliveryGroupId)}:no-schedule` };
   }
+  let orderingSessionId = null;
+  try { orderingSessionId = await findCurrentSessionId(String(shop.deliveryGroupId), group.orderingSchedule); } catch (_) {}
   return {
     cutoff: getOrderingWindowOpenAt(group.orderingSchedule),
+    deliveryGroupId: String(shop.deliveryGroupId),
+    orderingSessionId: orderingSessionId ? String(orderingSessionId) : null,
     cacheScope: `group:${String(shop.deliveryGroupId)}:${getOpenDateWarsaw(group.orderingSchedule)}`,
   };
 }
@@ -458,6 +464,16 @@ async function getEligibleSellerCatalogProducts(req) {
     status: 'active',
     orderingEnabled: { $ne: false },
   };
+
+  // A Product explicitly published through SupplementWave for this exact delivery
+  // cycle must not simultaneously appear as an ordinary-order item in the same
+  // OrderingSession. Later sessions are unaffected. The exclusion is session-scoped
+  // and derived from the Wave item relation, never a permanent Product flag.
+  if (context.orderingSessionId) {
+    const supplementProductIds = await getSupplementExcludedProductIds(context.orderingSessionId);
+    if (supplementProductIds.length) match._id = { $nin: supplementProductIds };
+  }
+
   applySellerCycleCutoff(match, context.cutoff);
   const products = await Product.aggregate([
     { $match: match },
@@ -1194,14 +1210,16 @@ router.post('/block-upload-photos', staffOnly, asyncHandler(async (req, res) => 
           imageNames: [safeFilename],
           originalImageUrl: imageUrl,
         }], { session });
-        block.productIds.push(product._id);
         nextOrderNumber += 1;
         results.push({ productId: String(product._id), imageUrl, index: results.length });
         createdProducts.push(product);
       }
 
-      block.version += 1;
-      await block.save({ session });
+      await appendProductsToBlockDocument({
+        block,
+        productIds: createdProducts.map((product) => product._id),
+        session,
+      });
       savedBlock = block;
     });
   } finally {

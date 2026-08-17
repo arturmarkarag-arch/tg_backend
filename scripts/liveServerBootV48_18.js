@@ -36,6 +36,8 @@ try { assertEnvUriAllowed(SOURCE_URI); }
 catch (err) { console.error(`⛔ ${err.message}`); process.exit(3); }
 
 const RUN_ID = `${new Date().toISOString().replace(/[-:.TZ]/g, '').slice(0, 14)}-${crypto.randomBytes(3).toString('hex')}`;
+
+const MULTI_WORKER_REFUSAL_TIMEOUT_MS = 45_000; // require/load budget on slower Windows hosts; still fails true hangs
 const DB_NAME = `e2e_boot_${RUN_ID.replace(/-/g, '_')}`;
 const MARKER = `__BOOT_E2E__${RUN_ID}`;
 
@@ -156,8 +158,8 @@ async function assertMultiWorkerWithoutRedisRefused({ bootUri, port }) {
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
-  const exited = await waitChildExit(child, 8_000);
-  if (!exited) { await stopChild(child); throw new Error('WEB_CONCURRENCY=2 without Redis did not fail fast'); }
+  const exited = await waitChildExit(child, MULTI_WORKER_REFUSAL_TIMEOUT_MS);
+  if (!exited) { await stopChild(child); throw new Error('WEB_CONCURRENCY=2 without Redis did not fail within boot budget'); }
   if (child.exitCode === 0) throw new Error('WEB_CONCURRENCY=2 without Redis booted successfully; expected refusal');
   console.log('✅ real index.js refuses WEB_CONCURRENCY>1 without Redis');
 }

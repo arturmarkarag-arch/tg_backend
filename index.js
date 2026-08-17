@@ -162,13 +162,13 @@ async function startServer() {
     await syncCritical({
       key: 'supplements',
       title: 'Не створилися критичні індекси дозамовлень',
-      whatBroke: 'Не підтверджено ідемпотентність пропозицій або правило однієї заявки магазину.',
+      whatBroke: 'Не підтверджено ідемпотентність Wave, позицій дозамовлення або правило однієї заявки магазину.',
       howToFix: [
-        'Перевірте db.supplementoffers.getIndexes() і db.supplementrequests.getIndexes().',
-        'Старого унікального індексу productId + deliveryGroupId більше не повинно бути.',
-        'Звірте дублікати, виправте дані та перезапустіть сервер.',
+        'Перевірте db.supplementwaves.getIndexes(), db.supplementoffers.getIndexes() і db.supplementrequests.getIndexes().',
+        'SupplementWave.publicationKey має бути UNIQUE; receiptItemId + deliveryGroupId лишається compatibility UNIQUE для item publication.',
+        'Звірте дублікати Wave/items/requests, виправте дані та перезапустіть сервер.',
       ],
-      models: [require('./models/SupplementOffer'), require('./models/SupplementRequest')],
+      models: [require('./models/SupplementWave'), require('./models/SupplementOffer'), require('./models/SupplementRequest')],
     });
 
     await syncCritical({

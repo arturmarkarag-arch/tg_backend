@@ -8,6 +8,7 @@ const model = read('models/ReceiptItem.js');
 const route = read('routes/receipts.js');
 const permissions = read('utils/receiptPermissions.js');
 const supplement = read('services/supplementOffers.js');
+const waveService = read('services/supplementWaveService.js');
 
 describe('receipt core contract', () => {
   test('totalQty remains the single received quantity', () => {
@@ -58,12 +59,14 @@ describe('receipt core contract', () => {
     expect(patch).not.toContain("status: 'draft'");
   });
 
-  test('supplement offers project the receipt-created product identity even as the projection grows', () => {
-    const projection = sliceBetweenOrThrow(supplement, 'const items = await ReceiptItem.find', ').lean();', { label: 'supplement receipt item projection' });
+  test('legacy supplement projection remains readable while modern Wave items allow standalone source identity', () => {
+    const projection = sliceBetweenOrThrow(supplement, 'const items = await ReceiptItem.find', ').lean();', { label: 'legacy supplement receipt item projection' });
     for (const field of ['createdProductId', 'name', 'routing', 'routingVersion']) {
       expect(projection).toContain(field);
     }
     expect(supplement).not.toContain('existingProductId');
+    expect(waveService).toContain('productId: item.createdProductId || null');
+    expect(waveService).toContain('sourceSnapshot: sourceSnapshotFromReceiptItem(item)');
   });
 
   test('photo gallery carries display, inline-preparation and edit-navigation context', () => {

@@ -82,35 +82,46 @@ then marks the item confirmed. Unconfirm is the guarded rollback path. The singl
 - warehouse → `Product` + linked `ShopProduct` mirror;
 - mandatory-only → standalone shop-owned `ShopProduct`;
 - mandatory+warehouse → one `Product` + mirror;
-- supplement-only → warehouse `Product`, `orderingEnabled=false`;
-- supplement+warehouse → same `Product`, also eligible for future normal flow.
+- supplement-only → no warehouse `Product` is required; Wave child may have `productId=null`;
+- supplement+warehouse → real `Product` plus a session-scoped supplement child; the Product remains eligible for future ordinary cycles.
 
 For new routing rows, warehouse `Product.quantity` starts at `0`; received quantity
 is not treated as an exact remaining stock counter.
 
 ## 7. Supplement behavior
 
-Current supplement is per item + delivery group, but confirmation and publication
-are separate operations. New items are batch-managed (`supplementBatchVersion=1`):
-confirm makes the item ready but does not create a `SupplementOffer` and does not
-send Telegram.
+Canonical supplement ownership is:
 
-The photo feed groups ready items by delivery group. Explicit batch publication
-stamps `supplementPublishRequestedAt` for all selected items. If ordinary ordering
-is closed, offers open immediately and one grouped notification is sent. If it is
-still open, the publication request remains durable and the minute scheduler opens
-it after closure. Notification happens only after offer reconciliation, grouped by
-delivery group.
+```text
+DeliveryGroup -> OrderingSession -> SupplementWave -> Wave item -> Shop request
+```
 
-Legacy `supplementBatchVersion=0` and `Receipt.type='supplement'` keep their old
-behaviour without a migration.
+Confirmation and supplement publication are separate operations. Confirm makes a
+ReceiptItem eligible; an explicit publish command chooses exactly one currently
+eligible DeliveryGroup + exact `OrderingSession` and creates/uses one Wave. One
+Wave can contain many items.
+
+Publication eligibility is exact-session aware. The same ReceiptItem may be
+published independently into multiple simultaneously-current eligible target
+sessions. `supplementPublishRequestedAt` is compatibility/audit metadata only and
+is not lifecycle or target authority.
+
+Wave lifecycle is `open -> frozen -> completed` with `cancelled` terminal path.
+Seller request writes are allowed while open and rejected after freeze. Warehouse
+packing starts only after freeze. New Wave lifecycle notifications are Wave-level,
+not per product.
+
+A warehouse Product offered through SupplementWave in Session A is excluded from
+ordinary ordering in Session A only; later sessions see it through normal warehouse
+rules. Future/upcoming sessions are never supplement targets.
+
+Legacy `SupplementOffer.waveId=null`, old receipt-level supplement flows and old
+batch markers remain compatibility-only and require no destructive migration.
 
 ## 8. Editing and concurrency
 
 A completed Receipt is not globally read-only. Receiving corrections and Stage 2
-updates remain allowed under ownership/in-use guards. Confirmed route changes require
-unconfirm first. Products already used by blocks/orders/picking cannot be silently
-rolled back.
+updates remain allowed under ownership/in-use guards. Published route corrections use the canonical compensating `CorrectReceiptItemRouting` command. It cancels unfinished wrong-path work, preserves packed/history facts and applies canonical artifacts for the new route. Completed historical Waves are never rewritten.
 
 ## 9. Full-photo UI projection
 

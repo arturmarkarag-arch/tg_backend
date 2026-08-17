@@ -1,6 +1,6 @@
 const { Server } = require('socket.io');
-const mongoose = require('mongoose');
 const Block = require('./models/Block');
+const { moveProductBetweenBlocks } = require('./services/blockMoveCommand');
 const User = require('./models/User');
 const { isRemovedUser } = require('./utils/userAccountState');
 const { validateTelegramInitData } = require('./utils/validateTelegramInitData');
@@ -229,88 +229,43 @@ function initSocket(httpServer) {
     // Auth is via socket.telegramId only — never trust a userId from the payload.
     socket.on('move_item', async ({ productId, fromBlock, toBlock, toIndex, expectedFromVersion, expectedToVersion }) => {
       if (!['admin', 'warehouse'].includes(socket.userRole)) {
-        socket.emit('move_error', { error: 'Forbidden: insufficient role' });
+        socket.emit('move_error', { error: 'forbidden', message: 'Недостатньо прав для цієї дії' });
         return;
       }
       try {
-        const session = await mongoose.connection.startSession();
-        try {
-          await session.withTransaction(async () => {
-            const source = await Block.findOne({ blockId: fromBlock }).session(session);
-            const target = fromBlock === toBlock
-              ? source
-              : await Block.findOne({ blockId: toBlock }).session(session);
+        const result = await moveProductBetweenBlocks({
+          productId,
+          fromBlock,
+          toBlock,
+          toIndex,
+          expectedFromVersion,
+          expectedToVersion,
+        });
 
-            if (!source || !target) {
-              throw Object.assign(new Error('Block not found'), { code: 'BLOCK_NOT_FOUND' });
-            }
-
-            // Optimistic lock — parity with the HTTP route (routes/blocks.js /move).
-            // The transaction's WriteConflict+retry already prevents a same-document
-            // lost update, but the version check additionally rejects a move issued
-            // from a STALE client view (the board moved under the user's feet) so the
-            // drag doesn't silently apply to state the user never saw. Inert unless
-            // the client sends the expected versions.
-            if (expectedFromVersion != null && Number(expectedFromVersion) !== source.version) {
-              throw Object.assign(new Error('Block changed'), { code: 'BLOCK_STALE', blockId: source.blockId, currentVersion: source.version });
-            }
-            if (fromBlock !== toBlock && expectedToVersion != null && Number(expectedToVersion) !== target.version) {
-              throw Object.assign(new Error('Block changed'), { code: 'BLOCK_STALE', blockId: target.blockId, currentVersion: target.version });
-            }
-
-            const idx = source.productIds.findIndex((id) => id.toString() === productId);
-            if (idx === -1) {
-              throw Object.assign(new Error('Product not in source block'), { code: 'PRODUCT_NOT_FOUND_IN_SOURCE' });
-            }
-
-            source.productIds.splice(idx, 1);
-            const safeIndex = Math.min(Math.max(0, toIndex), target.productIds.length);
-            target.productIds.splice(safeIndex, 0, productId);
-
-            if (fromBlock === toBlock) {
-              source.version += 1;
-              await source.save({ session });
-            } else {
-              source.version += 1;
-              target.version += 1;
-              await source.save({ session });
-              await target.save({ session });
-            }
-          });
-        } catch (txErr) {
-          // The productIds unique multikey index is the final barrier: if the product
-          // is already in another block (a concurrent placement), the save throws
-          // E11000. Map it to a clear error instead of leaking a raw driver message —
-          // parity with routes/blocks.js add/move.
-          if (txErr && txErr.code === 11000) {
-            const placed = await Block.findOne({ productIds: productId }).lean();
-            socket.emit('move_error', { error: 'product_in_other_block', existingBlockId: placed?.blockId ?? null });
-            return;
-          }
-          throw txErr;
-        } finally {
-          await session.endSession();
-        }
-
-        // Broadcast slim block updates to all clients
-        const updatedSource = await Block.findOne({ blockId: fromBlock }).lean();
-        const updatedTarget = fromBlock === toBlock
+        // Broadcast final physical truth after the canonical command committed.
+        const updatedSource = await Block.findById(result.sourceId).lean();
+        const updatedTarget = result.sameBlock
           ? updatedSource
-          : await Block.findOne({ blockId: toBlock }).lean();
+          : await Block.findById(result.targetId).lean();
 
         io.emit('block_updated', slimBlock(updatedSource));
-        if (fromBlock !== toBlock) {
-          io.emit('block_updated', slimBlock(updatedTarget));
+        if (!result.sameBlock) io.emit('block_updated', slimBlock(updatedTarget));
+        if (result.positionChanges.length) {
+          io.emit('picking_tasks_positions_updated', result.positionChanges);
         }
 
-        // Unlock the moved item
         releaseLock(productId);
         io.emit('item_unlocked', { productId });
-
-        // Notify the mover — only blockIds needed, data arrives via block_updated
-        socket.emit('move_success', { source: { blockId: fromBlock }, target: { blockId: toBlock } });
+        socket.emit('move_success', {
+          source: { blockId: result.fromBlockId },
+          target: { blockId: result.toBlockId },
+        });
       } catch (err) {
-        socket.emit('move_error', { error: err.message || 'Move failed' });
+        socket.emit('move_error', {
+          error: err?.code || 'move_failed',
+          message: err?.message || 'Move failed',
+          ...(err?.args || {}),
+        });
       }
     });
 

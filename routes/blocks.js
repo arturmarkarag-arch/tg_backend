@@ -1,14 +1,17 @@
 const express = require('express');
 const router = express.Router();
-const mongoose = require('mongoose');
 const Block = require('../models/Block');
 const Counter = require('../models/Counter');
 const Product = require('../models/Product');
 const { getIO } = require('../socket');
 const { requireTelegramRoles } = require('../middleware/telegramAuth');
 const { appError, asyncHandler } = require('../utils/errors');
-const { refreshPickingTaskPositions } = require('../services/taskBuilder');
-const { syncMirror } = require('../utils/upsertShopProduct');
+const {
+  repairBlockMissingProducts,
+  moveProductBetweenBlocks,
+  removeProductFromBlock,
+  placeProductInBlock,
+} = require('../services/blockMoveCommand');
 const { withLock } = require('../utils/lock');
 
 // On the "Полки" board a product tile renders ONLY its photo (+ name as the
@@ -18,32 +21,6 @@ const { withLock } = require('../utils/lock');
 // products, so populating full docs ships hundreds of KB per board read for
 // nothing. Project just what ProductImage + the card need. (`_id` is implicit.)
 const BLOCK_PRODUCT_FIELDS = 'name imageUrls localImageUrl originalImageUrl';
-
-async function repairBlockMissingProducts(blockId, session = null) {
-  const block = await Block.findOne({ blockId }).select('productIds').session(session).lean();
-  if (!block || !(block.productIds || []).length) return;
-
-  const existingProducts = await Product.find({ _id: { $in: block.productIds } }, '_id').session(session).lean();
-  const existingIds = new Set(existingProducts.map((p) => String(p._id)));
-  const filteredIds = block.productIds.filter((id) => existingIds.has(String(id)));
-  if (filteredIds.length === block.productIds.length) return;
-
-  await Block.updateOne(
-    { blockId },
-    { $set: { productIds: filteredIds }, $inc: { version: 1 } },
-    { session }
-  );
-}
-
-async function emitPositionUpdates() {
-  try {
-    const changed = await refreshPickingTaskPositions();
-    if (changed.length) {
-      getIO()?.emit('picking_tasks_positions_updated', changed);
-    }
-  } catch (err) {
-  }
-}
 
 function slimBlock(block) {
   return {
@@ -158,10 +135,9 @@ router.get('/incoming/products', asyncHandler(async (req, res) => {
     // Надходження = NOT in a block, awaiting placement → 'pending' (active⟺in-block).
     status: 'pending',
     source: { $in: ['receive', 'receipt'] },
-    // A supplement-only receipt keeps a technical Product for stable productId
-    // and supplement picking, but orderingEnabled=false means it is NOT a
-    // warehouse remainder waiting to be placed into a block. Only real
-    // warehouse-routed goods belong in the Надходження placement queue.
+    // Legacy supplement-only rows may still have a technical Product with
+    // orderingEnabled=false. New Wave-based supplement-only items own no Product.
+    // Only real warehouse-routed goods belong in the Надходження placement queue.
     orderingEnabled: { $ne: false },
     _id: { $nin: assignedIds },
     // New receipt flow keeps received quantity as reference metadata rather
@@ -224,61 +200,18 @@ router.post('/move', staffOnly, asyncHandler(async (req, res) => {
     throw appError('block_move_invalid_fields');
   }
 
+  const moveResult = await moveProductBetweenBlocks({
+    productId,
+    fromBlock: fromBlockId,
+    toBlock: toBlockId,
+    toIndex: index,
+    expectedFromVersion,
+    expectedToVersion,
+  });
+
+  const { sourceId, targetId, sameBlock: isSameBlock, positionChanges } = moveResult;
   let updatedSource;
   let updatedTarget;
-  let sourceId;
-  let targetId;
-  let isSameBlock = false;
-
-  const session = await mongoose.connection.startSession();
-  try {
-    await session.withTransaction(async () => {
-      const source = await Block.findOne({ blockId: fromBlockId }).session(session);
-      const target = fromBlockId === toBlockId
-        ? source
-        : await Block.findOne({ blockId: toBlockId }).session(session);
-
-      if (!source || !target) throw appError('block_not_found');
-
-      // Optimistic lock — refuse if any provided expected version is stale.
-      if (expectedFromVersion != null && Number(expectedFromVersion) !== source.version) {
-        throw appError('block_stale', { blockId: source.blockId, currentVersion: source.version });
-      }
-      if (
-        fromBlockId !== toBlockId &&
-        expectedToVersion != null &&
-        Number(expectedToVersion) !== target.version
-      ) {
-        throw appError('block_stale', { blockId: target.blockId, currentVersion: target.version });
-      }
-
-      const idx = source.productIds.findIndex((id) => id.toString() === productId);
-      if (idx === -1) throw appError('product_not_in_source_block');
-
-      source.productIds.splice(idx, 1);
-      const safeIndex = Math.min(Math.max(0, index), target.productIds.length);
-      target.productIds.splice(safeIndex, 0, productId);
-
-      if (fromBlockId === toBlockId) {
-        source.version += 1;
-        await source.save({ session });
-      } else {
-        source.version += 1;
-        target.version += 1;
-        await source.save({ session });
-        await target.save({ session });
-      }
-
-      // Зберігаємо лише ID збережених документів. populate без { session }
-      // читав би поза snapshot транзакції — клієнт міг отримати застарілі
-      // або, навпаки, ще не закомічені дані. Робимо populate ПІСЛЯ commit.
-      sourceId = source._id;
-      targetId = target._id;
-      isSameBlock = fromBlockId === toBlockId;
-    });
-  } finally {
-    session.endSession();
-  }
 
   updatedSource = await Block.findById(sourceId)
     .populate({ path: 'productIds', match: { status: { $in: ['active', 'pending'] } }, select: BLOCK_PRODUCT_FIELDS })
@@ -297,7 +230,9 @@ router.post('/move', staffOnly, asyncHandler(async (req, res) => {
     }
   } catch (_) {}
 
-  emitPositionUpdates();
+  if (positionChanges.length) {
+    try { getIO()?.emit('picking_tasks_positions_updated', positionChanges); } catch (_) {}
+  }
   res.json({ source: updatedSource, target: updatedTarget });
 }));
 
@@ -312,52 +247,18 @@ router.delete('/:number/products/:productId', staffOnly, asyncHandler(async (req
   const num = Number(req.params.number);
   const { productId } = req.params;
   if (!num || num < 1) throw appError('block_invalid_number');
-  if (!mongoose.Types.ObjectId.isValid(productId)) throw appError('block_invalid_product_id');
 
   // Optimistic lock can be passed via query or header to keep DELETE body-free.
   const expectedVersionRaw = req.query.expectedVersion ?? req.get('if-match');
   const expectedVersion = expectedVersionRaw != null ? Number(expectedVersionRaw) : null;
 
-  const MAX_RETRIES = 5;
-  let updatedRaw = null;
-  for (let attempt = 0; attempt < MAX_RETRIES; attempt += 1) {
-    const current = await Block.findOne({ blockId: num }).lean();
-    if (!current) throw appError('block_not_found');
+  const removal = await removeProductFromBlock({
+    blockId: num,
+    productId,
+    expectedVersion,
+  });
 
-    if (expectedVersion != null && expectedVersion !== current.version) {
-      throw appError('block_stale', { currentVersion: current.version });
-    }
-
-    if (!current.productIds.some((id) => String(id) === String(productId))) {
-      throw appError('product_not_in_block');
-    }
-
-    const versionToMatch = expectedVersion != null ? expectedVersion : current.version;
-    updatedRaw = await Block.findOneAndUpdate(
-      { blockId: num, version: versionToMatch, productIds: productId },
-      { $pull: { productIds: productId }, $inc: { version: 1 } },
-      { new: true },
-    );
-    if (updatedRaw) break;
-
-    // Збій збігу версії: якщо клієнт надіслав expectedVersion — це stale,
-    // повідомляємо явно. Інакше — паралельний запис; читаємо свіжу версію
-    // і повторюємо.
-    if (expectedVersion != null) {
-      const refreshed = await Block.findOne({ blockId: num }).lean();
-      throw appError('block_stale', { currentVersion: refreshed?.version });
-    }
-  }
-  if (!updatedRaw) throw appError('block_concurrent_modification');
-
-  // Out of every block ⟹ back to warehouse 'pending' (findable in Надходження),
-  // never left as an 'active' orphan that nobody can locate. Archived stays archived.
-  await Product.updateOne(
-    { _id: productId, status: { $ne: 'archived' } },
-    { $set: { status: 'pending' } },
-  );
-
-  const updated = await Block.findById(updatedRaw._id)
+  const updated = await Block.findById(removal.blockMongoId)
     .populate({ path: 'productIds', match: { status: { $in: ['active', 'pending'] } }, select: BLOCK_PRODUCT_FIELDS })
     .lean();
 
@@ -368,7 +269,9 @@ router.delete('/:number/products/:productId', staffOnly, asyncHandler(async (req
     io.emit('catalogue_updated', { action: 'add' });
   } catch (_) {}
 
-  emitPositionUpdates();
+  if (removal.positionChanges.length) {
+    try { getIO()?.emit('picking_tasks_positions_updated', removal.positionChanges); } catch (_) {}
+  }
   res.json(updated);
 }));
 
@@ -383,147 +286,29 @@ router.post('/:number/add', staffOnly, asyncHandler(async (req, res) => {
   const num = Number(req.params.number);
   const { productId, index, expectedVersion } = req.body;
   if (!num || num < 1) throw appError('block_invalid_number');
-  if (!productId) throw appError('block_missing_product_id');
-  if (!mongoose.Types.ObjectId.isValid(productId)) throw appError('block_invalid_product_id');
 
-  // Physical shelving gate: archived products may never be placed in a block
-  // (restore them first). Being in a block no longer automatically means the
-  // product is orderable: orderingEnabled and the seller's current session
-  // cutoff independently gate the ordinary seller catalog.
-  const productDoc = await Product.findById(productId, 'status firstBlockPlacedAt').lean();
-  if (!productDoc) throw appError('product_not_found');
-  if (productDoc.status === 'archived') throw appError('product_archived_cannot_shelve');
+  const placement = await placeProductInBlock({
+    blockId: num,
+    productId,
+    index,
+    expectedVersion,
+  });
 
-  const MAX_RETRIES = 5;
-  let updatedRaw = null;
-  for (let attempt = 0; attempt < MAX_RETRIES; attempt += 1) {
-    const current = await Block.findOne({ blockId: num }).lean();
-    if (!current) throw appError('block_not_found');
-
-    if (expectedVersion != null && Number(expectedVersion) !== current.version) {
-      throw appError('block_stale', { currentVersion: current.version });
-    }
-
-    // М'яка попередня перевірка для людського повідомлення (з номером блока).
-    // Жорсткий гарант — унікальний індекс нижче.
-    const existing = await Block.findOne({ productIds: productId }).lean();
-    if (existing) {
-      if (existing.blockId === num) {
-        throw appError('product_already_in_block', { existingBlockId: existing.blockId });
-      }
-      throw appError('product_in_other_block', { existingBlockId: existing.blockId });
-    }
-
-    // Build the "visible" (client-side) productIds — same subset the client renders.
-    // Dangling IDs (products deleted without being $pull-ed from the block) cause a
-    // mismatch: client's drop-zone index is based on the visible count, but the raw
-    // array is longer, so $position ends up before the visible products.
-    const rawIds = current.productIds || [];
-    let rawPosition;
-    if (rawIds.length === 0 || index == null) {
-      rawPosition = rawIds.length; // append at end
-    } else {
-      const visibleDocs = await Product.find(
-        { _id: { $in: rawIds }, status: { $in: ['active', 'pending'] } },
-        '_id',
-      ).lean();
-      const visibleIdSet = new Set(visibleDocs.map((p) => String(p._id)));
-
-      // Prune dangling IDs atomically before inserting so future reads are clean
-      const danglingIds = rawIds.filter((id) => !visibleIdSet.has(String(id)));
-      if (danglingIds.length) {
-        const versionForClean = expectedVersion != null ? Number(expectedVersion) : current.version;
-        await Block.updateOne(
-          { blockId: num, version: versionForClean },
-          { $pull: { productIds: { $in: danglingIds } }, $inc: { version: 1 } },
-        );
-        continue; // retry with fresh current after cleanup
-      }
-
-      // Map visible index → raw position (they are equal when no dangling IDs, i.e. the common case)
-      const visibleIds = rawIds.filter((id) => visibleIdSet.has(String(id)));
-      const clampedVisible = Math.min(Math.max(0, Number(index)), visibleIds.length);
-
-      if (clampedVisible === 0) {
-        rawPosition = rawIds.findIndex((id) => visibleIdSet.has(String(id)));
-        if (rawPosition === -1) rawPosition = rawIds.length;
-      } else {
-        let seen = 0;
-        rawPosition = rawIds.length; // default: append
-        for (let i = 0; i < rawIds.length; i++) {
-          if (visibleIdSet.has(String(rawIds[i]))) {
-            seen++;
-            if (seen === clampedVisible) { rawPosition = i + 1; break; }
-          }
-        }
-      }
-    }
-
-    const versionToMatch = expectedVersion != null ? Number(expectedVersion) : current.version;
-
-    try {
-      updatedRaw = await Block.findOneAndUpdate(
-        { blockId: num, version: versionToMatch },
-        {
-          $push: { productIds: { $each: [productId], $position: rawPosition } },
-          $inc: { version: 1 },
-        },
-        { new: true },
-      );
-    } catch (err) {
-      if (err.code === 11000) {
-        // Race програно: інший паралельний запит уже розмістив цей товар.
-        const placed = await Block.findOne({ productIds: productId }).lean();
-        if (placed) {
-          if (placed.blockId === num) {
-            throw appError('product_already_in_block', { existingBlockId: placed.blockId });
-          }
-          throw appError('product_in_other_block', { existingBlockId: placed.blockId });
-        }
-      }
-      throw err;
-    }
-
-    if (updatedRaw) break;
-
-    if (expectedVersion != null) {
-      const refreshed = await Block.findOne({ blockId: num }).lean();
-      throw appError('block_stale', { currentVersion: refreshed?.version });
-    }
-  }
-  if (!updatedRaw) throw appError('block_concurrent_modification');
-
-  // The physical placement timestamp is frozen the first time the product enters
-  // any block. It is distinct from receipt `shelvedAt` (arrival/confirmation).
-  // This lets a seller session stay catalog-stable even if warehouse staff place
-  // a newly received product into a block after that session has already started.
-  const activationSet = { status: 'active' };
-  if (!productDoc.firstBlockPlacedAt) activationSet.firstBlockPlacedAt = new Date();
-  await Product.updateOne({ _id: productId }, { $set: activationSet });
-
-  // This is THE normal activation path (receive/restore → Надходження → block), so
-  // the ShopProduct mirror must be created/refreshed HERE — previously only the
-  // products.js PATCH did it, leaving block-added (incl. restored) products active on
-  // the warehouse but absent/stale in "Товари Магазинів". Fire-and-forget — the mirror
-  // is a projection, never part of this request's contract.
-  const activatedProduct = await Product.findById(productId);
-  if (activatedProduct) {
-    syncMirror(activatedProduct).catch(() => {});
-  }
-
-  const updated = await Block.findById(updatedRaw._id)
+  const updated = await Block.findById(placement.blockMongoId)
     .populate({ path: 'productIds', match: { status: { $in: ['active', 'pending'] } }, select: BLOCK_PRODUCT_FIELDS })
     .lean();
 
-  // Broadcast to all clients so they see the update in real time.
-  // catalogue_updated signals sellers that a new product appeared in the catalogue.
+  // Transport owns publication only. Domain writes and picking-position repair
+  // are performed by the canonical Product -> Block command above.
   try {
     const io = getIO();
     io.emit('block_updated', slimBlock(updated));
     io.emit('catalogue_updated', { action: 'add' });
   } catch (_) { /* socket not initialized yet */ }
 
-  emitPositionUpdates();
+  if (placement.positionChanges.length) {
+    try { getIO()?.emit('picking_tasks_positions_updated', placement.positionChanges); } catch (_) {}
+  }
   res.json(updated);
 }));
 

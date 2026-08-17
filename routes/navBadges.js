@@ -42,10 +42,9 @@ async function countIncomingProducts() {
   return Product.countDocuments({
     status: 'pending',
     source: { $in: ['receive', 'receipt'] },
-    // A supplement-only receipt keeps a technical Product for stable productId
-    // and supplement picking, but orderingEnabled=false means it is NOT a
-    // warehouse remainder waiting to be placed into a block. Only real
-    // warehouse-routed goods belong in the Надходження placement queue.
+    // Legacy supplement-only rows may still have a technical Product with
+    // orderingEnabled=false. New Wave-based supplement-only items own no Product.
+    // Only real warehouse-routed goods belong in the Надходження placement queue.
     orderingEnabled: { $ne: false },
     _id: { $nin: assignedIds },
     $or: [

@@ -15,7 +15,9 @@
 
 const OrderingSession   = require('../models/OrderingSession');
 const PickingTask       = require('../models/PickingTask');
+const SupplementWave    = require('../models/SupplementWave');
 const { LIFECYCLE_EVENT } = require('./sessionVocab');
+const { withSessionLifecycleLock } = require('./sessionLifecycleLock');
 
 const MAX_EVENTS = 200; // keep the timeline bounded (order_added can fire often)
 
@@ -116,7 +118,7 @@ async function transitionPickingStatus(sessionId, toStatus, { actor = {}, meta =
  * fires from confirmed/in_progress, so an empty/never-built session is left for
  * start-session to finalise.
  */
-async function maybeCompleteSession(orderingSessionId, { actor = {}, meta = {}, skipCoverageAudit = false } = {}, mongoSession = null) {
+async function maybeCompleteSessionUnlocked(orderingSessionId, { actor = {}, meta = {}, skipCoverageAudit = false } = {}, mongoSession = null) {
   if (!orderingSessionId) return null;
 
   // Contract stays EXACTLY as before: success => OrderingSession, blocked => null.
@@ -128,6 +130,15 @@ async function maybeCompleteSession(orderingSessionId, { actor = {}, meta = {}, 
   if (mongoSession) q.session(mongoSession);
   const remaining = await q;
   if (remaining > 0) return null;
+
+  // V48.S2: SupplementWave is work of THIS delivery cycle. The session cannot
+  // become terminal while its supplement channel is still open/frozen.
+  const waveQuery = SupplementWave.countDocuments({
+    orderingSessionId: String(orderingSessionId),
+    status: { $in: SupplementWave.ACTIVE_STATUSES },
+  });
+  if (mongoSession) waveQuery.session(mongoSession);
+  if (await waveQuery) return null;
 
   // Transactional callers cannot run a read-only audit outside their uncommitted
   // snapshot. Existing live completion paths call this again after commit.
@@ -142,7 +153,7 @@ async function maybeCompleteSession(orderingSessionId, { actor = {}, meta = {}, 
     if (!closure.ok) return null;
   }
 
-  // Supplements are intentionally outside OrderingSession lifecycle.
+  // V48.S2: supplement Waves are part of this exact delivery-cycle lifecycle.
   const completed = await transitionPickingStatus(orderingSessionId, 'completed', { actor, meta }, mongoSession);
   if (!completed) return null;
 
@@ -168,6 +179,17 @@ async function maybeCompleteSession(orderingSessionId, { actor = {}, meta = {}, 
   }
 
   return completed;
+}
+
+async function maybeCompleteSession(orderingSessionId, opts = {}, mongoSession = null) {
+  // Transaction-owned callers already serialize through Mongo and cannot safely
+  // acquire an external lock around an uncommitted snapshot. Normal live callers
+  // share this lifecycle lock with SupplementWave publication.
+  if (mongoSession) return maybeCompleteSessionUnlocked(orderingSessionId, opts, mongoSession);
+  return withSessionLifecycleLock(
+    orderingSessionId,
+    () => maybeCompleteSessionUnlocked(orderingSessionId, opts, null),
+  );
 }
 
 module.exports = { pushSessionEvent, transitionPickingStatus, maybeCompleteSession, MAX_EVENTS };

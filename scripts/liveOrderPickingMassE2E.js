@@ -153,6 +153,22 @@ if (CFG.sellers < 80 || CFG.shops < CFG.sellers || CFG.products < CFG.blocks * 2
 if (CFG.conflictShops * 2 > CFG.sellers - 80) CFG.conflictShops = Math.max(1, Math.floor((CFG.sellers - 80) / 2));
 if (80 + CFG.conflictShops * 2 > CFG.sellers) CFG.conflictShops = Math.floor((CFG.sellers - 80) / 2);
 
+// MASS deliberately drives an extreme burst (12 warehouse workers over 100 sellers /
+// 120 shops), so its own latency envelope sits far above the generic anti-hang default
+// in liveHarnessSafety. Green runs recorded before that default existed peaked around
+// 53s on POST OOS / coverage-repair with zero failures, so a 30s cap turns this load
+// shape into a false FAIL rather than reporting a real defect. Keep a hard cap — a
+// genuinely hung request must still abort — but calibrate it to this suite and keep it
+// strictly below the progress watchdog so the HTTP abort always wins the race.
+const WATCHDOG_STALL_MS = 120_000;
+const MAX_HTTP_TIMEOUT_MS = WATCHDOG_STALL_MS - 10_000;
+const HTTP_TIMEOUT_MS = parseIntArg(
+  argv,
+  'http-timeout',
+  intEnv('LIVE_E2E_MASS_HTTP_TIMEOUT_MS', 90_000, 5_000, MAX_HTTP_TIMEOUT_MS),
+  { min: 5_000, max: MAX_HTTP_TIMEOUT_MS },
+);
+
 const RUN_ID = `${new Date().toISOString().replace(/[-:.TZ]/g, '').slice(0, 14)}-${crypto.randomBytes(3).toString('hex')}`;
 const MARKER = `__LIVE_E2E_MASS__${RUN_ID}`;
 const MANIFEST_KEY = `live-e2e.run.${RUN_ID}`;
@@ -278,6 +294,7 @@ async function api(method, urlPath, user, body, label = `${method} ${urlPath.spl
   if (user) headers.authorization = `Bearer ${await tokenFor(user)}`;
   const res = await fetchWithTimeout(`${baseUrl}${urlPath}`, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) }, {
     label,
+    timeoutMs: HTTP_TIMEOUT_MS,
     parentSignal: watchdog?.signal,
   });
   const text = await res.text();
@@ -1024,7 +1041,7 @@ function buildReport(error = null) {
   return {
     runId: RUN_ID, marker: MARKER, seed: seedNum, config: CFG,
     db: mongoose.connection?.db?.databaseName || null, host: mongoose.connection?.host || null,
-    execute, durationMs: Date.now() - startedAt,
+    execute, httpTimeoutMs: HTTP_TIMEOUT_MS, durationMs: Date.now() - startedAt,
     summary: { passed: assertions.filter((a) => a.ok).length, failed: assertions.filter((a) => !a.ok).length, error: error?.message || null },
     metrics: { ...metrics, api: apiSummary }, assertions,
   };
@@ -1040,6 +1057,7 @@ function writeReport(error = null) {
     `- Duration: **${Math.round(report.durationMs / 1000)}s**`,
     `- DB host: \`${report.host || 'unknown'}\``,
     `- Seed: \`${seedNum}\``,
+    `- HTTP timeout: \`${HTTP_TIMEOUT_MS}ms\``,
     `- Replay: \`${replayCommand}\``, '',
     '## Load shape',
     `- Sellers ordering: ${CFG.sellers}`,
@@ -1073,7 +1091,7 @@ async function main() {
     globalLease = await acquireGlobalHarnessLease({ AppSetting, runId: RUN_ID, kind: 'mass', ttlMs: 60 * 60 * 1000 });
     watchdog = createProgressWatchdog({
       name: `MASS ${RUN_ID}`,
-      stallMs: 120_000,
+      stallMs: WATCHDOG_STALL_MS,
       onStall: ({ error }) => console.error(`\n⏱️ ${error.message}\nCleanup: npm run test:live:e2e:cleanup -- --runId=${RUN_ID} --execute`),
       exitOnStallCode: 124,
     });

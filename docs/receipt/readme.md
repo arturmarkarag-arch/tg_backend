@@ -73,43 +73,51 @@ Legacy receipts з `routingVersion=0` та старі whole-receipt supplement �
 `Обов'язковий + Дозамовлення` заборонено.
 
 `Може приїхати не всім` — ручний прапорець тільки для mandatory без warehouse.
-Supplement потребує `supplementDeliveryGroupId`.
+Supplement target більше не належить routing-позиції: група та exact `OrderingSession` обираються при публікації `SupplementWave`. Legacy `supplementDeliveryGroupId` читається лише compatibility-path.
 
 ## 5. Публікація товару
 
 Після ціни/упаковки та валідного маршруту власник позиції або адміністратор
-підтверджує товар. Саме `POST /receipts/:id/items/:itemId/confirm` є межею
-публікації похідного товару.
-
-Він може працювати і після того, як receiving Receipt уже completed.
+підтверджує товар. `POST /receipts/:id/items/:itemId/confirm` публікує похідні
+артефакти маршруту, але **не відкриває SupplementWave автоматично**.
 
 - `На склад` → warehouse `Product` + linked `ShopProduct` mirror.
 - `Обов'язковий` без складу → standalone shop-owned `ShopProduct`.
 - `Обов'язковий + На склад` → один warehouse `Product` + mirror.
-- `Дозамовлення` → warehouse `Product` для supplement flow, але без ordinary ordering.
-- `Дозамовлення + На склад` → той самий `Product` також іде в normal warehouse flow.
+- `Дозамовлення` без складу → confirmed ReceiptItem готовий до supplement publication; fake warehouse `Product` не створюється.
+- `Дозамовлення + На склад` → реальний warehouse `Product` + можливість окремої supplement publication для поточної delivery session.
 
 ## 6. Дозамовлення
 
-У current regular flow supplement належить конкретному `ReceiptItem` і групі.
-V47.16 відділяє підтвердження товару від публікації дозамовлення:
+Канонічний lifecycle належить `SupplementWave`, а не `Receipt`, одному
+`SupplementOffer` чи полю `supplementPublishRequestedAt`.
 
 ```text
-підготувати + підтвердити item
--> supplementBatchVersion=1
--> товар лише ГОТОВИЙ ДО ПАЧКИ
--> Telegram ще НЕ надсилається
+confirmed ReceiptItem(s)
+-> staff chooses one eligible DeliveryGroup + exact OrderingSession
+-> publish
+-> one SupplementWave with many child items
+-> OPEN
+-> FROZEN / Передати в роботу
+-> warehouse packing
+-> COMPLETED
 ```
 
-У `Накладні -> Фото` готові items групуються по delivery group. Працівник один
-раз натискає `Відкрити N` / `Запланувати N`. Тільки після цього встановлюється
-`supplementPublishRequestedAt`. Якщо ordinary ordering уже закритий, усі offers
-групи відкриваються разом і notification layer викликається один раз. Якщо
-ordinary ordering ще відкритий, пачка чекає його закриття; scheduler спочатку
-відкриває всі publish-requested offers, а потім одним проходом повідомляє групу.
+Один confirmed ReceiptItem може бути незалежно опублікований у кілька **одночасно
+поточних і дозволених** delivery cycles. Publication eligibility визначається
+наявністю Wave child для exact `orderingSessionId`, а не одноразовим прапорцем
+ReceiptItem. `supplementPublishRequestedAt` залишається compatibility/audit marker
+«хоч раз публікувався» і не споживає item для інших поточних target sessions.
 
-Legacy `supplementBatchVersion=0` та `Receipt.type='supplement'` залишаються
-сумісними без міграції.
+Future/upcoming session не є supplement-target: якщо item має `warehouse=true`,
+наступна група повинна отримати товар через звичайний каталог своєї session.
+
+Поки Wave `OPEN`, продавці можуть змінювати заявки. `FROZEN` є серверною межею:
+після неї seller writes заборонені, і лише тоді починається packing.
+
+Legacy `supplementBatchVersion=0/1`, старий `Receipt.type='supplement'` та
+`SupplementOffer.waveId=null` підтримуються compatibility-path без destructive
+міграції.
 
 ## 6.1. Залишок після вже підтвердженого маршруту
 

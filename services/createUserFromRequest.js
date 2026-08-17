@@ -13,6 +13,7 @@ const GroupMember = require('../models/GroupMember');
 const { appError } = require('../utils/errors');
 const { isRemovedUser } = require('../utils/userAccountState');
 const { migrateSellerShop } = require('./migrateSellerShop');
+const { buildInitialAssignmentTransition } = require('./shopAssignmentCommand');
 
 async function resolveAndCreateUser({
   session,
@@ -41,15 +42,20 @@ async function resolveAndCreateUser({
   }
 
   if (existing && isRemovedUser(existing)) {
+    let assignmentTransition = null;
     const now = new Date();
     const previousRemovedAt = existing.removedAt || null;
     // If this seller had an active order parked when their account was removed,
     // re-registration must reattach it through the canonical shop-migration path
     // instead of leaving an invisible shopId=null order behind.
     if (role === 'seller' && resolvedShop) {
-      await migrateSellerShop({
+      assignmentTransition = await migrateSellerShop({
         session,
-        existingUser: existing.toObject(),
+        // The account may be re-registering into a different role (for example
+        // a previously removed warehouse user returning as seller). The canonical
+        // assignment command validates the INTENDED current role, not the stale
+        // role stored on the removed account snapshot.
+        existingUser: { ...existing.toObject(), role },
         newShopFull: resolvedShop,
         actor: {
           telegramId: String(telegramId),
@@ -105,7 +111,7 @@ async function resolveAndCreateUser({
       { session },
     );
 
-    return existing;
+    return { user: existing, assignmentTransition };
   }
 
   // Група доставки НЕ копіюється в User: вона належить магазину. Заявка
@@ -129,7 +135,11 @@ async function resolveAndCreateUser({
     { session },
   );
 
-  return user;
+  const assignmentTransition = resolvedShopId
+    ? buildInitialAssignmentTransition({ user, shop: resolvedShop })
+    : null;
+
+  return { user, assignmentTransition };
 }
 
 module.exports = { resolveAndCreateUser };

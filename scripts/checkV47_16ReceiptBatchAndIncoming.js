@@ -15,9 +15,10 @@ const receipts = read('routes/receipts.js');
 const offers = read('services/supplementOffers.js');
 const scheduler = read('services/supplementScheduler.js');
 const notify = read('services/supplementNotify.js');
+const waves = read('services/supplementWaveService.js');
 
 check(blocks.includes("orderingEnabled: { $ne: false }") && blocks.includes("router.get('/incoming/products'"),
-  'Incoming excludes supplement-only technical Products');
+  'Incoming still excludes legacy technical Products; new Wave rows need none');
 check(badges.includes("orderingEnabled: { $ne: false }") && badges.includes("{ source: 'receipt' }"),
   'Incoming nav badge mirrors placement semantics including receipt qty=0');
 check(itemModel.includes('supplementBatchVersion') && itemModel.includes('supplementPublishRequestedAt'),
@@ -26,18 +27,18 @@ check(receipts.includes("router.get('/supplement-batches/pending'") && receipts.
   'Batch list and publish endpoints exist');
 check(receipts.includes('readyCount') && receipts.includes("withLock('supplement-batch:publish'"),
   'Current batch exposes unassigned ready items and serializes group assignment globally');
-check(receipts.includes("'routing.supplementDeliveryGroupId': deliveryGroupId") && receipts.includes("'routing.supplementDeliveryGroupId': null"),
-  'Publishing assigns one selected delivery group to the unassigned batch');
+check(receipts.includes('existingTargetItems') && receipts.includes('orderingSessionId: target.orderingSessionId'),
+  'Publishing pins one exact target session without consuming the item for other current groups');
 check(receipts.includes('routing.supplementDeliveryGroupId ? 1 : 2') && receipts.includes('supplementPublishRequestedAt: null'),
   'New unassigned supplements enter current batch-v2 state while grouped legacy rows stay v1');
 check(receipts.includes('item.supplementBatchVersion = currentRouting.supplementDeliveryGroupId ? 1 : 2') && receipts.includes('item.supplementPublishRequestedAt = null'),
   'Confirm keeps unassigned current supplement drafts in batch v2');
-check(offers.includes('item.status !== \'confirmed\'') && offers.includes('!item.supplementPublishRequestedAt'),
-  'Offer creation skips unconfirmed/unpublished current batch items');
-check(receipts.includes('SupplementOffer.bulkWrite') && receipts.includes('$setOnInsert'),
-  'Explicit batch publish bulk-upserts offers instead of 100 sequential inserts');
-check(receipts.includes("notifyOffers(notificationOffers, 'opened')") && receipts.includes('if (!result.failed)'),
-  'Immediate batch sends one grouped notification only after complete offer creation');
+check(offers.includes('if (Number(item.supplementBatchVersion || 0) >= 1) continue'),
+  'Legacy offer creation cannot steal current Wave/batch items');
+check(receipts.includes('createWaveWithItems({') && waves.includes('SupplementOffer.bulkWrite') && waves.includes('$setOnInsert'),
+  'Explicit batch publish creates one Wave and bulk-upserts its child items');
+check(receipts.includes("notifyWaves([result.wave], 'opened')") && receipts.indexOf('notifyWaves([result.wave]') > receipts.indexOf('await mongoSession.endSession'),
+  'Immediate batch sends one Wave notification only after transaction completion');
 check(!offers.includes("await notifyOffers(openedThisTick, 'opened')") && scheduler.includes('findDueReminders'),
   'Deferred reconciliation leaves notification batching to scheduler-wide unnotified pass');
 check(offers.includes('.limit(500)'), 'Deferred reconciliation capacity covers large multi-receipt batches');

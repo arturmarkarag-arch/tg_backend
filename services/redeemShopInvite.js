@@ -19,7 +19,7 @@ const mongoose = require('mongoose');
 const Shop = require('../models/Shop');
 const User = require('../models/User');
 const { withLock } = require('../utils/lock');
-const { invalidateShop } = require('../utils/modelCache');
+const { publishShopAssignmentTransition } = require('./shopAssignmentCommand');
 const { migrateSellerShop } = require('./migrateSellerShop');
 const {
   peekShopInvite,
@@ -116,14 +116,16 @@ async function redeemShopInvite({ code, sellerTelegramId }) {
     }
   });
 
-  // Cache invalidation MUST happen AFTER the transaction commits — see the note
-  // in migrateSellerShop about the stale-read window.
+  // CURRENT assignment publication is shared with admin/self-service paths.
+  // This intentionally runs even when no active Order moved.
   if (result?.ok) {
-    if (result._invalidate) {
-      try { await result._invalidate(); } catch (e) {}
-    }
-    try { await invalidateShop(result.shop._id); } catch (_) {}
-    if (result.fromShopId) { try { await invalidateShop(result.fromShopId); } catch (_) {} }
+    await publishShopAssignmentTransition({
+      ...result,
+      invalidate: result._invalidate,
+      sellerTelegramId: tgId,
+      assignmentChanged: true,
+      toShopId: String(result.shop?._id || ''),
+    });
     delete result._invalidate;
   }
 

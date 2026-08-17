@@ -58,6 +58,8 @@ const ERRORS = {
 
   // ── Shops ──────────────────────────────────────────────────────────────────
   shop_not_found:           { status: 404, message: 'Магазин не знайдено' },
+  shop_inactive:            { status: 409, message: 'Магазин неактивний. Активуйте магазин або призначте користувача до іншого магазину.' },
+  shop_no_delivery_group:   { status: 409, message: 'Магазин не прив’язано до групи доставки.' },
   shop_has_sellers:         { status: 400, message: ({ sellerCount } = {}) =>
                                 `Не можна видалити магазин: ${sellerCount} продавець(ів) прив'язано. Спочатку зніміть їх у налаштуваннях магазину.` },
   shop_has_active_orders:   { status: 409, message: ({ activeOrders } = {}) =>
@@ -276,6 +278,18 @@ const ERRORS = {
                                 'Прийом заявок на це дозамовлення вже закрито — нову позицію додати нікому' },
   supplement_target_required: { status: 400, message: 'Оберіть групу доставки, для якої відкрити дозамовлення' },
   supplement_target_not_found:{ status: 404, message: 'Обрану групу доставки більше не існує — оновіть список і виберіть іншу' },
+  supplement_wave_not_found: { status: 404, message: 'Хвилю дозамовлення не знайдено' },
+  supplement_item_already_published: { status: 409, message: 'Цей товар уже опубліковано в іншому дозамовленні для цієї групи.' },
+  supplement_wave_items_incomplete: { status: 500, message: 'Не вдалося повністю відкрити дозамовлення. Спробуйте ще раз.' },
+  supplement_target_session_not_started: { status: 409, message: ({ group } = {}) =>
+    `${group || 'Ця група'} ще не має поточної активної сесії доставки` },
+  supplement_target_session_changed: { status: 409, message: ({ group } = {}) =>
+    `Поточна сесія ${group || 'групи'} змінилася — оновіть список і підтвердьте ще раз` },
+  supplement_target_session_completed: { status: 409, message: ({ group } = {}) =>
+    `Поточна доставка ${group || 'цієї групи'} вже завершена` },
+  supplement_pack_before_freeze: { status: 409, message: 'Спочатку закрийте дозамовлення і передайте його в роботу' },
+  supplement_item_cancelled: { status: 409, message: 'Цей товар у дозамовленні скасовано' },
+  product_supplement_session_only: { status: 409, message: 'Цей товар у поточній доставці доступний через дозамовлення, а не через звичайне замовлення' },
   supplement_ordering_still_open: { status: 409, message: ({ group } = {}) =>
                                 `У групі «${group || 'без назви'}» звичайна сесія замовлень ще відкрита. Дозамовлення відкриваємо тільки після її закриття.` },
   // Єдина причина відмови, що лишилась: показувати хвилю нікому. Стан вікна

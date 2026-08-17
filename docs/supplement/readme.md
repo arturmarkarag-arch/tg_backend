@@ -1,149 +1,277 @@
-# Дозамовлення — актуальна логіка V47.16
+# Дозамовлення — канонічна архітектура V48.S2
 
-## 1. Призначення
+## 1. Доменний сенс
 
-Дозамовлення — окремий потік для вже прийнятого товару, який продавці можуть
-замовити поза звичайною сесією. Продавець сам вирішує, чи потрібен товар.
+Дозамовлення — тимчасовий додатковий канал замовлення товару для **конкретної
+поточної доставки**. Воно не відкриває назад ordinary ordering і не визначає
+подальшу долю товару.
 
-Це протилежно `Обов'язковому`, де рішення про розподіл приймає склад. Тому
-`mandatory + supplement` для однієї позиції заборонено.
-
-Дозамовлення не відкриває повторно `OrderingSession`, не змінює її id/status і
-не може бути доступним продавцям паралельно з ordinary ordering тієї самої групи.
-
-## 2. Підготовка товару ≠ публікація дозамовлення
-
-Current regular receipt працює поетапно:
+Довгостроковий маршрут товару належить `ReceiptItem.routing`:
 
 ```text
-ReceiptItem
-  -> ціна + кількість в упаковці
-  -> routing.supplement = true
-  -> routing.supplementDeliveryGroupId = конкретна група
-  -> confirm
-  -> ГОТОВО ДО ПАЧКИ
+supplement=true, warehouse=false
+  -> дозамовлення цієї доставки; warehouse Product не обов'язковий
+
+supplement=true, warehouse=true
+  -> дозамовлення цієї доставки + звичайне складське життя товару далі
+
+supplement=false, warehouse=true
+  -> тільки звичайний складський потік
 ```
 
-Починаючи з V47.16, `confirm` для current per-item supplement **не створює
-`SupplementOffer` і не надсилає Telegram-повідомлення**.
+`mandatory + supplement` для однієї позиції невалідний.
 
-`ReceiptItem` отримує:
+## 2. Власність циклу
 
 ```text
-supplementBatchVersion = 1
-supplementPublishRequestedAt = null
+DeliveryGroup
+  -> OrderingSession
+      -> SupplementWave
+          -> SupplementOffer (item / compatibility child)
+              -> SupplementRequest
 ```
 
-Це означає: товар підготовлений, але ще не опублікований продавцям.
+Для нових даних:
 
-Legacy rows (`supplementBatchVersion=0`) залишають стару auto-open поведінку без
-обов'язкової міграції. Старі `Receipt.type='supplement'` документи також
-підтримуються.
+- Wave має рівно одну `deliveryGroupId`;
+- Wave має рівно одну `orderingSessionId`;
+- Wave може існувати до старту Picking, якщо ordinary cycle вже почався;
+- CURRENT Shop/DeliveryGroup topology не переписує ownership вже відкритої Wave;
+- completed/historical session не може отримати нову Wave.
 
-## 3. Публікація пачки
+Legacy `SupplementOffer.waveId=null` підтримується окремим compatibility path.
 
-У `Накладні -> Фото` сервер групує всі готові current supplement items за
-`deliveryGroupId`.
+## 3. Вибір цілі
 
-Працівник бачить, наприклад:
+Ціль вирішує `services/supplementTargets.js`.
+
+Заборонені евристики:
 
 ```text
-Понеділок Достава · 37 товарів
-[ Відкрити 37 ]
+"зараз ранок"
+"група закрилась N хвилин тому"
+"напевно наступна група"
 ```
 
-Один клік на:
+Доступні стани поточного cycle:
 
 ```text
-POST /receipts/supplement-batches/:deliveryGroupId/publish
+ordering_open       -> так
+awaiting_picking    -> так
+picking             -> так
+upcoming_not_started-> ні
+completed           -> ні
 ```
 
-ставить `supplementPublishRequestedAt` одразу всім готовим товарам цієї групи.
+Працівник явно обирає групу. UI показує точний `OrderingSession`, а publish
+повторно перевіряє цей session ID на сервері.
 
-### Якщо ordinary ordering уже закритий
 
-Сервер створює всі `SupplementOffer` пачкою та викликає notification layer один
-раз для всієї групи.
+## 3.1. Один item, кілька поточних target sessions
+
+Один confirmed `ReceiptItem` не «споживається» першою публікацією. Якщо серверний
+target resolver одночасно повертає кілька різних поточних delivery cycles, staff
+може окремо відкрити Wave для кожної з них — завжди одна група за одну publication.
+
+Канонічний fence:
 
 ```text
-37 товарів
--> 37 SupplementOffer
--> ОДНЕ Telegram-повідомлення для групи
+receiptItemId + exact orderingSessionId
 ```
 
-### Якщо ordinary ordering ще відкритий
+Тому `supplementPublishRequestedAt` не є eligibility authority; це лише
+compatibility/audit marker. Pending/readiness UI показує `readyCount` окремо для
+кожного exact target session. Retry тієї самої publication ідемпотентний.
 
-Публікація не блокується. Пачка стає запланованою:
+## 4. Wave
+
+Одна публікація багатьох готових позицій в одну групу/сесію створює одну
+`SupplementWave`.
 
 ```text
-supplementPublishRequestedAt = now
-Receipt.supplementStatus = pending
+OPEN -> FROZEN -> COMPLETED
+  \-> CANCELLED
 ```
 
-`SupplementOffer` продавцям ще не відкриваються. Після закриття ordinary window
-хвилинний scheduler спочатку створює/доремонтовує всі offer-и, а потім один
-notification pass групує всі `open + unnotified` offer-и за `deliveryGroupId`.
-Отже delayed batch теж отримує одне групове повідомлення, а не повідомлення на
-кожну позицію.
+### OPEN
 
-## 4. Дозамовлення + На склад
+Продавець може створити, змінити або скасувати свою заявку магазину.
 
-Це дозволена комбінація.
+### FROZEN
 
-- supplement-only тримає технічний warehouse `Product` як стабільний `productId`
-  для заявок/picking, але має `orderingEnabled=false`;
-- такий технічний Product **не належить до `Надходження`** і не чекає розміщення
-  в Block;
-- `supplement + warehouse` має `orderingEnabled=true` і нормально з'являється в
-  `Надходження` для майбутнього ordinary warehouse flow;
-- якщо залишок з'ясувався пізніше, confirmed supplement можна доповнити через
-  `add-warehouse-remainder` без recreating offer/request і без повторної розсилки.
+`Передати в роботу` — hard server boundary.
 
-`totalQty` не використовується для автоматичного висновку про залишок.
+Після freeze:
 
-## 5. Життєвий цикл SupplementOffer
+- seller writes заборонені;
+- склад може claim/pack item;
+- `packed` не є seller lock, бо продавця вже заблокував Wave status.
+
+### COMPLETED
+
+Усі active Wave items завершені.
+
+### CANCELLED
+
+Компенсуюче terminal-завершення. Уже фізично packed товар не повертається з
+коробки; незавершені заявки скасовуються.
+
+## 5. Заявка магазину
+
+Одна заявка належить Shop; seller/admin — actor/provenance.
 
 ```text
-open -> frozen -> completed
+offerId + shopId -> unique
+quantity         -> 1..6
 ```
 
-- `open`: магазини можуть створювати/міняти заявки;
-- `frozen`: склад/адмін закрив хвилю або її автоматично заморожено при старті
-  наступного ordinary ordering window цієї групи;
-- `completed`: усі заявки спаковані або після freeze заявок не було.
+Кількість — це demand, а не гарантований stock reservation. Поточна версія не
+робить fair allocation і не гарантує залишок конкретному магазину.
 
-Runtime gate seller API додатково не дозволяє бачити/міняти supplement, коли для
-цієї групи вже відкрилось ordinary ordering.
+## 6. Packing
 
-## 6. Закриття хвилі
+Новий Wave item не можна claim або pack до `Wave=FROZEN`.
 
-Regular receipt може містити supplement items для різних delivery groups. Freeze
-завжди scoped по `receiptId + deliveryGroupId`; група A не заморожує B.
-
-Scheduler також перевіряє всі `open` offers і заморожує старі хвилі при старті
-наступного ordinary ordering window. Існуючі заявки не видаляються.
-
-## 7. Заявка магазину
-
-Одна заявка належить магазину, продавець зберігається як історичний автор.
-Унікальна пара:
+Після freeze достатній простий фізичний стан:
 
 ```text
-offerId + shopId
+packed
+packedBy
+packedAt
 ```
 
-Після `packed=true` продавець не може змінити/видалити заявку, доки склад не
-зніме галочку.
+Revision-aware packing не потрібен, поки packing і seller-editing структурно не
+перетинаються.
 
-## 8. Віртуальний блок
+## 7. Standalone supplement
 
-Віртуальний supplement block показує активні пропозиції групи та фізичну
-локацію Product. Supplement-only технічний Product може мати location
-`Надходження` в старих/legacy даних, але V47.16 ordinary `Надходження` placement
-queue фільтрує `orderingEnabled=false` і не просить ставити такий товар у Block.
+`Product` створюється тільки якщо routing справді має `warehouse=true`.
 
-## 9. Кількість
+Для supplement-only item Wave child зберігає source snapshot із ReceiptItem і
+`productId=null` є нормальним станом.
 
-Authoritative reservation/remaining-stock math для всіх сценаріїв поки немає.
-Кількість прийомки зберігається як факт, але не визначає автоматично route або
-`залишок -> На склад`.
+Не створювати технічний warehouse Product лише для foreign key.
+
+## 8. Same-session ordinary exclusion
+
+Якщо warehouse Product уже опублікований через SupplementWave для Session A, він
+не повинен одночасно бути ordinary-orderable у Session A.
+
+Це session-scoped exclusion. Для наступного ordinary cycle він живе за звичайними
+warehouse/catalog rules.
+
+## 9. Завершення доставки
+
+`OrderingSession` — delivery-cycle owner:
+
+```text
+ordinary Orders / PickingTasks terminal
+AND
+усі SupplementWave цієї session terminal
+-> session may complete
+```
+
+Стара чи чужа Wave не блокує нову session.
+
+## 10. Зміна topology
+
+Shop -> DeliveryGroup не може від'єднати магазин від поточної доставки, якщо
+поточна exact OrderingSession має active Wave. Wave ownership ніколи не мігрує
+разом із CURRENT topology.
+
+## 11. Помилковий маршрут у Накладній
+
+Published item не unconfirm/delete/recreate.
+
+UI залишається простим:
+
+```text
+[ Редагувати ]
+
+в редакторі:
+[ Скасувати ] [ Зберегти ]
+```
+
+`Зберегти` зміненого confirmed routing викликає canonical
+`CorrectReceiptItemRouting`:
+
+```text
+stop wrong supplement item
+cancel unfinished requests
+preserve packed physical facts/history
+apply new ReceiptItem.routing
+invoke canonical artifacts of new route
+re-evaluate affected Wave / OrderingSession
+```
+
+Completed Wave history не переписується. Routing можна виправити для подальшого
+життя товару. Якщо active Wave item лишається supplement, correction також
+синхронізує його `productId/sourceSnapshot`: `warehouse=true` дає реальний Product,
+`warehouse=false` повертає child у валідний standalone `productId=null` стан.
+
+Seller UI для cancelled item показує просто `Скасовано`.
+
+## 12. Історія / Зміна
+
+Нову систему історії не створюємо.
+
+Existing `Зміна` отримує read projection з двох джерел:
+
+```text
+PickingTask                 -> ordinary work
+SupplementRequest.packedBy  -> supplement work
+```
+
+Одиниці не змішуються:
+
+```text
+Звичайні задачі: N
+Дозамовлення: M магазинів
+```
+
+Хронологія працівника одна.
+
+## 13. Notifications
+
+Telegram lifecycle належить Wave, а не кожному товару.
+
+```text
+wave opened
+wave reminder (optional)
+wave frozen
+```
+
+Одна Wave з 20 товарами не створює 20 повідомлень. Idempotency зберігається на
+Wave.
+
+## 14. Фізична локація
+
+Wave не є фізичним Block.
+
+Якщо item має warehouse Product, location читається з канонічного
+`Block.productIds`. Переміщення Product не змінює Wave identity.
+
+## 15. Compatibility
+
+Legacy rows:
+
+```text
+SupplementOffer.waveId = null
+```
+
+продовжують старий lifecycle через compatibility endpoints/scheduler. New Wave
+writes не повинні випадково потрапляти в legacy per-offer notifications або
+legacy automatic freeze.
+
+## 16. Заборонені патерни
+
+- browser timer як lifecycle authority;
+- packing Wave item до freeze;
+- `packed=true` як нормальний seller-edit lock;
+- fake Product для supplement-only;
+- CURRENT topology як ownership existing Wave;
+- group-only new Wave queries без exact `orderingSessionId`;
+- old/session-foreign Wave як blocker нової delivery session;
+- per-product Telegram lifecycle spam;
+- physical Block як реалізація віртуального supplement work;
+- unconfirm/delete/recreate published ReceiptItem для correction.

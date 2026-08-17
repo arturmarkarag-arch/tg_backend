@@ -9,7 +9,7 @@ const Shop  = require('../models/Shop');
 const User  = require('../models/User');
 const Order = require('../models/Order');
 const { migrateSellerShop } = require('../services/migrateSellerShop');
-const { invalidateShop } = require('../utils/modelCache');
+const { publishShopAssignmentTransition } = require('../services/shopAssignmentCommand');
 const { computeTargetShopState } = require('../utils/shopConflict');
 const { activeOrderShopFilter } = require('../utils/orderShopFilter');
 const { getIO } = require('../socket');
@@ -262,39 +262,20 @@ router.post('/:id/approve', telegramAuth, requireTelegramRole('admin'), asyncHan
         }
       }
 
-      // For initial assignment: just set the shop directly (no order to migrate, no lastSeller, no history)
-      // For shop change: use full migration service
-      if (isAssignment) {
-        // Тільки shopId: група й зона читаються з магазину.
-        await User.updateOne(
-          { telegramId: seller.telegramId },
-          { $set: { shopId: toShop._id } },
-          { session }
-        );
-        const assignOldShopId = seller.shopId ? String(seller.shopId) : '';
-        const assignNewShopId = String(toShop._id);
-        migrationResult = {
-          prevGroupId: null,
-          newGroupId: toShop.deliveryGroupId || null,
-          movedOrder: false,
-          invalidate: async () => {
-            if (assignOldShopId) await invalidateShop(assignOldShopId);
-            if (assignNewShopId) await invalidateShop(assignNewShopId);
-          },
-        };
-      } else {
-        migrationResult = await migrateSellerShop({
-          session,
-          existingUser: seller,
-          newShopFull: toShop,
-          actor: admin,
-          reason: `admin_transfer_approved:${String(request._id)}`,
-          resetCartNavigation: true,
-          clearCartReservation: true,
-          pushHistory: true,
-          updateLastSeller: true,
-        });
-      }
+      // One assignment command for BOTH initial placement and later transfers.
+      // migrateSellerShop already handles oldShopId=null and, critically, can
+      // re-attach a parked active Order. A raw `User.shopId = ...` here used to
+      // strand that order outside the seller's newly assigned shop.
+      migrationResult = await migrateSellerShop({
+        session,
+        existingUser: seller,
+        newShopFull: toShop,
+        actor: admin,
+        reason: `admin_transfer_approved:${String(request._id)}`,
+        resetCartNavigation: true,
+        pushHistory: true,
+        updateLastSeller: true,
+      });
 
       // Mark request resolved
       request.status = 'approved';
@@ -311,31 +292,20 @@ router.post('/:id/approve', telegramAuth, requireTelegramRole('admin'), asyncHan
   }
   }); // withSellerLocks
 
-  // Post-commit cache invalidation — outside withTransaction AND outside the
-  // seller locks so other workers don't repopulate L1 with pre-commit reads.
-  if (migrationResult?.invalidate) {
-    try { await migrationResult.invalidate(); }
-    catch (e) {}
+  // One post-commit publication path for CURRENT assignment topology. It
+  // refreshes dashboards even when no Order happened to move.
+  if (migrationResult) {
+    await publishShopAssignmentTransition(migrationResult);
   }
 
-  // Notify dashboards AFTER commit (same pattern as /me/shop)
   try {
     const io = getIO();
-    if (io && migrationResult) {
-      const { prevGroupId, newGroupId, movedOrder } = migrationResult;
-      if (prevGroupId) io.to(`picking_group_${prevGroupId}`).emit('shop_status_changed', { groupId: prevGroupId });
-      if (newGroupId && newGroupId !== prevGroupId) {
-        io.to(`picking_group_${newGroupId}`).emit('shop_status_changed', { groupId: newGroupId });
-        io.emit('delivery_groups_updated');
-      }
-      if (movedOrder) {
-        io.emit('user_order_updated', { buyerTelegramId: requestDoc.sellerTelegramId });
-      }
-      // Notify the approved seller that their shop changed
+    if (io && migrationResult?.assignmentChanged) {
+      // Direct notification for the affected seller remains transport-specific;
+      // group/cache publication above is canonical and shared by every caller.
       io.emit('user_shop_changed', { telegramId: requestDoc.sellerTelegramId });
     }
-  } catch (e) {
-  }
+  } catch (_) { /* best-effort */ }
 
   res.json(resolvedRequest);
 }));

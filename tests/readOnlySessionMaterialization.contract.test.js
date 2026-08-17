@@ -19,12 +19,15 @@ describe('read-only session materialization contract', () => {
   it('read-only conflict/product/shop-status views use findCurrentSessionId', () => {
     const orders = read('routes/orders.js');
     const products = read('routes/products.js');
-    const groups = read('routes/deliveryGroups.js');
+    const currentShopStatus = read('services/readModels/currentSessionShopStatusReadModel.js');
+    const shopProducts = read('services/readModels/currentSessionShopProductsReadModel.js');
+    const groupSessions = read('services/readModels/deliveryGroupSessionSummaryReadModel.js');
 
     expect(orders).toContain('allGroups.map((group) => findCurrentSessionId');
     expect(products).toContain('allGroups.map((group) => findCurrentSessionId');
-    expect(groups).toContain('const currentSessionId = await findCurrentSessionId(String(normalizedGroup._id)');
-    expect(groups).toContain('const currentSessionId = await findCurrentSessionId(String(group._id), group.orderingSchedule);');
+    expect(currentShopStatus).toContain('findCurrentSessionId(String(group._id), group.orderingSchedule)');
+    expect(shopProducts).toContain('findCurrentSessionId(String(group._id), group.orderingSchedule)');
+    expect(groupSessions).toContain('findCurrentSessionId(');
   });
 
   it('write paths still materialize a session when a real business operation needs identity', () => {

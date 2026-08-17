@@ -26,9 +26,10 @@ const { reconcileLateOrdersForSession } = require('../services/lateOrderReconcil
 const { ensureSessionShopNumbers, buildShopNumberLookup } = require('../utils/shopNumbering');
 const SupplementOffer   = require('../models/SupplementOffer');
 const SupplementRequest = require('../models/SupplementRequest');
-// Лічильник рахується ЗА ГРУПОЮ, не за сесією: хвиля дозамовлення до
-// OrderingSession не прив'язана (див. models/SupplementOffer.js).
+// New SupplementWave rows are scoped to the exact current OrderingSession;
+// legacy waveId=null rows remain group-scoped only for compatibility.
 const { countActiveOffersForGroup } = require('../services/supplementOffers');
+const { getSupplementShiftSummary, getSupplementWorkerHistory } = require('../services/readModels/supplementShiftActivityReadModel');
 const { getTelegramUsernameMap } = require('../utils/telegramUsername');
 
 const {
@@ -143,7 +144,8 @@ async function buildReadOnlyPickingSessionSnapshot(deliveryGroupId, { now = new 
     pickingReady: readiness.pickingReady,
     pickingReadyInMs: readiness.pickingReadyInMs,
   };
-  const supplementCount = await countActiveOffersForGroup(groupId);
+  const sessionId = await findCurrentSessionId(groupId, group.orderingSchedule);
+  const supplementCount = await countActiveOffersForGroup(groupId, { orderingSessionId: sessionId });
 
   if (windowState.isOpen) {
     return {
@@ -163,7 +165,6 @@ async function buildReadOnlyPickingSessionSnapshot(deliveryGroupId, { now = new 
     };
   }
 
-  const sessionId = await findCurrentSessionId(groupId, group.orderingSchedule);
   const session = sessionId
     ? await OrderingSession.findById(sessionId, 'pickingStatus events seq openDate finalSummary').lean()
     : null;
@@ -408,7 +409,7 @@ router.post('/start-session', requireTelegramRoles(['warehouse', 'admin']), asyn
     });
 
     if (presentationMode === 'upcoming_preflight') {
-      const supplementCount = await countActiveOffersForGroup(deliveryGroupId);
+      const supplementCount = await countActiveOffersForGroup(deliveryGroupId, { orderingSessionId: existingSessionId });
       return res.json({
         upcomingPreflight: true,
         presentationMode,
@@ -481,7 +482,7 @@ router.post('/start-session', requireTelegramRoles(['warehouse', 'admin']), asyn
     // знати про них навіть коли звичайних задач нуль, інакше віртуальний блок
     // «Дозамовлення» стане недосяжним (кнопка «Показати замовлення» ховається
     // на екрані «все зібрано»).
-    const supplementCount = await countActiveOffersForGroup(deliveryGroupId);
+    const supplementCount = await countActiveOffersForGroup(deliveryGroupId, { orderingSessionId: currentSessionId });
 
     const baseEnvelope = {
       pickingStatus: session?.pickingStatus || 'pending',
@@ -1083,8 +1084,8 @@ router.get('/queue-stats', requireTelegramRoles(['warehouse', 'admin']), async (
     let pickingReadyAt = null;
     let pickingReady = false;
     let pickingReadyInMs = null;
-    // Лічильник дозамовлень оновлюється незалежно від OrderingSession.
-    const supplementCount = await countActiveOffersForGroup(deliveryGroupId);
+    // Modern supplement rows are counted only for this exact current session.
+    const supplementCount = await countActiveOffersForGroup(deliveryGroupId, { orderingSessionId: currentSessionId });
     try {
       const groupDoc = await DeliveryGroup.findById(deliveryGroupId, 'dayOfWeek orderingSchedule').lean();
       if (groupDoc) {
@@ -1583,9 +1584,16 @@ router.get('/shift-board', requireTelegramRoles(['admin']), async (req, res, nex
     ).lean();
     const totalCompleted = completedTasks.length;
     const totalPending = await PickingTask.countDocuments({ ...sessionScope, deliveryGroupId: dgId, status: 'pending' });
-    const lastActivity = completedTasks.length
+    const ordinaryLastActivity = completedTasks.length
       ? completedTasks.reduce((max, t) => (t.updatedAt > max ? t.updatedAt : max), completedTasks[0].updatedAt)
       : null;
+    const supplementShift = sessionId
+      ? await getSupplementShiftSummary({ orderingSessionId: sessionId, deliveryGroupId: dgId }).catch(() => ({ totalPacked: 0, lastActivity: null, workers: [] }))
+      : { totalPacked: 0, lastActivity: null, workers: [] };
+    const totalSupplementPacked = Number(supplementShift.totalPacked || 0);
+    const lastActivity = [ordinaryLastActivity, supplementShift.lastActivity]
+      .filter(Boolean)
+      .sort((a, b) => new Date(b) - new Date(a))[0] || null;
 
     // Per-worker stats: count COMPLETED picking tasks of THIS session, grouped by
     // who finalised each one (completedBy). Scoped exactly like totalCompleted
@@ -1612,7 +1620,8 @@ router.get('/shift-board', requireTelegramRoles(['admin']), async (req, res, nex
         'items.packedBy': { $ne: null },
       })).map((value) => String(value || '')).filter(Boolean)
       : [];
-    const allWorkerIds = [...new Set([...workerIds, ...activeWorkerIds, ...packedWorkerIds])];
+    const supplementWorkerIds = (supplementShift.workers || []).map((row) => String(row.telegramId || '')).filter(Boolean);
+    const allWorkerIds = [...new Set([...workerIds, ...activeWorkerIds, ...packedWorkerIds, ...supplementWorkerIds])];
 
     const users = allWorkerIds.length
       ? await User.find({ telegramId: { $in: allWorkerIds } }, 'telegramId firstName lastName').lean()
@@ -1623,18 +1632,24 @@ router.get('/shift-board', requireTelegramRoles(['admin']), async (req, res, nex
     ]));
     const workerUsernameMap = await getTelegramUsernameMap(allWorkerIds);
 
-    const statsMap = new Map(workerStats.map((w) => [w._id, w]));
+    const statsMap = new Map(workerStats.map((w) => [String(w._id), w]));
+    const supplementStatsMap = new Map((supplementShift.workers || []).map((row) => [String(row.telegramId), row]));
 
     const workers = allWorkerIds.map((id) => {
-      const stat = statsMap.get(id);
+      const stat = statsMap.get(String(id));
+      const supplementStat = supplementStatsMap.get(String(id));
       return {
         telegramId: id,
-        name: stat?.name || userNameMap.get(id) || id,
+        name: stat?.name || supplementStat?.name || userNameMap.get(id) || id,
         username: workerUsernameMap.get(String(id)) || '',
         tasksCompleted: stat?.tasksCompleted || 0,
+        supplementPackedCount: supplementStat?.supplementPackedCount || 0,
         isActive: activeWorkerIds.has(id),
       };
-    }).sort((a, b) => b.tasksCompleted - a.tasksCompleted || (b.isActive ? 1 : 0) - (a.isActive ? 1 : 0));
+    }).sort((a, b) =>
+      b.tasksCompleted - a.tasksCompleted
+      || b.supplementPackedCount - a.supplementPackedCount
+      || (b.isActive ? 1 : 0) - (a.isActive ? 1 : 0));
 
     // ── Order-level "не завершено" aggregation (read-only data for the Зміна card) ──
     // Three views the operator wants visibility into, NO actions attached:
@@ -1824,7 +1839,7 @@ router.get('/shift-board', requireTelegramRoles(['admin']), async (req, res, nex
     } catch (e) {
     }
 
-    res.json({ groupName, sessionStart, lastActivity, workers, totalCompleted, totalPending, unfinished, sessionClosure, catalogReview });
+    res.json({ groupName, sessionStart, lastActivity, workers, totalCompleted, totalPending, totalSupplementPacked, unfinished, sessionClosure, catalogReview });
   } catch (err) {
     if (err && (err.name === 'AppError' || err.name === 'CastError' || isTransientTx(err))) return next(err);
     next(appError('picking_next_failed'));
@@ -1864,16 +1879,26 @@ router.get('/shift-board/worker-history', requireTelegramRoles(['admin']), async
       ],
     };
 
-    const [total, tasks] = await Promise.all([
+    // Fetch the top N rows from each work stream, then merge chronologically.
+    // To produce global rows [offset, offset+limit), top offset+limit from EACH
+    // independently sorted stream is sufficient and avoids mixing unlike units in
+    // storage merely for pagination.
+    const fetchLimit = offset + limit;
+    const [ordinaryTotal, tasks, supplementHistory] = await Promise.all([
       PickingTask.countDocuments(workerMatch),
       PickingTask.find(
         workerMatch,
         'productId blockId positionIndex status lockedBy lockedAt items completedBy completedByName completionReason updatedAt',
       )
         .sort({ updatedAt: -1, _id: -1 })
-        .skip(offset)
-        .limit(limit)
+        .limit(fetchLimit)
         .lean(),
+      getSupplementWorkerHistory({
+        orderingSessionId: sessionId,
+        deliveryGroupId,
+        workerTelegramId,
+        fetchLimit,
+      }),
     ]);
 
     const productIds = [...new Set(tasks.map((task) => String(task.productId || '')).filter(Boolean))];
@@ -1896,7 +1921,7 @@ router.get('/shift-board/worker-history', requireTelegramRoles(['admin']), async
       shopLookup.byName.get(String(item.shopName || '')) ??
       null;
 
-    const items = tasks.map((task) => {
+    const ordinaryItems = tasks.map((task) => {
       const workerPackedItems = (task.items || []).filter(
         (item) => item.packed && String(item.packedBy || '') === workerTelegramId,
       );
@@ -1954,9 +1979,16 @@ router.get('/shift-board/worker-history', requireTelegramRoles(['admin']), async
       };
     });
 
+    const total = ordinaryTotal + Number(supplementHistory.total || 0);
+    const items = [...ordinaryItems, ...(supplementHistory.items || [])]
+      .sort((a, b) => new Date(b.at || 0) - new Date(a.at || 0) || String(b.taskId).localeCompare(String(a.taskId)))
+      .slice(offset, offset + limit);
+
     res.json({
       items,
       total,
+      ordinaryTotal,
+      supplementTotal: Number(supplementHistory.total || 0),
       limit,
       offset,
       hasMore: offset + items.length < total,

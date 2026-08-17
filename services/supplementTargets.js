@@ -1,228 +1,149 @@
 'use strict';
 
-// Вибір групи: docs/receipt/readme.md#2-проведення-накладної-дозамовлення
-
-const DeliveryGroup   = require('../models/DeliveryGroup');
-const OrderingSession = require('../models/OrderingSession');
-const Order           = require('../models/Order');
-const Shop            = require('../models/Shop');
-
+/**
+ * V48.S2 canonical supplement target resolver.
+ *
+ * No "morning", "closed N minutes ago" or next-window heuristic may decide
+ * eligibility. A target is one CURRENT delivery-cycle OrderingSession that has
+ * already materialised and is not terminal. Staff choose explicitly; publish
+ * revalidates the exact session server-side.
+ */
 const mongoose = require('mongoose');
-
-const {
-  isOrderingOpen,
-  getWarsawNow,
-  getOpenDateWarsaw,
-  getNextOrderingWindowOpenAt,
-  getOrderingWindowCloseAt,
-  getPreviousOrderingCloseAt,
-  DAY_FULL_UK,
-} = require('../utils/orderingSchedule');
+const DeliveryGroup = require('../models/DeliveryGroup');
+const OrderingSession = require('../models/OrderingSession');
+const Shop = require('../models/Shop');
+const { findCurrentSessionId } = require('../utils/getOrCreateSession');
+const { isOrderingOpen, DAY_FULL_UK } = require('../utils/orderingSchedule');
 const { appError } = require('../utils/errors');
 
-// ─── Формат тривалості ───────────────────────────────────────────────────────
+function str(v) { return v == null ? '' : String(v); }
 
-const MINUTE = 60 * 1000;
-const HOUR   = 60 * MINUTE;
-const DAY    = 24 * HOUR;
-
-function plural(n, one, few, many) {
-  const mod10 = Math.abs(n) % 10;
-  const mod100 = Math.abs(n) % 100;
-  if (mod100 >= 11 && mod100 <= 14) return many;
-  if (mod10 === 1) return one;
-  if (mod10 >= 2 && mod10 <= 4) return few;
-  return many;
+function stateForSession(session, group, now = new Date()) {
+  if (!session) return 'upcoming_not_started';
+  if (session.openAt && new Date(session.openAt).getTime() > now.getTime()) return 'upcoming_not_started';
+  if (session.pickingStatus === 'completed') return 'completed';
+  if (session.pickingStatus === 'confirmed' || session.pickingStatus === 'in_progress') return 'picking';
+  return isOrderingOpen(group.orderingSchedule, now).isOpen ? 'ordering_open' : 'awaiting_picking';
 }
 
-/** Людський формат приблизної тривалості. */
-function humanDuration(ms) {
-  const abs = Math.max(0, ms);
-  if (abs < MINUTE) return 'менше хвилини';
-  if (abs < HOUR) {
-    const m = Math.round(abs / MINUTE);
-    return `${m} ${plural(m, 'хвилину', 'хвилини', 'хвилин')}`;
-  }
-  if (abs < DAY) {
-    const h = Math.floor(abs / HOUR);
-    const m = Math.round((abs % HOUR) / MINUTE);
-    const head = `${h} ${plural(h, 'годину', 'години', 'годин')}`;
-    if (!m) return head;
-    return `${head} ${m} ${plural(m, 'хвилину', 'хвилини', 'хвилин')}`;
-  }
-  const d = Math.round(abs / DAY);
-  return `${d} ${plural(d, 'день', 'дні', 'днів')}`;
+function titleForState(state) {
+  if (state === 'ordering_open') return 'Поточна доставка · замовлення відкриті';
+  if (state === 'awaiting_picking') return 'Поточна доставка · замовлення закриті';
+  if (state === 'picking') return 'Поточна доставка · збирання';
+  if (state === 'completed') return 'Доставка завершена';
+  return 'Наступна сесія ще не почалася';
 }
 
-/** Час у часовому поясі Europe/Warsaw. */
-function fmtTime(date) {
-  return new Intl.DateTimeFormat('uk-UA', {
-    timeZone: 'Europe/Warsaw', hour: '2-digit', minute: '2-digit', hour12: false,
-  }).format(new Date(date));
-}
+async function describeGroup(group, now = new Date()) {
+  const groupId = str(group?._id);
+  let sessionId = null;
+  try { sessionId = await findCurrentSessionId(groupId, group.orderingSchedule); } catch (_) {}
+  const session = sessionId
+    ? await OrderingSession.findById(sessionId, '_id seq openDate openAt closeAt pickingStatus').lean()
+    : null;
 
-// ─── Стан однієї групи ───────────────────────────────────────────────────────
-
-/** Стан збирання людською мовою. Немає сесії — збирання ще не починалося. */
-function pickingHint(session) {
-  if (!session) return 'Збирання ще не почалося';
-  if (session.pickingStatus === 'in_progress') return 'Збирання: триває';
-  if (session.pickingStatus === 'completed') return 'Збирання: завершено — коробки, найімовірніше, вже закриті';
-  return 'Збирання ще не почалося';
-}
-
-/** Інформаційний опис групи; статус не блокує вибір. */
-async function describeGroup(group, now) {
-  const dayOfWeek = group.dayOfWeek;
-  const schedule = group.orderingSchedule;
-  const openDate = getOpenDateWarsaw(schedule, now);
-  const session = await OrderingSession.findOne(
-    { groupId: String(group._id), openDate },
-    '_id pickingStatus',
-  ).lean();
-
-  const windowOpen = isOrderingOpen(schedule, now).isOpen;
-  const todayIsDeliveryDay = getWarsawNow(now).dayOfWeek === dayOfWeek;
-
-  const base = {
-    deliveryGroupId: String(group._id),
-    name: group.name || '',
-    dayOfWeek,
-    dayName: DAY_FULL_UK[dayOfWeek] || '',
-    pickingStatus: session?.pickingStatus || null,
-  };
-
-  const shopCount = await Shop.countDocuments({
-    deliveryGroupId: String(group._id),
-    isActive: true,
-  });
-  base.shopCount = shopCount;
-  // Навіть група без активних магазинів лишається клікабельною: статус тут
-  // інформаційний, а остаточне рішення завжди приймає працівник.
-  if (!shopCount) {
-    base.note = 'У групі зараз немає активних магазинів. Дозамовлення відкриється, але продавців для приватного сповіщення може не бути.';
-  }
-
-  // ── Вікно ще відкрите ──────────────────────────────────────────────────────
-  if (windowOpen) {
-    const closeAt = getOrderingWindowCloseAt(schedule, now);
-    return {
-      ...base,
-      state: 'ordering_open',
-      selectable: true,
-      title: 'Замовлення активні',
-      orderingClosesAt: closeAt.toISOString(),
-      details: [`Закриються через ${humanDuration(closeAt.getTime() - now.getTime())}`],
-      note: 'Дозамовлення можна підготувати зараз. Після підтвердження товари збираються в пачку без сповіщень. '
-        + 'Коли працівник натисне «Відкрити пачку», вона дочекається закриття звичайної сесії й відкриється автоматично одним повідомленням.',
-    };
-  }
-
-  // ── Вікно закрите, доставка СЬОГОДНІ — головний сценарій ───────────────────
-  if (todayIsDeliveryDay) {
-    const closedAt = getPreviousOrderingCloseAt(schedule, now);
-    const details = [
-      `Замовлення закрилися ${humanDuration(now.getTime() - closedAt.getTime())} тому`,
-      pickingHint(session),
-    ];
-
-    if (session) {
-      const shopIds = await Order.distinct('buyerSnapshot.shopId', {
-        orderingSessionId: String(session._id),
-        'buyerSnapshot.deliveryGroupId': String(group._id),
-        status: { $nin: ['cancelled', 'expired'] },
-      });
-      details.push(`Магазинів із замовленнями: ${shopIds.filter(Boolean).length}`);
-    } else {
-      details.push('Магазинів із замовленнями: 0');
-    }
-
-    return { ...base, state: 'closed_today', selectable: true, title: 'Доставка сьогодні', details };
-  }
-
-  // ── Вікно закрите, доставка не сьогодні ────────────────────────────────────
-  const nextOpenAt = getNextOrderingWindowOpenAt(schedule, now);
-  const untilOpen = humanDuration(nextOpenAt.getTime() - now.getTime());
-
-  if (session) {
-    const done = session.pickingStatus === 'completed';
-    return {
-      ...base,
-      state: 'delivery_passed',
-      selectable: true,
-      title: done
-        ? 'Попередня доставка завершена'
-        : `Доставка була в ${DAY_FULL_UK[dayOfWeek] || 'цій групі'} — збирання ще не закрите`,
-      details: [
-        done ? 'Наступна сесія ще не почалася' : pickingHint(session),
-        `Наступні замовлення відкриються через ${untilOpen}`,
-      ],
-    };
-  }
+  const state = stateForSession(session, group, now);
+  const shopCount = await Shop.countDocuments({ deliveryGroupId: groupId, isActive: true });
+  const selectable = !!session
+    && !['completed', 'upcoming_not_started'].includes(state)
+    && shopCount > 0;
 
   return {
-    ...base,
-    state: 'window_not_open',
-    selectable: true,
-    title: `Замовлення відкриються через ${untilOpen}`,
-    details: [`Наступна доставка — ${DAY_FULL_UK[dayOfWeek] || '—'}`],
+    deliveryGroupId: groupId,
+    name: group.name || '',
+    dayOfWeek: group.dayOfWeek,
+    dayName: DAY_FULL_UK[group.dayOfWeek] || '',
+    selectable,
+    state,
+    title: titleForState(state),
+    orderingSessionId: session ? str(session._id) : null,
+    sessionSeq: session?.seq ?? null,
+    sessionOpenDate: session?.openDate || null,
+    pickingStatus: session?.pickingStatus || null,
+    orderingOpen: state === 'ordering_open',
+    shopCount,
+    details: session
+      ? [
+        `Сесія${session.seq != null ? ` №${session.seq}` : ''}: ${session.openDate || '—'}`,
+        state === 'ordering_open'
+          ? 'Звичайне замовлення ще відкрите'
+          : state === 'awaiting_picking'
+            ? 'Звичайне замовлення закрите, збирання ще не почалось'
+            : state === 'picking'
+              ? 'Збирання цієї доставки вже триває'
+              : 'Сесія завершена',
+      ]
+      : ['Дозамовлення не потрібне: ця група отримає товар у своїй звичайній сесії'],
+    note: selectable ? '' : (state === 'completed'
+      ? 'Завершену доставку не можна повторно відкривати через дозамовлення.'
+      : 'Майбутня сесія не є ціллю дозамовлення.'),
   };
 }
 
-// ─── Публічне API ────────────────────────────────────────────────────────────
-
-/** Усі групи з інформаційним станом. */
 async function describeSupplementTargets(now = new Date()) {
-  const groups = await DeliveryGroup.find({}, 'name dayOfWeek orderingSchedule').sort({ dayOfWeek: 1, name: 1 }).lean();
-
+  const groups = await DeliveryGroup.find({}, 'name dayOfWeek orderingSchedule')
+    .sort({ dayOfWeek: 1, name: 1 })
+    .lean();
   const described = [];
   for (const group of groups) {
-    if (!Number.isInteger(group.dayOfWeek)) continue;
+    if (!Number.isInteger(group.dayOfWeek) || !group.orderingSchedule) continue;
     described.push(await describeGroup(group, now));
   }
-
-  // Жодного поділу на «доступні/недоступні»: усі коректні групи клікабельні,
-  // а статуси потрібні тільки як підказка.
-  return {
-    groups: described.map((g) => ({ ...g, selectable: true })),
-    serverTime: now.toISOString(),
-  };
+  return { groups: described, serverTime: now.toISOString() };
 }
 
 /**
- * Перевіряє коректність вручну вибраної групи. Legacy whole-receipt supplement
- * може лишатися permissive. Current V48.2 flow викликає це на етапі публікації
- * всієї пачки: allowDeferred=true дозволяє підтвердити пачку, поки звичайні
- * замовлення ще відкриті, але жоден SupplementOffer не показується продавцям
- * до фактичного закриття цього вікна.
+ * Resolves and pins the CURRENT session. `expectedOrderingSessionId` protects the
+ * confirmation screen from a cycle rollover between GET targets and POST publish.
  */
 async function resolveSupplementTarget(
   deliveryGroupId,
-  { requireOrderingClosed = false, allowDeferred = false, now = new Date() } = {},
+  { expectedOrderingSessionId = null, now = new Date() } = {},
 ) {
-  const gid = String(deliveryGroupId || '').trim();
+  const gid = str(deliveryGroupId).trim();
   if (!gid || !mongoose.Types.ObjectId.isValid(gid)) throw appError('supplement_target_required');
 
   const group = await DeliveryGroup.findById(gid, 'name dayOfWeek orderingSchedule').lean();
   if (!group) throw appError('supplement_target_not_found');
 
-  if (requireOrderingClosed && isOrderingOpen(group.orderingSchedule, now).isOpen) {
-    const closeAt = getOrderingWindowCloseAt(group.orderingSchedule, now);
-    if (!allowDeferred) {
-      throw appError('supplement_ordering_still_open', { group: group.name || '' });
-    }
-    return {
-      deliveryGroupId: gid,
-      deferred: true,
-      orderingClosesAt: closeAt?.toISOString?.() || null,
-    };
+  const sessionId = await findCurrentSessionId(gid, group.orderingSchedule);
+  if (!sessionId) {
+    throw appError('supplement_target_session_not_started', { group: group.name || '' });
+  }
+  if (expectedOrderingSessionId && str(expectedOrderingSessionId) !== str(sessionId)) {
+    throw appError('supplement_target_session_changed', { group: group.name || '' });
   }
 
-  return { deliveryGroupId: gid, deferred: false, orderingClosesAt: null };
+  const session = await OrderingSession.findById(
+    sessionId,
+    '_id groupId seq openDate openAt closeAt pickingStatus',
+  ).lean();
+  if (!session || str(session.groupId) !== gid) throw appError('supplement_target_session_not_started', { group: group.name || '' });
+  if (session.pickingStatus === 'completed') throw appError('supplement_target_session_completed', { group: group.name || '' });
+
+  // A future pre-created session is not eligible. Normal current sessions are
+  // proactively materialised by orderingOpenScheduler at/after openAt.
+  if (session.openAt && new Date(session.openAt).getTime() > now.getTime()) {
+    throw appError('supplement_target_session_not_started', { group: group.name || '' });
+  }
+
+  const hasActiveShop = await Shop.exists({ deliveryGroupId: gid, isActive: true });
+  if (!hasActiveShop) throw appError('supplement_target_no_shops', { group: group.name || '' });
+
+  const state = stateForSession(session, group, now);
+  return {
+    deliveryGroupId: gid,
+    orderingSessionId: str(session._id),
+    sessionSeq: session.seq ?? null,
+    sessionOpenDate: session.openDate || null,
+    state,
+    orderingOpen: state === 'ordering_open',
+    groupName: group.name || '',
+  };
 }
 
 module.exports = {
   describeSupplementTargets,
   resolveSupplementTarget,
-  humanDuration,
+  stateForSession,
 };

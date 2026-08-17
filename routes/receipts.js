@@ -27,6 +27,8 @@ const {
   blankRouting,
   normalizeReceiptItemRouting,
   legacyDestinationForRouting,
+  needsWarehouseProduct,
+  needsStandaloneShopProduct,
   validateReceiptItemRouting,
   isNormalOrderingEnabled,
 } = require('../utils/receiptRouting');
@@ -60,134 +62,10 @@ const FIELD_LABELS = {
   photoUrl: 'Фото',
 };
 
-async function ensureReceiptItemProduct(item, session, receipt = null) {
-  const routing = normalizeReceiptItemRouting(item, receipt);
-  const destination = legacyDestinationForRouting(routing);
-
-  // Mandatory-only goods never create warehouse stock. They live as a
-  // standalone ShopProduct and are physically distributed by the warehouse.
-  if (destination === 'shops') return null;
-
-  const orderingEnabled = isNormalOrderingEnabled(routing);
-  let product = null;
-
-  // Idempotency: once this receipt item created a warehouse Product, reuse it.
-  if (item.createdProductId) {
-    product = await Product.findById(item.createdProductId).session(session);
-    if (product) {
-      if (!item.stockApplied) {
-        // New routing keeps received quantity as receipt metadata only. Legacy
-        // rows preserve the historical stock-seed behavior.
-        product.quantity = Number(item.routingVersion || 0) >= 1 ? 0 : item.totalQty;
-      }
-      if (item.price !== null) product.price = item.price;
-      if (item.qtyPerPackage) product.quantityPerPackage = item.qtyPerPackage;
-      product.notes = photoCommentsText(item.photoMeta);
-      product.labelPositions = labelPositionsFromMeta(item.photoMeta);
-      if (!product.shelvedAt) product.shelvedAt = new Date();
-      product.orderingEnabled = orderingEnabled;
-      product.mandatoryDistribution = !!routing.mandatory;
-      product.mayNotReachAllShops = !!routing.mayNotReachAllShops;
-      product.receiptItemId = item._id;
-      await product.save({ session });
-      if (!item.stockApplied) {
-        item.stockApplied = true;
-        await item.save({ session });
-      }
-      return product;
-    }
-  }
-
-  const maxProduct = await Product.findOne(
-    { status: { $ne: 'archived' } },
-    'orderNumber',
-  ).sort({ orderNumber: -1 }).session(session).lean();
-  const nextOrderNumber = (maxProduct?.orderNumber ?? 0) + 1;
-  const labelPositions = labelPositionsFromMeta(item.photoMeta);
-
-  product = new Product({
-    orderNumber: nextOrderNumber,
-    price: item.price ?? 0,
-    quantity: Number(item.routingVersion || 0) >= 1 ? 0 : item.totalQty,
-    warehouse: '',
-    category: '',
-    name: item.name || '',
-    brand: item.name || '',
-    model: '',
-    status: 'pending',
-    shelvedAt: new Date(),
-    source: 'receipt',
-    orderingEnabled,
-    mandatoryDistribution: !!routing.mandatory,
-    mayNotReachAllShops: !!routing.mayNotReachAllShops,
-    receiptItemId: item._id,
-    imageUrls: [item.photoUrl],
-    imageNames: [item.photoName],
-    originalImageUrl: item.originalPhotoUrl || '',
-    labelPositions,
-    notes: photoCommentsText(item.photoMeta),
-    quantityPerPackage: item.qtyPerPackage || 0,
-    aiDescription: item.aiDescription || '',
-  });
-
-  try {
-    await product.save({ session });
-  } catch (err) {
-    if (err.code === 11000 && err.keyPattern?.orderNumber) {
-      throw appError('product_order_number_conflict');
-    }
-    throw err;
-  }
-
-  item.createdProductId = product._id;
-  item.stockApplied = true;
-  await item.save({ session });
-  return product;
-}
-
-
-// V47.15: a confirmed mandatory/supplement decision is historical business fact.
-// If stock remains later, adding that remainder to the warehouse must be ADDITIVE:
-// never unconfirm/re-confirm, never recreate supplement offers, never re-notify shops.
-// Mandatory-only rows already own a standalone ShopProduct. When they gain a
-// warehouse Product, convert that SAME ShopProduct document into the warehouse
-// mirror so "Товари Магазинів" does not get a duplicate card or a new id.
-async function convertReceiptShopOwnedToWarehouseMirror(item, product, session) {
-  const oldShopProductId = item.createdShopProductId;
-  if (oldShopProductId) {
-    const converted = await ShopProduct.findOneAndUpdate(
-      { _id: oldShopProductId, linkedProductId: null },
-      {
-        $set: { linkedProductId: product._id },
-        $unset: { receiptItemId: 1 },
-      },
-      { new: true, session },
-    );
-
-    if (converted) {
-      // Same clean photo => same vector. Move ownership instead of paying Gemini
-      // to embed the identical image again. If a warehouse vector somehow already
-      // exists, discard only the obsolete shop-owned vector.
-      const existingProductVector = await ProductVector.exists({ productId: product._id }).session(session);
-      if (existingProductVector) {
-        await ProductVector.deleteMany({ shopProductId: oldShopProductId }).session(session);
-      } else {
-        await ProductVector.updateOne(
-          { shopProductId: oldShopProductId },
-          { $set: { productId: product._id }, $unset: { shopProductId: 1 } },
-          { session },
-        );
-      }
-    }
-
-    // From now on the receipt item owns one warehouse Product; its ShopProduct is
-    // reached through Product.linkedProductId semantics, not the old standalone id.
-    item.createdShopProductId = null;
-    await item.save({ session });
-  }
-
-  return syncMirror(product, { session });
-}
+const {
+  ensureReceiptItemProduct,
+  convertReceiptShopOwnedToWarehouseMirror,
+} = require('../services/receiptRoutingArtifacts');
 
 function getActor(req) {
   const u = req.telegramUser || {};
@@ -434,10 +312,8 @@ router.get('/supplement-batches/pending', staffOnly, asyncHandler(async (_req, r
     status: 'confirmed',
     routingVersion: { $gte: 1 },
     'routing.supplement': true,
-    createdProductId: { $ne: null },
     supplementBatchVersion: { $gte: 1 },
-    supplementPublishRequestedAt: null,
-  }, '_id receiptId routing.supplementDeliveryGroupId supplementBatchVersion').lean();
+  }, '_id receiptId routing.supplementDeliveryGroupId supplementBatchVersion supplementPublishRequestedAt').lean();
 
   const { describeSupplementTargets } = require('../services/supplementTargets');
   const targets = await describeSupplementTargets();
@@ -445,8 +321,10 @@ router.get('/supplement-batches/pending', staffOnly, asyncHandler(async (_req, r
     return res.json({ readyCount: 0, groups: [], targets: targets.groups || [], serverTime: targets.serverTime || new Date().toISOString() });
   }
 
-  // Only a completed receiving document may enter a seller batch. Workers can
-  // prepare products earlier, but receiving must be formally closed first.
+  // Only a completed receiving document may enter a seller Wave. A ReceiptItem
+  // may be published into MORE THAN ONE currently-active delivery cycle. The old
+  // supplementPublishRequestedAt field means "published at least once" only; it
+  // is no longer the domain authority for per-target eligibility.
   const receiptIds = [...new Set(rows.map((row) => String(row.receiptId)))];
   const completed = await Receipt.find(
     { _id: { $in: receiptIds }, status: 'completed' },
@@ -454,20 +332,41 @@ router.get('/supplement-batches/pending', staffOnly, asyncHandler(async (_req, r
   ).lean();
   const completedIds = new Set(completed.map((receipt) => String(receipt._id)));
   const publishable = rows.filter((row) => completedIds.has(String(row.receiptId)));
+  const itemIds = publishable.map((row) => row._id);
 
-  const readyCount = publishable.filter((row) => !String(row.routing?.supplementDeliveryGroupId || '').trim()).length;
+  const selectableTargets = (targets.groups || []).filter((target) => target.selectable && target.orderingSessionId);
+  const targetSessionIds = selectableTargets.map((target) => String(target.orderingSessionId));
+  const alreadyPublished = itemIds.length && targetSessionIds.length
+    ? await SupplementOffer.find({
+      receiptItemId: { $in: itemIds },
+      orderingSessionId: { $in: targetSessionIds },
+      waveId: { $ne: null },
+    }, 'receiptItemId orderingSessionId').lean()
+    : [];
+  const publishedKeys = new Set(alreadyPublished.map((row) => `${String(row.orderingSessionId)}:${String(row.receiptItemId)}`));
 
-  // Compatibility only: old batch-v1 items may already have a group. Keep them
-  // visible until published; new UI never writes this field per product.
+  const targetsWithCounts = (targets.groups || []).map((target) => {
+    const sid = String(target.orderingSessionId || '');
+    const readyCountForTarget = target.selectable && sid
+      ? publishable.filter((row) => !publishedKeys.has(`${sid}:${String(row._id)}`)).length
+      : 0;
+    return { ...target, readyCount: readyCountForTarget };
+  });
+
+  // Compatibility only: batch-v1 rows that stored a group directly remain visible
+  // until that group's exact current session contains the child item.
+  const byTargetGroup = new Map(targetsWithCounts.map((target) => [String(target.deliveryGroupId), target]));
   const legacyCounts = new Map();
   for (const row of publishable) {
+    if (Number(row.supplementBatchVersion || 0) !== 1) continue;
     const gid = String(row.routing?.supplementDeliveryGroupId || '').trim();
-    if (!gid) continue;
+    const target = byTargetGroup.get(gid);
+    if (!gid || !target?.orderingSessionId) continue;
+    if (publishedKeys.has(`${String(target.orderingSessionId)}:${String(row._id)}`)) continue;
     legacyCounts.set(gid, (legacyCounts.get(gid) || 0) + 1);
   }
-  const byId = new Map((targets.groups || []).map((group) => [String(group.deliveryGroupId), group]));
   const groups = [...legacyCounts.entries()].map(([deliveryGroupId, count]) => {
-    const target = byId.get(deliveryGroupId) || {};
+    const target = byTargetGroup.get(deliveryGroupId) || {};
     return {
       deliveryGroupId,
       count,
@@ -476,14 +375,15 @@ router.get('/supplement-batches/pending', staffOnly, asyncHandler(async (_req, r
       title: target.title || '',
       details: target.details || [],
       note: target.note || '',
-      orderingClosesAt: target.orderingClosesAt || null,
+      orderingSessionId: target.orderingSessionId || null,
     };
   }).sort((a, b) => String(a.name).localeCompare(String(b.name), 'uk'));
 
+  const readyCount = targetsWithCounts.reduce((max, target) => Math.max(max, Number(target.readyCount || 0)), 0);
   res.json({
     readyCount,
     groups,
-    targets: targets.groups || [],
+    targets: targetsWithCounts,
     serverTime: targets.serverTime || new Date().toISOString(),
   });
 }));
@@ -491,168 +391,144 @@ router.get('/supplement-batches/pending', staffOnly, asyncHandler(async (_req, r
 router.post('/supplement-batches/:deliveryGroupId/publish', staffOnly, asyncHandler(async (req, res) => {
   const deliveryGroupId = String(req.params.deliveryGroupId || '').trim();
   if (!deliveryGroupId) throw appError('supplement_target_required');
+  const expectedOrderingSessionId = String(req.body?.orderingSessionId || '').trim() || null;
+  const actor = {
+    by: String(req.telegramUser?.telegramId || ''),
+    byName: [req.telegramUser?.firstName, req.telegramUser?.lastName].filter(Boolean).join(' '),
+  };
 
-  // Global publish lock is intentional: two workers selecting different groups
-  // must never split/steal the same unassigned ready pool concurrently.
+  // Two different targets must not split the same unassigned ready pool. Once the
+  // exact delivery cycle is resolved, publication also shares the session lifecycle
+  // lock with completion so the Wave cannot appear concurrently with completed.
   const result = await withLock('supplement-batch:publish', async () => {
-    const target = await require('../services/supplementTargets').resolveSupplementTarget(
-      deliveryGroupId,
-      { requireOrderingClosed: true, allowDeferred: true },
-    );
+    const { resolveSupplementTarget } = require('../services/supplementTargets');
+    const firstTarget = await resolveSupplementTarget(deliveryGroupId, { expectedOrderingSessionId });
+    const { withSessionLifecycleLock } = require('../utils/sessionLifecycleLock');
 
-    const candidates = await ReceiptItem.find({
-      status: 'confirmed',
-      routingVersion: { $gte: 1 },
-      'routing.supplement': true,
-      createdProductId: { $ne: null },
-      supplementBatchVersion: { $gte: 1 },
-      supplementPublishRequestedAt: null,
-      $or: [
-        { 'routing.supplementDeliveryGroupId': deliveryGroupId },
-        { 'routing.supplementDeliveryGroupId': null },
-        { 'routing.supplementDeliveryGroupId': '' },
-        { 'routing.supplementDeliveryGroupId': { $exists: false } },
-      ],
-    }, '_id receiptId createdProductId routing.supplementDeliveryGroupId').lean();
+    return withSessionLifecycleLock(firstTarget.orderingSessionId, async () => {
+      const target = await resolveSupplementTarget(deliveryGroupId, {
+        expectedOrderingSessionId: firstTarget.orderingSessionId,
+      });
 
-    if (!candidates.length) return { selected: 0, notificationOffers: [], deferred: false, failed: 0 };
-
-    const receiptIds = [...new Set(candidates.map((row) => String(row.receiptId)))];
-    const completed = await Receipt.find(
-      { _id: { $in: receiptIds }, status: 'completed' },
-      '_id',
-    ).lean();
-    const completedIds = new Set(completed.map((receipt) => String(receipt._id)));
-    const publishable = candidates.filter((row) => completedIds.has(String(row.receiptId)));
-    if (!publishable.length) return { selected: 0, notificationOffers: [], deferred: false, failed: 0 };
-
-    const now = new Date();
-    const ids = publishable.map((row) => row._id);
-
-    // Assign the selected group and claim publication in one DB operation. The
-    // predicate still accepts legacy rows already assigned to the same group.
-    await ReceiptItem.updateMany(
-      {
-        _id: { $in: ids },
-        status: 'confirmed',
-        routingVersion: { $gte: 1 },
-        'routing.supplement': true,
-        createdProductId: { $ne: null },
-        supplementBatchVersion: { $gte: 1 },
-        supplementPublishRequestedAt: null,
-        $or: [
-          { 'routing.supplementDeliveryGroupId': deliveryGroupId },
-          { 'routing.supplementDeliveryGroupId': null },
-          { 'routing.supplementDeliveryGroupId': '' },
-          { 'routing.supplementDeliveryGroupId': { $exists: false } },
-        ],
-      },
-      {
-        $set: {
-          'routing.supplementDeliveryGroupId': deliveryGroupId,
-          supplementPublishRequestedAt: now,
-        },
-      },
-    );
-
-    const selectedRows = await ReceiptItem.find({
-      _id: { $in: ids },
-      status: 'confirmed',
-      'routing.supplement': true,
-      createdProductId: { $ne: null },
-      'routing.supplementDeliveryGroupId': deliveryGroupId,
-      supplementPublishRequestedAt: now,
-    }, '_id receiptId createdProductId').lean();
-    if (!selectedRows.length) return { selected: 0, notificationOffers: [], deferred: false, failed: 0 };
-
-    const selectedIds = selectedRows.map((row) => row._id);
-    const involvedReceiptIds = [...new Set(selectedRows.map((row) => String(row.receiptId)))];
-
-    if (target.deferred) {
-      await Receipt.updateMany(
-        { _id: { $in: involvedReceiptIds } },
-        { $set: { supplementStatus: 'pending' } },
-      );
-      return {
-        selected: selectedRows.length,
-        notificationOffers: [],
-        deferred: true,
-        failed: 0,
-        orderingClosesAt: target.orderingClosesAt || null,
-      };
-    }
-
-    let failed = 0;
-    try {
-      await SupplementOffer.bulkWrite(
-        selectedRows.map((row) => ({
-          updateOne: {
-            filter: { receiptItemId: row._id, deliveryGroupId },
-            update: {
-              $setOnInsert: {
-                receiptId: row.receiptId,
-                receiptItemId: row._id,
-                productId: row.createdProductId,
-                deliveryGroupId,
-                openedAt: now,
-                closesAt: null,
-                status: 'open',
-                lastReminderAt: now,
-              },
-            },
-            upsert: true,
-          },
-        })),
-        { ordered: false },
-      );
-    } catch (err) {
-      const writeErrors = Array.isArray(err?.writeErrors) ? err.writeErrors : [];
-      const nonDuplicate = writeErrors.filter((entry) => Number(entry?.code || entry?.err?.code) !== 11000);
-      failed = nonDuplicate.length || (writeErrors.length ? 0 : 1);
-    }
-
-    const allBatchOffers = await SupplementOffer.find({
-      receiptItemId: { $in: selectedIds },
-      deliveryGroupId,
-    }).lean();
-    const existingItemIds = new Set(allBatchOffers.map((offer) => String(offer.receiptItemId)));
-    failed += selectedRows.filter((row) => !existingItemIds.has(String(row._id))).length;
-    const notificationOffers = allBatchOffers.filter((offer) => (
-      offer.status === 'open' && !(offer.notifiedTypes || []).includes('opened')
-    ));
-
-    await Receipt.updateMany(
-      { _id: { $in: involvedReceiptIds } },
-      { $set: { supplementStatus: 'pending' } },
-    );
-
-    return { selected: selectedRows.length, notificationOffers, deferred: false, failed };
-  }, { ttlMs: 20_000, waitMs: 8_000 });
-
-  const notificationOffers = result.notificationOffers || [];
-  if (notificationOffers.length) {
-    for (const offer of notificationOffers) {
+      const mongoSession = await mongoose.connection.startSession();
+      let outcome = { selected: 0, offers: [], wave: null, target };
       try {
-        getIO()?.emit('supplement_opened', {
-          offerId: String(offer._id),
-          deliveryGroupId: String(offer.deliveryGroupId),
-          closesAt: offer.closesAt,
+        await mongoSession.withTransaction(async () => {
+          // Re-check the exact session inside the transaction as well. The external
+          // lifecycle lock serialises this with maybeCompleteSession; this read makes
+          // the invariant explicit in the transaction snapshot.
+          const OrderingSession = require('../models/OrderingSession');
+          const sessionDoc = await OrderingSession.findOne({
+            _id: target.orderingSessionId,
+            groupId: deliveryGroupId,
+            pickingStatus: { $ne: 'completed' },
+          }).session(mongoSession).lean();
+          if (!sessionDoc) throw appError('supplement_target_session_completed', { group: target.groupName });
+
+          const candidates = await ReceiptItem.find({
+            status: 'confirmed',
+            routingVersion: { $gte: 1 },
+            'routing.supplement': true,
+            supplementBatchVersion: { $gte: 1 },
+            $or: [
+              // v2 is target-neutral and may be published independently into
+              // several CURRENT delivery cycles, one Wave/group at a time.
+              { supplementBatchVersion: { $gte: 2 } },
+              // v1 compatibility remains pinned to its old per-item group.
+              { supplementBatchVersion: 1, 'routing.supplementDeliveryGroupId': deliveryGroupId },
+            ],
+          }).session(mongoSession);
+          if (!candidates.length) return;
+
+          const receiptIds = [...new Set(candidates.map((row) => String(row.receiptId)))];
+          const completed = await Receipt.find(
+            { _id: { $in: receiptIds }, status: 'completed' },
+            '_id',
+          ).session(mongoSession).lean();
+          const completedIds = new Set(completed.map((receipt) => String(receipt._id)));
+          const publishable = candidates.filter((row) => completedIds.has(String(row.receiptId)));
+          if (!publishable.length) return;
+
+          const now = new Date();
+          const ids = publishable.map((row) => row._id);
+
+          // Exact-session child existence is the idempotency/eligibility authority.
+          // ReceiptItem.supplementPublishRequestedAt is retained only as a durable
+          // "published at least once" compatibility marker for rollback guards.
+          const existingTargetItems = await SupplementOffer.distinct('receiptItemId', {
+            receiptItemId: { $in: ids },
+            orderingSessionId: target.orderingSessionId,
+            waveId: { $ne: null },
+          }).session(mongoSession);
+          const existingSet = new Set(existingTargetItems.map(String));
+          const selectedRows = publishable.filter((row) => !existingSet.has(String(row._id)));
+          if (!selectedRows.length) return;
+
+          const selectedIds = selectedRows.map((row) => row._id);
+          await ReceiptItem.updateMany(
+            { _id: { $in: selectedIds }, supplementPublishRequestedAt: null },
+            { $set: { supplementPublishRequestedAt: now } },
+            { session: mongoSession },
+          );
+
+          const { createWaveWithItems } = require('../services/supplementWaveService');
+          const created = await createWaveWithItems({
+            deliveryGroupId,
+            orderingSessionId: target.orderingSessionId,
+            receiptItems: selectedRows,
+            actor,
+            now,
+            session: mongoSession,
+          });
+
+          const involvedReceiptIds = [...new Set(selectedRows.map((row) => String(row.receiptId)))];
+          await Receipt.updateMany(
+            { _id: { $in: involvedReceiptIds } },
+            { $set: { supplementStatus: 'ready' } },
+            { session: mongoSession },
+          );
+
+          outcome = {
+            selected: selectedRows.length,
+            offers: created.offers.map((doc) => doc.toObject ? doc.toObject() : doc),
+            wave: created.wave?.toObject ? created.wave.toObject() : created.wave,
+            target,
+          };
         });
-      } catch (_) {}
-    }
-    if (!result.failed) {
-      await require('../services/supplementNotify').notifyOffers(notificationOffers, 'opened').catch(() => {});
-    }
+      } finally {
+        await mongoSession.endSession();
+      }
+      return outcome;
+    });
+  }, { ttlMs: 30_000, waitMs: 10_000 });
+
+  if (result.wave) {
+    const waveId = String(result.wave._id);
+    try {
+      const wavePayload = {
+        waveId,
+        deliveryGroupId,
+        orderingSessionId: result.target.orderingSessionId,
+        itemCount: result.selected,
+        status: 'open',
+      };
+      getIO()?.emit('supplement_wave_opened', wavePayload);
+      getIO()?.emit('supplement_wave_changed', wavePayload);
+      // Compatibility event lets old open clients refresh their lists during rollout.
+      getIO()?.emit('supplement_opened', { waveId, deliveryGroupId });
+    } catch (_) {}
+    await require('../services/supplementNotify').notifyWaves([result.wave], 'opened').catch(() => {});
   }
 
   try { getIO()?.emit('receipt_supplement_batch_changed', { deliveryGroupId }); } catch (_) {}
 
   res.json({
     selectedCount: result.selected || 0,
-    openedCount: notificationOffers.length,
-    deferred: !!result.deferred,
-    repairPending: Number(result.failed || 0) > 0,
-    orderingClosesAt: result.orderingClosesAt || null,
+    openedCount: result.selected || 0,
+    waveId: result.wave?._id ? String(result.wave._id) : null,
+    orderingSessionId: result.target?.orderingSessionId || null,
+    deferred: false,
+    repairPending: false,
   });
 }));
 
@@ -1318,10 +1194,7 @@ router.patch('/:id/items/:itemId/routing', staffOnly, asyncHandler(async (req, r
 
   if (routing.supplement && routing.supplementDeliveryGroupId) {
     const { resolveSupplementTarget } = require('../services/supplementTargets');
-    const resolved = await resolveSupplementTarget(
-      routing.supplementDeliveryGroupId,
-      { requireOrderingClosed: true, allowDeferred: true },
-    );
+    const resolved = await resolveSupplementTarget(routing.supplementDeliveryGroupId);
     routing.supplementDeliveryGroupId = resolved.deliveryGroupId;
   } else if (!routing.supplement) {
     routing.supplementDeliveryGroupId = null;
@@ -1384,6 +1257,37 @@ router.patch('/:id/items/:itemId/routing', staffOnly, asyncHandler(async (req, r
   res.json(out);
 }));
 
+// ── COMPENSATING ROUTE CORRECTION AFTER PUBLICATION ─────────────────────────
+// Published/confirmed cards are edited through ONE domain command rather than
+// unconfirm/delete/recreate. Physical facts and history survive; unfinished work
+// is compensated using the same archive/OOS/session primitives as the rest of the
+// system.
+router.patch('/:id/items/:itemId/routing-correction', staffOnly, asyncHandler(async (req, res) => {
+  const item = await ReceiptItem.findOne({ _id: req.params.itemId, receiptId: req.params.id }).lean();
+  if (!item) throw appError('receipt_item_not_found');
+  assertCanConfirmItem(req.user, item);
+
+  const body = req.body || {};
+  const { correctReceiptItemRouting } = require('../services/receiptRoutingCorrectionCommand');
+  const result = await correctReceiptItemRouting({
+    receiptId: req.params.id,
+    itemId: req.params.itemId,
+    nextRouting: {
+      warehouse: body.warehouse === true,
+      mandatory: body.mandatory === true,
+      supplement: body.supplement === true,
+      mayNotReachAllShops: body.mayNotReachAllShops === true,
+    },
+    actor: {
+      by: String(req.telegramUser?.telegramId || ''),
+      byName: [req.telegramUser?.firstName, req.telegramUser?.lastName].filter(Boolean).join(' '),
+      byRole: req.telegramUser?.role || 'warehouse',
+    },
+    reason: String(body.reason || 'routing_corrected'),
+  });
+  res.json(result.item);
+}));
+
 // ── ADD REMAINDER TO WAREHOUSE AFTER PRIMARY ROUTE ─────────────────────────
 // A real-world correction, NOT a reroute: mandatory/supplement may be decided and
 // executed first, then workers discover there is stock left. The only permitted
@@ -1442,8 +1346,9 @@ router.post('/:id/items/:itemId/add-warehouse-remainder', staffOnly, asyncHandle
       item.destination = legacyDestinationForRouting(nextRouting);
       await item.save({ session });
 
-      // Supplement-only already owns a hidden warehouse Product; this call simply
-      // flips orderingEnabled=true. Mandatory-only creates the Product now.
+      // A supplement-only row deliberately owns NO warehouse Product. Turning on
+      // warehouse routing creates/reuses the real Product here; mandatory-only is
+      // promoted through the same canonical artifact service.
       const product = await ensureReceiptItemProduct(item, session, receipt);
       if (!product) throw appError('receipt_remainder_product_failed');
 
@@ -1515,11 +1420,9 @@ router.post('/:id/items/:itemId/confirm', staffOnly, asyncHandler(async (req, re
       assertCanConfirmItem(req.user, item);
       assertItemReadyToConfirm(item, receipt);
 
-      // Confirming a newly added supplement row in an already-completed regular
-      // receipt opens its offer immediately after this transaction. Re-check the
-      // core business boundary at that exact moment. If ordinary ordering is
-      // still open, confirmation is allowed but offer creation is deferred until
-      // the scheduler observes that the window has closed.
+      // A cached v1 item may already carry an explicit group before batch publication.
+      // Revalidate that group against the CURRENT delivery-cycle OrderingSession.
+      // Ordinary ordering may still be open; that is a valid supplement target.
       const currentRouting = normalizeReceiptItemRouting(item, receipt);
       if (receipt.status === 'completed'
           && receipt.type !== 'supplement'
@@ -1529,10 +1432,7 @@ router.post('/:id/items/:itemId/confirm', staffOnly, asyncHandler(async (req, re
         // intentionally unassigned until batch publication, so there is nothing
         // group-specific to validate at per-item confirm time.
         const { resolveSupplementTarget } = require('../services/supplementTargets');
-        await resolveSupplementTarget(
-          currentRouting.supplementDeliveryGroupId,
-          { requireOrderingClosed: true, allowDeferred: true },
-        );
+        await resolveSupplementTarget(currentRouting.supplementDeliveryGroupId);
       }
 
       if (item.status !== 'confirmed') {
@@ -1571,7 +1471,7 @@ router.post('/:id/items/:itemId/confirm', staffOnly, asyncHandler(async (req, re
         if (product.originalImageUrl || product.imageUrls?.[0]) {
           embedTargets.push(['warehouse', product, 'receipt-confirm-warehouse']);
         }
-      } else if (legacyDestinationForRouting(normalizeReceiptItemRouting(item, receipt)) === 'shops') {
+      } else if (needsStandaloneShopProduct(normalizeReceiptItemRouting(item, receipt))) {
         // Mandatory-only item → shop-OWNED ShopProduct (no warehouse Product/stock).
         const sp = await upsertShopOwnedFromReceiptItem(item.toObject(), { session });
         if (sp && String(sp._id) !== String(item.createdShopProductId || '')) {
@@ -1817,19 +1717,18 @@ router.post('/:id/commit', staffOnly, asyncHandler(async (req, res) => {
     }
   }
 
-  // ── Ціль хвилі дозамовлення ───────────────────────────────────────────────
-  // Працівник сам обирає будь-яку групу. Статуси груп — лише інформація.
-  // Закриття дозамовлення виконується вручну складом/адміном, без дедлайну.
+  // ── Legacy whole-receipt supplement target ────────────────────────────────
+  // Kept only for old Receipt.type='supplement' rows. Even legacy publication
+  // must target the CURRENT non-terminal delivery-cycle OrderingSession.
   let supplementTarget = null;
   if (receiptCheck.type === 'supplement') {
     const { resolveSupplementTarget } = require('../services/supplementTargets');
     supplementTarget = await resolveSupplementTarget(req.body?.targetDeliveryGroupId);
     supplementTarget.openedAt = new Date();
   } else {
-    // Current per-item supplements may be PREPARED while ordinary ordering is
-    // open, but the SupplementOffer itself may only OPEN after that window closes.
-    // Re-resolve groups here so a long-lived draft crossing a schedule boundary
-    // is still handled by the same deferred-open rule.
+    // Current per-item supplements may be prepared while ordinary ordering is
+    // open. Cached older clients may already have stored a group on the item, so
+    // revalidate those explicit targets against the current delivery session.
     const supplementRows = await ReceiptItem.find(
       { receiptId: receiptCheck._id, routingVersion: { $gte: 1 }, 'routing.supplement': true },
       'routing.supplementDeliveryGroupId',
@@ -1841,7 +1740,7 @@ router.post('/:id/commit', staffOnly, asyncHandler(async (req, res) => {
         .filter(Boolean)
         .map(String))];
       for (const groupId of groupIds) {
-        await resolveSupplementTarget(groupId, { requireOrderingClosed: true, allowDeferred: true });
+        await resolveSupplementTarget(groupId);
       }
     }
   }
@@ -1910,7 +1809,7 @@ router.post('/:id/commit', staffOnly, asyncHandler(async (req, res) => {
     // Pre-determine how many warehouse Products still need a fallback create.
     // Normally confirm already created the Product; this keeps commit robust and
     // idempotent without any pre-existing-product matching path.
-    const shelfItems = items.filter((i) => (i.destination || 'shelf') !== 'shops');
+    const shelfItems = items.filter((i) => needsWarehouseProduct(normalizeReceiptItemRouting(i, receipt)));
     const createdIdSet = new Set(
       shelfItems.map((i) => i.createdProductId).filter(Boolean).map(String),
     );
@@ -1932,9 +1831,10 @@ router.post('/:id/commit', staffOnly, asyncHandler(async (req, res) => {
 
     for (const item of items) {
       const routing = normalizeReceiptItemRouting(item, receipt);
-      // Mandatory-only items never create/update warehouse stock. Their
-      // shop-owned catalog entry was handled at confirm time.
-      if (legacyDestinationForRouting(routing) === 'shops') continue;
+      // Only explicit warehouse routing creates/updates warehouse stock.
+      // Mandatory-only and supplement-only items already own their non-warehouse
+      // publication artifacts and must not materialise a fake Product here.
+      if (!needsWarehouseProduct(routing)) continue;
 
       let currentProduct = null;
       const stockAlreadyApplied = !!item.stockApplied;

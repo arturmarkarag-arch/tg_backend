@@ -17,7 +17,7 @@ describe('session status UI/server consistency contract', () => {
   });
 
   it('delivery-group selector gets the same server-derived phase as the session header', () => {
-    const groups = readServer('routes/deliveryGroups.js');
+    const groups = readServer('services/readModels/deliveryGroupCatalogReadModel.js');
     const selector = readClient('components/miniapp/PickingGroupSelector.jsx');
     expect(groups).toContain('getCurrentGroupPresentation');
     expect(groups).toContain('pickingStatus: presentations[index]?.pickingStatus');

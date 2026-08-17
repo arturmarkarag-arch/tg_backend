@@ -54,7 +54,20 @@ describe('V48.18 live harness hardening contract', () => {
     const guard = read('scripts/liveScheduleGuardE2E.js');
     expect(receipt).toContain("kind: 'receipt'");
     expect(receipt).toContain('MANIFEST_KEY');
+    expect(receipt).toContain('shops: []');
+    expect(receipt).toContain("remember('shops', await Shop.create({");
+    expect(receipt).toContain('isActive: true');
+    expect(receipt).toContain('Shop.deleteMany({ _id: { $in: ids.shops } })');
+    expect(receipt).toContain('shops: ids.shops.length ? await Shop.countDocuments');
+    expect(receipt).toContain('retireTargetNeutralFixture');
+    expect(receipt).toContain('supplementBatchVersion: 0');
+    expect(receipt.match(/retireTargetNeutralFixture\(item\)/g)?.length).toBeGreaterThanOrEqual(5);
+    expect(receipt).toContain('No unrelated target-neutral supplement items are publishable before receipt live E2E');
+    expect(receipt).toContain("supplementBatchVersion: { $gte: 2 }");
     expect(cleanup).toContain('collectReceipt');
+    expect(cleanup).toContain('shopIds = oidList(r.shopIds || [])');
+    expect(cleanup).toContain('markerShops');
+    expect(cleanup).toContain('Shop.deleteMany({ _id: { $in: ids.shopIds } })');
     expect(cleanup).toContain('removeReceipt');
     expect(cleanup).toContain('collectScheduleGuard');
     expect(cleanup).toContain('taskIds');
@@ -69,6 +82,8 @@ describe('V48.18 live harness hardening contract', () => {
     expect(boot).toContain('e2e_boot_');
     expect(boot).toContain('dropDatabase()');
     expect(boot).toContain('WEB_CONCURRENCY: \'2\'');
+    expect(boot).toContain('MULTI_WORKER_REFUSAL_TIMEOUT_MS = 45_000');
+    expect(boot).toContain('waitChildExit(child, MULTI_WORKER_REFUSAL_TIMEOUT_MS)');
     expect(boot).toContain('/socket.io/?EIO=4&transport=polling');
     expect(boot).toContain('socketPollingOpen');
     expect(boot).toContain("['join_picking_group'");
@@ -83,6 +98,8 @@ describe('V48.18 live harness hardening contract', () => {
     const gate = read('scripts/runLiveReleaseGateV48_18.js');
     expect(gate).toContain('--server-paused');
     expect(gate).toContain('LIVE_E2E_EXTERNAL_SERVER_PAUSED');
+    expect(gate).toContain("const isWindows = process.platform === 'win32'");
+    expect(gate).toContain('shell: isWindows');
     for (const script of [
       'test:live:e2e:preflight',
       'test:live:boot:v48.18',

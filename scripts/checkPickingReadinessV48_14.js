@@ -16,6 +16,7 @@ console.log('----------------------------------');
 const schedule = read('utils/orderingSchedule.js');
 const picking = read('routes/picking.js');
 const groups = read('routes/deliveryGroups.js');
+const orderingStatus = read('services/readModels/sellerOrderingStatusReadModel.js');
 const telegram = read('routes/v1/telegram.js');
 const scheduler = read('services/orderingOpenScheduler.js');
 
@@ -25,8 +26,9 @@ check(schedule.includes('function getPickingReadiness'), 'server exposes one rea
 const statusStart = groups.indexOf("router.get('/ordering-status'");
 const statusEnd = groups.indexOf("router.post('/catalog-reviewed'", statusStart);
 const statusBlock = groups.slice(statusStart, statusEnd);
-check(statusStart >= 0 && statusBlock.includes('findCurrentSessionId('), 'ordering-status reads existing session');
-check(!statusBlock.includes('getOrCreateSessionId('), 'ordering-status cannot create session');
+check(statusStart >= 0 && statusBlock.includes('buildSellerOrderingStatusReadModel(req.telegramUser)'), 'ordering-status delegates to read model');
+check(orderingStatus.includes('findCurrentSessionId('), 'ordering-status read model reads existing session');
+check(!orderingStatus.includes('getOrCreateSessionId('), 'ordering-status read model cannot create session');
 
 const contextStart = telegram.indexOf('async function resolveOrderingSessionContext');
 const contextEnd = telegram.indexOf('\n// shopId', contextStart);

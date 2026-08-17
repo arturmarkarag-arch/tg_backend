@@ -6,16 +6,16 @@ const City = require('../models/City');
 const DeliveryGroup = require('../models/DeliveryGroup');
 const User = require('../models/User');
 const Order = require('../models/Order');
-const PickingTask = require('../models/PickingTask');
 const { telegramAuth, requireTelegramRole, requireTelegramRoles } = require('../middleware/telegramAuth');
 const cache = require('../utils/cache');
 const { invalidateShop } = require('../utils/modelCache');
 const { migrateSellerShop } = require('../services/migrateSellerShop');
 const { unassignSellerAndPark } = require('../services/unassignSeller');
+const { publishShopAssignmentTransition } = require('../services/shopAssignmentCommand');
+const { updateShopTopologyCommand } = require('../services/shopTopologyCommand');
 const { activeOrderShopFilter } = require('../utils/orderShopFilter');
-const { isOrderingOpen } = require('../utils/orderingSchedule');
-const { getOrCreateSessionId } = require('../utils/getOrCreateSession');
 const { getTelegramUsernameMap } = require('../utils/telegramUsername');
+const { ASSIGNED_SHOP_ROLES, buildCurrentAssignment } = require('../utils/shopOperationalState');
 
 const router = express.Router();
 
@@ -94,8 +94,8 @@ router.get('/', asyncHandler(async (req, res) => {
     // assigned" feature is computed server-side below (lastExSellers) instead of
     // shipping every seller's full history to the client.
     const shopIds = shops.map((s) => s._id);
-    const sellers = await User.find({ role: { $in: ['seller', 'admin'] }, shopId: { $in: shopIds } })
-      .select('shopId firstName lastName telegramId role phoneNumber cartState miniAppState')
+    const sellers = await User.find({ role: { $in: ASSIGNED_SHOP_ROLES }, shopId: { $in: shopIds } })
+      .select('shopId firstName lastName telegramId role phoneNumber cartState miniAppState accountState botBlocked')
       .lean();
 
     // Compute cartItemCount + lastOrderAt the same way GET /users does, so the
@@ -153,11 +153,15 @@ router.get('/', asyncHandler(async (req, res) => {
       const sid = String(s._id);
       const shopSellers = sellersByShop[sid] || [];
       const shopSellerNames = sellerNamesByShop[sid] || [];
+      const currentAssignment = buildCurrentAssignment(shopSellers, { shop: s });
       return {
         ...s,
         cityId: s.cityId?._id ? String(s.cityId._id) : (s.cityId || null),
         city: s.cityId?.name || '',
-        sellerCount: shopSellers.length,
+        // Same CURRENT assignment contract used by readiness/session dashboards.
+        // Legacy seller* fields remain for the existing Settings UI only.
+        currentAssignment,
+        sellerCount: currentAssignment.assignedCount,
         sellerNames: shopSellerNames,
         sellers: shopSellers,
         lastExSellers: lastExByShopName[s.name] || [],
@@ -179,7 +183,7 @@ async function computeLastExSellersByShopName(shops) {
   const map = {}; // shopName → { telegramId → { seller, at } }
   if (shopNames.length) {
     const exSellers = await User.find({
-      role: { $in: ['seller', 'admin'] },
+      role: { $in: ASSIGNED_SHOP_ROLES },
       history: { $elemMatch: { action: 'shop_changed', 'meta.fromShop': { $in: shopNames } } },
     }).select('firstName lastName telegramId history').lean();
 
@@ -256,7 +260,7 @@ router.get('/registry', asyncHandler(async (req, res) => {
 // admin is viewing. Carries minimal data + lastExSellers (who left last).
 router.get('/without-seller', telegramAuth, requireTelegramRoles(['admin', 'warehouse']), asyncHandler(async (req, res) => {
   const assignedShopIds = await User.distinct('shopId', {
-    role: { $in: ['seller', 'admin'] },
+    role: { $in: ASSIGNED_SHOP_ROLES },
     shopId: { $ne: null },
   });
   const shops = await Shop.find({ isActive: true, _id: { $nin: assignedShopIds } })
@@ -292,7 +296,7 @@ router.get('/:id', asyncHandler(async (req, res) => {
     return res.json(base);
   }
 
-  const sellers = await User.find({ shopId: shop._id, role: { $in: ['seller', 'admin'] } })
+  const sellers = await User.find({ shopId: shop._id, role: { $in: ASSIGNED_SHOP_ROLES } })
     .select('telegramId firstName lastName role')
     .lean();
   res.json({ ...base, sellers });
@@ -323,120 +327,12 @@ router.post('/', telegramAuth, requireTelegramRole('admin'), asyncHandler(async 
 
 // ─── PATCH /api/shops/:id ─────────────────────────────────────────────────────
 router.patch('/:id', telegramAuth, requireTelegramRole('admin'), asyncHandler(async (req, res) => {
-  const shop = await Shop.findById(req.params.id);
-  if (!shop) throw appError('shop_not_found');
-
-  const { name, cityId, deliveryGroupId, address, isActive } = req.body;
-
-  // Snapshot the delivery group BEFORE mutation so we can detect a real change:
-  // від нього залежить попередження про відкриту сесію старої групи (нижче).
-  // Каскаду на продавців НЕ потрібно — група живе лише на магазині.
-  const prevDeliveryGroupId = shop.deliveryGroupId ? String(shop.deliveryGroupId) : '';
-
-  // Match POST: name and cityId must never become empty on an existing shop.
-  // An empty name cascades into buyerSnapshot.shopName='' on every active order
-  // and from there into PickingTask.items.shopName, which then either renders
-  // blank in the picking UI or, on a fresh build, gets stamped with the
-  // "невідомий магазин" fallback in taskBuilder.
-  if (name !== undefined && !String(name).trim()) throw appError('shop_name_required');
-  if (cityId !== undefined && !cityId) throw appError('shop_city_required');
-
-  if (name !== undefined) shop.name = String(name).trim();
-  if (address !== undefined) shop.address = String(address).trim();
-  if (isActive !== undefined) shop.isActive = Boolean(isActive);
-
-  if (cityId !== undefined) {
-    const cityDoc = await City.findById(cityId).lean();
-    if (!cityDoc) throw appError('shop_city_not_found');
-    shop.cityId = cityDoc._id;
-  }
-
-  if (deliveryGroupId !== undefined) {
-    if (deliveryGroupId) {
-      const group = await DeliveryGroup.findById(deliveryGroupId).lean();
-      if (!group) throw appError('shop_delivery_group_not_found');
-    }
-
-    // Guard (mirrors the deliveryGroups day-change guard): moving the shop to a
-    // different group mid-cycle would strand its active orders — they keep the OLD
-    // group's orderingSessionId, fall out of both groups' current sessions, and the
-    // seller's next upsert-item opens a PARALLEL order in the new group. Refuse the
-    // move while the OLD group's window is open, the shop has active orders in the
-    // old current session, or those orders are already in picking. Allowed freely
-    // once the cycle is over (no active orders) → applies to the next session.
-    const newGroupIdRaw = deliveryGroupId ? String(deliveryGroupId) : '';
-    if (newGroupIdRaw !== prevDeliveryGroupId && prevDeliveryGroupId) {
-      const prevGroup = await DeliveryGroup.findById(prevDeliveryGroupId).lean();
-      if (prevGroup) {
-        const { isOpen } = isOrderingOpen(prevGroup.orderingSchedule);
-        const prevSessionId = await getOrCreateSessionId(prevDeliveryGroupId, prevGroup.orderingSchedule);
-        const shopActiveOrderIds = (await Order.find(
-          { ...activeOrderShopFilter(shop._id), orderingSessionId: prevSessionId },
-          '_id',
-        ).lean()).map((o) => o._id);
-        const inPicking = shopActiveOrderIds.length > 0 && !!(await PickingTask.exists({
-          deliveryGroupId: prevDeliveryGroupId,
-          status: { $in: ['pending', 'locked'] },
-          'items.orderId': { $in: shopActiveOrderIds },
-        }));
-        if (isOpen || shopActiveOrderIds.length > 0) {
-          const reason = isOpen ? 'вікно замовлень відкрите'
-            : inPicking ? 'триває збирання'
-            : 'є активні замовлення в поточній сесії';
-          throw appError('shop_group_change_session_active', { reason });
-        }
-      }
-    }
-
-    shop.deliveryGroupId = deliveryGroupId ? String(deliveryGroupId) : '';
-  }
-
-  await shop.save();
-  await invalidateShop(shop._id);
-
-  // Propagate identity changes onto already-placed ACTIVE orders and their
-  // pending/locked picking tasks. buyerSnapshot is a point-in-time copy taken
-  // at order time; without this the warehouse would pick/label and deliver to
-  // the OLD shop name/address for every order placed before this edit.
-  const nameChanged = name !== undefined;
-  const addressChanged = address !== undefined;
-  const cityChanged = cityId !== undefined;
-  if (nameChanged || addressChanged || cityChanged) {
-    const cityDoc2 = await City.findById(shop.cityId).lean();
-    const snap = {
-      'buyerSnapshot.shopName': shop.name,
-      'buyerSnapshot.shopCity': cityDoc2?.name || '',
-      'buyerSnapshot.shopAddress': shop.address || '',
-    };
-    const activeOrders = await Order.find(
-      activeOrderShopFilter(shop._id),
-      '_id',
-    ).lean();
-    if (activeOrders.length) {
-      const ids = activeOrders.map((o) => o._id);
-      await Order.updateMany({ _id: { $in: ids } }, { $set: snap });
-      if (nameChanged) {
-        await PickingTask.updateMany(
-          { status: { $in: ['pending', 'locked'] }, 'items.orderId': { $in: ids } },
-          { $set: { 'items.$[elem].shopName': shop.name } },
-          { arrayFilters: [{ 'elem.orderId': { $in: ids } }] },
-        );
-      }
-    }
-  }
-
-  // Каскаду на продавців тут БІЛЬШЕ НЕМАЄ і він не потрібен: група живе тільки на
-  // магазині, тож зміна Shop.deliveryGroupId автоматично перемикає всіх, хто до
-  // цього магазину прив'язаний. Раніше тут стояв User.updateMany по денормалізованих
-  // User.deliveryGroupId/warehouseZone — саме він і був місцем, де один пропущений
-  // шлях зміни залишав продавця у старій групі.
-  //
-  // NOTE (без змін): уже створені АКТИВНІ замовлення в нову групу НЕ переносяться —
-  // замовлення належить тій сесії/збиранню, в якій було створене (orderingSessionId
-  // прив'язаний до старої групи). Переходить лише магазин, тож НАСТУПНЕ замовлення
-  // потрапить у нову групу, а поточний прогін завершиться там, де почався.
-
-  res.json(shop);
+  const result = await updateShopTopologyCommand({
+    shopId: req.params.id,
+    patch: req.body || {},
+    actor: req.telegramUser,
+  });
+  res.json(result.shop);
 }));
 
 // ─── DELETE /api/shops/:id ────────────────────────────────────────────────────
@@ -453,7 +349,7 @@ router.delete('/:id', telegramAuth, requireTelegramRole('admin'), asyncHandler(a
 
       const sellerCount = await User.countDocuments({
         shopId: String(shop._id),
-        role: 'seller',
+        role: { $in: ASSIGNED_SHOP_ROLES },
       }).session(session);
       if (sellerCount > 0) throw appError('shop_has_sellers', { sellerCount });
 
@@ -512,21 +408,26 @@ router.patch('/:id/sellers', telegramAuth, requireTelegramRole('admin'), asyncHa
 
   if (toRemove.length > 0 || toAdd.length > 0) {
     const actor = req.telegramUser;
-    const invalidateFns = [];
+    const assignmentTransitions = [];
     const session = await mongoose.connection.startSession();
     try {
       await session.withTransaction(async () => {
+        // withTransaction may retry the callback after a transient conflict. Keep
+        // post-commit metadata from the successful attempt only.
+        assignmentTransitions.length = 0;
+
         // Removals: unassign + park not-yet-picked orders so they follow the seller.
         for (const tgId of toRemove) {
           const seller = await User.findOne({ telegramId: tgId }).session(session);
           if (!seller) continue;
-          await unassignSellerAndPark({
+          const transition = await unassignSellerAndPark({
             session,
             seller,
             fromShopId: shopIdStr,
             actor,
             reason: 'bulk_sellers_update',
           });
+          assignmentTransitions.push(transition);
         }
 
         // Additions: full migration so the seller's active/parked order, cart
@@ -547,7 +448,7 @@ router.patch('/:id/sellers', telegramAuth, requireTelegramRole('admin'), asyncHa
               pushHistory: true,
               updateLastSeller: true,
             });
-            if (result.invalidate) invalidateFns.push(result.invalidate);
+            assignmentTransitions.push(result);
           }
         }
 
@@ -560,8 +461,8 @@ router.patch('/:id/sellers', telegramAuth, requireTelegramRole('admin'), asyncHa
     } finally {
       session.endSession();
     }
-    for (const fn of invalidateFns) {
-      try { await fn(); } catch (e) {}
+    for (const transition of assignmentTransitions) {
+      await publishShopAssignmentTransition(transition);
     }
     await invalidateShop(req.params.id);
   }

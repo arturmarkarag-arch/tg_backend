@@ -22,8 +22,9 @@ describe('V45 current-session worker task history contract', () => {
     expect(route).toContain("{ completedBy: workerTelegramId }");
     expect(route).toContain("{ status: 'locked', lockedBy: workerTelegramId }");
     expect(route).toContain("{ items: { $elemMatch: { packed: true, packedBy: workerTelegramId } } }");
-    expect(route).toContain('.skip(offset)');
-    expect(route).toContain('.limit(limit)');
+    expect(route).toContain('const fetchLimit = offset + limit');
+    expect(route).toContain('.limit(fetchLimit)');
+    expect(route).toContain('.slice(offset, offset + limit)');
     expect(route).toContain('hasMore: offset + items.length < total');
   });
 

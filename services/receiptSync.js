@@ -82,10 +82,10 @@ async function describeItemUsage(item, { session = null } = {}) {
     if (taskCount > 0) reasons.push('товар уже потрапив у збирання');
   }
 
-  // Publication itself is irreversible from the receipt editor. A deferred batch
-  // has already been assigned to a delivery group and will be opened by the
-  // scheduler; letting unconfirm/delete clear it would silently move a product
-  // between groups. This guard intentionally applies even before an Offer exists.
+  // First publication is irreversible through legacy unconfirm/delete. Modern
+  // corrections use the compensating routing command instead. The marker is
+  // compatibility/audit only and does not decide which other current session may
+  // receive its own Wave.
   if (item.supplementPublishRequestedAt) {
     reasons.push('дозамовлення вже передано на публікацію');
   }

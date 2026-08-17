@@ -7,7 +7,7 @@ const GroupMember = require('../models/GroupMember');
 const PickingTask = require('../models/PickingTask');
 const { unassignSellerAndPark } = require('./unassignSeller');
 const { withLock } = require('../utils/lock');
-const { invalidateShop } = require('../utils/modelCache');
+const { publishShopAssignmentTransition } = require('./shopAssignmentCommand');
 const { isRemovedUser } = require('../utils/userAccountState');
 
 /**
@@ -32,6 +32,7 @@ async function softRemoveUser({ telegramId, actor = null, groupChatId = '' }) {
     let oldShopId = null;
     let userExisted = false;
     let alreadyRemoved = false;
+    let assignmentTransition = null;
     const now = new Date();
 
     try {
@@ -70,7 +71,7 @@ async function softRemoveUser({ telegramId, actor = null, groupChatId = '' }) {
         // Detach sellers/admins through the SAME business path used by a normal
         // unassignment, so active orders are not orphaned on an old shop.
         if (oldShopId && ['seller', 'admin'].includes(user.role)) {
-          await unassignSellerAndPark({
+          assignmentTransition = await unassignSellerAndPark({
             session,
             seller: user,
             fromShopId: oldShopId,
@@ -137,7 +138,9 @@ async function softRemoveUser({ telegramId, actor = null, groupChatId = '' }) {
       await session.endSession();
     }
 
-    if (oldShopId) await invalidateShop(oldShopId);
+    if (assignmentTransition) {
+      await publishShopAssignmentTransition(assignmentTransition);
+    }
     return { ok: true, userExisted, alreadyRemoved, removedAt: now, oldShopId };
   });
 }

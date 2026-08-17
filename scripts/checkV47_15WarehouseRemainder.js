@@ -3,6 +3,7 @@ const fs = require('fs');
 const assert = require('assert');
 
 const routes = fs.readFileSync(require.resolve('../routes/receipts'), 'utf8');
+const artifacts = fs.readFileSync(require.resolve('../services/receiptRoutingArtifacts'), 'utf8');
 const errors = fs.readFileSync(require.resolve('../utils/errors'), 'utf8');
 const start = routes.indexOf("router.post('/:id/items/:itemId/add-warehouse-remainder'");
 const end = routes.indexOf('// ── CONFIRM / UNCONFIRM A SINGLE ITEM', start);
@@ -24,9 +25,9 @@ assert.ok(!body.includes("/unconfirm"), 'must NOT call unconfirm route');
 assert.ok(errors.includes('receipt_remainder_route_invalid'));
 assert.ok(errors.includes('receipt_remainder_not_supported_legacy'));
 
-const helperStart = routes.indexOf('async function convertReceiptShopOwnedToWarehouseMirror');
-const helperEnd = routes.indexOf('\nfunction getActor', helperStart);
-const helper = routes.slice(helperStart, helperEnd);
+const helperStart = artifacts.indexOf('async function convertReceiptShopOwnedToWarehouseMirror');
+const helperEnd = artifacts.indexOf('\nmodule.exports', helperStart);
+const helper = artifacts.slice(helperStart, helperEnd);
 assert.ok(helper.includes('$set: { linkedProductId: product._id }'), 'same ShopProduct id must become warehouse mirror');
 assert.ok(helper.includes('$unset: { receiptItemId: 1 }'), 'converted mirror must leave shop-owned idempotency namespace');
 assert.ok(helper.includes('ProductVector.updateOne'), 'existing shop-owned vector should migrate to warehouse owner');

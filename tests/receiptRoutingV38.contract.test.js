@@ -9,11 +9,14 @@ const receipts = read('routes/receipts.js');
 const products = read('routes/products.js');
 const orders = read('routes/orders.js');
 const blocks = read('routes/blocks.js');
+const blockMoveCommand = read('services/blockMoveCommand.js');
 const shopUpsert = read('utils/upsertShopProduct.js');
 const itemLogModel = read('models/ReceiptItemLog.js');
 const routing = read('utils/receiptRouting.js');
 const permissions = read('utils/receiptPermissions.js');
 const supplement = read('services/supplementOffers.js');
+const waveService = read('services/supplementWaveService.js');
+const artifacts = read('services/receiptRoutingArtifacts.js');
 const supplementRoute = read('routes/supplement.js');
 const supplementTargets = read('services/supplementTargets.js');
 const supplementScheduler = read('services/supplementScheduler.js');
@@ -63,16 +66,21 @@ describe('receipt routing v38 contract', () => {
     expect(receipts).toContain('return res.json({ receipt, createdProductsCount: 0, supplementOffersCount });');
     expect(receipts).toContain("router.post('/:id/items/:itemId/confirm'");
   });
-  test('supplement-only physical Product is hidden from ordinary seller ordering', () => {
+  test('supplement-only current items do not require a fake warehouse Product', () => {
+    expect(routing).toContain('function needsWarehouseProduct');
+    expect(routing).toContain('return !!r.warehouse');
+    expect(artifacts).toContain('if (!needsWarehouseProduct(routing)) return null');
+    expect(waveService).toContain('productId: item.createdProductId || null');
+    expect(waveService).toContain('sourceSnapshot: sourceSnapshotFromReceiptItem(item)');
+    // Legacy technical products remain understood by the old catalogue guard.
     expect(productModel).toContain('orderingEnabled');
-    expect(routing).toContain('if (r.supplement && !r.warehouse) return false');
     expect(products).toContain('query.orderingEnabled = { $ne: false }');
     expect(orders).toContain('product.orderingEnabled === false');
   });
 
   test('seller catalogue is frozen to the current session start, including mid-session block placement', () => {
     expect(productModel).toContain('firstBlockPlacedAt');
-    expect(blocks).toContain('activationSet.firstBlockPlacedAt = new Date()');
+    expect(blockMoveCommand).toContain('activationSet.firstBlockPlacedAt = new Date()');
     expect(products).toContain('getSellerCatalogCycleOpenAt');
     expect(products).toContain('applySellerCycleCutoff');
     expect(products).toContain('firstBlockPlacedAt: { $lte: cutoff }');
@@ -94,33 +102,37 @@ describe('receipt routing v38 contract', () => {
     expect(itemLogModel).toContain("'routing_change'");
   });
 
-  test('new regular receipts can create per-item supplement offers without productId in UI', () => {
-    expect(supplement).toContain('normalizeReceiptItemRouting(item, receipt)');
-    expect(supplement).toContain('routing.supplementDeliveryGroupId');
-    expect(supplement).toContain('productId: String(item.createdProductId)');
-  });
-  test('new per-item supplement never opens inside ordinary ordering and may defer safely until close', () => {
-    expect(supplementTargets).toContain('requireOrderingClosed');
-    expect(supplementTargets).toContain('isOrderingOpen(group.orderingSchedule, now).isOpen');
-    expect(receipts).toContain('{ requireOrderingClosed: true, allowDeferred: true }');
-    expect(supplement).toContain('{ requireOrderingClosed: true, allowDeferred: true }');
-    expect(supplement).toContain('if (target.deferred)');
+  test('new regular supplements publish a Wave with optional Product identity', () => {
+    expect(receipts).toContain('createWaveWithItems({');
+    expect(waveService).toContain('SupplementWave.create');
+    expect(waveService).toContain('SupplementOffer.bulkWrite');
+    expect(waveService).toContain('productId: item.createdProductId || null');
+    expect(waveService).toContain('sourceSnapshot: sourceSnapshotFromReceiptItem(item)');
   });
 
-  test('forgotten supplement waves cannot overlap the next ordinary ordering window', () => {
+  test('supplement target is the current delivery session and may still have ordinary ordering open', () => {
+    expect(supplementTargets).toContain('findCurrentSessionId');
+    expect(supplementTargets).toContain('expectedOrderingSessionId');
+    expect(supplementTargets).toContain("isOrderingOpen(group.orderingSchedule, now).isOpen ? 'ordering_open' : 'awaiting_picking'");
+    expect(supplementTargets).toContain("return 'picking'");
+    expect(supplementTargets).toContain('supplement_target_session_not_started');
+    expect(supplementTargets).toContain('supplement_target_session_completed');
+    expect(receipts).toContain('expectedOrderingSessionId: firstTarget.orderingSessionId');
+  });
+
+  test('automatic ordinary-window freeze remains legacy-only; modern Wave freezes explicitly', () => {
     expect(supplement).toContain('freezeOffersForActiveOrderingWindows');
-    expect(supplement).toContain('ordinary_ordering_opened');
+    expect(supplement).toContain("status: 'open', waveId: null");
     expect(supplementScheduler).toContain('freezeOffersForActiveOrderingWindows(now)');
-    expect(supplementRoute).toContain('isOrdinaryOrderingOpenForSeller');
-    expect(supplementRoute).toContain("throw appError('supplement_ordering_still_open'");
+    expect(supplementRoute).toContain("router.post('/waves/:waveId/freeze'");
+    expect(supplementRoute).toContain('freezeWave(req.params.waveId');
   });
 
-  test('per-item supplements can be frozen per delivery group even in regular receipts', () => {
-    expect(supplement).toContain('deliveryGroupId = null');
-    expect(supplement).toContain("filter.deliveryGroupId = String(deliveryGroupId)");
-    expect(supplementRoute).not.toContain("if (!receipt || receipt.type !== 'supplement')");
-    expect(supplementRoute).toContain("req.body?.deliveryGroupId");
-    expect(supplementRoute).toContain('{ deliveryGroupId }');
+  test('packing of modern supplements begins only after Wave freeze', () => {
+    expect(supplementRoute).toContain("effective !== 'frozen'");
+    expect(supplementRoute).toContain("supplement_pack_before_freeze");
+    expect(supplementRoute).toContain("router.post('/waves/:waveId/freeze'");
   });
+
 
 });

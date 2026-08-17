@@ -9,6 +9,7 @@ const check = (cond, msg) => {
 };
 
 const receipts = read('routes/receipts.js');
+const waves = read('services/supplementWaveService.js');
 const permissions = read('utils/receiptPermissions.js');
 const offers = read('services/supplementOffers.js');
 const model = read('models/ReceiptItem.js');
@@ -21,13 +22,13 @@ check(receipts.includes('routing.supplementDeliveryGroupId ? 1 : 2'),
   'Routing marks unassigned supplement items as batch v2');
 check(receipts.includes("withLock('supplement-batch:publish'"),
   'A global publish lock protects the shared unassigned ready pool');
-check(receipts.includes("'routing.supplementDeliveryGroupId': null") && receipts.includes("'routing.supplementDeliveryGroupId': deliveryGroupId"),
-  'Publish accepts unassigned rows and assigns the selected group server-side');
-check(receipts.includes('readyCount') && receipts.includes('targets: targets.groups || []'),
+check(receipts.includes('existingTargetItems') && receipts.includes('orderingSessionId: target.orderingSessionId'),
+  'Publish accepts target-neutral rows and pins the exact group/session on the Wave child');
+check(receipts.includes('readyCount') && receipts.includes('targets: targetsWithCounts'),
   'Pending batch API returns ready unassigned count and group choices');
 check(offers.includes("if (!routing.supplement || !item.createdProductId || !routing.supplementDeliveryGroupId) continue;"),
   'No SupplementOffer can exist before batch group assignment');
-check(receipts.includes("notifyOffers(notificationOffers, 'opened')") && receipts.includes('if (!result.failed)'),
-  'Batch still sends one grouped notification only after complete offer creation');
+check(receipts.includes('createWaveWithItems({') && waves.includes('SupplementOffer.bulkWrite') && receipts.includes("notifyWaves([result.wave], 'opened')"),
+  'Batch publishes one Wave and sends one grouped lifecycle notification');
 
 if (process.exitCode) process.exit(process.exitCode);

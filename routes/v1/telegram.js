@@ -18,7 +18,7 @@ const { getIO } = require('../../socket');
 const { appError, asyncHandler } = require('../../utils/errors');
 const { formatWarsawDateTime } = require('../../utils/warsawDateTime');
 const { getSupportAdmins, toPublicSupportAdmins } = require('../../utils/telegramSupportAdmins');
-const { withLock } = require('../../utils/lock');
+const { assignUserToShopCommand, publishShopAssignmentTransition } = require('../../services/shopAssignmentCommand');
 const { getShop, getDeliveryGroup } = require('../../utils/modelCache');
 const { isRemovedUser } = require('../../utils/userAccountState');
 const { getTelegramUsernameMap } = require('../../utils/telegramUsername');
@@ -318,57 +318,15 @@ router.patch('/me/shop', asyncHandler(async (req, res) => {
     });
   }
 
-  const { migrateSellerShop } = require('../../services/migrateSellerShop');
-  const mongoose = require('mongoose');
-
-  const migrationResult = await withLock(`user:${user.telegramId}:shop`, async () => {
-    const session = await mongoose.connection.startSession();
-    try {
-      let out = null;
-      await session.withTransaction(async () => {
-        const fresh = await User.findOne({ telegramId: user.telegramId }).session(session).lean();
-        if (!fresh) throw appError('user_not_found');
-        out = await migrateSellerShop({
-          session,
-          existingUser: fresh,
-          newShopFull: shop,
-          actor: user,
-          reason: 'seller_changed_shop',
-          resetCartItems: false,
-          resetCartNavigation: true,
-          clearCartReservation: true,
-          pushHistory: false,
-          updateLastSeller: false,
-        });
-      });
-      return out;
-    } finally {
-      session.endSession();
-    }
+  const migrationResult = await assignUserToShopCommand({
+    telegramId: user.telegramId,
+    shopId: String(shop._id),
+    actor: user,
+    reason: 'seller_changed_shop',
+    resetCartNavigation: true,
+    pushHistory: false,
+    updateLastSeller: false,
   });
-
-  // Post-commit cache invalidation — done OUTSIDE withTransaction so other
-  // workers don't repopulate L1 with pre-commit reads.
-  if (migrationResult?.invalidate) {
-    try { await migrationResult.invalidate(); }
-    catch (e) {}
-  }
-
-  if (migrationResult?.movedOrder) {
-    try {
-      const io = getIO();
-      if (io) {
-        const { prevGroupId, newGroupId } = migrationResult;
-        if (prevGroupId) io.to(`picking_group_${prevGroupId}`).emit('shop_status_changed', { groupId: prevGroupId });
-        if (newGroupId && newGroupId !== prevGroupId) {
-          io.to(`picking_group_${newGroupId}`).emit('shop_status_changed', { groupId: newGroupId });
-          io.emit('delivery_groups_updated');
-        }
-        io.emit('user_order_updated', { buyerTelegramId: user.telegramId });
-      }
-    } catch (e) {
-    }
-  }
 
   const updatedUser = migrationResult?.updatedUser;
   res.json({
@@ -794,6 +752,7 @@ router.post('/register-request', asyncHandler(async (req, res) => {
     const mongoose = require('mongoose');
     const session = await mongoose.connection.startSession();
     let createdUser = null;
+    let assignmentTransition = null;
     try {
       await session.withTransaction(async () => {
         // Burn the invite in the SAME transaction as the User write: either both
@@ -806,7 +765,7 @@ router.post('/register-request', asyncHandler(async (req, res) => {
         }
         const existing = await User.findOne({ telegramId }).session(session).lean();
         if (existing && !isRemovedUser(existing)) throw appError('registration_user_exists');
-        createdUser = await resolveAndCreateUser({
+        const resolution = await resolveAndCreateUser({
           session,
           telegramId,
           role: 'seller',
@@ -815,6 +774,8 @@ router.post('/register-request', asyncHandler(async (req, res) => {
           phoneNumber: cleanPhone,
           shopId: String(shop._id),
         });
+        createdUser = resolution.user;
+        assignmentTransition = resolution.assignmentTransition;
       });
     } catch (err) {
       if (err && err.code === 11000) throw appError('registration_user_exists');
@@ -823,7 +784,10 @@ router.post('/register-request', asyncHandler(async (req, res) => {
       session.endSession();
     }
 
-    // Post-commit, best-effort side effects.
+    // Post-commit, best-effort side effects. Registration is a wider atomic
+    // workflow, so it calls the low-level creation/migration inside its tx and
+    // publishes CURRENT assignment only after commit.
+    if (assignmentTransition) await publishShopAssignmentTransition(assignmentTransition);
     deleteWelcomeFor(telegramId).catch(() => {});
     sendRegistrationApprovedMessage(createdUser.telegramId, createdUser.role).catch(() => {});
 
@@ -901,6 +865,7 @@ router.post('/register-requests/:id/approve', adminOnly, asyncHandler(async (req
 
   let userExists = false;
   let createdUser = null;
+  let assignmentTransition = null;
 
   const session = await mongoose.connection.startSession();
   try {
@@ -928,7 +893,7 @@ router.post('/register-requests/:id/approve', adminOnly, asyncHandler(async (req
 
       // Shared create/reactivate path. A soft-removed User row is intentionally
       // reused after the normal registration gates have passed.
-      createdUser = await resolveAndCreateUser({
+      const resolution = await resolveAndCreateUser({
         session,
         telegramId: request.telegramId,
         role: request.role,
@@ -937,6 +902,8 @@ router.post('/register-requests/:id/approve', adminOnly, asyncHandler(async (req
         phoneNumber: request.phoneNumber,
         shopId: request.role === 'seller' ? request.shopId : null,
       });
+      createdUser = resolution.user;
+      assignmentTransition = resolution.assignmentTransition;
 
       await RegistrationRequest.deleteOne({ _id: request._id }, { session });
     });
@@ -948,6 +915,8 @@ router.post('/register-requests/:id/approve', adminOnly, asyncHandler(async (req
   }
 
   if (userExists) throw appError('registration_user_exists');
+
+  if (assignmentTransition) await publishShopAssignmentTransition(assignmentTransition);
 
   // Remove the group "register here" welcome now that they're in the system.
   deleteWelcomeFor(createdUser.telegramId).catch(() => {});
