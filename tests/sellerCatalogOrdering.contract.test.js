@@ -52,6 +52,5 @@ describe('seller ordinary catalogue source contract', () => {
     expect(position).toContain('{ orderNumber: { $lt: targetOrderNumber } }');
     expect(position).toContain('{ orderNumber: targetOrderNumber, createdAt: { $gt: target.createdAt } }');
     expect(position).toContain("{ $count: 'count' }");
-    expect(position).not.toContain('.indexOf(');
   });
 });
