@@ -14,6 +14,10 @@ but MongoDB now performs the stable ordinary ordering and pagination directly:
 5. `orderNumber ASC`, `createdAt DESC`, `_id ASC`;
 6. `$skip` and `$limit` applied in MongoDB.
 
+Pagination inputs are normalized to bounded integers before reaching MongoDB.
+Current-session lookup errors fail closed instead of silently disabling the
+SupplementWave exclusion.
+
 `GET /api/v1/products/catalog/:id/position` uses the same eligibility pipeline and
 counts rows that sort before the target. It no longer builds or scans a global ID list.
 

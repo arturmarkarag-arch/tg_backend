@@ -44,12 +44,14 @@ assert(catalog.includes("Product.aggregate([...basePipeline, { $count: 'total' }
 assert(catalog.includes('{ $sort: SELLER_CATALOG_SORT }'), 'catalogue page is sorted in Mongo');
 assert(catalog.includes('{ $skip: offset }'), 'catalogue offset is applied in Mongo');
 assert(catalog.includes('{ $limit: limit }'), 'catalogue limit is applied in Mongo');
+assert(routes.includes('function parseCatalogPageInteger(value, fallback, min, max)'), 'Mongo pagination values are normalized to bounded integers');
 assert(!catalog.includes('ids.slice('), 'catalogue never pages an all-products id array in Node');
 
 assert(position.includes('const beforeMatch = {'), 'position resolver uses the ordinary-order comparator');
 assert(position.includes("{ orderNumber: { $lt: targetOrderNumber } }"), 'position resolver counts lower order numbers');
 assert(position.includes("{ $count: 'count' }"), 'position and total are counted in Mongo');
 assert(!position.includes('.indexOf('), 'position resolver never builds and scans a global id sequence');
+assert(!routes.includes('try { orderingSessionId = await findCurrentSessionId'), 'session lookup fails closed instead of disabling supplement exclusion');
 
 for (const token of ['getSellerVisualOrder', 'sellerVisualOrdering', 'seller_visual_catalog', 'seller-visual:']) {
   assert(!routes.includes(token), `products route has no retired vector-order token: ${token}`);

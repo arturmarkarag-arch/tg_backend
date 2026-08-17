@@ -54,8 +54,7 @@ async function getSellerCatalogCycleContext(req) {
   if (!group?.orderingSchedule) {
     return { cutoff: null, orderingSessionId: null };
   }
-  let orderingSessionId = null;
-  try { orderingSessionId = await findCurrentSessionId(String(shop.deliveryGroupId), group.orderingSchedule); } catch (_) {}
+  const orderingSessionId = await findCurrentSessionId(String(shop.deliveryGroupId), group.orderingSchedule);
   return {
     cutoff: getOrderingWindowOpenAt(group.orderingSchedule),
     orderingSessionId: orderingSessionId ? String(orderingSessionId) : null,
@@ -452,6 +451,13 @@ router.get('/drafts', staffOnly, asyncHandler(async (req, res) => {
 // never builds an all-products distance matrix and never acquires a Redis lock.
 const SELLER_CATALOG_SORT = Object.freeze({ orderNumber: 1, createdAt: -1, _id: 1 });
 
+function parseCatalogPageInteger(value, fallback, min, max) {
+  if (value === undefined || value === null || String(value).trim() === '') return fallback;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(max, Math.max(min, Math.trunc(parsed)));
+}
+
 async function getSellerCatalogBasePipeline(req) {
   const context = await getSellerCatalogCycleContext(req);
   const match = {
@@ -485,8 +491,8 @@ async function getSellerCatalogBasePipeline(req) {
 }
 
 router.get('/catalog', registeredOnly, asyncHandler(async (req, res) => {
-  const limit = Math.min(50, Math.max(1, Number(req.query.limit) || 24));
-  const offset = Math.max(0, Number(req.query.offset) || 0);
+  const limit = parseCatalogPageInteger(req.query.limit, 24, 1, 50);
+  const offset = parseCatalogPageInteger(req.query.offset, 0, 0, Number.MAX_SAFE_INTEGER);
   const basePipeline = await getSellerCatalogBasePipeline(req);
   const countRows = await Product.aggregate([...basePipeline, { $count: 'total' }]);
   const total = countRows[0]?.total ?? 0;
@@ -716,8 +722,8 @@ router.get('/', async (req, res) => {
     // Товари Складу asks for arrival order (?sort=newest) — the item that came in
     // last sits on top. "Надходження" is `shelvedAt` (stamped when a receipt commit
     // puts the product on a shelf); docs that predate that field fall back to
-    // createdAt. The seller catalogue keeps the shelf order (orderNumber) — its
-    // deep links resolve an offset through /:id/position, which assumes that sort.
+    // createdAt. The generic default keeps shelf order (orderNumber); the dedicated
+    // seller endpoint above uses the same stable sort with stricter eligibility.
     const newestFirst = req.query.sort === 'newest';
     const sortStages = newestFirst
       ? [
@@ -736,9 +742,8 @@ router.get('/', async (req, res) => {
 
     // Shelf location ({ blockId, position, total }) is opt-in via ?withLocation=1
     // — only the Товари Складу page needs it (card display + "Показати в блоці").
-    // The seller catalogue shares this endpoint on its hottest path, so we skip
-    // the extra Block lookup there. Every v1 product is on a shelf (the _block.0
-    // match above), so when requested the location is always present.
+    // Other generic-list callers skip that extra Block lookup. Every v1 product is
+    // on a shelf (the _block.0 match above), so when requested the location exists.
     const wantLocation = req.query.withLocation === '1' || req.query.withLocation === 'true';
     const locMap = wantLocation ? await buildLocationMap(products.map((p) => p._id)) : new Map();
 

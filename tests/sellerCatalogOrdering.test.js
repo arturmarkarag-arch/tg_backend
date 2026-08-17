@@ -105,6 +105,14 @@ describe('seller ordinary catalogue HTTP ordering', () => {
     const emptyPage = await get('/api/v1/products/catalog?limit=2&offset=50').expect(200);
     expect(emptyPage.body).toMatchObject({ items: [], offset: 50, limit: 2, total: 3, hasMore: false });
 
+    const normalizedPage = await get('/api/v1/products/catalog?limit=1.9&offset=0.8').expect(200);
+    expect(normalizedPage.body).toMatchObject({ offset: 0, limit: 1, total: 3, hasMore: true });
+    expect(normalizedPage.body.items.map((item) => item.orderNumber)).toEqual([10]);
+
+    const nonFinitePage = await get('/api/v1/products/catalog?limit=Infinity&offset=Infinity').expect(200);
+    expect(nonFinitePage.body).toMatchObject({ offset: 0, limit: 24, total: 3, hasMore: false });
+    expect(nonFinitePage.body.items.map((item) => item.orderNumber)).toEqual([10, 20, 30]);
+
     const position = await get(`/api/v1/products/catalog/${second._id}/position`).expect(200);
     expect(position.body).toEqual({ position: 1, total: 3 });
 
@@ -212,5 +220,17 @@ describe('seller ordinary catalogue HTTP ordering', () => {
       .set('Authorization', sellerAuth)
       .expect(200);
     expect(otherPosition.body).toEqual({ position: 2, total: 3 });
+
+    const sessionLookup = vi.spyOn(OrderingSession, 'findOne').mockReturnValueOnce({
+      lean: () => Promise.reject(new Error('synthetic session lookup failure')),
+    });
+    try {
+      await request(app)
+        .get('/api/v1/products/catalog?limit=10&offset=0')
+        .set('Authorization', sellerAuth)
+        .expect(500);
+    } finally {
+      sessionLookup.mockRestore();
+    }
   }, 60_000);
 });

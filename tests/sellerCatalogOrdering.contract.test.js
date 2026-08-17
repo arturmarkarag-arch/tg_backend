@@ -41,10 +41,13 @@ describe('seller ordinary catalogue source contract', () => {
     expect(page).toContain('{ $sort: SELLER_CATALOG_SORT }');
     expect(page).toContain('{ $skip: offset }');
     expect(page).toContain('{ $limit: limit }');
+    expect(routes).toContain('function parseCatalogPageInteger(value, fallback, min, max)');
+    expect(routes).toContain('Math.trunc(parsed)');
     expect(page).not.toContain('ids.slice(');
     expect(routes).not.toContain('getSellerVisualOrder');
     expect(routes).not.toContain('seller_visual_catalog');
     expect(routes).not.toContain('seller-visual:');
+    expect(routes).not.toContain('try { orderingSessionId = await findCurrentSessionId');
   });
 
   test('position uses the identical ordinary comparator and Mongo counts', () => {
