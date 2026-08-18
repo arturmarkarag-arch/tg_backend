@@ -14,6 +14,7 @@ const CatalogReview = require('../../models/CatalogReview');
 const { findCurrentSessionId } = require('../../utils/getOrCreateSession');
 const { getTelegramUsernameMap } = require('../../utils/telegramUsername');
 const { ASSIGNED_SHOP_ROLES } = require('../../utils/shopOperationalState');
+const { loadAnnouncementMembershipByTelegramId } = require('../announcementGroupMembership');
 const { buildCurrentSessionShopProjection } = require('../shopStatusProjection');
 
 function liveItem(item) {
@@ -24,7 +25,7 @@ function resolveOrderShopId(order) {
   return String(order?.shopId || order?.buyerSnapshot?.shopId || '');
 }
 
-function mapSeller(user, usernameMap) {
+function mapSeller(user, usernameMap, membershipByTelegramId = new Map()) {
   const items = user.cartState?.orderItems;
   const itemObj = items instanceof Map ? Object.fromEntries(items) : (items || {});
   return {
@@ -34,6 +35,7 @@ function mapSeller(user, usernameMap) {
     role: user.role,
     accountState: user.accountState || 'active',
     botBlocked: user.botBlocked === true,
+    announcementGroupMember: membershipByTelegramId.get(String(user.telegramId)) ?? null,
     hasCart: Object.keys(itemObj).length > 0,
   };
 }
@@ -107,13 +109,16 @@ async function buildCurrentSessionShopStatusReadModel(group, { windowOpen }) {
     ...orders.map((order) => order.buyerTelegramId),
     ...staleOrders.map((order) => order.buyerTelegramId),
   ]);
+  const membershipByTelegramId = await loadAnnouncementMembershipByTelegramId(
+    sellers.map((seller) => seller.telegramId),
+  );
 
   const sellersByShop = {};
   for (const seller of sellers) {
     const shopId = String(seller.shopId || '');
     if (!shopId) continue;
     if (!sellersByShop[shopId]) sellersByShop[shopId] = [];
-    sellersByShop[shopId].push(mapSeller(seller, usernameMap));
+    sellersByShop[shopId].push(mapSeller(seller, usernameMap, membershipByTelegramId));
   }
 
   const buyerTelegramIds = [...new Set([...orders, ...staleOrders]

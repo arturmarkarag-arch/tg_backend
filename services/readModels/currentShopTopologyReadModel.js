@@ -11,9 +11,10 @@ const Shop = require('../../models/Shop');
 const User = require('../../models/User');
 const { getTelegramUsernameMap } = require('../../utils/telegramUsername');
 const { ASSIGNED_SHOP_ROLES } = require('../../utils/shopOperationalState');
+const { loadAnnouncementMembershipByTelegramId } = require('../announcementGroupMembership');
 const { buildReadinessShopProjection } = require('../shopStatusProjection');
 
-function toAssignedUser(user, usernameMap) {
+function toAssignedUser(user, usernameMap, membershipByTelegramId = new Map()) {
   return {
     name: [user.firstName, user.lastName].filter(Boolean).join(' ') || String(user.telegramId),
     telegramId: String(user.telegramId),
@@ -21,19 +22,20 @@ function toAssignedUser(user, usernameMap) {
     role: user.role,
     accountState: user.accountState || 'active',
     botBlocked: user.botBlocked === true,
+    announcementGroupMember: membershipByTelegramId.get(String(user.telegramId)) ?? null,
     hasCart: false,
     hasOrder: false,
     catalogReviewedAt: null,
   };
 }
 
-function groupUsersByShop(users, usernameMap) {
+function groupUsersByShop(users, usernameMap, membershipByTelegramId = new Map()) {
   const byShop = {};
   for (const user of users) {
     const shopId = String(user.shopId || '');
     if (!shopId) continue;
     if (!byShop[shopId]) byShop[shopId] = [];
-    byShop[shopId].push(toAssignedUser(user, usernameMap));
+    byShop[shopId].push(toAssignedUser(user, usernameMap, membershipByTelegramId));
   }
   return byShop;
 }
@@ -51,7 +53,10 @@ async function buildCurrentShopTopologyReadModel(group) {
       .lean()
     : [];
   const usernameMap = await getTelegramUsernameMap(assignedUsers.map((user) => user.telegramId));
-  const usersByShop = groupUsersByShop(assignedUsers, usernameMap);
+  const membershipByTelegramId = await loadAnnouncementMembershipByTelegramId(
+    assignedUsers.map((user) => user.telegramId),
+  );
+  const usersByShop = groupUsersByShop(assignedUsers, usernameMap, membershipByTelegramId);
 
   const shopStatuses = shops.map((shop) => buildReadinessShopProjection({
     shop,

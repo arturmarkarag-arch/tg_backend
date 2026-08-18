@@ -31,14 +31,16 @@ describe('V48.19 current shop assignment semantics', () => {
       { telegramId: '1', name: 'Seller', role: 'seller', accountState: 'active', botBlocked: false },
       { telegramId: '2', name: 'Blocked', role: 'seller', accountState: 'active', botBlocked: true },
       { telegramId: '3', name: 'Removed', role: 'admin', accountState: 'removed', botBlocked: false },
+      { telegramId: '4', name: 'Left group', role: 'seller', accountState: 'active', botBlocked: false, announcementGroupMember: false },
     ], { shop: activeShop });
 
-    expect(current.assignedCount).toBe(3);
+    expect(current.assignedCount).toBe(4);
     expect(current.hasAssigned).toBe(true);
     expect(current.operationalCount).toBe(1);
     expect(current.hasOperationalUser).toBe(true);
     expect(current.assignedUsers.find((u) => u.telegramId === '2').operationalIssues).toContain('bot_blocked');
     expect(current.assignedUsers.find((u) => u.telegramId === '3').operationalIssues).toContain('account_removed');
+    expect(current.assignedUsers.find((u) => u.telegramId === '4').operationalIssues).toContain('announcement_group_missing');
   });
 
   it('an inactive shop has current assignment but no operational assignment', () => {

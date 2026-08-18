@@ -20,6 +20,7 @@ function getUserOperationalIssues(user) {
   if (!isAssignedShopRole(user.role)) issues.push('role_not_shop_assignable');
   if (user.accountState === 'removed') issues.push('account_removed');
   if (user.botBlocked === true) issues.push('bot_blocked');
+  if (user.announcementGroupMember === false) issues.push('announcement_group_missing');
   return issues;
 }
 
