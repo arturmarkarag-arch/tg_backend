@@ -430,7 +430,7 @@ async function run() {
     await retireTargetNeutralFixture(item);
   }
 
-  console.log('\nScenario 4: one item can publish independently into multiple current delivery sessions');
+  console.log('\nScenario 4: one READY item can win only one concurrent delivery target');
   {
     const [a, b] = await Promise.all([
       createCurrentDeliveryGroup(`${MARKER}-A`, { open: true }),
@@ -443,17 +443,15 @@ async function run() {
     const [ra, rb] = await Promise.all([publishGroup(a), publishGroup(b)]);
     eq(ra.status, 200, 'batch publish A returned');
     eq(rb.status, 200, 'batch publish B returned');
-    eq(Number(ra.data.selectedCount || 0), 1, 'group A receives its own Wave item');
-    eq(Number(rb.data.selectedCount || 0), 1, 'group B receives its own Wave item');
+    eq(Number(ra.data.selectedCount || 0) + Number(rb.data.selectedCount || 0), 1, 'exactly one group wins the READY item');
     const fresh = await ReceiptItem.findById(item._id).lean();
     ok(fresh.supplementPublishRequestedAt, 'first-publication audit marker persisted');
-    eq(await SupplementOffer.countDocuments({ receiptItemId: item._id }), 2, 'one ReceiptItem has independent Wave children for two groups');
-    eq(await SupplementWave.countDocuments({}), 2, 'each group/session publication owns its own Wave');
-    const waveA = await SupplementWave.findOne({ deliveryGroupId: String(a._id) }).lean();
-    const waveB = await SupplementWave.findOne({ deliveryGroupId: String(b._id) }).lean();
-    remember('waves', waveA); remember('waves', waveB);
-    eq(String(waveA.orderingSessionId), String(a.orderingSessionId), 'Wave A pins exact current OrderingSession');
-    eq(String(waveB.orderingSessionId), String(b.orderingSessionId), 'Wave B pins exact current OrderingSession');
+    eq(await SupplementOffer.countDocuments({ receiptItemId: item._id }), 1, 'one ReceiptItem has only one active Wave child');
+    eq(await SupplementWave.countDocuments({}), 1, 'the losing target does not create an empty Wave');
+    const winningOffer = await SupplementOffer.findOne({ receiptItemId: item._id }).lean();
+    const winningWave = await SupplementWave.findById(winningOffer.waveId).lean();
+    remember('waves', winningWave);
+    ok([String(a.orderingSessionId), String(b.orderingSessionId)].includes(String(winningWave.orderingSessionId)), 'winning Wave pins one exact current OrderingSession');
     const retry = await publishGroup(a);
     eq(retry.data.selectedCount, 0, 'same exact session is idempotent on retry');
     await retireTargetNeutralFixture(item);

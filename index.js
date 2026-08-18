@@ -87,6 +87,8 @@ async function startServer() {
     console.log('Connected to MongoDB');
     await assertDeliveryGroupSchedulesReady();
     await migrateOrdersToSessionIds();
+    const supplementV3Migration = await require('./services/supplementV3Migration').migrateSupplementV3();
+    console.log(`[supplement-v3] containers=${supplementV3Migration.containers} merged=${supplementV3Migration.merged}`);
 
     try {
       await ensureShopProductIndexes();
@@ -165,7 +167,7 @@ async function startServer() {
       whatBroke: 'Не підтверджено ідемпотентність Wave, позицій дозамовлення або правило однієї заявки магазину.',
       howToFix: [
         'Перевірте db.supplementwaves.getIndexes(), db.supplementoffers.getIndexes() і db.supplementrequests.getIndexes().',
-        'SupplementWave.publicationKey має бути UNIQUE; receiptItemId + deliveryGroupId лишається compatibility UNIQUE для item publication.',
+        'SupplementWave.containerKey має бути UNIQUE для group+session; modern SupplementOffer = waveId+receiptItemId; SupplementRequest = offerId+revision+shopId.',
         'Звірте дублікати Wave/items/requests, виправте дані та перезапустіть сервер.',
       ],
       models: [require('./models/SupplementWave'), require('./models/SupplementOffer'), require('./models/SupplementRequest')],

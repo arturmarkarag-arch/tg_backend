@@ -11,7 +11,7 @@ const Order = require('../models/Order');
 //
 // Shared by the warehouse PATCH (routes/products.js) and the write-through shop edit
 // (routes/shopProducts.js) so a price change from EITHER side reprices identically.
-async function repriceActiveOrders(productId, newPrice) {
+async function repriceActiveOrders(productId, newPrice, { session = null } = {}) {
   const price = Number(newPrice);
   if (!Number.isFinite(price)) return;
   const activeFilter = {
@@ -21,7 +21,7 @@ async function repriceActiveOrders(productId, newPrice) {
   await Order.updateMany(
     activeFilter,
     { $set: { 'items.$[elem].price': price } },
-    { arrayFilters: [{ 'elem.productId': productId, 'elem.cancelled': { $ne: true } }] },
+    { arrayFilters: [{ 'elem.productId': productId, 'elem.cancelled': { $ne: true } }], ...(session ? { session } : {}) },
   );
   await Order.updateMany(activeFilter, [
     {
@@ -53,7 +53,7 @@ async function repriceActiveOrders(productId, newPrice) {
         },
       },
     },
-  ]);
+  ], session ? { session } : {});
 }
 
 module.exports = { repriceActiveOrders };

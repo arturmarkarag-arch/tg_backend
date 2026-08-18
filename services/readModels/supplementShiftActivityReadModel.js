@@ -11,6 +11,7 @@ const SupplementRequest = require('../../models/SupplementRequest');
 const SupplementOffer = require('../../models/SupplementOffer');
 const OrderingSession = require('../../models/OrderingSession');
 const { loadProductsFor, productView } = require('../supplementOffers');
+const { offerSnapshotForRequestRevision } = require('../supplementRevisionProjection');
 const { buildShopNumberLookup } = require('../../utils/shopNumbering');
 
 function str(v) { return v == null ? '' : String(v); }
@@ -77,7 +78,7 @@ async function getSupplementWorkerHistory({
     SupplementRequest.countDocuments(match),
     SupplementRequest.find(
       match,
-      'offerId shopId shopName quantity packed packedBy packedByName packedAt',
+      'offerId revision shopId shopName quantity packed packedBy packedByName packedAt',
     )
       .sort({ packedAt: -1, _id: -1 })
       .limit(Math.max(1, fetchLimit))
@@ -96,7 +97,8 @@ async function getSupplementWorkerHistory({
   const shopLookup = buildShopNumberLookup(sessionMeta?.shopNumbers);
 
   const items = requests.map((request) => {
-    const offer = offerById.get(str(request.offerId));
+    const currentOffer = offerById.get(str(request.offerId));
+    const offer = offerSnapshotForRequestRevision(currentOffer, request);
     const product = offer ? productView(productMap.get(str(offer.productId)), offer) : { productId: null, title: 'Товар', imageUrl: null };
     const shopNumber = (request.shopId != null ? shopLookup.byId.get(str(request.shopId)) : undefined)
       ?? shopLookup.byName.get(str(request.shopName || ''))

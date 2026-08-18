@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * V48.S2 compensating command for a WRONG already-published ReceiptItem route.
+ * V48.S3 compensating command for a WRONG already-published ReceiptItem route.
  *
  * This is deliberately not unconfirm/delete. We preserve physical/history facts,
  * stop unfinished work through existing canonical mechanisms, then project the
@@ -33,9 +33,14 @@ const {
 const { upsertShopOwnedFromReceiptItem, syncMirror } = require('../utils/upsertShopProduct');
 const {
   withdrawReceiptItemFromActiveWaves,
-  completeAffectedWaves,
   sourceSnapshotFromReceiptItem,
 } = require('./supplementWaveService');
+const {
+  ACTIVE_ITEM_STATUSES,
+  ITEM_RELATION_STATUS,
+  RECEIPT_ITEM_SUPPLEMENT_STATE,
+  deriveReceiptItemSupplementState,
+} = require('../utils/supplementState');
 const { maybeCompleteSession } = require('../utils/sessionStatus');
 const { getIO } = require('../socket');
 
@@ -121,6 +126,21 @@ async function correctReceiptItemRouting({
 
         const livePrevious = normalizeReceiptItemRouting(item, receipt);
         if (!sameRouting(livePrevious, previousRouting)) throw appError('receipt_route_locked');
+
+        if (normalizedNext.supplement && !livePrevious.supplement) {
+          const offers = await SupplementOffer.find(
+            { receiptItemId: item._id, waveId: { $ne: null } },
+            'status itemStatus frozenAt completedAt revisionHistory',
+          ).session(mongoSession).lean();
+          const supplementState = deriveReceiptItemSupplementState({
+            offers,
+            routingSupplement: livePrevious.supplement,
+            receiptCompleted: receipt.status === 'completed',
+          });
+          if (supplementState === RECEIPT_ITEM_SUPPLEMENT_STATE.COMPLETED) {
+            throw appError('receipt_supplement_already_completed');
+          }
+        }
 
         if (livePrevious.supplement && !normalizedNext.supplement) {
           const withdrawal = await withdrawReceiptItemFromActiveWaves({
@@ -210,7 +230,7 @@ async function correctReceiptItemRouting({
         // ReceiptItem rather than depending on the Product foreign key.
         if (item.routing.supplement) {
           await SupplementOffer.updateMany(
-            { receiptItemId: item._id, waveId: { $ne: null }, itemStatus: 'active' },
+            { receiptItemId: item._id, waveId: { $ne: null }, itemStatus: ITEM_RELATION_STATUS.ACTIVE, status: { $in: ACTIVE_ITEM_STATUSES } },
             {
               $set: {
                 productId: item.createdProductId || null,
@@ -243,7 +263,6 @@ async function correctReceiptItemRouting({
       try { require('../utils/shopProductEmbedding').embedShopProductAsync(shopProductForEmbedding, 'routing-correction'); } catch (_) {}
     }
 
-    await completeAffectedWaves(affectedWaveIds, actor).catch(() => {});
     if (archiveOutcome?.changed) {
       await publishArchiveProductOutcome(archiveOutcome, {
         reason: 'receipt_routing_correction',

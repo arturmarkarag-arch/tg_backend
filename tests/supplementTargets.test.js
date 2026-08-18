@@ -10,7 +10,7 @@ const executableTargets = targets
   .replace(/\/\*[\s\S]*?\*\//g, '')
   .replace(/\/\/.*$/gm, '');
 
-describe('V48.S2 supplement target contract', () => {
+describe('V48.S3 supplement target contract', () => {
   it('pins a supplement target to the current OrderingSession', () => {
     expect(targets).toContain('findCurrentSessionId');
     expect(targets).toContain('expectedOrderingSessionId');
@@ -30,9 +30,14 @@ describe('V48.S2 supplement target contract', () => {
     expect(targets).toContain('new Date(session.openAt).getTime() > now.getTime()');
   });
 
-  it('rejects completed delivery cycles', () => {
-    expect(targets).toContain("session.pickingStatus === 'completed'");
+  it('keeps completed delivery cycles closed unless exact current supplement state proves cancellation', () => {
+    expect(targets).toContain('hasReopenableSupplementCancellation');
+    expect(targets).toContain('status: ITEM_STATUS.CANCELLED');
+    expect(targets).toContain("session.pickingStatus === 'completed' && !reopenableSupplement");
     expect(targets).toContain('supplement_target_session_completed');
+    expect(targets).toContain("reopenableSupplement ? 'supplement_reopenable' : 'completed'");
+    expect(targets).toContain('blockedItemIds');
+    expect(targets).toContain('publications.filter(blocksGenericRepublish)');
   });
 
   it('allows current delivery states before and during warehouse picking', () => {

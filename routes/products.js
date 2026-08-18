@@ -17,6 +17,7 @@ const ReceiptItem = require('../models/ReceiptItem');
 const SupplementOffer = require('../models/SupplementOffer');
 const { getSupplementExcludedProductIds } = require('../services/supplementSessionExclusion');
 const SupplementRequest = require('../models/SupplementRequest');
+const { REQUEST_STATUS } = require('../utils/supplementState');
 const User = require('../models/User');
 const Shop = require('../models/Shop');
 const DeliveryGroup = require('../models/DeliveryGroup');
@@ -28,11 +29,13 @@ const { describeImageUrl } = require('../utils/productDescribe');
 const { embedProductAsync, getProductEmbeddingSource } = require('../utils/productEmbedding');
 const { getOrCreateSessionId, findCurrentSessionId } = require('../utils/getOrCreateSession');
 const { normalizeDeliveryGroup } = require('../utils/deliveryGroupHelpers');
-const { getOrderingWindowOpenAt } = require('../utils/orderingSchedule');
-const { warsawDateKeyToUtcRange } = require('../utils/warsawDateTime');
+const { getOrderingWindowOpenAt, getOpenDateWarsaw } = require('../utils/orderingSchedule');
+const { formatWarsawDateKey, warsawDateKeyToUtcRange } = require('../utils/warsawDateTime');
 const cache = require('../utils/cache');
 const { buildWarehouseStockEstimate } = require('../utils/warehouseStockEstimate');
+const { getSellerVisualOrder } = require('../services/sellerVisualOrdering');
 const { appendProductsToBlockDocument } = require('../services/blockMembershipPrimitives');
+const { hasReceiptCommercialMutation, syncReceiptItemCommercialMetadataFromProduct } = require('../services/receiptCommercialMetadataCommand');
 
 const staffOnly = requireTelegramRoles(['admin', 'warehouse']);
 const registeredOnly = requireTelegramRoles(['seller', 'admin', 'warehouse']);
@@ -44,20 +47,28 @@ const registeredOnly = requireTelegramRoles(['seller', 'admin', 'warehouse']);
 // advances and the product becomes part of the ordinary catalogue automatically.
 async function getSellerCatalogCycleContext(req) {
   if (req.telegramUser?.role !== 'seller' || !req.telegramUser?.shopId) {
-    return { cutoff: null, orderingSessionId: null };
+    // Staff can open the same "Товари" screen for diagnostics. Keep that
+    // presentation isolated from seller-group cycles and refresh it daily.
+    return {
+      cutoff: null,
+      cacheScope: `staff:${formatWarsawDateKey(new Date())}`,
+    };
   }
   const shop = await Shop.findById(req.telegramUser.shopId, 'deliveryGroupId').lean();
   if (!shop?.deliveryGroupId) {
-    return { cutoff: null, orderingSessionId: null };
+    return { cutoff: null, cacheScope: `seller:${req.telegramUser.id || req.telegramId || 'no-shop'}` };
   }
   const group = normalizeDeliveryGroup(await DeliveryGroup.findById(shop.deliveryGroupId).lean());
   if (!group?.orderingSchedule) {
-    return { cutoff: null, orderingSessionId: null };
+    return { cutoff: null, cacheScope: `group:${String(shop.deliveryGroupId)}:no-schedule` };
   }
-  const orderingSessionId = await findCurrentSessionId(String(shop.deliveryGroupId), group.orderingSchedule);
+  let orderingSessionId = null;
+  try { orderingSessionId = await findCurrentSessionId(String(shop.deliveryGroupId), group.orderingSchedule); } catch (_) {}
   return {
     cutoff: getOrderingWindowOpenAt(group.orderingSchedule),
+    deliveryGroupId: String(shop.deliveryGroupId),
     orderingSessionId: orderingSessionId ? String(orderingSessionId) : null,
+    cacheScope: `group:${String(shop.deliveryGroupId)}:${getOpenDateWarsaw(group.orderingSchedule)}`,
   };
 }
 
@@ -236,7 +247,10 @@ router.get('/warehouse-stats', staffOnly, asyncHandler(async (req, res) => {
   const supplementPackagesByProduct = new Map();
   if (offers.length) {
     const supplementRows = await SupplementRequest.aggregate([
-      { $match: { offerId: { $in: offers.map((offer) => offer._id) } } },
+      // Cancelled/unpacked results from old publication revisions are historical
+      // facts, not warehouse demand. Packed rows remain status=active and still
+      // count as physical outbound work even after their item revision is cancelled.
+      { $match: { offerId: { $in: offers.map((offer) => offer._id) }, status: REQUEST_STATUS.ACTIVE } },
       { $group: { _id: '$offerId', packages: { $sum: { $ifNull: ['$quantity', 0] } } } },
     ]);
     for (const row of supplementRows) {
@@ -438,44 +452,35 @@ router.get('/drafts', staffOnly, asyncHandler(async (req, res) => {
   res.json(products);
 }));
 
-// Seller ordering catalogue — ordinary stable warehouse sequence.
+// Seller ordering catalogue — presentation-only visual sequence.
 //
 // IMPORTANT scope:
 //   - ONLY Product.status=active;
 //   - ONLY products physically present in Block.productIds;
 //   - ONLY ordinary-order-enabled products;
 //   - seller cycle cutoff remains authoritative;
-//   - products published through SupplementWave for this exact session stay excluded.
+//   - embeddings/order never mutate Block, PickingTask, Product.orderNumber or session data.
 //
-// Mongo owns ordering and pagination. The HTTP path never loads ProductVector,
-// never builds an all-products distance matrix and never acquires a Redis lock.
-const SELLER_CATALOG_SORT = Object.freeze({ orderNumber: 1, createdAt: -1, _id: 1 });
-
-function parseCatalogPageInteger(value, fallback, min, max) {
-  if (value === undefined || value === null || String(value).trim() === '') return fallback;
-  const parsed = Number(value);
-  if (!Number.isFinite(parsed)) return fallback;
-  return Math.min(max, Math.max(min, Math.trunc(parsed)));
-}
-
-async function getSellerCatalogBasePipeline(req) {
+// The frontend receives ONE already-ordered `items` array. It never receives
+// embeddings or a second array telling React how to sort.
+async function getEligibleSellerCatalogProducts(req) {
   const context = await getSellerCatalogCycleContext(req);
   const match = {
     status: 'active',
     orderingEnabled: { $ne: false },
   };
 
-  // A Product explicitly published through SupplementWave for this exact delivery
-  // cycle must not simultaneously appear as an ordinary-order item in the same
-  // OrderingSession. Later sessions are unaffected. The exclusion is session-scoped
-  // and derived from the Wave item relation, never a permanent Product flag.
+  // A Product that used SupplementWave for this exact delivery cycle must not
+  // appear as an ordinary-order item in the same OrderingSession, including after
+  // supplement completion. Later sessions are unaffected. The exclusion is
+  // session-scoped and derived from item history, never a permanent Product flag.
   if (context.orderingSessionId) {
     const supplementProductIds = await getSupplementExcludedProductIds(context.orderingSessionId);
     if (supplementProductIds.length) match._id = { $nin: supplementProductIds };
   }
 
   applySellerCycleCutoff(match, context.cutoff);
-  return [
+  const products = await Product.aggregate([
     { $match: match },
     {
       $lookup: {
@@ -487,25 +492,37 @@ async function getSellerCatalogBasePipeline(req) {
       },
     },
     { $match: { '_block.0': { $exists: true } } },
-  ];
+    { $project: { _id: 1, orderNumber: 1, createdAt: 1 } },
+    { $sort: { orderNumber: 1, createdAt: -1, _id: 1 } },
+  ]);
+  return { context, products };
+}
+
+async function getOrderedSellerCatalogIds(req) {
+  const { context, products } = await getEligibleSellerCatalogProducts(req);
+  const visual = await getSellerVisualOrder({
+    cacheScope: context.cacheScope,
+    eligibleProducts: products,
+  });
+  return { ids: visual.ids, meta: visual.meta };
 }
 
 router.get('/catalog', registeredOnly, asyncHandler(async (req, res) => {
-  const limit = parseCatalogPageInteger(req.query.limit, 24, 1, 50);
-  const offset = parseCatalogPageInteger(req.query.offset, 0, 0, Number.MAX_SAFE_INTEGER);
-  const basePipeline = await getSellerCatalogBasePipeline(req);
-  const countRows = await Product.aggregate([...basePipeline, { $count: 'total' }]);
-  const total = countRows[0]?.total ?? 0;
-  const products = await Product.aggregate([
-    ...basePipeline,
-    { $project: { _block: 0 } },
-    { $sort: SELLER_CATALOG_SORT },
-    { $skip: offset },
-    { $limit: limit },
-  ]);
+  const limit = Math.min(50, Math.max(1, Number(req.query.limit) || 24));
+  const offset = Math.max(0, Number(req.query.offset) || 0);
+  const { ids } = await getOrderedSellerCatalogIds(req);
+  const total = ids.length;
+  const pageIds = ids.slice(offset, offset + limit);
+  if (!pageIds.length) {
+    return res.json({ items: [], offset, limit, total, hasMore: false });
+  }
 
-  // Preserve the seller-card response shape while returning the ordinary
-  // warehouse order directly from MongoDB.
+  const docs = await Product.find({ _id: { $in: pageIds } }).lean();
+  const byId = new Map(docs.map((product) => [String(product._id), product]));
+  const products = pageIds.map((id) => byId.get(String(id))).filter(Boolean);
+  // Preserve the existing seller-card shape exactly; only the ORDER of rows is
+  // new. This keeps order-save snapshots, "new" badges and image rendering
+  // independent from the visual-order rollout.
   const items = products.map((product) => ({
     id: product._id,
     title: getProductTitle(product),
@@ -542,39 +559,15 @@ router.get('/catalog/:id/position', registeredOnly, asyncHandler(async (req, res
   if (!mongoose.Types.ObjectId.isValid(id)) {
     return res.status(400).json({ error: 'invalid_id' });
   }
-  const target = await Product.findById(id, 'orderNumber createdAt').lean();
-  if (!target) return res.status(404).json({ error: 'not_in_catalog' });
-
-  const basePipeline = await getSellerCatalogBasePipeline(req);
-  const targetObjectId = new mongoose.Types.ObjectId(id);
-  const [selfResult] = await Product.aggregate([
-    ...basePipeline,
-    { $match: { _id: targetObjectId } },
-    { $count: 'count' },
-  ]);
-  if (!selfResult?.count) return res.status(404).json({ error: 'not_in_catalog' });
-
-  const targetOrderNumber = target.orderNumber ?? 0;
-  const beforeMatch = {
-    $or: [
-      { orderNumber: { $lt: targetOrderNumber } },
-      { orderNumber: targetOrderNumber, createdAt: { $gt: target.createdAt } },
-      { orderNumber: targetOrderNumber, createdAt: target.createdAt, _id: { $lt: targetObjectId } },
-    ],
-  };
-  const [beforeRows, totalRows] = await Promise.all([
-    Product.aggregate([...basePipeline, { $match: beforeMatch }, { $count: 'count' }]),
-    Product.aggregate([...basePipeline, { $count: 'count' }]),
-  ]);
-  return res.json({
-    position: beforeRows[0]?.count ?? 0,
-    total: totalRows[0]?.count ?? 0,
-  });
+  const { ids } = await getOrderedSellerCatalogIds(req);
+  const position = ids.indexOf(String(id));
+  if (position < 0) return res.status(404).json({ error: 'not_in_catalog' });
+  return res.json({ position, total: ids.length });
 }));
 
 // Legacy orderNumber-position resolver for callers of the generic /v1/products list.
 // Seller Товари → Товари deep-links use /catalog/:id/position above so their
-// position always matches the dedicated seller eligibility rules. Matches the GET / filter
+// position always matches the backend visual sequence. Matches the GET / filter
 // (not archived + in a block) and sort (orderNumber asc, createdAt desc,
 // _id asc) exactly, so the returned `position` lines up with the `offset`
 // clients use to page in.
@@ -722,8 +715,8 @@ router.get('/', async (req, res) => {
     // Товари Складу asks for arrival order (?sort=newest) — the item that came in
     // last sits on top. "Надходження" is `shelvedAt` (stamped when a receipt commit
     // puts the product on a shelf); docs that predate that field fall back to
-    // createdAt. The generic default keeps shelf order (orderNumber); the dedicated
-    // seller endpoint above uses the same stable sort with stricter eligibility.
+    // createdAt. The seller catalogue keeps the shelf order (orderNumber) — its
+    // deep links resolve an offset through /:id/position, which assumes that sort.
     const newestFirst = req.query.sort === 'newest';
     const sortStages = newestFirst
       ? [
@@ -742,8 +735,9 @@ router.get('/', async (req, res) => {
 
     // Shelf location ({ blockId, position, total }) is opt-in via ?withLocation=1
     // — only the Товари Складу page needs it (card display + "Показати в блоці").
-    // Other generic-list callers skip that extra Block lookup. Every v1 product is
-    // on a shelf (the _block.0 match above), so when requested the location exists.
+    // The seller catalogue shares this endpoint on its hottest path, so we skip
+    // the extra Block lookup there. Every v1 product is on a shelf (the _block.0
+    // match above), so when requested the location is always present.
     const wantLocation = req.query.withLocation === '1' || req.query.withLocation === 'true';
     const locMap = wantLocation ? await buildLocationMap(products.map((p) => p._id)) : new Map();
 
@@ -1389,7 +1383,7 @@ router.post('/', staffOnly, asyncHandler(async (req, res) => {
 }));
 
 router.patch('/:id', staffOnly, asyncHandler(async (req, res) => {
-  const product = await Product.findById(req.params.id);
+  let product = await Product.findById(req.params.id);
   if (!product) throw appError('product_not_found');
 
   const fields = req.body;
@@ -1471,12 +1465,15 @@ router.patch('/:id', staffOnly, asyncHandler(async (req, res) => {
   }
 
   const barcodeChanged = fields.barcode !== undefined;
-  const needsSession = orderChanged || barcodeChanged;
+  const receiptCommercialChanged = !!product.receiptItemId && hasReceiptCommercialMutation(fields);
+  const needsSession = orderChanged || barcodeChanged || receiptCommercialChanged;
+  let receiptMetadataResult = null;
 
   if (needsSession) {
     const session = await mongoose.connection.startSession();
     try {
       await session.withTransaction(async () => {
+        receiptMetadataResult = null; // withTransaction may retry the callback
         if (orderChanged) {
           // status:{$ne:archived} — archived products hold orderNumber:0 and must
           // never be touched by a reorder shift. Matches archiveProduct/archive.js;
@@ -1494,6 +1491,18 @@ router.patch('/:id', staffOnly, asyncHandler(async (req, res) => {
           }
         }
         await product.save({ session });
+        if (receiptCommercialChanged) {
+          const u = req.telegramUser || {};
+          receiptMetadataResult = await syncReceiptItemCommercialMetadataFromProduct(product, fields, {
+            session,
+            actor: {
+              telegramId: String(u.telegramId || ''),
+              firstName: u.firstName || '',
+              lastName: u.lastName || '',
+            },
+            source: 'warehouse_product',
+          });
+        }
         if (barcodeChanged) {
           await ShopProduct.findOneAndUpdate(
             { linkedProductId: product._id },
@@ -1528,7 +1537,7 @@ router.patch('/:id', staffOnly, asyncHandler(async (req, res) => {
 
   // Re-price ACTIVE orders so the whole order stays in one price epoch (shared with
   // the write-through shop edit). confirmed/fulfilled orders are intentionally untouched.
-  if (price !== undefined && Number(price) !== previousPrice) {
+  if (price !== undefined && Number(price) !== previousPrice && !receiptCommercialChanged) {
     await repriceActiveOrders(product._id, Number(price));
   }
 
@@ -1559,6 +1568,16 @@ router.patch('/:id', staffOnly, asyncHandler(async (req, res) => {
       // the same event through QuerySocketBridge.
       io.emit('catalogue_updated', { action: 'update', productId: String(product._id) });
       io.to('staff').emit('catalogue_cache_patch', { action: 'update', entity: 'warehouse', productId: String(product._id), patch: productCataloguePatch(product) });
+      if (receiptMetadataResult?.item?.receiptId) {
+        io.to(`receipt_${String(receiptMetadataResult.item.receiptId)}`).emit('receipt_item_updated', receiptMetadataResult.item);
+      }
+      for (const change of receiptMetadataResult?.propagation?.supplementChanges || []) {
+        io.emit('supplement_wave_changed', {
+          ...change,
+          receiptItemId: String(receiptMetadataResult.item._id),
+          action: 'metadata_updated',
+        });
+      }
     }
   } catch (e) {
   }
@@ -1616,8 +1635,35 @@ router.post('/:id/describe', staffOnly, asyncHandler(async (req, res) => {
     if (!text) return res.status(502).json({ error: 'empty_description', message: 'Не вдалося згенерувати опис' });
     product.aiDescription = text;
     // Auto-fill name only when the product has none — never overwrite an existing name.
-    if (aiName && !product.name) product.name = aiName;
-    await product.save();
+    const nameWasFilled = !!(aiName && !product.name);
+    if (nameWasFilled) product.name = aiName;
+    let receiptMetadataResult = null;
+    if (product.receiptItemId) {
+      const session = await mongoose.connection.startSession();
+      try {
+        await session.withTransaction(async () => {
+          receiptMetadataResult = null;
+          await product.save({ session });
+          const u = req.telegramUser || {};
+          receiptMetadataResult = await syncReceiptItemCommercialMetadataFromProduct(product, {
+            aiDescription: text,
+            ...(nameWasFilled ? { name: product.name } : {}),
+          }, {
+            session,
+            actor: {
+              telegramId: String(u.telegramId || ''),
+              firstName: u.firstName || '',
+              lastName: u.lastName || '',
+            },
+            source: 'warehouse_product_describe',
+          });
+        });
+      } finally {
+        await session.endSession();
+      }
+    } else {
+      await product.save();
+    }
     res.json({ _id: product._id, aiDescription: product.aiDescription, aiName: aiName || null });
     // Live-refresh open warehouse boards so the generated name/description shows
     // without a reload (same channel the photo edit uses).
@@ -1626,7 +1672,17 @@ router.post('/:id/describe', staffOnly, asyncHandler(async (req, res) => {
       if (io) {
         io.emit('incoming_updated');
         io.emit('catalogue_updated', { action: 'update', productId: String(product._id) });
-      io.to('staff').emit('catalogue_cache_patch', { action: 'update', entity: 'warehouse', productId: String(product._id), patch: productCataloguePatch(product) });
+        io.to('staff').emit('catalogue_cache_patch', { action: 'update', entity: 'warehouse', productId: String(product._id), patch: productCataloguePatch(product) });
+        if (receiptMetadataResult?.item?.receiptId) {
+          io.to(`receipt_${String(receiptMetadataResult.item.receiptId)}`).emit('receipt_item_updated', receiptMetadataResult.item);
+        }
+        for (const change of receiptMetadataResult?.propagation?.supplementChanges || []) {
+          io.emit('supplement_wave_changed', {
+            ...change,
+            receiptItemId: String(receiptMetadataResult.item._id),
+            action: 'metadata_updated',
+          });
+        }
       }
     } catch (e) {}
     pushSharedFieldsToMirror(product, {}).catch(() => {});

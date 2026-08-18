@@ -13,7 +13,7 @@ const checks = [
   'scripts/checkV47_14ReceiptPhotoComments.js',
   'scripts/checkV47_15WarehouseRemainder.js',
   'scripts/checkV47_16ReceiptBatchAndIncoming.js',
-  'scripts/checkSellerCatalogOrdering.js',
+  'scripts/checkSellerVisualOrderingV48_1.js',
   'scripts/checkV48_2SupplementGroupAtBatch.js',
   'scripts/checkV48_4LiveHarness.js',
   'scripts/checkV48_5TestDbSafety.js',
@@ -27,7 +27,9 @@ const checks = [
   'scripts/checkDataStateArchitectureV48_19.js',
   'scripts/checkMutationAuthorityV48_20.js',
   'scripts/checkOperationalReadModelsV48_21.js',
-  'scripts/checkSupplementWaveArchitectureV48_S2.js',
+  'scripts/checkSupplementContainerArchitectureV48_S3.js',
+  'scripts/checkSupplementRevisionCyclesV48_S3.js',
+  'scripts/checkSupplementMetadataAuthorityV48_S3_1.js',
 ];
 
 let failed = 0;

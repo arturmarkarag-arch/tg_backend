@@ -5,12 +5,23 @@ const mongoose = require('mongoose');
 const SupplementWave = require('../models/SupplementWave');
 const SupplementOffer = require('../models/SupplementOffer');
 const SupplementRequest = require('../models/SupplementRequest');
-const ReceiptItem = require('../models/ReceiptItem');
 const { withLock } = require('../utils/lock');
 const { appError } = require('../utils/errors');
 const { getIO } = require('../socket');
+const { containerKeyFor } = require('./supplementV3Migration');
+const {
+  ITEM_STATUS,
+  ITEM_RELATION_STATUS,
+  REQUEST_STATUS,
+  REQUEST_CANCEL_SOURCE,
+  ACTIVE_ITEM_STATUSES,
+  revisionOf,
+  nextRevision,
+  blocksGenericRepublish,
+  deriveContainerSummary,
+} = require('../utils/supplementState');
 
-const ACTIVE_WAVE_STATUSES = SupplementWave.ACTIVE_STATUSES;
+const ACTIVE_WAVE_STATUSES = SupplementWave.ACTIVE_STATUSES; // legacy compatibility
 const TERMINAL_WAVE_STATUSES = SupplementWave.TERMINAL_STATUSES;
 
 function str(v) { return v == null ? '' : String(v); }
@@ -33,13 +44,14 @@ function sourceSnapshotFromReceiptItem(item) {
   };
 }
 
+// Legacy S2 idempotency key retained for compatibility scripts/history.
 function publicationKeyFor({ deliveryGroupId, orderingSessionId, receiptItemIds }) {
-  const raw = [
-    str(deliveryGroupId),
-    str(orderingSessionId),
-    ...[...(receiptItemIds || [])].map(str).sort(),
-  ].join('|');
+  const raw = [str(deliveryGroupId), str(orderingSessionId), ...[...(receiptItemIds || [])].map(str).sort()].join('|');
   return crypto.createHash('sha256').update(raw).digest('hex');
+}
+
+function isV3Wave(wave) {
+  return Number(wave?.architectureVersion || 0) >= 3 && Boolean(wave?.containerKey);
 }
 
 async function loadWaveForOffer(offer, { session = null, lean = true } = {}) {
@@ -49,9 +61,11 @@ async function loadWaveForOffer(offer, { session = null, lean = true } = {}) {
   return lean ? q.lean() : q;
 }
 
+/** V48.S3: item status is authority; V48.S2/legacy may still derive from Wave. */
 function effectiveOfferStatus(offer, wave = null) {
   if (!offer) return null;
-  if (offer.itemStatus === 'withdrawn') return 'cancelled';
+  if (offer.itemStatus === ITEM_RELATION_STATUS.WITHDRAWN) return ITEM_STATUS.CANCELLED;
+  if (isV3Wave(wave)) return offer.status || null;
   return wave?.status || offer.status || null;
 }
 
@@ -60,446 +74,464 @@ async function effectiveOfferStatusFromDb(offer, { session = null } = {}) {
   return { wave, status: effectiveOfferStatus(offer, wave) };
 }
 
-function isSellerEditableStatus(status) {
-  return status === 'open';
+function emit(event, payload) { try { getIO()?.emit(event, payload); } catch (_) {} }
+
+function revisionArchiveOf(offer, now = new Date()) {
+  return {
+    revision: revisionOf(offer),
+    status: offer.status || 'cancelled',
+    sourceSnapshot: offer.sourceSnapshot || {},
+    openedAt: offer.openedAt || null,
+    openedBy: str(offer.openedBy),
+    openedByName: str(offer.openedByName),
+    frozenAt: offer.frozenAt || null,
+    frozenBy: str(offer.frozenBy),
+    frozenByName: str(offer.frozenByName),
+    completedAt: offer.completedAt || null,
+    completedBy: str(offer.completedBy),
+    completedByName: str(offer.completedByName),
+    cancelledAt: offer.cancelledAt || null,
+    cancelledBy: str(offer.cancelledBy),
+    cancelledByName: str(offer.cancelledByName),
+    cancelReason: str(offer.cancelReason || offer.withdrawReason),
+    archivedAt: now,
+  };
 }
 
-function isPackingStatus(status) {
-  return status === 'frozen';
+function waveSummaryFromOffers(offers) {
+  return deriveContainerSummary(offers);
 }
 
-function emit(event, payload) {
-  try { getIO()?.emit(event, payload); } catch (_) {}
-}
-
-/**
- * Creates one Wave and one child SupplementOffer per selected ReceiptItem.
- * Must be called inside the publication transaction.
- */
-async function createWaveWithItems({
-  deliveryGroupId,
-  orderingSessionId,
-  receiptItems,
-  actor = {},
-  now = new Date(),
-  session,
-}) {
-  const rows = receiptItems || [];
-  if (!rows.length) return { wave: null, offers: [] };
+async function recomputeWaveSummaryInSession(waveId, { session = null, actor = {}, now = new Date() } = {}) {
+  const id = str(waveId);
+  if (!id) return null;
+  let q = SupplementOffer.find({ waveId: id }, 'status itemStatus').lean();
+  if (session) q = q.session(session);
+  const offers = await q;
+  const status = waveSummaryFromOffers(offers);
   const { by, byName } = actorFields(actor);
-  const publicationKey = publicationKeyFor({
-    deliveryGroupId,
-    orderingSessionId,
-    receiptItemIds: rows.map((row) => row._id),
-  });
+  const set = { status };
+  if (status === ITEM_STATUS.OPEN) {
+    set.completedAt = null;
+    set.cancelledAt = null;
+    set.cancelReason = '';
+  } else if (status === ITEM_STATUS.FROZEN) {
+    set.frozenAt = now;
+    if (by) set.frozenBy = by;
+    if (byName) set.frozenByName = byName;
+    set.completedAt = null;
+    set.cancelledAt = null;
+    set.cancelReason = '';
+  } else if (status === ITEM_STATUS.CANCELLED) {
+    set.cancelledAt = now;
+    if (by) set.cancelledBy = by;
+    if (byName) set.cancelledByName = byName;
+  } else {
+    set.completedAt = now;
+    if (by) set.completedBy = by;
+    if (byName) set.completedByName = byName;
+  }
+  let update = SupplementWave.findByIdAndUpdate(id, { $set: set }, { new: true });
+  if (session) update = update.session(session);
+  return update;
+}
 
-  let wave = await SupplementWave.findOne({ publicationKey }).session(session);
-  if (!wave) {
+async function ensureContainer({ deliveryGroupId, orderingSessionId, actor = {}, now = new Date(), session }) {
+  const gid = str(deliveryGroupId);
+  const sid = str(orderingSessionId);
+  const key = containerKeyFor(gid, sid);
+  let wave = await SupplementWave.findOne({ containerKey: key }).session(session);
+  if (wave) return wave;
+
+  const { by, byName } = actorFields(actor);
+  try {
     [wave] = await SupplementWave.create([{
-      deliveryGroupId: str(deliveryGroupId),
-      orderingSessionId: str(orderingSessionId),
-      status: 'open',
+      deliveryGroupId: gid,
+      orderingSessionId: sid,
+      architectureVersion: 3,
+      containerKey: key,
+      status: ITEM_STATUS.COMPLETED, // no active item until this publication transaction adds one
       openedAt: now,
       openedBy: by,
       openedByName: byName,
-      publicationKey,
-      lastReminderAt: now,
+      activityRevision: 0,
     }], { session });
+    return wave;
+  } catch (err) {
+    if (err?.code !== 11000) throw err;
+    wave = await SupplementWave.findOne({ containerKey: key }).session(session);
+    if (!wave) throw err;
+    return wave;
   }
+}
 
-  // One Wave can contain tens/hundreds of items. Do not turn publication into
-  // N read + N insert round-trips. Pre-read existing compatibility rows once,
-  // bulk-upsert the missing/current rows, then read the final child set once.
-  const itemIds = rows.map((item) => item._id);
-  const existing = await SupplementOffer.find({
-    receiptItemId: { $in: itemIds },
-    deliveryGroupId: str(deliveryGroupId),
-  }).session(session);
-  const existingByItem = new Map(existing.map((offer) => [str(offer.receiptItemId), offer]));
+/**
+ * Add/restart item slots in the stable group+session container.
+ * - never creates a second visible Wave for the same group+session;
+ * - open/frozen/current completed items are idempotently skipped;
+ * - any cancelled/withdrawn item restarts as revision+1 with a fresh Receipt snapshot;
+ * - only completed current/history work stays terminal;
+ * - previous request rows remain under their old revision and are never reused.
+ */
+async function createWaveWithItems({ deliveryGroupId, orderingSessionId, receiptItems, actor = {}, now = new Date(), session }) {
+  const rows = receiptItems || [];
+  if (!rows.length) return { wave: null, offers: [], changedOffers: [] };
+  const wave = await ensureContainer({ deliveryGroupId, orderingSessionId, actor, now, session });
+  const { by, byName } = actorFields(actor);
+  const itemIds = rows.map((row) => row._id);
+  const existing = await SupplementOffer.find({ waveId: wave._id, receiptItemId: { $in: itemIds } }).session(session);
+  const byItem = new Map(existing.map((offer) => [str(offer.receiptItemId), offer]));
   const operations = [];
+  const changedIds = [];
 
   for (const item of rows) {
-    const current = existingByItem.get(str(item._id));
-    if (current?.waveId && str(current.waveId) !== str(wave._id)) {
-      throw appError('supplement_item_already_published');
-    }
-
-    if (current && !current.waveId) {
-      // Forward-compatibility for a row inserted by an interrupted/legacy rollout.
+    const current = byItem.get(str(item._id));
+    if (!current) {
       operations.push({
-        updateOne: {
-          filter: { _id: current._id, waveId: null },
-          update: {
-            $set: {
-              waveId: wave._id,
-              orderingSessionId: str(orderingSessionId),
-              sourceSnapshot: sourceSnapshotFromReceiptItem(item),
-            },
+        insertOne: {
+          document: {
+            waveId: wave._id,
+            orderingSessionId: str(orderingSessionId),
+            receiptId: item.receiptId,
+            receiptItemId: item._id,
+            productId: item.createdProductId || null,
+            deliveryGroupId: str(deliveryGroupId),
+            sourceSnapshot: sourceSnapshotFromReceiptItem(item),
+            revision: 1,
+            revisionHistory: [],
+            itemStatus: ITEM_RELATION_STATUS.ACTIVE,
+            openedAt: now,
+            openedBy: by,
+            openedByName: byName,
+            status: ITEM_STATUS.OPEN,
+            lastReminderAt: now,
           },
         },
       });
+      changedIds.push(str(item._id));
       continue;
     }
 
-    if (!current) {
-      operations.push({
-        updateOne: {
-          filter: {
-            receiptItemId: item._id,
+    // Current active work must never be duplicated. Completed work is immutable;
+    // an explicit future "repeat completed" command can be added separately if
+    // business ever requires a second fulfilled round in the same session.
+    if (blocksGenericRepublish(current)) continue;
+
+    // Cancellation releases the slot even when the previous revision reached
+    // FROZEN. Old requests remain archived under that revision and never leak
+    // into this clean restart.
+    operations.push({
+      updateOne: {
+        filter: { _id: current._id, revision: revisionOf(current) },
+        update: {
+          $push: { revisionHistory: revisionArchiveOf(current, now) },
+          $set: {
+            revision: nextRevision(current),
+            productId: item.createdProductId || null,
+            sourceSnapshot: sourceSnapshotFromReceiptItem(item),
+            itemStatus: ITEM_RELATION_STATUS.ACTIVE,
+            withdrawnAt: null,
+            withdrawnBy: '',
+            withdrawnByName: '',
+            withdrawReason: '',
+            status: ITEM_STATUS.OPEN,
+            openedAt: now,
+            openedBy: by,
+            openedByName: byName,
+            frozenAt: null,
+            frozenBy: '',
+            frozenByName: '',
+            completedAt: null,
+            completedBy: null,
+            completedByName: '',
+            cancelledAt: null,
+            cancelledBy: '',
+            cancelledByName: '',
+            cancelReason: '',
+            lockedBy: null,
+            lockedAt: null,
+            orderingSessionId: str(orderingSessionId),
             deliveryGroupId: str(deliveryGroupId),
           },
-          update: {
-            $setOnInsert: {
-              waveId: wave._id,
-              orderingSessionId: str(orderingSessionId),
-              receiptId: item.receiptId,
-              receiptItemId: item._id,
-              productId: item.createdProductId || null,
-              deliveryGroupId: str(deliveryGroupId),
-              sourceSnapshot: sourceSnapshotFromReceiptItem(item),
-              itemStatus: 'active',
-              openedAt: now,
-              status: 'open', // compatibility mirror
-              lastReminderAt: now,
-            },
-          },
-          upsert: true,
         },
-      });
-    }
+      },
+    });
+    changedIds.push(str(item._id));
   }
 
-  if (operations.length) {
-    await SupplementOffer.bulkWrite(operations, { session, ordered: true });
+  if (operations.length) await SupplementOffer.bulkWrite(operations, { session, ordered: true });
+
+  if (changedIds.length) {
+    await SupplementWave.updateOne(
+      { _id: wave._id },
+      {
+        $inc: { activityRevision: 1 },
+        $set: {
+          architectureVersion: 3,
+          status: ITEM_STATUS.OPEN,
+          openedAt: now,
+          openedBy: by,
+          openedByName: byName,
+          completedAt: null,
+          cancelledAt: null,
+          cancelReason: '',
+          lastReminderAt: now,
+        },
+      },
+      { session },
+    );
   }
 
-  const offers = await SupplementOffer.find({
-    receiptItemId: { $in: itemIds },
-    deliveryGroupId: str(deliveryGroupId),
-    waveId: wave._id,
-  }).session(session);
-  if (offers.length !== rows.length) {
-    throw appError('supplement_wave_items_incomplete');
-  }
-
-  return { wave, offers };
+  const offers = await SupplementOffer.find({ waveId: wave._id, receiptItemId: { $in: itemIds } }).session(session);
+  const changedSet = new Set(changedIds);
+  const changedOffers = offers.filter((offer) => changedSet.has(str(offer.receiptItemId)));
+  const finalWave = await SupplementWave.findById(wave._id).session(session);
+  return { wave: finalWave, offers, changedOffers };
 }
 
+/** Freeze only currently OPEN item revisions; already-frozen/completed items stay untouched. */
 async function freezeWave(waveId, actor = {}, now = new Date()) {
   const id = str(waveId);
-  if (!mongoose.Types.ObjectId.isValid(id)) {
-    throw Object.assign(new Error('wave not found'), { code: 'supplement_wave_not_found' });
-  }
+  if (!mongoose.Types.ObjectId.isValid(id)) throw Object.assign(new Error('wave not found'), { code: 'supplement_wave_not_found' });
   const { by, byName } = actorFields(actor);
-
   return withLock(`supplement:wave:${id}`, async () => {
     const mongoSession = await mongoose.connection.startSession();
     let result = null;
-    let transitioned = false;
+    let frozenCount = 0;
     try {
       await mongoSession.withTransaction(async () => {
-        const existing = await SupplementWave.findById(id).session(mongoSession);
-        if (!existing) throw Object.assign(new Error('wave not found'), { code: 'supplement_wave_not_found' });
-        if (existing.status === 'frozen') {
-          result = existing;
-          return;
+        const wave = await SupplementWave.findById(id).session(mongoSession);
+        if (!wave || wave.mergedIntoWaveId) throw Object.assign(new Error('wave not found'), { code: 'supplement_wave_not_found' });
+        if (!isV3Wave(wave)) {
+          if (wave.status === ITEM_STATUS.FROZEN) { result = wave; return; }
+          if (wave.status !== ITEM_STATUS.OPEN) throw Object.assign(new Error('wave closed'), { code: 'supplement_closed' });
         }
-        if (existing.status !== 'open') {
-          throw Object.assign(new Error('wave closed'), { code: 'supplement_closed' });
-        }
-
-        existing.status = 'frozen';
-        existing.frozenAt = now;
-        existing.frozenBy = by;
-        existing.frozenByName = byName;
-        await existing.save({ session: mongoSession });
-
-        // The Wave is the lifecycle authority, but child status remains as a
-        // compatibility mirror for old readers. Root + mirrors transition in one
-        // transaction so a restart cannot leave an OPEN child under a FROZEN Wave.
-        await SupplementOffer.updateMany(
-          { waveId: existing._id, itemStatus: 'active', status: 'open' },
-          { $set: { status: 'frozen', frozenAt: now, frozenBy: by, frozenByName: byName } },
+        const write = await SupplementOffer.updateMany(
+          { waveId: wave._id, itemStatus: ITEM_RELATION_STATUS.ACTIVE, status: ITEM_STATUS.OPEN },
+          { $set: { status: ITEM_STATUS.FROZEN, frozenAt: now, frozenBy: by, frozenByName: byName, lockedBy: null, lockedAt: null } },
           { session: mongoSession },
         );
-        result = existing;
-        transitioned = true;
+        frozenCount = Number(write.modifiedCount || 0);
+        result = await recomputeWaveSummaryInSession(id, { session: mongoSession, actor, now });
       });
-    } finally {
-      await mongoSession.endSession();
-    }
+    } finally { await mongoSession.endSession(); }
 
-    if (transitioned && result) {
-      const frozenPayload = {
-        waveId: id,
-        deliveryGroupId: str(result.deliveryGroupId),
-        orderingSessionId: str(result.orderingSessionId),
-        status: 'frozen',
-      };
-      emit('supplement_wave_frozen', frozenPayload);
-      emit('supplement_wave_changed', frozenPayload);
-      // legacy client event during rollout
-      emit('supplement_frozen', { waveId: id, deliveryGroupId: str(result.deliveryGroupId) });
+    if (frozenCount > 0 && result) {
+      const payload = { waveId: id, deliveryGroupId: str(result.deliveryGroupId), orderingSessionId: str(result.orderingSessionId), status: result.status, frozenCount };
+      emit('supplement_wave_frozen', payload);
+      emit('supplement_wave_changed', payload);
+      emit('supplement_frozen', { waveId: id, deliveryGroupId: str(result.deliveryGroupId), frozenCount });
+    }
+    if (result) result._v3TransitionCount = frozenCount;
+    return result;
+  }, { ttlMs: 10_000, waitMs: 5_000 });
+}
+
+async function cancelOfferRevision(offerId, actor = {}, reason = 'cancelled_by_staff', now = new Date()) {
+  const id = str(offerId);
+  if (!mongoose.Types.ObjectId.isValid(id)) throw Object.assign(new Error('offer not found'), { code: 'supplement_offer_not_found' });
+  const { by, byName } = actorFields(actor);
+  return withLock(`supplement:${id}`, async () => {
+    const mongoSession = await mongoose.connection.startSession();
+    let result = null;
+    let cancelledRequestIds = [];
+    try {
+      await mongoSession.withTransaction(async () => {
+        const offer = await SupplementOffer.findById(id).session(mongoSession);
+        if (!offer) throw Object.assign(new Error('offer not found'), { code: 'supplement_offer_not_found' });
+        if (offer.itemStatus === ITEM_RELATION_STATUS.WITHDRAWN || offer.status === ITEM_STATUS.CANCELLED) { result = offer; return; }
+        if (offer.status === ITEM_STATUS.COMPLETED) throw Object.assign(new Error('completed item is immutable'), { code: 'supplement_closed' });
+        if (!ACTIVE_ITEM_STATUSES.includes(offer.status)) throw Object.assign(new Error('offer closed'), { code: 'supplement_closed' });
+
+        const revision = revisionOf(offer);
+        const pending = await SupplementRequest.find({ offerId: offer._id, revision, status: REQUEST_STATUS.ACTIVE, packed: false }, '_id').session(mongoSession).lean();
+        cancelledRequestIds = pending.map((r) => str(r._id));
+        if (pending.length) {
+          await SupplementRequest.updateMany(
+            { _id: { $in: pending.map((r) => r._id) }, revision, status: REQUEST_STATUS.ACTIVE, packed: false },
+            {
+              $set: { status: REQUEST_STATUS.CANCELLED, cancelledAt: now, cancelledBy: by, cancelledByName: byName, cancelReason: str(reason), cancelSource: REQUEST_CANCEL_SOURCE.STAFF },
+              $push: { history: { at: now, by, byName, action: 'cancelled', meta: { reason: str(reason), staffCancelled: true, revision } } },
+            },
+            { session: mongoSession },
+          );
+        }
+        offer.status = ITEM_STATUS.CANCELLED;
+        offer.cancelledAt = now;
+        offer.cancelledBy = by;
+        offer.cancelledByName = byName;
+        offer.cancelReason = str(reason);
+        offer.lockedBy = null;
+        offer.lockedAt = null;
+        await offer.save({ session: mongoSession });
+        await recomputeWaveSummaryInSession(offer.waveId, { session: mongoSession, actor, now });
+        result = offer;
+      });
+    } finally { await mongoSession.endSession(); }
+
+    if (result) {
+      const payload = { offerId: id, waveId: result.waveId ? str(result.waveId) : null, deliveryGroupId: str(result.deliveryGroupId), orderingSessionId: result.orderingSessionId || null, revision: Number(result.revision || 1), status: result.status, cancelledRequestIds };
+      emit('supplement_item_cancelled', payload);
+      emit('supplement_wave_changed', payload);
     }
     return result;
   }, { ttlMs: 10_000, waitMs: 5_000 });
 }
 
-async function recomputeWaveCompletion(waveId, actor = {}, now = new Date()) {
+/** Cancel all CURRENT open/frozen item revisions in the container. Container stays reusable. */
+async function cancelWave(waveId, actor = {}, reason = 'cancelled_by_admin', now = new Date()) {
   const id = str(waveId);
-  if (!id) return null;
+  if (!mongoose.Types.ObjectId.isValid(id)) throw Object.assign(new Error('wave not found'), { code: 'supplement_wave_not_found' });
+  const { by, byName } = actorFields(actor);
   return withLock(`supplement:wave:${id}`, async () => {
-    const wave = await SupplementWave.findById(id);
-    if (!wave || TERMINAL_WAVE_STATUSES.includes(wave.status)) return wave;
-    if (wave.status !== 'frozen') return wave;
+    const mongoSession = await mongoose.connection.startSession();
+    let result = null;
+    let cancelledItems = 0;
+    try {
+      await mongoSession.withTransaction(async () => {
+        const wave = await SupplementWave.findById(id).session(mongoSession);
+        if (!wave || wave.mergedIntoWaveId) throw Object.assign(new Error('wave not found'), { code: 'supplement_wave_not_found' });
+        const offers = await SupplementOffer.find({ waveId: wave._id, itemStatus: ITEM_RELATION_STATUS.ACTIVE, status: { $in: ACTIVE_ITEM_STATUSES } }).session(mongoSession);
+        for (const offer of offers) {
+          const revision = revisionOf(offer);
+          await SupplementRequest.updateMany(
+            { offerId: offer._id, revision, status: REQUEST_STATUS.ACTIVE, packed: false },
+            {
+              $set: { status: REQUEST_STATUS.CANCELLED, cancelledAt: now, cancelledBy: by, cancelledByName: byName, cancelReason: str(reason), cancelSource: REQUEST_CANCEL_SOURCE.STAFF },
+              $push: { history: { at: now, by, byName, action: 'cancelled', meta: { reason: str(reason), waveCancelled: true, revision } } },
+            },
+            { session: mongoSession },
+          );
+          offer.status = ITEM_STATUS.CANCELLED;
+          offer.cancelledAt = now;
+          offer.cancelledBy = by;
+          offer.cancelledByName = byName;
+          offer.cancelReason = str(reason);
+          offer.lockedBy = null;
+          offer.lockedAt = null;
+          await offer.save({ session: mongoSession });
+          cancelledItems += 1;
+        }
+        result = await recomputeWaveSummaryInSession(id, { session: mongoSession, actor, now });
+        if (result && cancelledItems) {
+          result.cancelReason = str(reason);
+          await result.save({ session: mongoSession });
+        }
+      });
+    } finally { await mongoSession.endSession(); }
 
-    const activeItems = await SupplementOffer.find({
-      waveId: wave._id,
-      itemStatus: 'active',
-    }, '_id status').lean();
-
-    if (activeItems.some((item) => item.status !== 'completed')) return wave;
-
-    const { by, byName } = actorFields(actor);
-    const completed = await SupplementWave.findOneAndUpdate(
-      { _id: wave._id, status: 'frozen' },
-      { $set: { status: 'completed', completedAt: now, completedBy: by, completedByName: byName } },
-      { new: true },
-    );
-    if (completed) {
-      const completedPayload = {
-        waveId: id,
-        deliveryGroupId: str(completed.deliveryGroupId),
-        orderingSessionId: str(completed.orderingSessionId),
-        status: 'completed',
-      };
-      emit('supplement_wave_completed', completedPayload);
-      emit('supplement_wave_changed', completedPayload);
-      emit('supplement_completed', { waveId: id, deliveryGroupId: str(completed.deliveryGroupId) });
+    if (result && cancelledItems) {
+      const payload = { waveId: id, deliveryGroupId: str(result.deliveryGroupId), orderingSessionId: str(result.orderingSessionId), status: result.status, cancelledItems };
+      emit('supplement_wave_cancelled', payload);
+      emit('supplement_wave_changed', payload);
+      emit('supplement_completed', { waveId: id, deliveryGroupId: str(result.deliveryGroupId), cancelled: true });
     }
-    return completed || wave;
+    if (result) result._v3TransitionCount = cancelledItems;
+    return result;
   }, { ttlMs: 10_000, waitMs: 5_000 });
 }
 
 /**
- * Compensating withdrawal for a wrong ReceiptItem route.
- * Packed rows remain physical facts; active/unpacked requests become cancelled.
+ * Route correction: cancel only current non-terminal item revisions derived from
+ * this ReceiptItem. Packed facts remain. Wave summary is recomputed INSIDE the
+ * same transaction, eliminating the old post-commit crash window.
  */
 async function withdrawReceiptItemFromActiveWaves({ receiptItemId, actor = {}, reason = 'routing_corrected', session = null, now = new Date() }) {
-  const query = SupplementOffer.find({
-    receiptItemId,
-    waveId: { $ne: null },
-    itemStatus: 'active',
-  });
-  if (session) query.session(session);
-  const offers = await query;
+  let q = SupplementOffer.find({ receiptItemId, waveId: { $ne: null }, itemStatus: ITEM_RELATION_STATUS.ACTIVE, status: { $in: ACTIVE_ITEM_STATUSES } });
+  if (session) q = q.session(session);
+  const offers = await q;
   if (!offers.length) return { waveIds: [], alreadyFulfilledShopIds: [], cancelledRequestIds: [] };
 
-  const waveIds = [...new Set(offers.map((o) => str(o.waveId)).filter(Boolean))];
-  let wavesQ = SupplementWave.find({ _id: { $in: waveIds }, status: { $in: ACTIVE_WAVE_STATUSES } });
-  if (session) wavesQ = wavesQ.session(session);
-  const activeWaves = await wavesQ.lean();
-  const activeWaveIds = new Set(activeWaves.map((w) => str(w._id)));
-  const activeOffers = offers.filter((o) => activeWaveIds.has(str(o.waveId)));
-  if (!activeOffers.length) return { waveIds: [], alreadyFulfilledShopIds: [], cancelledRequestIds: [] };
-
-  const offerIds = activeOffers.map((o) => o._id);
-  let requestsQ = SupplementRequest.find({ offerId: { $in: offerIds }, status: { $ne: 'cancelled' } });
-  if (session) requestsQ = requestsQ.session(session);
-  const requests = await requestsQ;
-  const packed = requests.filter((r) => r.packed);
-  const unpacked = requests.filter((r) => !r.packed);
   const { by, byName } = actorFields(actor);
+  const packedShopIds = new Set();
+  const cancelledRequestIds = [];
+  const waveIds = new Set();
 
-  if (unpacked.length) {
-    const opts = session ? { session } : undefined;
-    await SupplementRequest.updateMany(
-      { _id: { $in: unpacked.map((r) => r._id) }, packed: false },
-      {
-        $set: {
-          status: 'cancelled', cancelledAt: now,
-          cancelledBy: by, cancelledByName: byName,
-          cancelReason: reason,
+  for (const offer of offers) {
+    const revision = revisionOf(offer);
+    let rq = SupplementRequest.find({ offerId: offer._id, revision, status: REQUEST_STATUS.ACTIVE });
+    if (session) rq = rq.session(session);
+    const requests = await rq;
+    const packed = requests.filter((r) => r.packed);
+    const unpacked = requests.filter((r) => !r.packed);
+    packed.forEach((r) => packedShopIds.add(str(r.shopId)));
+    cancelledRequestIds.push(...unpacked.map((r) => str(r._id)));
+    if (unpacked.length) {
+      await SupplementRequest.updateMany(
+        { _id: { $in: unpacked.map((r) => r._id) }, revision, packed: false },
+        {
+          $set: { status: REQUEST_STATUS.CANCELLED, cancelledAt: now, cancelledBy: by, cancelledByName: byName, cancelReason: reason, cancelSource: REQUEST_CANCEL_SOURCE.SYSTEM },
+          $push: { history: { at: now, by, byName, action: 'cancelled', meta: { reason, correction: true, revision } } },
         },
-        $push: { history: { at: now, by, byName, action: 'cancelled', meta: { reason, correction: true } } },
-      },
-      opts,
-    );
-  }
-
-  for (const offer of activeOffers) {
+        session ? { session } : undefined,
+      );
+    }
     offer.itemStatus = 'withdrawn';
     offer.withdrawnAt = now;
     offer.withdrawnBy = by;
     offer.withdrawnByName = byName;
     offer.withdrawReason = reason;
-    offer.status = 'cancelled';
+    offer.status = ITEM_STATUS.CANCELLED;
+    offer.cancelledAt = now;
+    offer.cancelledBy = by;
+    offer.cancelledByName = byName;
+    offer.cancelReason = reason;
     offer.lockedBy = null;
     offer.lockedAt = null;
     await offer.save(session ? { session } : undefined);
+    waveIds.add(str(offer.waveId));
   }
 
-  return {
-    waveIds: [...new Set(activeOffers.map((o) => str(o.waveId)))],
-    alreadyFulfilledShopIds: [...new Set(packed.map((r) => str(r.shopId)))],
-    cancelledRequestIds: unpacked.map((r) => str(r._id)),
-  };
+  for (const waveId of waveIds) await recomputeWaveSummaryInSession(waveId, { session, actor, now });
+  return { waveIds: [...waveIds], alreadyFulfilledShopIds: [...packedShopIds], cancelledRequestIds };
 }
 
-async function cancelWave(waveId, actor = {}, reason = 'cancelled_by_admin', now = new Date()) {
-  const id = str(waveId);
-  if (!mongoose.Types.ObjectId.isValid(id)) {
-    throw Object.assign(new Error('wave not found'), { code: 'supplement_wave_not_found' });
-  }
-  const { by, byName } = actorFields(actor);
-
-  return withLock(`supplement:wave:${id}`, async () => {
-    const mongoSession = await mongoose.connection.startSession();
-    let result = null;
-    let transitioned = false;
-    try {
-      await mongoSession.withTransaction(async () => {
-        const wave = await SupplementWave.findById(id).session(mongoSession);
-        if (!wave) throw Object.assign(new Error('wave not found'), { code: 'supplement_wave_not_found' });
-        if (wave.status === 'completed' || wave.status === 'cancelled') {
-          result = wave;
-          return;
-        }
-
-        const offers = await SupplementOffer.find(
-          { waveId: wave._id, itemStatus: 'active' },
-          '_id',
-        ).session(mongoSession).lean();
-        const offerIds = offers.map((offer) => offer._id);
-        if (offerIds.length) {
-          // Physical facts are immutable: packed rows stay packed/fulfilled.
-          // Only unfinished demand is cancelled.
-          await SupplementRequest.updateMany(
-            { offerId: { $in: offerIds }, status: { $ne: 'cancelled' }, packed: false },
-            {
-              $set: {
-                status: 'cancelled',
-                cancelledAt: now,
-                cancelledBy: by,
-                cancelledByName: byName,
-                cancelReason: reason,
-              },
-              $push: { history: { at: now, by, byName, action: 'cancelled', meta: { reason, waveCancelled: true } } },
-            },
-            { session: mongoSession },
-          );
-          await SupplementOffer.updateMany(
-            { _id: { $in: offerIds }, status: { $in: ['open', 'frozen'] } },
-            { $set: { status: 'cancelled', lockedBy: null, lockedAt: null } },
-            { session: mongoSession },
-          );
-        }
-
-        wave.status = 'cancelled';
-        wave.cancelledAt = now;
-        wave.cancelledBy = by;
-        wave.cancelledByName = byName;
-        wave.cancelReason = str(reason);
-        await wave.save({ session: mongoSession });
-        result = wave;
-        transitioned = true;
-      });
-    } finally {
-      await mongoSession.endSession();
-    }
-
-    if (transitioned && result) {
-      const cancelledPayload = {
-        waveId: id,
-        deliveryGroupId: str(result.deliveryGroupId),
-        orderingSessionId: str(result.orderingSessionId),
-        status: 'cancelled',
-      };
-      emit('supplement_wave_cancelled', cancelledPayload);
-      emit('supplement_wave_changed', cancelledPayload);
-      emit('supplement_completed', { waveId: id, deliveryGroupId: str(result.deliveryGroupId), cancelled: true });
-    }
-    return result;
-  }, { ttlMs: 10_000, waitMs: 5_000 });
-}
-
-async function completeAffectedWaves(waveIds = [], actor = {}) {
-  for (const waveId of [...new Set(waveIds.map(str).filter(Boolean))]) {
-    const wave = await SupplementWave.findById(waveId);
-    if (!wave || TERMINAL_WAVE_STATUSES.includes(wave.status)) continue;
-    const active = await SupplementOffer.find({ waveId, itemStatus: 'active' }, '_id status').lean();
-
-    // A compensating route correction can withdraw the last item while a Wave is
-    // still OPEN. Leaving that aggregate open forever would block session closure.
-    // No physical work remains, so close the empty publication as cancelled.
-    if (!active.length) {
-      const { by, byName } = actorFields(actor);
-      const now = new Date();
-      const cancelled = await SupplementWave.findOneAndUpdate(
-        { _id: waveId, status: { $in: ACTIVE_WAVE_STATUSES } },
-        {
-          $set: {
-            status: 'cancelled',
-            cancelledAt: now,
-            cancelledBy: by || 'system:routing-correction',
-            cancelledByName: byName,
-            cancelReason: 'all_items_withdrawn',
-          },
-        },
-        { new: true },
-      );
-      if (cancelled) {
-        const cancelledPayload = {
-          waveId: str(cancelled._id),
-          deliveryGroupId: str(cancelled.deliveryGroupId),
-          orderingSessionId: str(cancelled.orderingSessionId),
-          status: 'cancelled',
-          reason: 'all_items_withdrawn',
-        };
-        emit('supplement_wave_cancelled', cancelledPayload);
-        emit('supplement_wave_changed', cancelledPayload);
-      }
-      continue;
-    }
-
-    if (active.every((o) => o.status === 'completed')) {
-      await recomputeWaveCompletion(waveId, actor).catch(() => {});
-    }
-  }
+async function recomputeWaveCompletion(waveId, actor = {}, now = new Date()) {
+  return withLock(`supplement:wave:${str(waveId)}`, () => recomputeWaveSummaryInSession(waveId, { actor, now }), { ttlMs: 10_000, waitMs: 5_000 });
 }
 
 async function countActiveWavesForSession(orderingSessionId) {
   if (!orderingSessionId) return 0;
-  return SupplementWave.countDocuments({
+  const ids = await SupplementOffer.distinct('waveId', {
     orderingSessionId: str(orderingSessionId),
-    status: { $in: ACTIVE_WAVE_STATUSES },
+    waveId: { $ne: null },
+    itemStatus: ITEM_RELATION_STATUS.ACTIVE,
+    status: { $in: ACTIVE_ITEM_STATUSES },
   });
+  return ids.filter(Boolean).length;
 }
 
 async function findActiveWavesForSession(orderingSessionId) {
   if (!orderingSessionId) return [];
-  return SupplementWave.find({
+  const ids = await SupplementOffer.distinct('waveId', {
     orderingSessionId: str(orderingSessionId),
-    status: { $in: ACTIVE_WAVE_STATUSES },
-  }).sort({ openedAt: 1 }).lean();
+    waveId: { $ne: null },
+    itemStatus: ITEM_RELATION_STATUS.ACTIVE,
+    status: { $in: ACTIVE_ITEM_STATUSES },
+  });
+  if (!ids.length) return [];
+  return SupplementWave.find({ _id: { $in: ids }, mergedIntoWaveId: null }).sort({ openedAt: 1 }).lean();
 }
 
 module.exports = {
   ACTIVE_WAVE_STATUSES,
   TERMINAL_WAVE_STATUSES,
+  ACTIVE_ITEM_STATUSES,
   sourceSnapshotFromReceiptItem,
   publicationKeyFor,
+  isV3Wave,
   loadWaveForOffer,
   effectiveOfferStatus,
   effectiveOfferStatusFromDb,
-  isSellerEditableStatus,
-  isPackingStatus,
+  revisionArchiveOf,
+  waveSummaryFromOffers,
+  recomputeWaveSummaryInSession,
   createWaveWithItems,
   freezeWave,
+  cancelOfferRevision,
   cancelWave,
   recomputeWaveCompletion,
   withdrawReceiptItemFromActiveWaves,
-  completeAffectedWaves,
   countActiveWavesForSession,
   findActiveWavesForSession,
 };

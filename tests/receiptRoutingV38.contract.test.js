@@ -129,7 +129,7 @@ describe('receipt routing v38 contract', () => {
   });
 
   test('packing of modern supplements begins only after Wave freeze', () => {
-    expect(supplementRoute).toContain("effective !== 'frozen'");
+    expect(supplementRoute).toContain('effective !== ITEM_STATUS.FROZEN');
     expect(supplementRoute).toContain("supplement_pack_before_freeze");
     expect(supplementRoute).toContain("router.post('/waves/:waveId/freeze'");
   });

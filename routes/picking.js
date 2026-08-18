@@ -31,6 +31,7 @@ const SupplementRequest = require('../models/SupplementRequest');
 const { countActiveOffersForGroup } = require('../services/supplementOffers');
 const { getSupplementShiftSummary, getSupplementWorkerHistory } = require('../services/readModels/supplementShiftActivityReadModel');
 const { getTelegramUsernameMap } = require('../utils/telegramUsername');
+const { ITEM_RELATION_STATUS, ACTIVE_ITEM_STATUSES, revisionOf } = require('../utils/supplementState');
 
 const {
   findAndLockNext,
@@ -575,15 +576,26 @@ router.post('/start-session', requireTelegramRoles(['warehouse', 'admin']), asyn
 
     // Заморожуємо номери коробок. Активні дозамовлення додають магазини без
     // основного Order; пізніші магазини отримують номер у хвіст.
-    const activeOffers = await SupplementOffer.find(
-      { deliveryGroupId: String(deliveryGroupId), status: { $in: SupplementOffer.ACTIVE_STATUSES } },
-      '_id',
-    ).lean();
-    const supplementShops = activeOffers.length
-      ? await SupplementRequest.find(
-        { offerId: { $in: activeOffers.map((o) => o._id) } },
-        'shopId shopName',
-      ).lean()
+    const activeOffers = await SupplementOffer.find({
+      $or: [
+        {
+          waveId: { $ne: null },
+          deliveryGroupId: String(deliveryGroupId),
+          orderingSessionId: String(currentSessionId),
+          itemStatus: ITEM_RELATION_STATUS.ACTIVE,
+          status: { $in: ACTIVE_ITEM_STATUSES },
+        },
+        // Compatibility-only legacy rows had no exact session/revision owner.
+        { waveId: null, deliveryGroupId: String(deliveryGroupId), status: { $in: SupplementOffer.ACTIVE_STATUSES } },
+      ],
+    }, '_id waveId revision').lean();
+    const requestPairs = activeOffers.map((offer) => ({
+      offerId: offer._id,
+      ...(offer.waveId ? { revision: revisionOf(offer) } : {}),
+      status: 'active',
+    }));
+    const supplementShops = requestPairs.length
+      ? await SupplementRequest.find({ $or: requestPairs }, 'shopId shopName').lean()
       : [];
     await ensureSessionShopNumbers(currentSessionId, [...sessionActiveOrders, ...supplementShops]);
 

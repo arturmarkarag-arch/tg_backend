@@ -191,6 +191,7 @@ const ERRORS = {
   // ── Дозамовлення (supplement) ──────────────────────────────────────────────
   supplement_offer_not_found:  { status: 404, message: 'Дозамовлення не знайдено' },
   supplement_request_not_found:{ status: 404, message: 'Заявку не знайдено' },
+  supplement_request_exists:   { status: 409, message: 'Заявка на цю позицію вже існує' },
   supplement_closed:           { status: 409, message: 'Прийом дозамовлень закрито — змінити заявку вже не можна' },
   supplement_request_locked:   { status: 409, message: 'Склад уже спакував цю заявку — змінити або скасувати її не можна' },
   supplement_wrong_group:      { status: 403, message: 'Це дозамовлення призначене іншій групі доставки' },
@@ -253,6 +254,11 @@ const ERRORS = {
                                 `Щоб підтвердити позицію, заповніть: ${fields || 'усі обовʼязкові поля'}.` },
   receipt_item_not_prepared: { status: 422, message: ({ fields } = {}) =>
                                 `Перед вибором маршруту заповніть: ${fields || 'ціну та кількість в упаковці'}.` },
+  receipt_routing_batch_empty: { status: 400, message: 'Оберіть хоча б один товар для пакетного маршруту' },
+  receipt_routing_batch_too_large: { status: 400, message: 'За один раз можна обробити не більше 100 товарів' },
+  receipt_routing_batch_draft_only: { status: 409, message: 'Пакетний маршрут доступний лише для товарів, які ще не підтверджені' },
+  receipt_routing_batch_regular_only: { status: 409, message: 'Пакетний маршрут недоступний для старих накладних-дозамовлень' },
+  receipt_supplement_already_completed: { status: 409, message: 'Дозамовлення цього товару вже виконано' },
   receipt_destination_required: { status: 400, message: 'Вкажіть призначення: «Склад» або «Магазини»' },
   receipt_route_required: { status: 422, message: 'Оберіть, куди піде товар: «На склад», «Обовʼязковий» або «Дозамовлення»' },
   receipt_route_conflict: { status: 422, message: '«Обовʼязковий» і «Дозамовлення» не можна вибрати одночасно' },
@@ -403,6 +409,9 @@ const ERRORS = {
                                 `Не можна змінити групу доставки магазину під час активної сесії (${reason || 'цикл у процесі'}). ` +
                                 'Поточні замовлення прив\'язані до сесії старої групи — переніс лишив би їх застряглими. ' +
                                 'Змініть групу після завершення поточного циклу.' },
+  shop_deactivate_session_active: { status: 409, message: ({ reason } = {}) =>
+                                `Не можна деактивувати магазин зараз (${reason || 'є незавершена робота поточного циклу'}). ` +
+                                'Спочатку завершіть або скасуйте його поточне замовлення/дозамовлення.' },
 };
 
 // ─── Dev-time integrity guard ────────────────────────────────────────────────

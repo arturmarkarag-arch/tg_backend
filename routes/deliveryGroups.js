@@ -7,6 +7,8 @@ const Shop = require('../models/Shop');
 const PickingTask = require('../models/PickingTask');
 const CatalogReview = require('../models/CatalogReview');
 const OrderingSession = require('../models/OrderingSession');
+const SupplementOffer = require('../models/SupplementOffer');
+const { ACTIVE_ITEM_STATUSES, ITEM_RELATION_STATUS } = require('../utils/supplementState');
 const { telegramAuth, requireTelegramRole, requireTelegramRoles } = require('../middleware/telegramAuth');
 const {
   isOrderingOpen,
@@ -304,7 +306,7 @@ router.patch('/:id', telegramAuth, requireTelegramRole('admin'), asyncHandler(as
 
     // Clock-time alone must not freeze an empty TEST/configuration group.
     // We block only when changing the calendar could strand REAL session data.
-    const [sessionOrder, sessionTask, livePickingSession, currentSession] = await Promise.all([
+    const [sessionOrder, sessionTask, sessionSupplement, livePickingSession, currentSession] = await Promise.all([
       // Terminal history must NOT freeze schedule editing forever. Only orders
       // that can still change operationally are blockers.
       Order.exists({
@@ -317,6 +319,12 @@ router.patch('/:id', telegramAuth, requireTelegramRole('admin'), asyncHandler(as
         orderingSessionId: { $in: protectedSessionIds },
         status: { $in: ['pending', 'locked'] },
       }),
+      SupplementOffer.exists({
+        orderingSessionId: { $in: protectedSessionIds },
+        waveId: { $ne: null },
+        itemStatus: ITEM_RELATION_STATUS.ACTIVE,
+        status: { $in: ACTIVE_ITEM_STATUSES },
+      }),
       OrderingSession.exists({
         _id: { $in: protectedSessionIds },
         pickingStatus: { $in: ['confirmed', 'in_progress'] },
@@ -324,10 +332,11 @@ router.patch('/:id', telegramAuth, requireTelegramRole('admin'), asyncHandler(as
       OrderingSession.findById(currentSessionId, 'pickingStatus openNotifiedAt').lean(),
     ]);
 
-    if (sessionOrder || sessionTask || livePickingSession) {
+    if (sessionOrder || sessionTask || sessionSupplement || livePickingSession) {
       const reason = sessionOrder ? 'у поточній або наступній сесії є активні замовлення'
         : sessionTask ? 'у поточній або наступній сесії є незавершені задачі збирання'
-        : 'збирання поточної або наступної сесії вже підтверджене чи триває';
+          : sessionSupplement ? 'у поточній або наступній сесії є активні позиції дозамовлення'
+            : 'збирання поточної або наступної сесії вже підтверджене чи триває';
       throw appError('group_day_change_session_active', { reason });
     }
 
@@ -342,12 +351,14 @@ router.patch('/:id', telegramAuth, requireTelegramRole('admin'), asyncHandler(as
     ).lean();
     if (requestedSession) {
       const requestedId = String(requestedSession._id);
-      const [targetOrderCount, targetTaskCount] = await Promise.all([
+      const [targetOrderCount, targetTaskCount, targetSupplementCount] = await Promise.all([
         Order.countDocuments({ orderingSessionId: requestedId }),
         PickingTask.countDocuments({ orderingSessionId: requestedId }),
+        SupplementOffer.countDocuments({ orderingSessionId: requestedId, waveId: { $ne: null } }),
       ]);
       const targetHasWork = targetOrderCount > 0
         || targetTaskCount > 0
+        || targetSupplementCount > 0
         || requestedSession.pickingStatus !== 'pending';
       const targetUsed = targetHasWork || Boolean(requestedSession.openNotifiedAt);
 

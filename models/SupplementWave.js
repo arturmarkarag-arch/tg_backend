@@ -1,23 +1,35 @@
 'use strict';
 
 const mongoose = require('mongoose');
+const { ITEM_STATUS, ACTIVE_ITEM_STATUSES, TERMINAL_ITEM_STATUSES } = require('../utils/supplementState');
 
 /**
- * V48.S2 aggregate root for one supplement publication.
+ * Supplement container for ONE DeliveryGroup + ONE exact OrderingSession.
  *
- * One Wave = one explicit publication to ONE DeliveryGroup in ONE OrderingSession.
- * Items/offers and shop requests are children of this lifecycle; current Shop
- * topology must never migrate a Wave to another delivery cycle.
+ * V48.S3+: the Wave is a stable container, NOT a one-shot batch. Individual
+ * SupplementOffer rows own the lifecycle of each item publication/revision.
+ * The container may therefore move between summary states many times while the
+ * exact delivery session is alive (new items can be added after older items were
+ * frozen/completed/cancelled).
+ *
+ * Legacy V48.S2 fields are preserved for rollout/history compatibility.
  */
 const SupplementWaveSchema = new mongoose.Schema(
   {
     deliveryGroupId: { type: String, required: true },
     orderingSessionId: { type: String, required: true },
 
+    // 3 = stable group+session container with item-level lifecycle/revisions.
+    architectureVersion: { type: Number, default: 3 },
+    containerKey: { type: String, default: null },
+    mergedIntoWaveId: { type: mongoose.Schema.Types.ObjectId, ref: 'SupplementWave', default: null },
+
+    // Derived operational summary for compatibility/UI. It is NOT the seller
+    // edit lock in V48.S3; SupplementOffer.status is authoritative per item.
     status: {
       type: String,
-      enum: ['open', 'frozen', 'completed', 'cancelled'],
-      default: 'open',
+      enum: Object.values(ITEM_STATUS),
+      default: ITEM_STATUS.OPEN,
       required: true,
     },
 
@@ -38,22 +50,38 @@ const SupplementWaveSchema = new mongoose.Schema(
     cancelledByName: { type: String, default: '' },
     cancelReason: { type: String, default: '' },
 
-    // Idempotent lifecycle notifications belong to the Wave, never to every item.
-    notifiedTypes: { type: [String], default: [] },
+    // Every successful item-publication command increments activityRevision.
+    // Notification claims are revision-based, so a container can be reopened
+    // 100+ times without a one-shot `notifiedTypes` lifetime lock.
+    activityRevision: { type: Number, default: 0 },
+    openedNotifiedRevision: { type: Number, default: 0 },
+    frozenNotifiedRevision: { type: Number, default: 0 },
+    cancelledNotifiedRevision: { type: Number, default: 0 },
+    lastReminderRevision: { type: Number, default: 0 },
     lastReminderAt: { type: Date, default: null },
 
-    // Stable idempotency key for a publish command. It is intentionally opaque to
-    // UI and derived from target session + selected receipt item ids.
-    publicationKey: { type: String, required: true },
+    // Legacy V48.S2 notification/idempotency fields.
+    notifiedTypes: { type: [String], default: [] },
+    publicationKey: { type: String, default: null },
   },
   { timestamps: true },
 );
 
-SupplementWaveSchema.statics.ACTIVE_STATUSES = ['open', 'frozen'];
-SupplementWaveSchema.statics.TERMINAL_STATUSES = ['completed', 'cancelled'];
+// Legacy helper constants remain for compatibility readers only. New operational
+// code must inspect current SupplementOffer statuses for exact-session work.
+SupplementWaveSchema.statics.ACTIVE_STATUSES = [...ACTIVE_ITEM_STATUSES];
+SupplementWaveSchema.statics.TERMINAL_STATUSES = [...TERMINAL_ITEM_STATUSES];
+SupplementWaveSchema.statics.ARCHITECTURE_VERSION = 3;
 
-SupplementWaveSchema.index({ publicationKey: 1 }, { unique: true });
+SupplementWaveSchema.index(
+  { containerKey: 1 },
+  { unique: true, partialFilterExpression: { containerKey: { $type: 'string' } } },
+);
+SupplementWaveSchema.index(
+  { publicationKey: 1 },
+  { unique: true, partialFilterExpression: { publicationKey: { $type: 'string' } } },
+);
 SupplementWaveSchema.index({ orderingSessionId: 1, status: 1 });
-SupplementWaveSchema.index({ deliveryGroupId: 1, orderingSessionId: 1, status: 1 });
+SupplementWaveSchema.index({ deliveryGroupId: 1, orderingSessionId: 1 });
 
 module.exports = mongoose.model('SupplementWave', SupplementWaveSchema);

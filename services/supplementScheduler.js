@@ -2,7 +2,7 @@
 
 // Фонові задачі дозамовлень: docs/supplement/readme.md
 
-const { autoCompleteEmptyOffers, reconcilePendingReceipts, freezeOffersForActiveOrderingWindows } = require('./supplementOffers');
+const { releaseEmptyOffers, reconcilePendingReceipts, freezeOffersForActiveOrderingWindows } = require('./supplementOffers');
 const { notifyOffers, findDueReminders, notifyWaves, findDueWaveNotifications } = require('./supplementNotify');
 const { runAsSchedulerLeader } = require('./schedulerLeader');
 
@@ -35,7 +35,7 @@ async function runSupplementTick(now = new Date()) {
   }
 
   try {
-    const closed = await autoCompleteEmptyOffers(now);
+    await releaseEmptyOffers(now);
   } catch (err) {
   }
 

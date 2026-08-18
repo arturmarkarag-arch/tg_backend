@@ -34,6 +34,7 @@ let worker;
 let auth;
 let workerAuth;
 let seq = 0;
+let seedSeq = 0;
 
 beforeAll(async () => {
   mongod = await MongoMemoryReplSet.create({ replSet: { count: 1, storageEngine: 'wiredTiger' } });
@@ -70,15 +71,16 @@ beforeEach(async () => {
 });
 
 async function seedConfirmed({ supplement = false, publishRequested = false, warehouse = true } = {}) {
+  const localSeed = ++seedSeq;
   const receipt = await Receipt.create({
-    receiptNumber: `REC-CROSS-${seq}`,
+    receiptNumber: `REC-CROSS-${seq}-${localSeed}`,
     status: 'completed',
     completedAt: new Date(),
     type: 'regular',
     createdBy: admin.telegramId,
   });
   const product = await Product.create({
-    orderNumber: 1000 + seq,
+    orderNumber: 100000 + localSeed,
     price: 2,
     quantity: 0,
     quantityPerPackage: 12,
@@ -175,6 +177,38 @@ async function createMirror(product) {
 }
 
 describe('receipt lifecycle HTTP cross guards', () => {
+  it('exposes a receiving link only for products backed by a real ReceiptItem', async () => {
+    const { item, product } = await seedConfirmed();
+    const direct = await Product.create({
+      orderNumber: 900000 + seedSeq,
+      price: 1,
+      quantity: 1,
+      name: 'Direct product',
+      status: 'active',
+      source: 'manual',
+      imageUrls: ['https://example.test/direct.jpg'],
+    });
+    await Block.create({ blockId: 901, productIds: [product._id, direct._id] });
+
+    const board = await request(app).get('/api/blocks/901').set('Authorization', auth);
+    expect(board.status).toBe(200);
+    const byId = new Map(board.body.productIds.map((row) => [String(row._id), row]));
+    expect(String(byId.get(String(product._id)).receiptItemId)).toBe(String(item._id));
+    expect(byId.get(String(direct._id)).receiptItemId).toBeNull();
+
+    const linkedContext = await request(app)
+      .get(`/api/receipts/product-context/${product._id}`)
+      .set('Authorization', auth);
+    expect(linkedContext.status).toBe(200);
+    expect(String(linkedContext.body.item._id)).toBe(String(item._id));
+
+    const directContext = await request(app)
+      .get(`/api/receipts/product-context/${direct._id}`)
+      .set('Authorization', auth);
+    expect(directContext.status).toBe(404);
+    expect(directContext.body.error).toBe('receipt_item_not_found');
+  });
+
   it('allows rollback before supplement publication starts', async () => {
     const { receipt, item, product } = await seedConfirmed({ supplement: true, publishRequested: false, warehouse: false });
     const res = await post(`/api/receipts/${receipt._id}/items/${item._id}/unconfirm`);
@@ -247,7 +281,7 @@ describe('receipt lifecycle HTTP cross guards', () => {
     expect(rollback.body.error).toBe('receipt_item_forbidden_confirm');
   });
 
-  it('blocks unconfirm, delete and commercial edit once deferred publication was requested', async () => {
+  it('blocks destructive rollback but keeps commercial metadata editable after deferred publication', async () => {
     const { receipt, item, product } = await seedConfirmed({ supplement: true, publishRequested: true, warehouse: false });
 
     const unconfirm = await post(`/api/receipts/${receipt._id}/items/${item._id}/unconfirm`);
@@ -259,8 +293,7 @@ describe('receipt lifecycle HTTP cross guards', () => {
     expect(remove.body.error).toBe('receipt_item_in_use');
 
     const price = await patch(`/api/receipts/${receipt._id}/items/${item._id}`).field('price', '3');
-    expect(price.status).toBe(409);
-    expect(price.body.error).toBe('receipt_item_in_use');
+    expect(price.status).toBe(200);
 
     const [freshItem, freshProduct] = await Promise.all([
       ReceiptItem.findById(item._id).lean(),
@@ -268,11 +301,11 @@ describe('receipt lifecycle HTTP cross guards', () => {
     ]);
     expect(freshItem.status).toBe('confirmed');
     expect(freshItem.supplementPublishRequestedAt).toBeTruthy();
-    expect(freshItem.price).toBe(2);
-    expect(freshProduct.price).toBe(2);
+    expect(freshItem.price).toBe(3);
+    expect(freshProduct.price).toBe(3);
   });
 
-  it.each(['open', 'frozen', 'completed'])('blocks unconfirm/delete/commercial edit for %s supplement offer even with zero requests', async (status) => {
+  it.each(['open', 'frozen', 'completed'])('blocks unconfirm/delete but allows metadata correction for %s supplement offer with zero requests', async (status) => {
     const { receipt, item, product } = await seedConfirmed({ supplement: true, publishRequested: true, warehouse: false });
     await SupplementOffer.create({
       receiptId: receipt._id,
@@ -291,25 +324,20 @@ describe('receipt lifecycle HTTP cross guards', () => {
     expect(remove.body.error).toBe('receipt_item_in_use');
 
     const edit = await patch(`/api/receipts/${receipt._id}/items/${item._id}`).field('qtyPerPackage', '24');
-    expect(edit.status).toBe(409);
-    expect(edit.body.error).toBe('receipt_item_in_use');
+    expect(edit.status).toBe(200);
+    expect((await ReceiptItem.findById(item._id).lean()).qtyPerPackage).toBe(24);
     expect(await SupplementRequest.countDocuments({})).toBe(0);
   });
 
-  it('block membership freezes price/original-photo corrections through the receipt', async () => {
+  it('block membership blocks rollback but keeps commercial metadata corrections available', async () => {
     const { receipt, item, product } = await seedConfirmed();
     await Block.create({ blockId: 77, productIds: [product._id] });
 
     const price = await patch(`/api/receipts/${receipt._id}/items/${item._id}`).field('price', '4');
-    expect(price.status).toBe(409);
-    expect(price.body.error).toBe('receipt_item_in_use');
-
-    const photo = await patch(`/api/receipts/${receipt._id}/items/${item._id}`).field('originalFilename', 'replacement.jpg');
-    expect(photo.status).toBe(409);
-    expect(photo.body.error).toBe('receipt_item_in_use');
+    expect(price.status).toBe(200);
   });
 
-  it('order usage alone freezes commercial edits and destructive rollback', async () => {
+  it('order usage blocks destructive rollback but permits canonical metadata correction', async () => {
     const { receipt, item, product } = await seedConfirmed();
     await Order.create({
       orderNumber: 800000 + seq,
@@ -320,13 +348,12 @@ describe('receipt lifecycle HTTP cross guards', () => {
     });
 
     const edit = await patch(`/api/receipts/${receipt._id}/items/${item._id}`).field('qtyPerPackage', '24');
-    expect(edit.status).toBe(409);
-    expect(edit.body.error).toBe('receipt_item_in_use');
+    expect(edit.status).toBe(200);
     expect((await post(`/api/receipts/${receipt._id}/items/${item._id}/unconfirm`)).status).toBe(409);
     expect((await del(`/api/receipts/${receipt._id}/items/${item._id}`)).status).toBe(409);
   });
 
-  it('picking usage alone freezes commercial edits and destructive rollback', async () => {
+  it('picking usage blocks destructive rollback but permits canonical metadata correction', async () => {
     const { receipt, item, product } = await seedConfirmed();
     await PickingTask.create({
       productId: product._id,
@@ -337,20 +364,18 @@ describe('receipt lifecycle HTTP cross guards', () => {
     });
 
     const edit = await patch(`/api/receipts/${receipt._id}/items/${item._id}`).field('price', '4');
-    expect(edit.status).toBe(409);
-    expect(edit.body.error).toBe('receipt_item_in_use');
+    expect(edit.status).toBe(200);
     expect((await post(`/api/receipts/${receipt._id}/items/${item._id}/unconfirm`)).status).toBe(409);
     expect((await del(`/api/receipts/${receipt._id}/items/${item._id}`)).status).toBe(409);
   });
 
-  it('archived warehouse product also freezes receipt rollback and commercial correction', async () => {
+  it('archived warehouse product blocks rollback but still accepts metadata correction', async () => {
     const { receipt, item, product } = await seedConfirmed();
     product.status = 'archived';
     await product.save();
 
     const edit = await patch(`/api/receipts/${receipt._id}/items/${item._id}`).field('price', '4');
-    expect(edit.status).toBe(409);
-    expect(edit.body.error).toBe('receipt_item_in_use');
+    expect(edit.status).toBe(200);
     expect((await post(`/api/receipts/${receipt._id}/items/${item._id}/unconfirm`)).status).toBe(409);
   });
 
@@ -390,7 +415,7 @@ describe('receipt lifecycle HTTP cross guards', () => {
     expect(offer.sourceSnapshot).toBeTruthy();
   });
 
-  it('one ready item may publish independently into two current delivery sessions', async () => {
+  it('one ready item can open in only one delivery session even under concurrent target publishes', async () => {
     const { item } = await seedConfirmed({ supplement: true, publishRequested: false, warehouse: false });
     const [groupA, groupB] = await Promise.all([
       createClosedGroup('Cross A'),
@@ -403,18 +428,274 @@ describe('receipt lifecycle HTTP cross guards', () => {
     ]);
     expect(a.status).toBe(200);
     expect(b.status).toBe(200);
-    expect(Number(a.body.selectedCount || 0)).toBe(1);
-    expect(Number(b.body.selectedCount || 0)).toBe(1);
+    expect(Number(a.body.selectedCount || 0) + Number(b.body.selectedCount || 0)).toBe(1);
 
     const fresh = await ReceiptItem.findById(item._id).lean();
     expect(fresh.supplementPublishRequestedAt).toBeTruthy();
-    expect(await SupplementOffer.countDocuments({ receiptItemId: item._id })).toBe(2);
-    expect(await SupplementWave.countDocuments({})).toBe(2);
+    expect(await SupplementOffer.countDocuments({ receiptItemId: item._id })).toBe(1);
+    expect(await SupplementWave.countDocuments({})).toBe(1);
 
     const retry = await publishToGroup(groupA);
     expect(retry.status).toBe(200);
     expect(retry.body.selectedCount).toBe(0);
+    expect(await SupplementOffer.countDocuments({ receiptItemId: item._id })).toBe(1);
+  });
+
+  it('cancel -> complete-by-cancellation -> edit -> republish reopens only the exact current session and starts clean', async () => {
+    const { receipt, item } = await seedConfirmed({ supplement: true, publishRequested: false, warehouse: false });
+    const group = await createClosedGroup(`Cross Repeat ${seq}`);
+
+    const first = await publishToGroup(group);
+    expect(first.status).toBe(200);
+    expect(Number(first.body.selectedCount || 0)).toBe(1);
+
+    const [wave, offer, shop] = await Promise.all([
+      SupplementWave.findOne({ orderingSessionId: String(group.orderingSessionId) }).lean(),
+      SupplementOffer.findOne({ receiptItemId: item._id, orderingSessionId: String(group.orderingSessionId) }).lean(),
+      Shop.findOne({ deliveryGroupId: String(group._id), isActive: true }).lean(),
+    ]);
+    expect(wave).toBeTruthy();
+    expect(offer).toBeTruthy();
+    expect(shop).toBeTruthy();
+
+    const oldRequest = await SupplementRequest.create({
+      waveId: wave._id,
+      orderingSessionId: String(group.orderingSessionId),
+      offerId: offer._id,
+      revision: 1,
+      shopId: shop._id,
+      shopName: shop.name,
+      deliveryGroupId: String(group._id),
+      quantity: 3,
+      status: 'active',
+      createdBy: admin.telegramId,
+    });
+
+    // Simulate the ordinary part already being done: cancellation of the final
+    // supplement item is now allowed to make the delivery session terminal.
+    await OrderingSession.updateOne(
+      { _id: group.orderingSessionId },
+      { $set: { pickingStatus: 'confirmed', pickingConfirmedAt: new Date() } },
+    );
+
+    const cancelled = await post(`/api/supplement/offers/${offer._id}/cancel`).send({ reason: 'test_restart' });
+    expect(cancelled.status).toBe(200);
+    expect(cancelled.body.status).toBe('cancelled');
+    expect((await OrderingSession.findById(group.orderingSessionId).lean()).pickingStatus).toBe('completed');
+
+    const cancelledRequest = await SupplementRequest.findById(oldRequest._id).lean();
+    expect(cancelledRequest.status).toBe('cancelled');
+    expect(cancelledRequest.revision).toBe(1);
+
+    // Terminal modern revision owns its old snapshot, so future metadata may change.
+    const edit = await patch(`/api/receipts/${receipt._id}/items/${item._id}`).field('price', '3.5');
+    expect(edit.status).toBe(200);
+
+    const repeat = await publishToGroup(group);
+    expect(repeat.status).toBe(200);
+    expect(Number(repeat.body.selectedCount || 0)).toBe(1);
+
+    const [sameWave, restartedOffer, reopenedSession] = await Promise.all([
+      SupplementWave.findOne({ orderingSessionId: String(group.orderingSessionId), mergedIntoWaveId: null }).lean(),
+      SupplementOffer.findById(offer._id).lean(),
+      OrderingSession.findById(group.orderingSessionId).lean(),
+    ]);
+    expect(String(sameWave._id)).toBe(String(wave._id));
+    expect(await SupplementWave.countDocuments({ orderingSessionId: String(group.orderingSessionId), mergedIntoWaveId: null })).toBe(1);
+    expect(restartedOffer.revision).toBe(2);
+    expect(restartedOffer.status).toBe('open');
+    expect(Number(restartedOffer.sourceSnapshot?.price || 0)).toBe(3.5);
+    expect(await SupplementRequest.countDocuments({ offerId: offer._id, revision: 2 })).toBe(0);
+    expect((await SupplementRequest.findById(oldRequest._id).lean()).status).toBe('cancelled');
+    expect(reopenedSession.pickingStatus).toBe('in_progress');
+  });
+
+  it('a FROZEN cancellation releases the ReceiptItem for another target', async () => {
+    const { item } = await seedConfirmed({ supplement: true, publishRequested: false, warehouse: false });
+    const [groupA, groupB] = await Promise.all([
+      createClosedGroup(`Cross Frozen A ${seq}`),
+      createClosedGroup(`Cross Frozen B ${seq}`),
+    ]);
+
+    const first = await publishToGroup(groupA);
+    expect(first.status).toBe(200);
+    expect(Number(first.body.selectedCount || 0)).toBe(1);
+
+    const [wave, offer, shop] = await Promise.all([
+      SupplementWave.findOne({ orderingSessionId: String(groupA.orderingSessionId) }).lean(),
+      SupplementOffer.findOne({ receiptItemId: item._id, orderingSessionId: String(groupA.orderingSessionId) }).lean(),
+      Shop.findOne({ deliveryGroupId: String(groupA._id), isActive: true }).lean(),
+    ]);
+    expect(wave).toBeTruthy();
+    expect(offer).toBeTruthy();
+    expect(shop).toBeTruthy();
+    await SupplementRequest.create({
+      waveId: wave._id,
+      orderingSessionId: String(groupA.orderingSessionId),
+      offerId: offer._id,
+      revision: offer.revision,
+      shopId: shop._id,
+      shopName: shop.name,
+      deliveryGroupId: String(groupA._id),
+      quantity: 1,
+      status: 'active',
+      createdBy: admin.telegramId,
+    });
+
+    const freeze = await post(`/api/supplement/waves/${wave._id}/freeze`);
+    expect(freeze.status).toBe(200);
+    expect((await SupplementOffer.findById(offer._id).lean()).status).toBe('frozen');
+
+    const cancelled = await post(`/api/supplement/offers/${offer._id}/cancel`).send({ reason: 'terminal_after_freeze' });
+    expect(cancelled.status).toBe(200);
+    const terminal = await SupplementOffer.findById(offer._id).lean();
+    expect(terminal.status).toBe('cancelled');
+    expect(terminal.frozenAt).toBeTruthy();
+
+    const second = await publishToGroup(groupB);
+    expect(second.status).toBe(200);
+    expect(Number(second.body.selectedCount || 0)).toBe(1);
     expect(await SupplementOffer.countDocuments({ receiptItemId: item._id })).toBe(2);
+    expect(await SupplementOffer.findOne({
+      receiptItemId: item._id,
+      orderingSessionId: String(groupB.orderingSessionId),
+      status: 'open',
+    }).lean()).toBeTruthy();
+
+    const pending = await request(app)
+      .get('/api/receipts/supplement-batches/pending')
+      .set('Authorization', auth);
+    expect(pending.status).toBe(200);
+    expect(Math.max(...pending.body.targets.map((target) => Number(target.readyCount || 0)), 0)).toBe(0);
+  });
+
+  it('a zero-request item is released after freeze and may target another group', async () => {
+    const { item } = await seedConfirmed({ supplement: true, publishRequested: false, warehouse: false });
+    const [groupA, groupB] = await Promise.all([
+      createClosedGroup(`Cross Empty A ${seq}`),
+      createClosedGroup(`Cross Empty B ${seq}`),
+    ]);
+
+    const first = await publishToGroup(groupA);
+    expect(first.status).toBe(200);
+    const [wave, offer] = await Promise.all([
+      SupplementWave.findOne({ orderingSessionId: String(groupA.orderingSessionId) }).lean(),
+      SupplementOffer.findOne({ receiptItemId: item._id, orderingSessionId: String(groupA.orderingSessionId) }).lean(),
+    ]);
+
+    const freeze = await post(`/api/supplement/waves/${wave._id}/freeze`);
+    expect(freeze.status).toBe(200);
+    const released = await SupplementOffer.findById(offer._id).lean();
+    expect(released.status).toBe('cancelled');
+    expect(released.frozenAt).toBeTruthy();
+    expect(released.completedAt).toBeFalsy();
+    expect(released.cancelReason).toBe('no_requests');
+
+    const second = await publishToGroup(groupB);
+    expect(second.status).toBe(200);
+    expect(Number(second.body.selectedCount || 0)).toBe(1);
+    expect(await SupplementOffer.countDocuments({ receiptItemId: item._id })).toBe(2);
+  });
+
+  it('an old OPEN cancellation cannot reopen its session after the item was retargeted elsewhere', async () => {
+    const firstItem = await seedConfirmed({ supplement: true, publishRequested: false, warehouse: false });
+    const [groupA, groupB] = await Promise.all([
+      createClosedGroup(`Cross Retarget A ${seq}`),
+      createClosedGroup(`Cross Retarget B ${seq}`),
+    ]);
+
+    expect((await publishToGroup(groupA)).body.selectedCount).toBe(1);
+    const offerA = await SupplementOffer.findOne({
+      receiptItemId: firstItem.item._id,
+      orderingSessionId: String(groupA.orderingSessionId),
+    }).lean();
+    await OrderingSession.updateOne(
+      { _id: groupA.orderingSessionId },
+      { $set: { pickingStatus: 'confirmed', pickingConfirmedAt: new Date() } },
+    );
+    expect((await post(`/api/supplement/offers/${offerA._id}/cancel`).send({ reason: 'wrong_group' })).status).toBe(200);
+    expect((await OrderingSession.findById(groupA.orderingSessionId).lean()).pickingStatus).toBe('completed');
+
+    const retarget = await publishToGroup(groupB);
+    expect(retarget.status).toBe(200);
+    expect(Number(retarget.body.selectedCount || 0)).toBe(1);
+
+    await seedConfirmed({ supplement: true, publishRequested: false, warehouse: false });
+    const staleReopen = await publishToGroup(groupA);
+    expect(staleReopen.status).toBe(409);
+    expect(staleReopen.body.error).toBe('supplement_target_session_completed');
+  });
+
+  it('successful completed supplement state cannot reopen the delivery session', async () => {
+    const { item } = await seedConfirmed({ supplement: true, publishRequested: false, warehouse: false });
+    const group = await createClosedGroup(`Cross Completed Closed ${seq}`);
+
+    const first = await publishToGroup(group);
+    expect(first.status).toBe(200);
+    expect(Number(first.body.selectedCount || 0)).toBe(1);
+
+    const offer = await SupplementOffer.findOne({
+      receiptItemId: item._id,
+      orderingSessionId: String(group.orderingSessionId),
+    });
+    expect(offer).toBeTruthy();
+    offer.status = 'completed';
+    offer.completedAt = new Date();
+    await offer.save();
+    await OrderingSession.updateOne(
+      { _id: group.orderingSessionId },
+      { $set: { pickingStatus: 'completed', pickingCompletedAt: new Date() } },
+    );
+
+    const repeat = await publishToGroup(group);
+    expect(repeat.status).toBe(409);
+    expect(repeat.body.error).toBe('supplement_target_session_completed');
+    expect((await OrderingSession.findById(group.orderingSessionId).lean()).pickingStatus).toBe('completed');
+    expect((await SupplementOffer.findById(offer._id).lean()).revision).toBe(1);
+  });
+
+  it('freezing existing items does not create a second container when a new product arrives later', async () => {
+    const firstItem = await seedConfirmed({ supplement: true, publishRequested: false, warehouse: false });
+    const group = await createClosedGroup(`Cross Add After Freeze ${seq}`);
+    const firstPublish = await publishToGroup(group);
+    expect(firstPublish.status).toBe(200);
+    expect(Number(firstPublish.body.selectedCount || 0)).toBe(1);
+
+    const [wave, firstOffer, shop] = await Promise.all([
+      SupplementWave.findOne({ orderingSessionId: String(group.orderingSessionId) }).lean(),
+      SupplementOffer.findOne({ receiptItemId: firstItem.item._id, orderingSessionId: String(group.orderingSessionId) }).lean(),
+      Shop.findOne({ deliveryGroupId: String(group._id), isActive: true }).lean(),
+    ]);
+    await SupplementRequest.create({
+      waveId: wave._id,
+      orderingSessionId: String(group.orderingSessionId),
+      offerId: firstOffer._id,
+      revision: 1,
+      shopId: shop._id,
+      shopName: shop.name,
+      deliveryGroupId: String(group._id),
+      quantity: 2,
+      status: 'active',
+      createdBy: admin.telegramId,
+    });
+
+    const freeze = await post(`/api/supplement/waves/${wave._id}/freeze`);
+    expect(freeze.status).toBe(200);
+    expect((await SupplementOffer.findById(firstOffer._id).lean()).status).toBe('frozen');
+
+    const secondItem = await seedConfirmed({ supplement: true, publishRequested: false, warehouse: false });
+    const secondPublish = await publishToGroup(group);
+    expect(secondPublish.status).toBe(200);
+    expect(Number(secondPublish.body.selectedCount || 0)).toBe(1);
+
+    const [oldAfter, newOffer] = await Promise.all([
+      SupplementOffer.findById(firstOffer._id).lean(),
+      SupplementOffer.findOne({ receiptItemId: secondItem.item._id, orderingSessionId: String(group.orderingSessionId) }).lean(),
+    ]);
+    expect(oldAfter.status).toBe('frozen');
+    expect(newOffer.status).toBe('open');
+    expect(String(newOffer.waveId)).toBe(String(wave._id));
+    expect(await SupplementWave.countDocuments({ orderingSessionId: String(group.orderingSessionId), mergedIntoWaveId: null })).toBe(1);
   });
 
   it('publish vs unconfirm race has only two valid outcomes and never leaves a split state', async () => {

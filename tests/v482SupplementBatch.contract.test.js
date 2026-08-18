@@ -10,15 +10,15 @@ const model = read('models/ReceiptItem.js');
 describe('V48.2 supplement batch-group release contract', () => {
   test('current regular supplement items can confirm unassigned and are marked batch v2', () => {
     expect(model).toContain('Version 2 = current flow');
-    expect(receipts).toContain('v2 is target-neutral and may be published independently');
+    expect(receipts).toContain('v2 stays target-neutral only while READY');
     expect(permissions).toContain('allowSupplementWithoutGroup: currentBatchSupplement');
     expect(receipts).toContain('routing.supplementDeliveryGroupId ? 1 : 2');
   });
 
-  test('one global publish lock pins one exact group/session while keeping the item target-neutral', () => {
+  test('one global publish lock pins one exact group/session and applies an item-global lifecycle fence', () => {
     expect(receipts).toContain("withLock('supplement-batch:publish'");
-    expect(receipts).toContain('existingTargetItems');
-    expect(receipts).toContain('orderingSessionId: target.orderingSessionId');
+    expect(receipts).toContain('existingPublications');
+    expect(receipts).toContain('blockedItemIds');
     expect(receipts).toContain('readyCount: readyCountForTarget');
   });
 

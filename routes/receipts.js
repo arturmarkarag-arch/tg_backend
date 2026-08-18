@@ -9,6 +9,7 @@ const Product = require('../models/Product');
 const ShopProduct = require('../models/ShopProduct');
 const ProductVector = require('../models/ProductVector');
 const SupplementOffer = require('../models/SupplementOffer');
+const SupplementWave = require('../models/SupplementWave');
 const Block = require('../models/Block');
 const ReceiptItemLog = require('../models/ReceiptItemLog');
 const DeliveryGroup = require('../models/DeliveryGroup');
@@ -21,6 +22,13 @@ const { getGeminiStatus } = require('../geminiClient');
 const { describeImageUrl } = require('../utils/productDescribe');
 const { appError, asyncHandler } = require('../utils/errors');
 const { withLock } = require('../utils/lock');
+const {
+  RECEIPT_ITEM_SUPPLEMENT_STATE,
+  blocksGenericRepublish,
+  deriveReceiptItemSupplementState,
+  findActiveReceiptItemSupplementOffer,
+  isTerminalReceiptItemSupplementState,
+} = require('../utils/supplementState');
 const { normalizeReceiptPhotoMeta, photoCommentsText } = require('../utils/receiptPhotoMeta');
 const { buildWarsawDateRange } = require('../utils/warsawDateTime');
 const {
@@ -48,10 +56,31 @@ const {
   propagateItemEdit,
   rollbackItemArtifacts,
   hasOpenSupplementWave,
-  hasActiveSupplementItemWave,
 } = require('../services/receiptSync');
 
 const staffOnly = requireTelegramRoles(['admin', 'warehouse']);
+const RECEIPT_GALLERY_FIELDS = '_id receiptId photoUrl originalPhotoUrl totalQty destination routingVersion routing price qtyPerPackage status createdBy supplementBatchVersion supplementPublishRequestedAt';
+
+async function supplementGroupNamesByWaveForOffers(offers = []) {
+  const waveIds = [...new Set(offers
+    .map((offer) => String(offer?.waveId || ''))
+    .filter((id) => mongoose.Types.ObjectId.isValid(id)))];
+  if (!waveIds.length) return new Map();
+  const waves = await SupplementWave.find(
+    { _id: { $in: waveIds } },
+    '_id deliveryGroupId',
+  ).lean();
+  const groupIds = [...new Set(waves
+    .map((wave) => String(wave.deliveryGroupId || ''))
+    .filter((id) => mongoose.Types.ObjectId.isValid(id)))];
+  if (!groupIds.length) return new Map();
+  const groups = await DeliveryGroup.find({ _id: { $in: groupIds } }, '_id name').lean();
+  const groupNameById = new Map(groups.map((group) => [String(group._id), group.name || '']));
+  return new Map(waves.map((wave) => [
+    String(wave._id),
+    groupNameById.get(String(wave.deliveryGroupId || '')) || '',
+  ]));
+}
 
 const FIELD_LABELS = {
   totalQty: 'Загальна к-сть',
@@ -262,10 +291,7 @@ router.get('/items-gallery', staffOnly, asyncHandler(async (req, res) => {
 
   const [total, rows] = await Promise.all([
     ReceiptItem.countDocuments(query),
-    ReceiptItem.find(
-      query,
-      '_id receiptId photoUrl originalPhotoUrl totalQty destination routingVersion routing price qtyPerPackage status createdBy supplementBatchVersion supplementPublishRequestedAt',
-    )
+    ReceiptItem.find(query, RECEIPT_GALLERY_FIELDS)
       .sort({ createdAt: -1, _id: -1 })
       .skip((page - 1) * pageSize)
       .limit(pageSize)
@@ -279,16 +305,42 @@ router.get('/items-gallery', staffOnly, asyncHandler(async (req, res) => {
   const receipts = receiptIds.length
     ? await Receipt.find(
         { _id: { $in: receiptIds } },
-        '_id type targetDeliveryGroupId',
+        '_id type status targetDeliveryGroupId',
       ).lean()
     : [];
+  const rowIds = rows.map((row) => row._id);
+  const supplementOffers = rowIds.length
+    ? await SupplementOffer.find(
+        { receiptItemId: { $in: rowIds }, waveId: { $ne: null } },
+        'receiptItemId waveId status itemStatus openedAt frozenAt completedAt revisionHistory',
+      ).lean()
+    : [];
+  const supplementGroupNameByWaveId = await supplementGroupNamesByWaveForOffers(supplementOffers);
+  const offersByItemId = new Map();
+  for (const offer of supplementOffers) {
+    const itemId = String(offer.receiptItemId || '');
+    offersByItemId.set(itemId, [...(offersByItemId.get(itemId) || []), offer]);
+  }
   const receiptById = new Map(receipts.map((receipt) => [String(receipt._id), receipt]));
   const items = rows.map((row) => {
     const receipt = receiptById.get(String(row.receiptId || ''));
+    const routing = normalizeReceiptItemRouting(row, receipt);
+    const supplementState = deriveReceiptItemSupplementState({
+      offers: offersByItemId.get(String(row._id)) || [],
+      routingSupplement: routing.supplement,
+      receiptCompleted: receipt?.status === 'completed',
+    });
+    const activeSupplementOffer = findActiveReceiptItemSupplementOffer(
+      offersByItemId.get(String(row._id)) || [],
+      supplementState,
+    );
     return {
       ...row,
       receiptType: receipt?.type || 'regular',
+      receiptStatus: receipt?.status || 'draft',
       receiptTargetDeliveryGroupId: receipt?.targetDeliveryGroupId || null,
+      supplementState,
+      supplementGroupName: supplementGroupNameByWaveId.get(String(activeSupplementOffer?.waveId || '')) || '',
     };
   });
 
@@ -301,11 +353,54 @@ router.get('/items-gallery', staffOnly, asyncHandler(async (req, res) => {
   });
 }));
 
+// Deep-link from a warehouse tile to receiving. Product._id is the navigation
+// handle, but receiving exists only when a real ReceiptItem link exists. Products
+// created outside receiving must keep the tile action disabled and may not create
+// a synthetic/photo-only row inside the invoices screen.
+router.get('/product-context/:productId', staffOnly, asyncHandler(async (req, res) => {
+  const { productId } = req.params;
+  if (!mongoose.Types.ObjectId.isValid(productId)) throw appError('product_not_found');
 
-// ── SUPPLEMENT BATCH PUBLICATION ────────────────────────────────────────────
+  const product = await Product.findById(
+    productId,
+    '_id receiptItemId',
+  ).lean();
+  if (!product) throw appError('product_not_found');
+
+  let item = product.receiptItemId
+    ? await ReceiptItem.findById(product.receiptItemId, RECEIPT_GALLERY_FIELDS).lean()
+    : null;
+  if (!item) {
+    item = await ReceiptItem.findOne(
+      { createdProductId: product._id },
+      RECEIPT_GALLERY_FIELDS,
+    ).sort({ createdAt: -1 }).lean();
+  }
+
+  if (!item) throw appError('receipt_item_not_found');
+
+  const receipt = await Receipt.findById(
+    item.receiptId,
+    '_id type targetDeliveryGroupId',
+  ).lean();
+  if (!receipt) throw appError('receipt_not_found');
+
+  return res.json({
+    productId: String(product._id),
+    item: {
+      ...item,
+      receiptType: receipt.type || 'regular',
+      receiptTargetDeliveryGroupId: receipt.targetDeliveryGroupId || null,
+    },
+  });
+}));
+
+
+// ── SUPPLEMENT GROUP-SESSION PUBLICATION ───────────────────────────────────
 // Preparing/confirming a supplement product never sends Telegram by itself.
 // V48.2 current rows are deliberately UNASSIGNED: workers mark all needed items
-// as supplement first, then choose one delivery group for the whole batch here.
+// as supplement first, then choose one delivery group. The command adds ready
+// items to that group+session's single stable supplement container.
 // Legacy V47.16 rows that already carry a group remain publishable.
 router.get('/supplement-batches/pending', staffOnly, asyncHandler(async (_req, res) => {
   const rows = await ReceiptItem.find({
@@ -321,10 +416,11 @@ router.get('/supplement-batches/pending', staffOnly, asyncHandler(async (_req, r
     return res.json({ readyCount: 0, groups: [], targets: targets.groups || [], serverTime: targets.serverTime || new Date().toISOString() });
   }
 
-  // Only a completed receiving document may enter a seller Wave. A ReceiptItem
-  // may be published into MORE THAN ONE currently-active delivery cycle. The old
-  // supplementPublishRequestedAt field means "published at least once" only; it
-  // is no longer the domain authority for per-target eligibility.
+  // Only a completed receiving document may enter a seller Wave. Supplement
+  // lifecycle is item-global, not target-local: one ReceiptItem can have only one
+  // OPEN/FROZEN publication, and after FROZEN/COMPLETED it never returns to the
+  // generic ready pool. An OPEN publication cancelled as a correction is the only
+  // state that may become ready again (possibly for another group).
   const receiptIds = [...new Set(rows.map((row) => String(row.receiptId)))];
   const completed = await Receipt.find(
     { _id: { $in: receiptIds }, status: 'completed' },
@@ -334,21 +430,25 @@ router.get('/supplement-batches/pending', staffOnly, asyncHandler(async (_req, r
   const publishable = rows.filter((row) => completedIds.has(String(row.receiptId)));
   const itemIds = publishable.map((row) => row._id);
 
-  const selectableTargets = (targets.groups || []).filter((target) => target.selectable && target.orderingSessionId);
-  const targetSessionIds = selectableTargets.map((target) => String(target.orderingSessionId));
-  const alreadyPublished = itemIds.length && targetSessionIds.length
+  const currentPublications = itemIds.length
     ? await SupplementOffer.find({
       receiptItemId: { $in: itemIds },
-      orderingSessionId: { $in: targetSessionIds },
       waveId: { $ne: null },
-    }, 'receiptItemId orderingSessionId').lean()
+    }, 'receiptItemId orderingSessionId status itemStatus revision frozenAt completedAt revisionHistory').lean()
     : [];
-  const publishedKeys = new Set(alreadyPublished.map((row) => `${String(row.orderingSessionId)}:${String(row.receiptItemId)}`));
+  const blocksRepublish = (row) => blocksGenericRepublish(row);
+  const blockedItemIds = new Set(
+    currentPublications.filter(blocksRepublish).map((row) => String(row.receiptItemId)),
+  );
+  const eligibleForTarget = (row, target) => {
+    if (blockedItemIds.has(String(row._id))) return false;
+    if (Number(row.supplementBatchVersion || 0) >= 2) return true;
+    return String(row.routing?.supplementDeliveryGroupId || '') === String(target.deliveryGroupId || '');
+  };
 
   const targetsWithCounts = (targets.groups || []).map((target) => {
-    const sid = String(target.orderingSessionId || '');
-    const readyCountForTarget = target.selectable && sid
-      ? publishable.filter((row) => !publishedKeys.has(`${sid}:${String(row._id)}`)).length
+    const readyCountForTarget = target.selectable && target.orderingSessionId
+      ? publishable.filter((row) => eligibleForTarget(row, target)).length
       : 0;
     return { ...target, readyCount: readyCountForTarget };
   });
@@ -362,7 +462,7 @@ router.get('/supplement-batches/pending', staffOnly, asyncHandler(async (_req, r
     const gid = String(row.routing?.supplementDeliveryGroupId || '').trim();
     const target = byTargetGroup.get(gid);
     if (!gid || !target?.orderingSessionId) continue;
-    if (publishedKeys.has(`${String(target.orderingSessionId)}:${String(row._id)}`)) continue;
+    if (!eligibleForTarget(row, target)) continue;
     legacyCounts.set(gid, (legacyCounts.get(gid) || 0) + 1);
   }
   const groups = [...legacyCounts.entries()].map(([deliveryGroupId, count]) => {
@@ -397,7 +497,7 @@ router.post('/supplement-batches/:deliveryGroupId/publish', staffOnly, asyncHand
     byName: [req.telegramUser?.firstName, req.telegramUser?.lastName].filter(Boolean).join(' '),
   };
 
-  // Two different targets must not split the same unassigned ready pool. Once the
+  // Two different targets must not race over the same target-neutral ready pool. Once the
   // exact delivery cycle is resolved, publication also shares the session lifecycle
   // lock with completion so the Wave cannot appear concurrently with completed.
   const result = await withLock('supplement-batch:publish', async () => {
@@ -421,9 +521,13 @@ router.post('/supplement-batches/:deliveryGroupId/publish', staffOnly, asyncHand
           const sessionDoc = await OrderingSession.findOne({
             _id: target.orderingSessionId,
             groupId: deliveryGroupId,
-            pickingStatus: { $ne: 'completed' },
           }).session(mongoSession).lean();
-          if (!sessionDoc) throw appError('supplement_target_session_completed', { group: target.groupName });
+          if (!sessionDoc) throw appError('supplement_target_session_changed', { group: target.groupName });
+          if (sessionDoc.pickingStatus === 'completed') {
+            const { hasReopenableSupplementCancellation } = require('../services/supplementTargets');
+            const reopenable = await hasReopenableSupplementCancellation(target.orderingSessionId, { session: mongoSession });
+            if (!reopenable) throw appError('supplement_target_session_completed', { group: target.groupName });
+          }
 
           const candidates = await ReceiptItem.find({
             status: 'confirmed',
@@ -431,8 +535,9 @@ router.post('/supplement-batches/:deliveryGroupId/publish', staffOnly, asyncHand
             'routing.supplement': true,
             supplementBatchVersion: { $gte: 1 },
             $or: [
-              // v2 is target-neutral and may be published independently into
-              // several CURRENT delivery cycles, one Wave/group at a time.
+              // v2 stays target-neutral only while READY. The item-global fence
+              // below prevents simultaneous targets and makes FROZEN/COMPLETED
+              // terminal for future supplement publication.
               { supplementBatchVersion: { $gte: 2 } },
               // v1 compatibility remains pinned to its old per-item group.
               { supplementBatchVersion: 1, 'routing.supplementDeliveryGroupId': deliveryGroupId },
@@ -452,17 +557,40 @@ router.post('/supplement-batches/:deliveryGroupId/publish', staffOnly, asyncHand
           const now = new Date();
           const ids = publishable.map((row) => row._id);
 
-          // Exact-session child existence is the idempotency/eligibility authority.
-          // ReceiptItem.supplementPublishRequestedAt is retained only as a durable
-          // "published at least once" compatibility marker for rollback guards.
-          const existingTargetItems = await SupplementOffer.distinct('receiptItemId', {
+          // Item-global lifecycle is the publication fence. The old target-local
+          // check allowed the same ReceiptItem to appear in several groups. Now an
+          // Active OPEN/FROZEN work anywhere blocks a duplicate and COMPLETED is
+          // final. Any CANCELLED revision is eligible for a clean re-target.
+          const existingPublications = await SupplementOffer.find({
             receiptItemId: { $in: ids },
-            orderingSessionId: target.orderingSessionId,
             waveId: { $ne: null },
-          }).session(mongoSession);
-          const existingSet = new Set(existingTargetItems.map(String));
-          const selectedRows = publishable.filter((row) => !existingSet.has(String(row._id)));
+          }, 'receiptItemId orderingSessionId status itemStatus revision frozenAt completedAt revisionHistory').session(mongoSession).lean();
+          const blockedItemIds = new Set(
+            existingPublications.filter(blocksGenericRepublish).map((row) => String(row.receiptItemId)),
+          );
+          const selectedRows = publishable.filter((row) => {
+            return !blockedItemIds.has(String(row._id));
+          });
           if (!selectedRows.length) return;
+
+          // A cancellation may have made this exact CURRENT delivery
+          // session terminal. A real new publication is allowed to reopen only
+          // that same current session, and only because persisted cancelled
+          // supplement state proves why it closed.
+          // Historical sessions are impossible here: resolveSupplementTarget already
+          // pinned findCurrentSessionId and the lifecycle lock fences cycle rollover.
+          if (sessionDoc.pickingStatus === 'completed') {
+            const { transitionPickingStatus } = require('../utils/sessionStatus');
+            const reopened = await transitionPickingStatus(
+              target.orderingSessionId,
+              'in_progress',
+              { actor, meta: { reason: 'supplement_republished_after_cancel' }, allowReopen: true },
+              mongoSession,
+            );
+            if (!reopened) throw appError('supplement_target_session_changed', { group: target.groupName });
+            target.state = 'picking';
+            target.reopenCompleted = false;
+          }
 
           const selectedIds = selectedRows.map((row) => row._id);
           await ReceiptItem.updateMany(
@@ -489,8 +617,8 @@ router.post('/supplement-batches/:deliveryGroupId/publish', staffOnly, asyncHand
           );
 
           outcome = {
-            selected: selectedRows.length,
-            offers: created.offers.map((doc) => doc.toObject ? doc.toObject() : doc),
+            selected: created.changedOffers.length,
+            offers: created.changedOffers.map((doc) => doc.toObject ? doc.toObject() : doc),
             wave: created.wave?.toObject ? created.wave.toObject() : created.wave,
             target,
           };
@@ -758,6 +886,22 @@ router.get('/:id/items', staffOnly, asyncHandler(async (req, res) => {
 
   const items = await ReceiptItem.find({ receiptId: receipt._id }).sort({ createdAt: -1 }).lean();
 
+  const supplementOffers = items.length
+    ? await SupplementOffer.find(
+        { receiptItemId: { $in: items.map((item) => item._id) }, waveId: { $ne: null } },
+        'receiptItemId waveId status itemStatus openedAt frozenAt completedAt revisionHistory',
+      ).lean()
+    : [];
+  const supplementGroupNameByWaveId = await supplementGroupNamesByWaveForOffers(supplementOffers);
+  const supplementOffersByItemId = new Map();
+  for (const offer of supplementOffers) {
+    const itemId = String(offer.receiptItemId || '');
+    supplementOffersByItemId.set(itemId, [
+      ...(supplementOffersByItemId.get(itemId) || []),
+      offer,
+    ]);
+  }
+
   // Enrich each item with currentLocation (block + product status) and productCurrentQty
   const productIds = items.map((i) => i.createdProductId).filter(Boolean);
   let productMap = {};
@@ -780,10 +924,23 @@ router.get('/:id/items', staffOnly, asyncHandler(async (req, res) => {
     const productId = item.createdProductId;
     const product = productId ? productMap[String(productId)] : null;
     const blockId = productId ? (blockMap[String(productId)] ?? null) : null;
+    const routing = normalizeReceiptItemRouting(item, receipt);
+    const itemSupplementOffers = supplementOffersByItemId.get(String(item._id)) || [];
+    const supplementState = deriveReceiptItemSupplementState({
+      offers: itemSupplementOffers,
+      routingSupplement: routing.supplement,
+      receiptCompleted: receipt.status === 'completed',
+    });
+    const activeSupplementOffer = findActiveReceiptItemSupplementOffer(
+      itemSupplementOffers,
+      supplementState,
+    );
     return {
       ...item,
       currentLocation: { blockId, status: product?.status ?? null },
       productCurrentQty: product?.quantity ?? null,
+      supplementState,
+      supplementGroupName: supplementGroupNameByWaveId.get(String(activeSupplementOffer?.waveId || '')) || '',
     };
   });
 
@@ -912,18 +1069,14 @@ router.patch('/:id/items/:itemId', staffOnly, asyncHandler(async (req, res) => {
       if (!liveReceipt) throw appError('receipt_not_found');
       const afterCommit = liveReceipt.status === 'completed';
 
-      // Хвиля дозамовлення вже пішла продавцям: підписи на фото перемальовуються
-      // разом з ціною (photoFilename), але ПІДМІНИТИ саму світлину (originalFilename
-      // = нове знімання/галерея) не можна — магазин замовляв би одне, а приїхало б
-      // інше. Перевірка живого статусу тут, а не до транзакції: накладну могли
-      // провести саме поки вантажилось фото.
-      if (afterCommit && originalFilename) {
-        const legacySupplement = liveReceipt.type === 'supplement';
-        const itemSupplementActive = !legacySupplement
-          && await hasActiveSupplementItemWave(item._id, { session: txSession });
-        if (legacySupplement || itemSupplementActive) {
-          throw appError('receipt_supplement_photo_locked');
-        }
+      // V48.S3.1: metadata of the SAME ReceiptItem may be corrected while
+      // supplement work is OPEN/FROZEN. Identity/routing is unchanged, so current
+      // requests stay intact and the active SupplementOffer snapshot is updated in
+      // the same transaction by propagateItemEdit(). Legacy whole-receipt supplement
+      // rows keep their historical contract because they do not have revisioned
+      // snapshots.
+      if (afterCommit && originalFilename && liveReceipt.type === 'supplement') {
+        throw appError('receipt_supplement_photo_locked');
       }
 
       // New routing rows change business direction ONLY through the dedicated
@@ -959,15 +1112,14 @@ router.patch('/:id/items/:itemId', staffOnly, asyncHandler(async (req, res) => {
       // product identity or commercial terms. totalQty is receiving metadata for
       // routingVersion>=1 and is intentionally not treated as live stock.
       const criticalEditFields = new Set([
-        'price',
-        'qtyPerPackage',
-        'originalPhotoUrl',
+        // Metadata corrections (price/package/photo) do NOT cancel or block
+        // modern supplement work. Business direction changes remain guarded.
         'destination',
         'deliveryGroupIds',
         'qtyPerShop',
       ]);
       if (item.status === 'confirmed' && changedFields.some((field) => criticalEditFields.has(field))) {
-        const usage = await describeItemUsage(item, { session: txSession });
+        const usage = await describeItemUsage(item, { session: txSession, mode: 'edit' });
         if (usage.inUse) throw appError('receipt_item_in_use', { reasons: usage.reasons.join('; ') });
       }
 
@@ -1076,6 +1228,13 @@ router.patch('/:id/items/:itemId', staffOnly, asyncHandler(async (req, res) => {
     io.to(`receipt_${req.params.id}`).emit('receipt_item_updated', item);
     // Правка проведеної накладної міняє живий товар — дошки складу мають це побачити.
     if (propagation.productId || propagation.shopProductId) io.emit('incoming_updated');
+    for (const change of propagation.supplementChanges || []) {
+      io.emit('supplement_wave_changed', {
+        ...change,
+        receiptItemId: String(item._id),
+        action: 'metadata_updated',
+      });
+    }
   }
 
   res.json(item);
@@ -1155,6 +1314,178 @@ router.delete('/:id/items/:itemId', staffOnly, asyncHandler(async (req, res) => 
 // quantity. Only then may Stage 3 choose routing on the item card. Draft rows are
 // freely routable. Confirmed primary routes are immutable EXCEPT the explicit
 // additive `add-warehouse-remainder` operation below (false -> true warehouse only).
+
+// Photo-feed batch routing deliberately spans receipts. Draft rows only record
+// the intended route and stay unconfirmed. Confirmed rows go through the same
+// compensating correction command as the single-item editor so existing product,
+// shop and supplement artifacts remain consistent.
+router.patch('/items/routing-batch', staffOnly, asyncHandler(async (req, res) => {
+  const itemIds = [...new Set((Array.isArray(req.body?.itemIds) ? req.body.itemIds : [])
+    .map((id) => String(id || '').trim())
+    .filter(Boolean))];
+  if (itemIds.length === 0) throw appError('receipt_routing_batch_empty');
+  if (itemIds.length > 100) throw appError('receipt_routing_batch_too_large');
+  if (itemIds.some((id) => !mongoose.Types.ObjectId.isValid(id))) {
+    throw appError('validation_failed', { field: 'itemIds' });
+  }
+
+  const body = req.body?.routing || {};
+  const routing = {
+    warehouse: body.warehouse === true,
+    mandatory: body.mandatory === true,
+    supplement: body.supplement === true,
+    mayNotReachAllShops: body.mayNotReachAllShops === true,
+    supplementDeliveryGroupId: null,
+  };
+  const check = validateReceiptItemRouting(routing, {
+    allowEmpty: false,
+    allowSupplementWithoutGroup: true,
+  });
+  if (!check.ok) {
+    if (check.reason === 'route_required') throw appError('receipt_route_required');
+    if (check.reason === 'mandatory_and_supplement') throw appError('receipt_route_conflict');
+    if (check.reason === 'may_not_reach_without_mandatory') throw appError('receipt_route_warning_requires_mandatory');
+    if (check.reason === 'may_not_reach_with_warehouse') throw appError('receipt_route_warning_with_warehouse');
+  }
+
+  const items = await ReceiptItem.find({ _id: { $in: itemIds } }).lean();
+  if (items.length !== itemIds.length) throw appError('receipt_item_not_found');
+  for (const item of items) {
+    if (item.status === 'confirmed') assertCanConfirmItem(req.user, item);
+    else assertCanEditItem(req.user, item, ['routing']);
+  }
+
+  const receiptIds = [...new Set(items.map((item) => String(item.receiptId || '')).filter(Boolean))];
+  const receipts = await Receipt.find({ _id: { $in: receiptIds } }, '_id type status').lean();
+  const receiptById = new Map(receipts.map((receipt) => [String(receipt._id), receipt]));
+  if (receipts.length !== receiptIds.length) throw appError('receipt_not_found');
+  if (receipts.some((receipt) => receipt.type === 'supplement')) {
+    throw appError('receipt_routing_batch_regular_only');
+  }
+
+  const updatedItems = [];
+  const failures = [];
+  let processableItems = items;
+
+  // Do not let a stale/older client mark a physically spent lifecycle as a new
+  // supplement. The same derivation powers the gallery's grey button and badge.
+  if (routing.supplement) {
+    const publications = await SupplementOffer.find(
+      { receiptItemId: { $in: items.map((item) => item._id) }, waveId: { $ne: null } },
+      'receiptItemId status itemStatus frozenAt completedAt revisionHistory',
+    ).lean();
+    const offersByItemId = new Map();
+    for (const offer of publications) {
+      const itemId = String(offer.receiptItemId || '');
+      offersByItemId.set(itemId, [...(offersByItemId.get(itemId) || []), offer]);
+    }
+    processableItems = items.filter((item) => {
+      const receipt = receiptById.get(String(item.receiptId || ''));
+      const state = deriveReceiptItemSupplementState({
+        offers: offersByItemId.get(String(item._id)) || [],
+        routingSupplement: normalizeReceiptItemRouting(item, receipt).supplement,
+        receiptCompleted: receipt?.status === 'completed',
+      });
+      if (!isTerminalReceiptItemSupplementState(state)) return true;
+      failures.push({
+        itemId: String(item._id),
+        error: 'receipt_supplement_already_completed',
+        message: 'Дозамовлення цього товару вже виконано',
+      });
+      return false;
+    });
+  }
+
+  const draftItems = processableItems.filter((item) => item.status !== 'confirmed');
+  const confirmedItems = processableItems.filter((item) => item.status === 'confirmed');
+
+  if (draftItems.length) {
+    const draftIds = draftItems.map((item) => item._id);
+    const session = await mongoose.connection.startSession();
+    let draftUpdatedItems = [];
+    try {
+      await session.withTransaction(async () => {
+        const result = await ReceiptItem.updateMany(
+          { _id: { $in: draftIds }, status: 'draft' },
+          {
+            $set: {
+              routingVersion: 1,
+              routing,
+              destination: legacyDestinationForRouting(routing),
+              supplementBatchVersion: routing.supplement ? 2 : 0,
+              supplementPublishRequestedAt: null,
+            },
+          },
+          { session },
+        );
+        if (Number(result.matchedCount ?? result.n ?? 0) !== draftIds.length) {
+          throw appError('receipt_routing_batch_draft_only');
+        }
+
+        const logs = draftItems.map((item) => ({
+          receiptId: item.receiptId,
+          itemId: item._id,
+          itemName: item.name,
+          action: 'routing_change',
+          actor: getActor(req),
+          changes: [{
+            field: 'routing',
+            label: 'Маршрут (пакетно)',
+            from: normalizeReceiptItemRouting(item, receiptById.get(String(item.receiptId))),
+            to: routing,
+          }],
+        }));
+        await ReceiptItemLog.insertMany(logs, { session });
+        draftUpdatedItems = await ReceiptItem.find({ _id: { $in: draftIds } }).session(session).lean();
+      });
+    } finally {
+      session.endSession();
+    }
+    updatedItems.push(...draftUpdatedItems);
+
+    const io = getIO();
+    if (io) {
+      for (const item of draftUpdatedItems) {
+        io.to(`receipt_${item.receiptId}`).emit('receipt_item_updated', item);
+      }
+    }
+  }
+
+  if (confirmedItems.length) {
+    const { correctReceiptItemRouting: correctConfirmedRouting } = require('../services/receiptRoutingCorrectionCommand');
+    for (const item of confirmedItems) {
+      try {
+        const result = await correctConfirmedRouting({
+          receiptId: item.receiptId,
+          itemId: item._id,
+          nextRouting: routing,
+          actor: {
+            by: String(req.telegramUser?.telegramId || ''),
+            byName: [req.telegramUser?.firstName, req.telegramUser?.lastName].filter(Boolean).join(' '),
+            byRole: req.telegramUser?.role || 'warehouse',
+          },
+          reason: 'routing_corrected_batch',
+        });
+        if (result?.item) updatedItems.push(result.item);
+      } catch (err) {
+        failures.push({
+          itemId: String(item._id),
+          error: err?.code || 'internal_error',
+          message: err?.expose ? err.message : 'Не вдалося змінити маршрут товару',
+        });
+      }
+    }
+  }
+
+  res.json({
+    selectedCount: itemIds.length,
+    updatedCount: updatedItems.length,
+    failedCount: failures.length,
+    items: updatedItems,
+    failures,
+  });
+}));
+
 router.patch('/:id/items/:itemId/routing', staffOnly, asyncHandler(async (req, res) => {
   const receipt = await Receipt.findById(req.params.id).lean();
   if (!receipt) throw appError('receipt_not_found');
@@ -1200,6 +1531,22 @@ router.patch('/:id/items/:itemId/routing', staffOnly, asyncHandler(async (req, r
     routing.supplementDeliveryGroupId = null;
   }
   if (!routing.mandatory) routing.mayNotReachAllShops = false;
+
+  const currentRouting = normalizeReceiptItemRouting(authItem, receipt);
+  if (routing.supplement && !currentRouting.supplement) {
+    const offers = await SupplementOffer.find(
+      { receiptItemId: authItem._id, waveId: { $ne: null } },
+      'status itemStatus frozenAt completedAt revisionHistory',
+    ).lean();
+    const supplementState = deriveReceiptItemSupplementState({
+      offers,
+      routingSupplement: currentRouting.supplement,
+      receiptCompleted: receipt.status === 'completed',
+    });
+    if (supplementState === RECEIPT_ITEM_SUPPLEMENT_STATE.COMPLETED) {
+      throw appError('receipt_supplement_already_completed');
+    }
+  }
 
   // Return the real pre-image from the atomic write. Besides making the audit log
   // exact under two simultaneous toggles, the predicate makes confirm vs routing
@@ -1912,12 +2259,12 @@ router.post('/:id/commit', staffOnly, asyncHandler(async (req, res) => {
 
     // ── Дозамовлення після durable commit ───────────────────────────────────
     // Legacy Receipt.type='supplement' лишається однією receipt-level хвилею.
-    // Current regular rows are batch-managed: unassigned V48.2 rows stay silent
-    // until a worker chooses one group for the whole batch in the photo feed.
+    // Current regular rows are publication-managed: unassigned rows stay silent
+    // until a worker chooses a group; all ready items join that group+session container.
     // Grouped V47.16 rows remain readable/publishable during rollout.
     //
-    // Поза транзакцією свідомо: створення ідемпотентне (унікальний індекс
-    // {receiptItemId, deliveryGroupId}), тому повторний виклик нічого не
+    // Поза транзакцією свідомо: створення ідемпотентне через container+item identity
+    // і current item revision, тому повторний виклик нічого не
     // задублює, а збій розсилки не має відкочувати вже проведену накладну.
     // Відповідь клієнту чекає на створення пропозицій (щоб «Проведено» і
     // «дозамовлення відкрито» не розповзалися в часі), а Telegram — ні.
@@ -1925,8 +2272,7 @@ router.post('/:id/commit', staffOnly, asyncHandler(async (req, res) => {
     try {
       const { createOffersForReceipt } = require('../services/supplementOffers');
       // Works for BOTH legacy supplement receipts and new per-item supplement
-      // routing in an ordinary receipt. Creation is idempotent by
-      // {receiptItemId, deliveryGroupId}.
+      // routing in an ordinary receipt. Creation is idempotent by the exact group+session container and item slot.
       const { created: offers } = await createOffersForReceipt(receipt._id);
       supplementOffersCount = offers.length;
       if (offers.length) {

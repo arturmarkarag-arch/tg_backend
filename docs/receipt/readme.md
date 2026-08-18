@@ -115,6 +115,8 @@ Future/upcoming session не є supplement-target: якщо item має `warehou
 Поки Wave `OPEN`, продавці можуть змінювати заявки. `FROZEN` є серверною межею:
 після неї seller writes заборонені, і лише тоді починається packing.
 
+V48.S3 stable group+session container не є «пачкою товарів»: кожна нова або повторно запущена supplement-позиція додається до одного exact `DeliveryGroup + OrderingSession` container, а чистий повтор забезпечує item `revision`, не нова видима Wave.
+
 Legacy `supplementBatchVersion=0/1`, старий `Receipt.type='supplement'` та
 `SupplementOffer.waveId=null` підтримуються compatibility-path без destructive
 міграції.

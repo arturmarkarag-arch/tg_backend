@@ -79,17 +79,19 @@ assert(supplementRoute.includes('req.body?.deliveryGroupId'));
 assert(supplementService.includes('filter.deliveryGroupId = String(deliveryGroupId)'));
 // V48.S2: target identity is an exact current OrderingSession, not the old
 // "ordinary ordering must already be closed" rule. OPEN ordering is a valid current
-// delivery target; future/completed cycles are rejected by the target resolver.
+// delivery target; future/historical and normal completed cycles are rejected. An exact CURRENT session may reopen only from persisted CANCELLED supplement state.
 assert(supplementTargets.includes('findCurrentSessionId'));
 assert(supplementTargets.includes('expectedOrderingSessionId'));
 assert(supplementTargets.includes('supplement_target_session_not_started'));
 assert(supplementTargets.includes('supplement_target_session_completed'));
+assert(supplementTargets.includes('hasReopenableSupplementCancellation'));
+assert(supplementTargets.includes('status: ITEM_STATUS.CANCELLED'));
 assert(receipts.includes('expectedOrderingSessionId'));
 assert(receipts.includes('createWaveWithItems({'));
-assert(supplementWaveService.includes("status = 'frozen'"), 'modern Wave has explicit server freeze');
-assert(supplementService.includes("status: 'open', waveId: null"), 'automatic ordinary-window freeze is legacy-only');
+assert(supplementWaveService.includes('status: ITEM_STATUS.FROZEN') && supplementWaveService.includes('status: ITEM_STATUS.OPEN'), 'modern supplement item revisions have explicit server freeze');
+assert(supplementService.includes('status: ITEM_STATUS.OPEN, waveId: null'), 'automatic ordinary-window freeze is legacy-only');
 assert(supplementScheduler.includes('freezeOffersForActiveOrderingWindows(now)'));
-assert(supplementExclusion.includes("itemStatus: 'active'"), 'same-session ordinary exclusion uses active Wave item relation');
+assert(supplementExclusion.includes('itemStatus: ITEM_RELATION_STATUS.ACTIVE') && supplementExclusion.includes('ITEM_STATUS.COMPLETED') && supplementExclusion.includes('ITEM_STATUS.CANCELLED'), 'same-session ordinary exclusion survives completed/post-freeze supplement work');
 assert(orders.includes('assertProductOrdinaryOrderable'), 'ordinary order write boundary must enforce supplement session exclusion');
 
 const galleryStart = receipts.indexOf("router.get('/items-gallery'");

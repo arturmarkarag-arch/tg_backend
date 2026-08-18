@@ -1,5 +1,6 @@
 const express = require('express');
 const crypto  = require('crypto');
+const mongoose = require('mongoose');
 const { S3Client, PutObjectCommand, DeleteObjectCommand } = require('@aws-sdk/client-s3');
 const { requireTelegramRoles } = require('../middleware/telegramAuth');
 const { appError, asyncHandler } = require('../utils/errors');
@@ -13,6 +14,7 @@ const { getIO } = require('../socket');
 const { productCataloguePatch, shopProductCataloguePatch } = require('../utils/catalogueSocket');
 const { getGeminiStatus } = require('../geminiClient');
 const { describeImageUrl } = require('../utils/productDescribe');
+const { hasReceiptCommercialMutation, syncReceiptItemCommercialMetadataFromProduct, syncReceiptItemCommercialMetadataFromShopProduct } = require('../services/receiptCommercialMetadataCommand');
 
 const staffOnly  = requireTelegramRoles(['admin', 'warehouse']);
 const adminOnly  = requireTelegramRoles(['admin']);
@@ -170,7 +172,7 @@ router.post('/', staffOnly, asyncHandler(async (req, res) => {
 // mirror. "Товари Магазинів" and "Склад" are two editable views of the SAME live
 // product, so a price/name/photo change from either side ends up identical on both —
 // with no two-master conflicts or sync loops (every write funnels to the Product).
-async function editMirrorThroughToWarehouse(product, fields, res) {
+async function editMirrorThroughToWarehouse(product, fields, req, res) {
   const previousPrice = Number(product.price || 0);
   const previousEmbeddingSource = getProductEmbeddingSource(product).url;
 
@@ -197,14 +199,38 @@ async function editMirrorThroughToWarehouse(product, fields, res) {
   }
   const photoChanged = Boolean(fields.filename || fields.originalFilename);
 
+  const receiptCommercialChanged = !!product.receiptItemId && hasReceiptCommercialMutation(fields);
+  let receiptMetadataResult = null;
   try {
-    await product.save();
+    if (receiptCommercialChanged) {
+      const session = await mongoose.connection.startSession();
+      try {
+        await session.withTransaction(async () => {
+          receiptMetadataResult = null;
+          await product.save({ session });
+          const u = req.telegramUser || {};
+          receiptMetadataResult = await syncReceiptItemCommercialMetadataFromProduct(product, fields, {
+            session,
+            actor: {
+              telegramId: String(u.telegramId || ''),
+              firstName: u.firstName || '',
+              lastName: u.lastName || '',
+            },
+            source: 'shop_product_mirror',
+          });
+        });
+      } finally {
+        await session.endSession();
+      }
+    } else {
+      await product.save();
+    }
   } catch (err) {
     if (err.code === 11000 && err.keyPattern?.barcode) return res.status(409).json({ error: 'barcode_exists', message: 'Товар з таким штрихкодом вже існує' });
     throw err;
   }
 
-  if (fields.price !== undefined && Number(product.price) !== previousPrice) {
+  if (fields.price !== undefined && Number(product.price) !== previousPrice && !receiptCommercialChanged) {
     await repriceActiveOrders(product._id, Number(product.price));
   }
 
@@ -229,6 +255,16 @@ async function editMirrorThroughToWarehouse(product, fields, res) {
       // live seller catalogue, not only photo changes.
       io.emit('catalogue_updated', { action: 'update', productId: String(product._id) });
       io.to('staff').emit('catalogue_cache_patch', { action: 'update', entity: 'warehouse', productId: String(product._id), patch: productCataloguePatch(product) });
+      if (receiptMetadataResult?.item?.receiptId) {
+        io.to(`receipt_${String(receiptMetadataResult.item.receiptId)}`).emit('receipt_item_updated', receiptMetadataResult.item);
+      }
+      for (const change of receiptMetadataResult?.propagation?.supplementChanges || []) {
+        io.emit('supplement_wave_changed', {
+          ...change,
+          receiptItemId: String(receiptMetadataResult.item._id),
+          action: 'metadata_updated',
+        });
+      }
     }
   } catch (e) {}
 
@@ -247,7 +283,7 @@ router.patch('/:id', staffOnly, asyncHandler(async (req, res) => {
   if (item.linkedProductId) {
     const owner = await Product.findById(item.linkedProductId);
     if (owner && owner.status !== 'archived') {
-      return editMirrorThroughToWarehouse(owner, req.body, res);
+      return editMirrorThroughToWarehouse(owner, req.body, req, res);
     }
     // else: orphan mirror → fall through and edit this doc directly.
   }
@@ -282,9 +318,33 @@ router.patch('/:id', staffOnly, asyncHandler(async (req, res) => {
   }
 
   const photoChanged = Boolean(fields.filename || fields.originalFilename);
+  const receiptCommercialChanged = !!item.receiptItemId && hasReceiptCommercialMutation(fields);
+  let receiptMetadataResult = null;
 
   try {
-    await item.save();
+    if (receiptCommercialChanged) {
+      const session = await mongoose.connection.startSession();
+      try {
+        await session.withTransaction(async () => {
+          receiptMetadataResult = null;
+          await item.save({ session });
+          const u = req.telegramUser || {};
+          receiptMetadataResult = await syncReceiptItemCommercialMetadataFromShopProduct(item, fields, {
+            session,
+            actor: {
+              telegramId: String(u.telegramId || ''),
+              firstName: u.firstName || '',
+              lastName: u.lastName || '',
+            },
+            source: 'shop_product_owned',
+          });
+        });
+      } finally {
+        await session.endSession();
+      }
+    } else {
+      await item.save();
+    }
   } catch (err) {
     if (err.code === 11000) {
       return res.status(409).json({ error: 'barcode_exists', message: 'Товар з таким штрихкодом вже існує' });
@@ -297,6 +357,16 @@ router.patch('/:id', staffOnly, asyncHandler(async (req, res) => {
     if (io) {
       io.emit('catalogue_updated', { action: 'update', shopProductId: String(item._id) });
       io.to('staff').emit('catalogue_cache_patch', { action: 'update', entity: 'shop', shopProductId: String(item._id), patch: shopProductCataloguePatch(item) });
+      if (receiptMetadataResult?.item?.receiptId) {
+        io.to(`receipt_${String(receiptMetadataResult.item.receiptId)}`).emit('receipt_item_updated', receiptMetadataResult.item);
+      }
+      for (const change of receiptMetadataResult?.propagation?.supplementChanges || []) {
+        io.emit('supplement_wave_changed', {
+          ...change,
+          receiptItemId: String(receiptMetadataResult.item._id),
+          action: 'metadata_updated',
+        });
+      }
     }
   } catch (e) {}
 
@@ -338,8 +408,36 @@ router.post('/:id/describe', staffOnly, asyncHandler(async (req, res) => {
     const { text, name: aiName } = await describeImageUrl(url);
     if (!text) return res.status(502).json({ error: 'empty_description', message: 'Не вдалося згенерувати опис' });
     target.aiDescription = text;
-    if (aiName && !target.name) target.name = aiName;
-    await target.save();
+    const nameWasFilled = !!(aiName && !target.name);
+    if (nameWasFilled) target.name = aiName;
+    let receiptMetadataResult = null;
+    const receiptLinked = target === owner ? owner?.receiptItemId : item?.receiptItemId;
+    if (receiptLinked) {
+      const session = await mongoose.connection.startSession();
+      try {
+        await session.withTransaction(async () => {
+          receiptMetadataResult = null;
+          await target.save({ session });
+          const u = req.telegramUser || {};
+          const changed = { aiDescription: text, ...(nameWasFilled ? { name: target.name } : {}) };
+          receiptMetadataResult = target === owner
+            ? await syncReceiptItemCommercialMetadataFromProduct(owner, changed, {
+                session,
+                actor: { telegramId: String(u.telegramId || ''), firstName: u.firstName || '', lastName: u.lastName || '' },
+                source: 'shop_product_mirror_describe',
+              })
+            : await syncReceiptItemCommercialMetadataFromShopProduct(item, changed, {
+                session,
+                actor: { telegramId: String(u.telegramId || ''), firstName: u.firstName || '', lastName: u.lastName || '' },
+                source: 'shop_product_owned_describe',
+              });
+        });
+      } finally {
+        await session.endSession();
+      }
+    } else {
+      await target.save();
+    }
     // Live mirror → push the warehouse-owned description back onto the mirror.
     if (target === owner) await syncMirror(owner);
     try {
@@ -353,6 +451,16 @@ router.post('/:id/describe', staffOnly, asyncHandler(async (req, res) => {
           : { action: 'update', entity: 'shop', shopProductId: String(item._id), patch: shopProductCataloguePatch(item) };
         io.emit('catalogue_updated', publicPayload);
         io.to('staff').emit('catalogue_cache_patch', staffPayload);
+        if (receiptMetadataResult?.item?.receiptId) {
+          io.to(`receipt_${String(receiptMetadataResult.item.receiptId)}`).emit('receipt_item_updated', receiptMetadataResult.item);
+        }
+        for (const change of receiptMetadataResult?.propagation?.supplementChanges || []) {
+          io.emit('supplement_wave_changed', {
+            ...change,
+            receiptItemId: String(receiptMetadataResult.item._id),
+            action: 'metadata_updated',
+          });
+        }
       }
     } catch (e) {}
     res.json({ _id: item._id, aiDescription: target.aiDescription, aiName: aiName || null });

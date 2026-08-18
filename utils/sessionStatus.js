@@ -15,7 +15,8 @@
 
 const OrderingSession   = require('../models/OrderingSession');
 const PickingTask       = require('../models/PickingTask');
-const SupplementWave    = require('../models/SupplementWave');
+const SupplementOffer   = require('../models/SupplementOffer');
+const { ACTIVE_ITEM_STATUSES, ITEM_RELATION_STATUS } = require('./supplementState');
 const { LIFECYCLE_EVENT } = require('./sessionVocab');
 const { withSessionLifecycleLock } = require('./sessionLifecycleLock');
 
@@ -131,14 +132,17 @@ async function maybeCompleteSessionUnlocked(orderingSessionId, { actor = {}, met
   const remaining = await q;
   if (remaining > 0) return null;
 
-  // V48.S2: SupplementWave is work of THIS delivery cycle. The session cannot
-  // become terminal while its supplement channel is still open/frozen.
-  const waveQuery = SupplementWave.countDocuments({
+  // V48.S3: item revisions are the operational lifecycle. A reusable Wave
+  // container may be summary-terminal and later receive another item, so session
+  // closure must inspect exact-session current item work, not container status.
+  const supplementQuery = SupplementOffer.countDocuments({
     orderingSessionId: String(orderingSessionId),
-    status: { $in: SupplementWave.ACTIVE_STATUSES },
+    waveId: { $ne: null },
+    itemStatus: ITEM_RELATION_STATUS.ACTIVE,
+    status: { $in: ACTIVE_ITEM_STATUSES },
   });
-  if (mongoSession) waveQuery.session(mongoSession);
-  if (await waveQuery) return null;
+  if (mongoSession) supplementQuery.session(mongoSession);
+  if (await supplementQuery) return null;
 
   // Transactional callers cannot run a read-only audit outside their uncommitted
   // snapshot. Existing live completion paths call this again after commit.
@@ -153,7 +157,7 @@ async function maybeCompleteSessionUnlocked(orderingSessionId, { actor = {}, met
     if (!closure.ok) return null;
   }
 
-  // V48.S2: supplement Waves are part of this exact delivery-cycle lifecycle.
+  // V48.S3: current supplement item revisions are part of this exact delivery-cycle lifecycle.
   const completed = await transitionPickingStatus(orderingSessionId, 'completed', { actor, meta }, mongoSession);
   if (!completed) return null;
 

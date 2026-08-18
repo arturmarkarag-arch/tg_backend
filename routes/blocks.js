@@ -3,6 +3,7 @@ const router = express.Router();
 const Block = require('../models/Block');
 const Counter = require('../models/Counter');
 const Product = require('../models/Product');
+const ReceiptItem = require('../models/ReceiptItem');
 const { getIO } = require('../socket');
 const { requireTelegramRoles } = require('../middleware/telegramAuth');
 const { appError, asyncHandler } = require('../utils/errors');
@@ -14,13 +15,44 @@ const {
 } = require('../services/blockMoveCommand');
 const { withLock } = require('../utils/lock');
 
-// On the "Полки" board a product tile renders ONLY its photo (+ name as the
-// alt/placeholder letter). Everything else on the warehouse Product — price,
+// On the "Полки" board a product tile renders ONLY its photo. Everything else
+// on the warehouse Product — name, price,
 // quantity, barcode, aiDescription, labelPositions, pendingShopUpdate,
 // storeLinks, … — is dead weight here, and a single block can hold 200+
 // products, so populating full docs ships hundreds of KB per board read for
 // nothing. Project just what ProductImage + the card need. (`_id` is implicit.)
-const BLOCK_PRODUCT_FIELDS = 'name imageUrls localImageUrl originalImageUrl';
+const BLOCK_PRODUCT_FIELDS = 'imageUrls localImageUrl originalImageUrl receiptItemId';
+
+// Product.receiptItemId is canonical for current rows. Older receipt-created
+// products can have only the reverse ReceiptItem.createdProductId link, so board
+// reads repair that relation in-memory with one batched query. The client can
+// then disable «Прийомка» truthfully without probing an endpoint on every tile.
+async function attachReceiptItemLinks(products = []) {
+  const rows = products.filter((product) => product && typeof product === 'object');
+  const unresolvedIds = rows
+    .filter((product) => !product.receiptItemId && product._id)
+    .map((product) => product._id);
+  if (!unresolvedIds.length) return products;
+
+  const legacyLinks = await ReceiptItem.find(
+    { createdProductId: { $in: unresolvedIds } },
+    '_id createdProductId',
+  ).sort({ createdAt: -1 }).lean();
+  const byProductId = new Map();
+  for (const item of legacyLinks) {
+    const productId = String(item.createdProductId || '');
+    if (productId && !byProductId.has(productId)) byProductId.set(productId, item._id);
+  }
+  for (const product of rows) {
+    if (!product.receiptItemId) product.receiptItemId = byProductId.get(String(product._id)) || null;
+  }
+  return products;
+}
+
+async function attachBlockReceiptItemLinks(blocks = []) {
+  await attachReceiptItemLinks(blocks.flatMap((block) => block?.productIds || []));
+  return blocks;
+}
 
 function slimBlock(block) {
   return {
@@ -45,6 +77,7 @@ router.get('/', asyncHandler(async (req, res) => {
   const blocks = await query
     .populate({ path: 'productIds', match: { status: { $in: ['active', 'pending'] } }, select: BLOCK_PRODUCT_FIELDS })
     .lean();
+  await attachBlockReceiptItemLinks(blocks);
 
   if (limit !== undefined) {
     const [total, maxDoc] = await Promise.all([
@@ -149,8 +182,10 @@ router.get('/incoming/products', asyncHandler(async (req, res) => {
       { restoredFromArchive: true },
     ],
   })
+    .select(BLOCK_PRODUCT_FIELDS)
     .sort('-createdAt')
     .lean();
+  await attachReceiptItemLinks(products);
   res.json(products);
 }));
 
@@ -181,6 +216,7 @@ router.get('/:number', asyncHandler(async (req, res) => {
     .populate({ path: 'productIds', match: { status: { $in: ['active', 'pending'] } }, select: BLOCK_PRODUCT_FIELDS })
     .lean();
   if (!block) throw appError('block_not_found');
+  await attachBlockReceiptItemLinks([block]);
   res.json(block);
 }));
 
@@ -221,6 +257,7 @@ router.post('/move', staffOnly, asyncHandler(async (req, res) => {
     : await Block.findById(targetId)
         .populate({ path: 'productIds', match: { status: { $in: ['active', 'pending'] } }, select: BLOCK_PRODUCT_FIELDS })
         .lean();
+  await attachBlockReceiptItemLinks(isSameBlock ? [updatedSource] : [updatedSource, updatedTarget]);
 
   try {
     const io = getIO();

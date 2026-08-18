@@ -93,7 +93,7 @@ is not treated as an exact remaining stock counter.
 Canonical supplement ownership is:
 
 ```text
-DeliveryGroup -> OrderingSession -> SupplementWave -> Wave item -> Shop request
+DeliveryGroup -> OrderingSession -> one stable SupplementWave container -> item revision -> Shop request
 ```
 
 Confirmation and supplement publication are separate operations. Confirm makes a
@@ -101,27 +101,45 @@ ReceiptItem eligible; an explicit publish command chooses exactly one currently
 eligible DeliveryGroup + exact `OrderingSession` and creates/uses one Wave. One
 Wave can contain many items.
 
-Publication eligibility is exact-session aware. The same ReceiptItem may be
-published independently into multiple simultaneously-current eligible target
-sessions. `supplementPublishRequestedAt` is compatibility/audit metadata only and
-is not lifecycle or target authority.
+Publication eligibility is item-global. A READY ReceiptItem is target-neutral
+until the first publication wins the global transaction fence. Active OPEN or
+FROZEN work holds that fence. Cancelling either state releases the ReceiptItem to
+READY when its supplement route remains enabled; COMPLETED history is terminal.
+`supplementPublishRequestedAt` remains compatibility/audit metadata only.
 
-Wave lifecycle is `open -> frozen -> completed` with `cancelled` terminal path.
-Seller request writes are allowed while open and rejected after freeze. Warehouse
-packing starts only after freeze. New Wave lifecycle notifications are Wave-level,
-not per product.
+The Wave is the stable `DeliveryGroup + OrderingSession` container. Lifecycle
+authority is per item revision: `ready -> open -> frozen -> completed`, with
+`cancelled` as an audited correction/termination path. Seller request writes are allowed only for that item's OPEN
+current revision; packing starts only after that item is FROZEN. The container status
+is a derived summary, not a global seller lock. Lifecycle notifications remain
+grouped at container/activity level rather than per-product Telegram spam.
 
-A warehouse Product offered through SupplementWave in Session A is excluded from
-ordinary ordering in Session A only; later sessions see it through normal warehouse
-rules. Future/upcoming sessions are never supplement targets.
+A warehouse Product offered through SupplementWave in Session A stays excluded
+from ordinary ordering for all of Session A, including after its supplement work
+completed. Later sessions see it through normal warehouse rules. Cancellation of
+OPEN or FROZEN removes that exact-session exclusion because the publication was
+explicitly stopped. Future/upcoming sessions are never supplement targets.
 
 Legacy `SupplementOffer.waveId=null`, old receipt-level supplement flows and old
-batch markers remain compatibility-only and require no destructive migration.
+legacy batch markers remain compatibility-only; modern publication joins the stable group+session container and uses item revisions, with no destructive history migration.
 
 ## 8. Editing and concurrency
 
-A completed Receipt is not globally read-only. Receiving corrections and Stage 2
-updates remain allowed under ownership/in-use guards. Published route corrections use the canonical compensating `CorrectReceiptItemRouting` command. It cancels unfinished wrong-path work, preserves packed/history facts and applies canonical artifacts for the new route. Completed historical Waves are never rewritten.
+A completed Receipt is not globally read-only. Receiving and commercial metadata
+corrections remain allowed. For the same item, photo, price, quantity-per-package,
+received quantity, comments/name/description are metadata UPDATEs: they preserve the
+current supplement revision and Shop requests, and synchronize current OPEN/FROZEN
+supplement snapshots. Terminal revision snapshots remain immutable history.
+
+Receipt-derived shared commercial metadata has one write-through authority: edits
+from Receipt, warehouse Product or ShopProduct views converge through ReceiptItem and
+then propagate to derived Product/ShopProduct/current supplement projections.
+
+Published **route** corrections use the separate canonical compensating
+`CorrectReceiptItemRouting` command. It cancels unfinished supplement work only when
+the new route no longer contains `supplement`; if supplement remains, requests stay.
+Packed/history facts are preserved and completed historical revisions are never
+rewritten.
 
 ## 9. Full-photo UI projection
 

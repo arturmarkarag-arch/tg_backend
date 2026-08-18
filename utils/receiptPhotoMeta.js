@@ -93,6 +93,54 @@ function labelPositionsFromPhotoMeta(photoMeta) {
   return out;
 }
 
+
+function photoMetaFromProductDisplay({ notes, labelPositions } = {}, currentPhotoMeta = {}) {
+  const current = normalizeReceiptPhotoMeta(currentPhotoMeta) || {
+    comment: '', commentPos: { x: 0.5, y: 0.5 }, comments: [], pricePos: null, qtyPos: null,
+  };
+  const lp = labelPositions && typeof labelPositions === 'object' ? labelPositions : {};
+  const noteLines = String(notes ?? '')
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .slice(0, MAX_COMMENTS);
+  const positionRows = Array.isArray(lp.comments) ? lp.comments : [];
+  const count = Math.max(noteLines.length, positionRows.length, current.comments.length);
+  const comments = [];
+
+  for (let i = 0; i < count && comments.length < MAX_COMMENTS; i += 1) {
+    const row = positionRows[i] || {};
+    const old = current.comments[i] || {};
+    const text = String(noteLines[i] ?? row.text ?? old.text ?? '').trim().slice(0, MAX_COMMENT_LENGTH);
+    if (!text) continue;
+    comments.push({
+      id: String(row.id || old.id || `comment-${i + 1}`).slice(0, 80),
+      text,
+      pos: normalizePos(
+        Number.isFinite(Number(row.x)) || Number.isFinite(Number(row.y))
+          ? { x: row.x, y: row.y }
+          : old.pos,
+      ),
+    });
+  }
+
+  const first = comments[0] || null;
+  const pricePos = (Number.isFinite(Number(lp.priceX)) || Number.isFinite(Number(lp.priceY)))
+    ? normalizePos({ x: lp.priceX, y: lp.priceY })
+    : current.pricePos;
+  const qtyPos = (Number.isFinite(Number(lp.qtyX)) || Number.isFinite(Number(lp.qtyY)))
+    ? normalizePos({ x: lp.qtyX, y: lp.qtyY })
+    : current.qtyPos;
+
+  return normalizeReceiptPhotoMeta({
+    comment: first?.text || '',
+    commentPos: first?.pos || { x: 0.5, y: 0.5 },
+    comments,
+    pricePos,
+    qtyPos,
+  });
+}
+
 function photoCommentsText(photoMeta) {
   return normalizePhotoComments(photoMeta).map((comment) => comment.text).join('\n');
 }
@@ -103,4 +151,5 @@ module.exports = {
   normalizeReceiptPhotoMeta,
   labelPositionsFromPhotoMeta,
   photoCommentsText,
+  photoMetaFromProductDisplay,
 };

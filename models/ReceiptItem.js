@@ -58,7 +58,8 @@ const ReceiptItemSchema = new mongoose.Schema(
     // the group was stored per item. Version 2 = current flow: the item may stay
     // unassigned until batch publication atomically sets the group for the batch.
     // `supplementPublishRequestedAt` is compatibility/audit only: first successful
-    // publication time. Per-target eligibility belongs to exact-session Wave items.
+    // publication time. READY/OPEN/FROZEN/COMPLETED eligibility is derived from
+    // all modern SupplementOffer rows of this ReceiptItem, never one target alone.
     supplementBatchVersion: { type: Number, default: 0 },
     supplementPublishRequestedAt: { type: Date, default: null },
 

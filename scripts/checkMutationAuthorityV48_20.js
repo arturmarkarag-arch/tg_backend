@@ -140,11 +140,15 @@ const topologyOffenders = runtimeJsFiles().filter((file) => {
 }).map(rel);
 check('direct Shop.deliveryGroupId/isActive assignment is confined to topology command', topologyOffenders.length === 0);
 
-check('supplement topology authority is Wave/session-scoped, not child-row-scoped',
-  topology.includes('SupplementWave')
-  && topology.includes('orderingSessionId')
-  && !topology.includes('SupplementOffer')
-  && !topology.includes('SupplementRequest'));
+check('supplement topology authority uses exact-session item state; Shop deactivation additionally fences exact current request revision',
+  topology.includes('SupplementOffer.find')
+  && topology.includes('orderingSessionId: String(currentSession._id)')
+  && topology.includes('status: { $in: ACTIVE_ITEM_STATUSES }')
+  && topology.includes('itemStatus: ITEM_RELATION_STATUS.ACTIVE')
+  && topology.includes('SupplementRequest.exists')
+  && topology.includes('revision: revisionOf(offer)')
+  && topology.includes('shopId: shop._id')
+  && topology.includes("throw appError('shop_deactivate_session_active'"));
 
 const failed = checks.filter((row) => !row.ok);
 console.log(`\nV48.20 MUTATION AUTHORITY: ${checks.length - failed.length}/${checks.length} PASS`);

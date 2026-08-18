@@ -7,7 +7,9 @@ const DeliveryGroup = require('../models/DeliveryGroup');
 const OrderingSession = require('../models/OrderingSession');
 const Order = require('../models/Order');
 const PickingTask = require('../models/PickingTask');
-const SupplementWave = require('../models/SupplementWave');
+const SupplementOffer = require('../models/SupplementOffer');
+const SupplementRequest = require('../models/SupplementRequest');
+const { ACTIVE_ITEM_STATUSES, ITEM_RELATION_STATUS, REQUEST_STATUS, revisionOf } = require('../utils/supplementState');
 const { appError } = require('../utils/errors');
 const { withLock } = require('../utils/lock');
 const { activeOrderShopFilter } = require('../utils/orderShopFilter');
@@ -49,6 +51,7 @@ async function updateShopTopologyCommand({ shopId, patch = {}, actor = null }) {
 
       const prevDeliveryGroupId = shop.deliveryGroupId ? String(shop.deliveryGroupId) : '';
       const prevIsActive = shop.isActive !== false;
+      const deactivating = input.isActive !== undefined && prevIsActive && !Boolean(input.isActive);
 
       if (input.name !== undefined && !String(input.name).trim()) {
         throw appError('shop_name_required');
@@ -72,9 +75,10 @@ async function updateShopTopologyCommand({ shopId, patch = {}, actor = null }) {
         }
       }
 
-      // Group assignment is CURRENT topology, but current-cycle Order ownership is
-      // SESSION state. Never let a topology edit strand current session work.
-      if (nextGroupId !== prevDeliveryGroupId && prevDeliveryGroupId) {
+      // Topology edits must never detach CURRENT session work. Resolve the exact
+      // current delivery cycle once and use it for both group-move and deactivate
+      // guards. Historical/foreign sessions never participate in this decision.
+      if ((nextGroupId !== prevDeliveryGroupId || deactivating) && prevDeliveryGroupId) {
         const prevGroup = await DeliveryGroup.findById(prevDeliveryGroupId).session(session).lean();
         if (prevGroup) {
           const { isOpen } = isOrderingOpen(prevGroup.orderingSchedule);
@@ -86,7 +90,8 @@ async function updateShopTopologyCommand({ shopId, patch = {}, actor = null }) {
 
           let shopActiveOrderIds = [];
           let inPicking = false;
-          let activeSupplementWave = false;
+          let activeSupplementItem = false;
+          let shopActiveSupplementRequest = false;
           if (currentSession?._id) {
             shopActiveOrderIds = (await Order.find(
               { ...activeOrderShopFilter(shop._id), orderingSessionId: String(currentSession._id) },
@@ -99,23 +104,47 @@ async function updateShopTopologyCommand({ shopId, patch = {}, actor = null }) {
               'items.orderId': { $in: shopActiveOrderIds },
             }).session(session));
 
-            // SupplementWave is frozen SESSION ownership. Moving a Shop to another
-            // CURRENT group while the Wave is open/frozen would make seller access
-            // follow the new topology while warehouse work remains in the old
-            // delivery cycle. Block the topology change instead of migrating history.
-            activeSupplementWave = Boolean(await SupplementWave.exists({
+            const currentOffers = await SupplementOffer.find({
               deliveryGroupId: prevDeliveryGroupId,
               orderingSessionId: String(currentSession._id),
-              status: { $in: ['open', 'frozen'] },
-            }).session(session));
+              waveId: { $ne: null },
+              itemStatus: ITEM_RELATION_STATUS.ACTIVE,
+              status: { $in: ACTIVE_ITEM_STATUSES },
+            }, '_id revision').session(session).lean();
+            activeSupplementItem = currentOffers.length > 0;
+
+            if (currentOffers.length) {
+              const currentPairs = currentOffers.map((offer) => ({
+                offerId: offer._id,
+                revision: revisionOf(offer),
+              }));
+              shopActiveSupplementRequest = Boolean(await SupplementRequest.exists({
+                shopId: shop._id,
+                status: REQUEST_STATUS.ACTIVE,
+                $or: currentPairs,
+              }).session(session));
+            }
           }
 
-          if (isOpen || shopActiveOrderIds.length > 0 || activeSupplementWave) {
-            const reason = activeSupplementWave ? 'є активне дозамовлення в поточній доставці'
+          if (nextGroupId !== prevDeliveryGroupId
+              && (isOpen || shopActiveOrderIds.length > 0 || activeSupplementItem)) {
+            const reason = activeSupplementItem ? 'є активне дозамовлення в поточній доставці'
               : isOpen ? 'вікно замовлень відкрите'
                 : inPicking ? 'триває збирання'
                 : 'є активні замовлення в поточній сесії';
             throw appError('shop_group_change_session_active', { reason });
+          }
+
+          // Deactivation is narrower than group migration: an OPEN supplement in
+          // the group is not itself a blocker unless THIS Shop already owns current
+          // demand. This prevents orphaning real work without freezing unrelated
+          // shop administration for the whole group.
+          if (deactivating && (shopActiveOrderIds.length > 0 || shopActiveSupplementRequest)) {
+            const reason = shopActiveSupplementRequest
+              ? 'магазин має активну заявку в дозамовленні поточної доставки'
+              : inPicking ? 'замовлення магазину вже в збиранні'
+                : 'магазин має активне замовлення в поточній сесії';
+            throw appError('shop_deactivate_session_active', { reason });
           }
         }
       }

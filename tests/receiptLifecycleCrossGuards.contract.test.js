@@ -9,12 +9,12 @@ const receipts = read('routes/receipts.js');
 const sync = read('services/receiptSync.js');
 
 describe('V48.7 receipt cross-lifecycle guards', () => {
-  it('treats supplement publication itself as irreversible usage', () => {
-    expect(sync).toContain('if (item.supplementPublishRequestedAt)');
-    expect(sync).toContain("SupplementOffer.find({ receiptItemId: item._id }, '_id status deliveryGroupId')");
-    expect(sync).toContain("statuses.has('completed')");
-    expect(sync).toContain("statuses.has('frozen')");
-    expect(sync).toContain('дозамовлення вже відкрито для магазинів');
+  it('preserves supplement publication history for destructive rollback while allowing metadata corrections', () => {
+    expect(sync).toContain('item.supplementPublishRequestedAt && modernOffers.length === 0');
+    expect(sync).toContain("SupplementOffer.find({ receiptItemId: item._id }, '_id waveId revision status itemStatus deliveryGroupId')");
+    expect(sync).toContain("mode === 'destructive' && modernOffers.length > 0");
+    expect(sync).toContain('statuses.has(ITEM_STATUS.FROZEN)');
+    expect(sync).toContain('дозамовлення цієї позиції зараз відкрите для магазинів');
   });
 
   it('runs usage guard before DELETE/UNCONFIRM rollback even if back-references are damaged', () => {
@@ -64,7 +64,7 @@ describe('V48.7 receipt cross-lifecycle guards', () => {
     const publishRoute = sliceBetweenOrThrow(receipts, "router.post('/supplement-batches/:deliveryGroupId/publish'", "router.get('/:id'", { label: 'supplement batch publish route' });
 
     const candidatesStart = indexOrThrow(publishRoute, 'const candidates = await ReceiptItem.find(');
-    const existingStart = indexOrThrow(publishRoute, "const existingTargetItems = await SupplementOffer.distinct", { from: candidatesStart });
+    const existingStart = indexOrThrow(publishRoute, 'const existingPublications = await SupplementOffer.find', { from: candidatesStart });
     const candidates = sliceIndexesOrThrow(publishRoute, candidatesStart, existingStart, { label: 'supplement candidate fence' });
     expect(candidates).toContain("status: 'confirmed'");
     expect(candidates).toContain("'routing.supplement': true");
@@ -74,9 +74,9 @@ describe('V48.7 receipt cross-lifecycle guards', () => {
 
     const selectedStart = indexOrThrow(publishRoute, 'const selectedRows = publishable.filter', { from: existingStart });
     const selectedEnd = indexOrThrow(publishRoute, 'if (!selectedRows.length)', { from: selectedStart });
-    const selected = sliceIndexesOrThrow(publishRoute, existingStart, selectedEnd, { label: 'exact-session publication fence' });
-    expect(selected).toContain('orderingSessionId: target.orderingSessionId');
+    const selected = sliceIndexesOrThrow(publishRoute, existingStart, selectedEnd, { label: 'item-global publication fence' });
     expect(selected).toContain('waveId: { $ne: null }');
-    expect(selected).toContain('existingSet');
+    expect(selected).toContain('blockedItemIds');
+    expect(selected).toContain('existingPublications.filter(blocksGenericRepublish)');
   });
 });

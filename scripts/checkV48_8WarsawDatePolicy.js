@@ -60,6 +60,7 @@ if (receipts.includes('Date.parse(req.query.dateFrom') || receipts.includes('Dat
 if (!archive.includes('formatWarsawDateKey(p.archivedAt)')) fail('archive grouping is not based on Warsaw calendar dates');
 if (/archivedAt[^\n]*toISOString\(\)\.slice\(0,\s*10\)/.test(archive)) fail('archive still groups by UTC date key');
 
+if (!products.includes('formatWarsawDateKey(new Date())')) fail('product catalogue day cache is not Warsaw-scoped');
 if (!products.includes('warsawDateKeyToUtcRange(dateFilter)')) fail('product date_filter is not interpreted as a Warsaw day');
 if (/dateFilter[^\n]*T00:00:00/.test(products)) fail('product date_filter still constructs a raw UTC midnight');
 

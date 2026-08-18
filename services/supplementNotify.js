@@ -8,6 +8,7 @@ const SupplementWave = require('../models/SupplementWave');
 const SupplementOfferModel = SupplementOffer;
 const { getSupplementSettings } = require('../utils/supplementSettings');
 const { sellersOfGroup, serviceGroupChatIds } = require('../utils/groupRecipients');
+const { ITEM_STATUS, ITEM_RELATION_STATUS } = require('../utils/supplementState');
 
 const NOTIFY_TYPES = ['opened', 'reminder', 'frozen', 'cancelled'];
 const REMINDER_EVERY_MS = 2 * 60 * 60 * 1000;
@@ -18,10 +19,10 @@ function buildText(type, { groupName, appUrl, offersCount = 0 }) {
   const name = groupName || 'Група доставки';
   if (type === 'frozen') {
     return [
-      'Дозамовлення закрито',
+      'Відкриті позиції дозамовлення передано в роботу',
       name,
       '',
-      'Зміни замовлень більше недоступні. Товар передано в роботу складу.',
+      'Зміни цих позицій більше недоступні. Вони передані в роботу складу.',
       appUrl,
     ].join('\n');
   }
@@ -42,7 +43,7 @@ function buildText(type, { groupName, appUrl, offersCount = 0 }) {
     title,
     '',
     `Всі магазини ${name}, приїхав новий товар, ЗРОБІТЬ ТЕРМІНОВО ЗАМОВЛЕННЯ.`,
-    ...(offersCount > 1 ? [`Нових товарів у пачці: ${offersCount}.`] : []),
+    ...(offersCount > 1 ? [`Відкритих товарів у дозамовленні: ${offersCount}.`] : []),
     '',
     'Відкрийте додаток → «Товари» — картки позначені бейджем «Дозамовлення».',
     appUrl,
@@ -53,7 +54,7 @@ async function claimOpened(offers, now) {
   const claimed = [];
   for (const offer of offers) {
     const updated = await SupplementOffer.findOneAndUpdate(
-      { _id: offer._id, status: 'open', notifiedTypes: { $ne: 'opened' } },
+      { _id: offer._id, status: ITEM_STATUS.OPEN, notifiedTypes: { $ne: 'opened' } },
       { $addToSet: { notifiedTypes: 'opened' }, $set: { lastReminderAt: now } },
       { new: true },
     );
@@ -77,7 +78,7 @@ async function claimReminders(offers, now) {
     const updated = await SupplementOffer.findOneAndUpdate(
       {
         _id: offer._id,
-        status: 'open',
+        status: ITEM_STATUS.OPEN,
         waveId: null,
         notifiedTypes: 'opened',
         $or: [
@@ -170,12 +171,12 @@ async function findDueReminders(now = new Date()) {
   const threshold = new Date(now.getTime() - REMINDER_EVERY_MS);
   const [opened, reminder] = await Promise.all([
     SupplementOffer.find(
-      { status: 'open', waveId: null, notifiedTypes: { $ne: 'opened' } },
+      { status: ITEM_STATUS.OPEN, waveId: null, notifiedTypes: { $ne: 'opened' } },
       '_id receiptId deliveryGroupId openedAt notifiedTypes lastReminderAt',
     ).lean(),
     SupplementOffer.find(
       {
-        status: 'open',
+        status: ITEM_STATUS.OPEN,
         waveId: null,
         notifiedTypes: 'opened',
         $or: [
@@ -191,13 +192,27 @@ async function findDueReminders(now = new Date()) {
 
 
 
-// ── V48.S2 Wave-level lifecycle notifications ───────────────────────────────
+// ── V48.S3 group-session container lifecycle notifications ───────────────────────────────
+
+function isV3NotificationWave(wave) {
+  return Number(wave?.architectureVersion || 0) >= 3 && Number(wave?.activityRevision || 0) > 0;
+}
 
 async function claimWaveOpened(waves, now) {
   const claimed = [];
   for (const wave of waves || []) {
+    if (isV3NotificationWave(wave)) {
+      const revision = Number(wave.activityRevision);
+      const updated = await SupplementWave.findOneAndUpdate(
+        { _id: wave._id, status: ITEM_STATUS.OPEN, activityRevision: revision, openedNotifiedRevision: { $lt: revision } },
+        { $set: { openedNotifiedRevision: revision, lastReminderRevision: revision, lastReminderAt: now } },
+        { new: true },
+      );
+      if (updated) claimed.push(updated.toObject ? updated.toObject() : updated);
+      continue;
+    }
     const updated = await SupplementWave.findOneAndUpdate(
-      { _id: wave._id, status: 'open', notifiedTypes: { $ne: 'opened' } },
+      { _id: wave._id, status: ITEM_STATUS.OPEN, notifiedTypes: { $ne: 'opened' } },
       { $addToSet: { notifiedTypes: 'opened' }, $set: { lastReminderAt: now } },
       { new: true },
     );
@@ -208,20 +223,50 @@ async function claimWaveOpened(waves, now) {
 
 async function releaseWaveOpened(waves) {
   if (!waves?.length) return;
-  await SupplementWave.updateMany(
-    { _id: { $in: waves.map((wave) => wave._id) } },
-    { $pull: { notifiedTypes: 'opened' }, $set: { lastReminderAt: null } },
-  );
+  for (const wave of waves) {
+    if (isV3NotificationWave(wave)) {
+      const revision = Number(wave.activityRevision);
+      await SupplementWave.updateOne(
+        { _id: wave._id, activityRevision: revision, openedNotifiedRevision: revision },
+        { $set: { openedNotifiedRevision: Math.max(0, revision - 1), lastReminderRevision: 0, lastReminderAt: null } },
+      );
+      continue;
+    }
+    await SupplementWave.updateOne(
+      { _id: wave._id },
+      { $pull: { notifiedTypes: 'opened' }, $set: { lastReminderAt: null } },
+    );
+  }
 }
 
 async function claimWaveReminders(waves, now) {
   const threshold = new Date(now.getTime() - REMINDER_EVERY_MS);
   const claimed = [];
   for (const wave of waves || []) {
+    if (isV3NotificationWave(wave)) {
+      const revision = Number(wave.activityRevision);
+      const updated = await SupplementWave.findOneAndUpdate(
+        {
+          _id: wave._id,
+          status: ITEM_STATUS.OPEN,
+          activityRevision: revision,
+          openedNotifiedRevision: revision,
+          $or: [
+            { lastReminderRevision: { $lt: revision } },
+            { lastReminderAt: null },
+            { lastReminderAt: { $lte: threshold } },
+          ],
+        },
+        { $set: { lastReminderRevision: revision, lastReminderAt: now } },
+        { new: true },
+      );
+      if (updated) claimed.push(updated.toObject ? updated.toObject() : updated);
+      continue;
+    }
     const updated = await SupplementWave.findOneAndUpdate(
       {
         _id: wave._id,
-        status: 'open',
+        status: ITEM_STATUS.OPEN,
         notifiedTypes: 'opened',
         $or: [{ lastReminderAt: null }, { lastReminderAt: { $lte: threshold } }],
       },
@@ -236,7 +281,18 @@ async function claimWaveReminders(waves, now) {
 async function claimWaveLifecycle(waves, type) {
   const claimed = [];
   for (const wave of waves || []) {
-    const requiredStatus = type === 'frozen' ? 'frozen' : type === 'cancelled' ? 'cancelled' : wave.status;
+    const requiredStatus = type === 'frozen' ? ITEM_STATUS.FROZEN : type === 'cancelled' ? ITEM_STATUS.CANCELLED : wave.status;
+    if (isV3NotificationWave(wave) && ['frozen', 'cancelled'].includes(type)) {
+      const revision = Number(wave.activityRevision);
+      const field = type === 'frozen' ? 'frozenNotifiedRevision' : 'cancelledNotifiedRevision';
+      const updated = await SupplementWave.findOneAndUpdate(
+        { _id: wave._id, status: requiredStatus, activityRevision: revision, [field]: { $lt: revision } },
+        { $set: { [field]: revision } },
+        { new: true },
+      );
+      if (updated) claimed.push(updated.toObject ? updated.toObject() : updated);
+      continue;
+    }
     const updated = await SupplementWave.findOneAndUpdate(
       { _id: wave._id, status: requiredStatus, notifiedTypes: { $ne: type } },
       { $addToSet: { notifiedTypes: type } },
@@ -268,7 +324,7 @@ async function notifyWaves(waves, type, { now = new Date() } = {}) {
     DeliveryGroup.find({ _id: { $in: groupIds } }, 'name').lean(),
     Promise.all(claimed.map(async (wave) => ({
       waveId: String(wave._id),
-      count: await SupplementOfferModel.countDocuments({ waveId: wave._id, itemStatus: 'active' }),
+      count: await SupplementOfferModel.countDocuments({ waveId: wave._id, itemStatus: ITEM_RELATION_STATUS.ACTIVE, status: type === 'frozen' ? ITEM_STATUS.FROZEN : type === 'cancelled' ? ITEM_STATUS.CANCELLED : ITEM_STATUS.OPEN }),
     }))),
     serviceGroupChatIds(),
   ]);
@@ -301,23 +357,22 @@ async function notifyWaves(waves, type, { now = new Date() } = {}) {
 
 async function findDueWaveNotifications(now = new Date()) {
   const threshold = new Date(now.getTime() - REMINDER_EVERY_MS);
-  const [opened, reminder] = await Promise.all([
-    SupplementWave.find(
-      { status: 'open', notifiedTypes: { $ne: 'opened' } },
-      '_id deliveryGroupId orderingSessionId openedAt notifiedTypes lastReminderAt',
-    ).lean(),
-    SupplementWave.find(
-      {
-        status: 'open',
-        notifiedTypes: 'opened',
-        $or: [
-          { lastReminderAt: null, openedAt: { $lte: threshold } },
-          { lastReminderAt: { $lte: threshold } },
-        ],
-      },
-      '_id deliveryGroupId orderingSessionId openedAt notifiedTypes lastReminderAt',
-    ).lean(),
-  ]);
+  const openWaves = await SupplementWave.find(
+    { status: ITEM_STATUS.OPEN, mergedIntoWaveId: null },
+    '_id deliveryGroupId orderingSessionId status architectureVersion activityRevision openedNotifiedRevision lastReminderRevision openedAt notifiedTypes lastReminderAt',
+  ).lean();
+  const opened = [];
+  const reminder = [];
+  for (const wave of openWaves) {
+    if (isV3NotificationWave(wave)) {
+      const revision = Number(wave.activityRevision);
+      if (Number(wave.openedNotifiedRevision || 0) < revision) opened.push(wave);
+      else if (Number(wave.lastReminderRevision || 0) < revision || !wave.lastReminderAt || new Date(wave.lastReminderAt) <= threshold) reminder.push(wave);
+      continue;
+    }
+    if (!(wave.notifiedTypes || []).includes('opened')) opened.push(wave);
+    else if (!wave.lastReminderAt || new Date(wave.lastReminderAt) <= threshold) reminder.push(wave);
+  }
   return { opened, reminder };
 }
 

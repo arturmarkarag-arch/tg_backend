@@ -16,10 +16,11 @@ describe('V48.8 Warsaw / European date policy', () => {
     expect(source).not.toContain('Date.parse(req.query.dateTo');
   });
 
-  it('archive/product date filters use Europe/Warsaw date keys', () => {
+  it('archive/product day semantics use Europe/Warsaw date keys', () => {
     const archive = read('routes/archive.js');
     const products = read('routes/products.js');
     expect(archive).toContain('formatWarsawDateKey(p.archivedAt)');
+    expect(products).toContain('formatWarsawDateKey(new Date())');
     expect(products).toContain('warsawDateKeyToUtcRange(dateFilter)');
   });
 

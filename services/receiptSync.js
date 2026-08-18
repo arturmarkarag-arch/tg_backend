@@ -31,7 +31,10 @@ const SupplementOffer   = require('../models/SupplementOffer');
 const SupplementRequest = require('../models/SupplementRequest');
 
 const { syncMirror, upsertShopOwnedFromReceiptItem } = require('../utils/upsertShopProduct');
+const { repriceActiveOrders } = require('../utils/repriceActiveOrders');
 const { labelPositionsFromPhotoMeta, photoCommentsText } = require('../utils/receiptPhotoMeta');
+const { ITEM_STATUS, ITEM_RELATION_STATUS, ACTIVE_ITEM_STATUSES, REQUEST_STATUS, revisionOf, isActiveItemRevision } = require('../utils/supplementState');
+const { sourceSnapshotFromReceiptItem } = require('./supplementWaveService');
 
 /** Підписи на фото (позиції ціни/кількості/всіх коментарів) у формі товару. */
 function labelPositionsFromMeta(photoMeta) {
@@ -49,6 +52,8 @@ function snapshotItem(item) {
     photoName:        item.photoName || '',
     originalPhotoUrl: item.originalPhotoUrl || '',
     photoMeta:        JSON.stringify(labelPositionsFromMeta(item.photoMeta)),
+    name:             item.name || '',
+    aiDescription:    item.aiDescription || '',
   };
 }
 
@@ -60,7 +65,7 @@ function snapshotItem(item) {
  * людською мовою — вони йдуть просто в текст помилки, щоб працівник знав, що
  * саме заважає, і куди йти виправляти.
  */
-async function describeItemUsage(item, { session = null } = {}) {
+async function describeItemUsage(item, { session = null, mode = 'destructive' } = {}) {
   const ses = (q) => (session ? q.session(session) : q);
   const reasons = [];
 
@@ -82,30 +87,41 @@ async function describeItemUsage(item, { session = null } = {}) {
     if (taskCount > 0) reasons.push('товар уже потрапив у збирання');
   }
 
-  // First publication is irreversible through legacy unconfirm/delete. Modern
-  // corrections use the compensating routing command instead. The marker is
-  // compatibility/audit only and does not decide which other current session may
-  // receive its own Wave.
-  if (item.supplementPublishRequestedAt) {
-    reasons.push('дозамовлення вже передано на публікацію');
+  // Destructive rollback and future metadata editing have different contracts.
+  // - DELETE/UNCONFIRM must preserve ANY supplement publication history.
+  // - a normal metadata edit may proceed after a modern revision is terminal,
+  //   because that revision owns an immutable sourceSnapshot and a later publish
+  //   will create revision+1. OPEN/FROZEN work still blocks the edit.
+  const offers = await ses(
+    SupplementOffer.find({ receiptItemId: item._id }, '_id waveId revision status itemStatus deliveryGroupId').lean(),
+  );
+  const legacyOffers = offers.filter((offer) => !offer.waveId);
+  const modernOffers = offers.filter((offer) => offer.waveId);
+  const activeModernOffers = modernOffers.filter(isActiveItemRevision);
+
+  if (legacyOffers.length > 0 || (item.supplementPublishRequestedAt && modernOffers.length === 0)) {
+    reasons.push('дозамовлення вже передано через старий publication flow');
   }
 
-  // An offer means sellers have already been exposed to this product. Zero
-  // requests is NOT a reason to roll it back: open/frozen/completed are all
-  // downstream business states. Requests are reported additionally for diagnosis.
-  const offers = await ses(
-    SupplementOffer.find({ receiptItemId: item._id }, '_id status deliveryGroupId').lean(),
-  );
-  if (offers.length > 0) {
-    const statuses = new Set(offers.map((offer) => String(offer.status || '')));
-    if (statuses.has('completed')) reasons.push('дозамовлення вже завершено');
-    else if (statuses.has('frozen')) reasons.push('дозамовлення вже закрито для нових заявок');
-    else reasons.push('дозамовлення вже відкрито для магазинів');
+  if (mode === 'destructive' && modernOffers.length > 0) {
+    reasons.push('позиція має історію публікацій дозамовлення');
+    const requestCount = await ses(SupplementRequest.countDocuments({
+      offerId: { $in: modernOffers.map((offer) => offer._id) },
+    }));
+    if (requestCount > 0) reasons.push(`історія дозамовлень містить заявки магазинів (${requestCount})`);
+  } else if (activeModernOffers.length > 0) {
+    const statuses = new Set(activeModernOffers.map((offer) => String(offer.status || '')));
+    if (statuses.has(ITEM_STATUS.FROZEN)) reasons.push('дозамовлення цієї позиції вже передано в роботу');
+    else reasons.push('дозамовлення цієї позиції зараз відкрите для магазинів');
 
-    const requestCount = await ses(
-      SupplementRequest.countDocuments({ offerId: { $in: offers.map((o) => o._id) } }),
-    );
-    if (requestCount > 0) reasons.push(`магазини вже дозамовили цей товар (${requestCount})`);
+    const requestCount = await ses(SupplementRequest.countDocuments({
+      $or: activeModernOffers.map((offer) => ({
+        offerId: offer._id,
+        revision: revisionOf(offer),
+        status: REQUEST_STATUS.ACTIVE,
+      })),
+    }));
+    if (requestCount > 0) reasons.push(`магазини мають поточні заявки на цей товар (${requestCount})`);
   }
 
   return { inUse: reasons.length > 0, reasons };
@@ -122,6 +138,36 @@ async function describeItemUsage(item, { session = null } = {}) {
  * Викликати ЗАВЖДИ всередині транзакції позиції: товар, дзеркало і сама позиція
  * мусять комітитись разом.
  */
+async function syncCurrentSupplementSnapshots(item, { session = null } = {}) {
+  const filter = {
+    receiptItemId: item._id,
+    waveId: { $ne: null },
+    itemStatus: ITEM_RELATION_STATUS.ACTIVE,
+    status: { $in: ACTIVE_ITEM_STATUSES },
+  };
+  const idsQuery = SupplementOffer.find(filter, '_id waveId revision deliveryGroupId orderingSessionId').lean();
+  const rows = await (session ? idsQuery.session(session) : idsQuery);
+  if (!rows.length) return { offerIds: [], waveIds: [], changes: [] };
+
+  await SupplementOffer.updateMany(
+    { _id: { $in: rows.map((row) => row._id) } },
+    { $set: { sourceSnapshot: sourceSnapshotFromReceiptItem(item) } },
+    { session },
+  );
+
+  return {
+    offerIds: rows.map((row) => String(row._id)),
+    waveIds: [...new Set(rows.map((row) => row.waveId).filter(Boolean).map(String))],
+    changes: rows.map((row) => ({
+      offerId: String(row._id),
+      waveId: row.waveId ? String(row.waveId) : null,
+      revision: revisionOf(row),
+      deliveryGroupId: String(row.deliveryGroupId || ''),
+      orderingSessionId: row.orderingSessionId ? String(row.orderingSessionId) : null,
+    })),
+  };
+}
+
 async function propagateItemEdit(item, prev, { session = null } = {}) {
   const out = {
     productId: null,
@@ -130,6 +176,9 @@ async function propagateItemEdit(item, prev, { session = null } = {}) {
     quantityClamped: false,
     // Документ, чиє фото змінилось, — його вектор перегенерується ПІСЛЯ коміту.
     reembed: null,
+    supplementOfferIds: [],
+    supplementWaveIds: [],
+    supplementChanges: [],
   };
 
   const nextLabelPositions = labelPositionsFromMeta(item.photoMeta);
@@ -143,6 +192,11 @@ async function propagateItemEdit(item, prev, { session = null } = {}) {
   // джерелом вектора є сам анотований файл.
   const vectorStale = originalChanged || (labeledChanged && !item.originalPhotoUrl);
 
+  const supplementSync = await syncCurrentSupplementSnapshots(item, { session });
+  out.supplementOfferIds = supplementSync.offerIds;
+  out.supplementWaveIds = supplementSync.waveIds;
+  out.supplementChanges = supplementSync.changes;
+
   if ((item.destination || 'shelf') !== 'shops') {
     // Позиція без товару — ще не підтверджена. Товар створить підтвердження.
     if (!item.createdProductId) return out;
@@ -150,7 +204,16 @@ async function propagateItemEdit(item, prev, { session = null } = {}) {
     const product = await (session ? q.session(session) : q);
     if (!product) return out;
 
-    if (item.price !== prev.price && item.price != null) product.price = item.price;
+    if (item.price !== prev.price && item.price != null) {
+      product.price = item.price;
+      // Commercial price authority must have identical side effects regardless of
+      // whether the edit came from Receipt, warehouse Product or ShopProduct view.
+      // Active ordinary Orders are part of the same price epoch; finalized Orders
+      // remain immutable by repriceActiveOrders contract.
+      await repriceActiveOrders(product._id, Number(item.price), { session });
+    }
+    if (item.name !== prev.name) product.name = item.name || '';
+    if (item.aiDescription !== prev.aiDescription) product.aiDescription = item.aiDescription || '';
     if (item.qtyPerPackage !== prev.qtyPerPackage && item.qtyPerPackage) {
       product.quantityPerPackage = item.qtyPerPackage;
     }
@@ -255,25 +318,12 @@ async function hasOpenSupplementWave(receiptId, { session = null } = {}) {
   return !!(await (session ? q.session(session) : q));
 }
 
-/**
- * Чи конкретна позиція вже показана продавцям у дозамовленні.
- * Open і frozen обидва блокують підміну оригінального фото: продавці вже
- * бачили саме цей товар, а frozen ще й може бути в процесі збирання.
- */
-async function hasActiveSupplementItemWave(receiptItemId, { session = null } = {}) {
-  const q = SupplementOffer.exists({
-    receiptItemId,
-    status: { $in: SupplementOffer.ACTIVE_STATUSES },
-  });
-  return !!(await (session ? q.session(session) : q));
-}
-
 module.exports = {
   labelPositionsFromMeta,
   snapshotItem,
   describeItemUsage,
   propagateItemEdit,
+  syncCurrentSupplementSnapshots,
   rollbackItemArtifacts,
   hasOpenSupplementWave,
-  hasActiveSupplementItemWave,
 };

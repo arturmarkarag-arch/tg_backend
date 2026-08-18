@@ -18,6 +18,7 @@ const { withLock } = require('../utils/lock');
 const { getProductTitle } = require('./archiveProduct');
 const { getIO } = require('../socket');
 const { normalizeReceiptItemRouting } = require('../utils/receiptRouting');
+const { ITEM_STATUS, ITEM_RELATION_STATUS, REQUEST_STATUS, ACTIVE_ITEM_STATUSES, revisionOf, isSellerEditable, isPackable } = require('../utils/supplementState');
 const { resolveSupplementTarget } = require('./supplementTargets');
 const { isOrderingOpen } = require('../utils/orderingSchedule');
 const {
@@ -31,16 +32,18 @@ const {
 /** Поточний збережений статус пропозиції. */
 function effectiveOfferStatus(offer) {
   if (!offer) return null;
-  return offer.waveStatus || offer._waveStatus || (offer.itemStatus === 'withdrawn' ? 'cancelled' : offer.status);
+  // V48.S3: lifecycle belongs to the current item revision. Wave status is only
+  // a container summary and must never lock/unlock unrelated items.
+  return offer.itemStatus === ITEM_RELATION_STATUS.WITHDRAWN ? ITEM_STATUS.CANCELLED : offer.status;
 }
 
 /** Пропозиція ще приймає зміни від продавців? */
 function isOfferOpenForSellers(offer, now = new Date()) {
-  return effectiveOfferStatus(offer, now) === 'open';
+  return isSellerEditable(offer);
 }
 
 // Спільне визначення активної пропозиції.
-const ACTIVE_STATUSES = SupplementOffer.ACTIVE_STATUSES;
+const ACTIVE_STATUSES = ACTIVE_ITEM_STATUSES; // same lifecycle vocabulary for legacy rows
 
 // Створення пропозицій після проведення: docs/receipt/readme.md#2-проведення-накладної-дозамовлення
 /** @returns {Promise<{created: Array, complete: boolean}>} */
@@ -124,7 +127,7 @@ async function createOffersForReceipt(receiptId) {
     deliveryGroupId,
     openedAt,
     closesAt: null,
-    status: 'open',
+    status: ITEM_STATUS.OPEN,
     lastReminderAt: openedAt,
   }));
 
@@ -213,6 +216,23 @@ function formatLocation(location) {
 // ─── Збірка відповіді API ────────────────────────────────────────────────────
 
 function productView(product, offer = null) {
+  // A modern publication keeps a revision snapshot. Explicit canonical metadata
+  // corrections update the CURRENT OPEN/FROZEN revision in-place because it is the
+  // same product; terminal revisions remain immutable history. A restart captures a
+  // fresh ReceiptItem snapshot for the new revision.
+  if (offer?.waveId && offer?.sourceSnapshot) {
+    const snap = offer.sourceSnapshot || {};
+    return {
+      productId: product?._id ? String(product._id) : (offer?.productId ? String(offer.productId) : null),
+      receiptItemId: offer?.receiptItemId ? String(offer.receiptItemId) : null,
+      title: snap.title || (product ? getProductTitle(product) : 'Товар'),
+      imageUrl: snap.imageUrl || null,
+      price: Number(snap.price || 0),
+      quantityPerPackage: Number(snap.quantityPerPackage || 0),
+      aiDescription: snap.aiDescription || '',
+      standaloneSupplement: !product,
+    };
+  }
   if (!product) {
     const snap = offer?.sourceSnapshot || {};
     return {
@@ -259,6 +279,7 @@ function offerViewForWarehouse(offer, { product, requests = [], location = null,
 
   return {
     offerId: String(offer._id),
+    revision: revisionOf(offer),
     status,
     openedAt: offer.openedAt,
     closesAt: offer.closesAt,
@@ -273,7 +294,7 @@ function offerViewForWarehouse(offer, { product, requests = [], location = null,
     lockedBy: offer.lockedBy ? String(offer.lockedBy) : null,
     lockedAt: offer.lockedAt || null,
     // Сервер сам каже, чи можна завершувати — клієнт не має відтворювати правило.
-    canComplete: status === 'frozen' && rows.length > 0 && rows.every((r) => r.packed),
+    canComplete: status === ITEM_STATUS.FROZEN && rows.length > 0 && rows.every((r) => r.packed),
   };
 }
 
@@ -305,19 +326,17 @@ async function claimOffer(offerId, telegramId, now = new Date()) {
   return withOfferLock(offerId, async () => {
     const head = await SupplementOffer.findById(offerId);
     if (!head) return { ok: false, reason: 'supplement_offer_not_found' };
-    if (head.itemStatus === 'withdrawn') return { ok: false, reason: 'supplement_closed' };
+    if (head.itemStatus === ITEM_RELATION_STATUS.WITHDRAWN) return { ok: false, reason: 'supplement_closed' };
 
-    const wave = await loadWaveForOffer(head, { lean: true });
-    if (wave && wave.status !== 'frozen') {
-      return { ok: false, reason: wave.status === 'open' ? 'supplement_pack_before_freeze' : 'supplement_closed' };
+    if (!isPackable(head)) {
+      return { ok: false, reason: head.status === ITEM_STATUS.OPEN ? 'supplement_pack_before_freeze' : 'supplement_closed' };
     }
-    if (!wave && !ACTIVE_STATUSES.includes(head.status)) return { ok: false, reason: 'supplement_closed' };
 
     const claimed = await SupplementOffer.findOneAndUpdate(
       {
         _id: offerId,
-        itemStatus: { $ne: 'withdrawn' },
-        ...(wave ? { waveId: wave._id, status: 'frozen' } : { status: { $in: ACTIVE_STATUSES } }),
+        itemStatus: { $ne: ITEM_RELATION_STATUS.WITHDRAWN },
+        status: ITEM_STATUS.FROZEN,
         $or: [
           { lockedBy: null },
           { lockedBy: me },
@@ -329,13 +348,12 @@ async function claimOffer(offerId, telegramId, now = new Date()) {
     );
     if (claimed) {
       const out = claimed.toObject ? claimed.toObject() : claimed;
-      if (wave) out.waveStatus = wave.status;
       return { ok: true, offer: out };
     }
 
     const existing = await SupplementOffer.findById(offerId, 'lockedBy status itemStatus waveId').lean();
     if (!existing) return { ok: false, reason: 'supplement_offer_not_found' };
-    if (existing.itemStatus === 'withdrawn' || existing.status === 'completed' || existing.status === 'cancelled') {
+    if (existing.itemStatus === ITEM_RELATION_STATUS.WITHDRAWN || existing.status === ITEM_STATUS.COMPLETED || existing.status === ITEM_STATUS.CANCELLED) {
       return { ok: false, reason: 'supplement_closed' };
     }
     return { ok: false, reason: 'supplement_locked_by_other', lockedBy: String(existing.lockedBy || '') };
@@ -347,12 +365,11 @@ async function heartbeatOffer(offerId, telegramId, now = new Date()) {
   const me = String(telegramId || '');
   return withOfferLock(offerId, async () => {
     const head = await SupplementOffer.findById(offerId, 'waveId status itemStatus lockedBy lockedAt').lean();
-    if (!head || head.itemStatus === 'withdrawn') return { ok: true, held: false, state: 'missing' };
-    const wave = await loadWaveForOffer(head, { lean: true });
-    if (wave && wave.status !== 'frozen') return { ok: true, held: false, state: wave.status };
+    if (!head || head.itemStatus === ITEM_RELATION_STATUS.WITHDRAWN) return { ok: true, held: false, state: 'missing' };
+    if (!isPackable(head)) return { ok: true, held: false, state: head.status };
 
     const mine = await SupplementOffer.findOneAndUpdate(
-      { _id: offerId, status: { $in: ACTIVE_STATUSES }, itemStatus: { $ne: 'withdrawn' }, lockedBy: me },
+      { _id: offerId, status: { $in: ACTIVE_STATUSES }, itemStatus: { $ne: ITEM_RELATION_STATUS.WITHDRAWN }, lockedBy: me },
       { $set: { lockedAt: now } },
       { new: true },
     );
@@ -360,7 +377,7 @@ async function heartbeatOffer(offerId, telegramId, now = new Date()) {
 
     const existing = await SupplementOffer.findById(offerId, 'lockedBy lockedAt status').lean();
     if (!existing) return { ok: true, held: false, state: 'missing' };
-    if (existing.status === 'completed' || existing.status === 'cancelled') return { ok: true, held: false, state: 'completed' };
+    if (existing.status === ITEM_STATUS.COMPLETED || existing.status === ITEM_STATUS.CANCELLED) return { ok: true, held: false, state: 'completed' };
     if (!existing.lockedBy) return { ok: true, held: false, state: 'available' };
     return {
       ok: true,
@@ -391,16 +408,16 @@ async function freezeReceiptOffers(receiptId, actor = {}, now = new Date(), { de
     throw Object.assign(new Error('receipt not found'), { code: 'receipt_not_found' });
   }
 
-  const filter = { receiptId, status: 'open', waveId: null };
+  const filter = { receiptId, status: ITEM_STATUS.OPEN, waveId: null };
   if (deliveryGroupId) filter.deliveryGroupId = String(deliveryGroupId);
   const open = await SupplementOffer.find(filter, '_id deliveryGroupId').lean();
   const frozen = [];
   for (const o of open) {
     const updated = await withOfferLock(o._id, () => SupplementOffer.findOneAndUpdate(
-      { _id: o._id, status: 'open' },
+      { _id: o._id, status: ITEM_STATUS.OPEN },
       {
         $set: {
-          status: 'frozen',
+          status: ITEM_STATUS.FROZEN,
           frozenAt: now,
           frozenBy: String(actor.by || ''),
           frozenByName: String(actor.byName || ''),
@@ -429,7 +446,7 @@ async function freezeReceiptOffers(receiptId, actor = {}, now = new Date(), { de
  * sellers simply cannot add/change quantities anymore.
  */
 async function freezeOffersForActiveOrderingWindows(now = new Date()) {
-  const open = await SupplementOffer.find({ status: 'open', waveId: null }, '_id receiptId deliveryGroupId').lean();
+  const open = await SupplementOffer.find({ status: ITEM_STATUS.OPEN, waveId: null }, '_id receiptId deliveryGroupId').lean();
   if (!open.length) return 0;
 
   const groupIds = [...new Set(open.map((o) => String(o.deliveryGroupId || '')).filter(Boolean))];
@@ -445,10 +462,10 @@ async function freezeOffersForActiveOrderingWindows(now = new Date()) {
   for (const offer of open) {
     if (!activeGroupIds.has(String(offer.deliveryGroupId))) continue;
     const updated = await withOfferLock(offer._id, () => SupplementOffer.findOneAndUpdate(
-      { _id: offer._id, status: 'open' },
+      { _id: offer._id, status: ITEM_STATUS.OPEN },
       {
         $set: {
-          status: 'frozen',
+          status: ITEM_STATUS.FROZEN,
           frozenAt: now,
           frozenBy: 'system:ordering-window',
           frozenByName: 'Автоматично: почалась звичайна сесія',
@@ -468,10 +485,10 @@ async function freezeOffersForActiveOrderingWindows(now = new Date()) {
   return frozenCount;
 }
 
-/** Після ручного/автоматичного frozen закриває пропозиції без заявок. */
-async function autoCompleteEmptyOffers(now = new Date()) {
+/** Після frozen звільняє позиції без заявок: без пакування немає COMPLETED. */
+async function releaseEmptyOffers(now = new Date()) {
   const frozen = await SupplementOffer.find(
-    { status: 'frozen', itemStatus: { $ne: 'withdrawn' } },
+    { status: ITEM_STATUS.FROZEN, itemStatus: { $ne: ITEM_RELATION_STATUS.WITHDRAWN } },
     '_id deliveryGroupId waveId',
   ).lean();
 
@@ -479,29 +496,41 @@ async function autoCompleteEmptyOffers(now = new Date()) {
   const waveIds = new Set();
   for (const o of frozen) {
     const updated = await withOfferLock(o._id, async () => {
-      if (await SupplementRequest.exists({ offerId: o._id, status: { $ne: 'cancelled' } })) return null;
+      const current = await SupplementOffer.findById(o._id, 'revision').lean();
+      const revision = revisionOf(current);
+      if (await SupplementRequest.exists({ offerId: o._id, revision, status: { $ne: REQUEST_STATUS.CANCELLED } })) return null;
       return SupplementOffer.findOneAndUpdate(
-        { _id: o._id, status: 'frozen', itemStatus: { $ne: 'withdrawn' } },
-        { $set: { status: 'completed', completedAt: now, lockedBy: null, lockedAt: null } },
+        { _id: o._id, status: ITEM_STATUS.FROZEN, itemStatus: { $ne: ITEM_RELATION_STATUS.WITHDRAWN } },
+        {
+          $set: {
+            status: ITEM_STATUS.CANCELLED,
+            completedAt: null,
+            cancelledAt: now,
+            cancelledBy: 'system',
+            cancelledByName: 'Система',
+            cancelReason: 'no_requests',
+            lockedBy: null,
+            lockedAt: null,
+          },
+        },
         { new: true },
       );
     });
     if (!updated) continue;
     closed += 1;
     if (updated.waveId) waveIds.add(String(updated.waveId));
-    emit('supplement_completed', {
+    emit('supplement_cancelled', {
       offerId: String(o._id),
       waveId: o.waveId ? String(o.waveId) : null,
       deliveryGroupId: String(o.deliveryGroupId),
-      reason: 'empty',
+      reason: 'no_requests',
     });
   }
   for (const waveId of waveIds) {
     const wave = await recomputeWaveCompletion(waveId, {}, now).catch(() => null);
-    if (wave?.status === 'completed' && wave.orderingSessionId) {
-      // A frozen empty Wave can be the final blocker of the delivery cycle. The
-      // scheduler/explicit freeze therefore re-evaluates the same exact session
-      // after the Wave becomes terminal instead of waiting for unrelated traffic.
+    if (wave) emit('supplement_wave_changed', { waveId, status: wave.status });
+    if ([ITEM_STATUS.COMPLETED, ITEM_STATUS.CANCELLED].includes(wave?.status) && wave.orderingSessionId) {
+      // A released empty Wave can be the final blocker of the delivery cycle.
       await require('../utils/sessionStatus').maybeCompleteSession(String(wave.orderingSessionId)).catch(() => {});
     }
   }
@@ -513,22 +542,23 @@ async function completeOffer(offerId, actor = {}, now = new Date()) {
   const offer = await withOfferLock(offerId, async () => {
     const doc = await SupplementOffer.findById(offerId);
     if (!doc) throw Object.assign(new Error('offer not found'), { code: 'supplement_offer_not_found' });
-    if (doc.itemStatus === 'withdrawn' || doc.status === 'cancelled') {
+    if (doc.itemStatus === ITEM_RELATION_STATUS.WITHDRAWN || doc.status === ITEM_STATUS.CANCELLED) {
       throw Object.assign(new Error('offer closed'), { code: 'supplement_closed' });
     }
-    if (doc.status === 'completed') return doc;
+    if (doc.status === ITEM_STATUS.COMPLETED) return doc;
 
     const wave = await loadWaveForOffer(doc, { lean: true });
     const effective = effectiveWaveItemStatus(doc, wave);
-    if (effective !== 'frozen') {
+    if (effective !== ITEM_STATUS.FROZEN) {
       throw Object.assign(new Error('offer not frozen'), { code: 'supplement_not_frozen' });
     }
     if (actor?.by && String(doc.lockedBy || '') !== String(actor.by)) {
       throw Object.assign(new Error('offer not claimed'), { code: 'supplement_not_claimed' });
     }
 
+    const revision = revisionOf(doc);
     const requests = await SupplementRequest.find(
-      { offerId: doc._id, status: { $ne: 'cancelled' } },
+      { offerId: doc._id, revision, status: { $ne: REQUEST_STATUS.CANCELLED } },
       'packed',
     ).lean();
     if (!requests.length) throw Object.assign(new Error('no requests'), { code: 'supplement_no_requests' });
@@ -537,10 +567,10 @@ async function completeOffer(offerId, actor = {}, now = new Date()) {
     }
 
     return SupplementOffer.findOneAndUpdate(
-      { _id: doc._id, status: { $ne: 'completed' }, itemStatus: { $ne: 'withdrawn' } },
+      { _id: doc._id, status: { $ne: ITEM_STATUS.COMPLETED }, itemStatus: { $ne: ITEM_RELATION_STATUS.WITHDRAWN } },
       {
         $set: {
-          status: 'completed',
+          status: ITEM_STATUS.COMPLETED,
           completedAt: now,
           frozenAt: doc.frozenAt || wave?.frozenAt || now,
           completedBy: String(actor.by || ''),
@@ -582,8 +612,8 @@ async function countActiveOffersForGroup(deliveryGroupId, { orderingSessionId = 
         waveId: { $ne: null },
         deliveryGroupId: String(deliveryGroupId),
         orderingSessionId: String(orderingSessionId),
-        itemStatus: 'active',
-        status: { $in: ACTIVE_STATUSES },
+        itemStatus: ITEM_RELATION_STATUS.ACTIVE,
+        status: { $in: ACTIVE_ITEM_STATUSES },
       });
     }
     return await SupplementOffer.countDocuments({ $or: clauses });
@@ -603,8 +633,8 @@ async function findActiveOffersForGroup(deliveryGroupId, { orderingSessionId = n
       waveId: { $ne: null },
       deliveryGroupId: String(deliveryGroupId),
       orderingSessionId: String(orderingSessionId),
-      itemStatus: 'active',
-      status: { $in: ACTIVE_STATUSES },
+      itemStatus: ITEM_RELATION_STATUS.ACTIVE,
+      status: { $in: ACTIVE_ITEM_STATUSES },
     });
   }
   return SupplementOffer.find({ $or: clauses }).sort({ createdAt: 1 }).lean();
@@ -638,7 +668,7 @@ module.exports = {
   releaseOffer,
   freezeReceiptOffers,
   freezeOffersForActiveOrderingWindows,
-  autoCompleteEmptyOffers,
+  releaseEmptyOffers,
   completeOffer,
   countActiveOffersForGroup,
   findActiveOffersForGroup,

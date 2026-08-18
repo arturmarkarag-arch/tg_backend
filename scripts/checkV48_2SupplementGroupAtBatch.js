@@ -22,8 +22,8 @@ check(receipts.includes('routing.supplementDeliveryGroupId ? 1 : 2'),
   'Routing marks unassigned supplement items as batch v2');
 check(receipts.includes("withLock('supplement-batch:publish'"),
   'A global publish lock protects the shared unassigned ready pool');
-check(receipts.includes('existingTargetItems') && receipts.includes('orderingSessionId: target.orderingSessionId'),
-  'Publish accepts target-neutral rows and pins the exact group/session on the Wave child');
+check(receipts.includes('existingPublications') && receipts.includes('blockedItemIds'),
+  'Publish accepts READY target-neutral rows and applies one item-global lifecycle fence');
 check(receipts.includes('readyCount') && receipts.includes('targets: targetsWithCounts'),
   'Pending batch API returns ready unassigned count and group choices');
 check(offers.includes("if (!routing.supplement || !item.createdProductId || !routing.supplementDeliveryGroupId) continue;"),

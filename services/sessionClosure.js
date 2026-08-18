@@ -13,7 +13,8 @@ const Order = require('../models/Order');
 const PickingTask = require('../models/PickingTask');
 const OrderingSession = require('../models/OrderingSession');
 const Product = require('../models/Product');
-const SupplementWave = require('../models/SupplementWave');
+const SupplementOffer = require('../models/SupplementOffer');
+const { ACTIVE_ITEM_STATUSES, ITEM_RELATION_STATUS } = require('../utils/supplementState');
 const { auditSessionCoverage } = require('./sessionCoverage');
 const { isTerminalOrderItem } = require('../utils/orderItemState');
 
@@ -56,17 +57,22 @@ async function auditSessionClosure({ deliveryGroupId, orderingSessionId }) {
     lockedAt: t.lockedAt || null,
   }))));
 
-  const activeSupplementWaves = await SupplementWave.find({
+  const activeSupplementItems = await SupplementOffer.find({
     orderingSessionId: sessionId,
-    status: { $in: SupplementWave.ACTIVE_STATUSES },
-  }, '_id deliveryGroupId status openedAt frozenAt').sort({ openedAt: 1 }).lean();
-  const supplementGroupMismatches = activeSupplementWaves.filter((wave) => str(wave.deliveryGroupId) !== groupId);
-  const supplementForGroup = activeSupplementWaves.filter((wave) => str(wave.deliveryGroupId) === groupId);
-  if (supplementForGroup.length) blockers.push(issue('active_supplement_waves', supplementForGroup.map((wave) => ({
-    waveId: str(wave._id), status: wave.status, openedAt: wave.openedAt || null, frozenAt: wave.frozenAt || null,
+    waveId: { $ne: null },
+    itemStatus: ITEM_RELATION_STATUS.ACTIVE,
+    status: { $in: ACTIVE_ITEM_STATUSES },
+  }, '_id waveId receiptItemId revision deliveryGroupId status openedAt frozenAt').sort({ openedAt: 1 }).lean();
+  const supplementGroupMismatches = activeSupplementItems.filter((item) => str(item.deliveryGroupId) !== groupId);
+  const supplementForGroup = activeSupplementItems.filter((item) => str(item.deliveryGroupId) === groupId);
+  if (supplementForGroup.length) blockers.push(issue('active_supplement_waves', supplementForGroup.map((item) => ({
+    waveId: str(item.waveId), offerId: str(item._id), receiptItemId: str(item.receiptItemId),
+    revision: revisionOf(item), status: item.status,
+    openedAt: item.openedAt || null, frozenAt: item.frozenAt || null,
   }))));
-  if (supplementGroupMismatches.length) blockers.push(issue('session_supplement_group_mismatch', supplementGroupMismatches.map((wave) => ({
-    waveId: str(wave._id), deliveryGroupId: str(wave.deliveryGroupId), expectedDeliveryGroupId: groupId, status: wave.status,
+  if (supplementGroupMismatches.length) blockers.push(issue('session_supplement_group_mismatch', supplementGroupMismatches.map((item) => ({
+    waveId: str(item.waveId), offerId: str(item._id), deliveryGroupId: str(item.deliveryGroupId),
+    expectedDeliveryGroupId: groupId, status: item.status,
   }))));
   if (taskGroupMismatches.length) blockers.push(issue('session_task_group_mismatch', taskGroupMismatches.map((t) => ({
     taskId: str(t._id), productId: str(t.productId), deliveryGroupId: str(t.deliveryGroupId) || null,
