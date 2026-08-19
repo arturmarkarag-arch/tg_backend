@@ -303,28 +303,105 @@ async function claimWaveLifecycle(waves, type) {
   return claimed;
 }
 
+async function prepareWaveNotificationEvent(wave, type, { now, text, sellers, chatIds }) {
+  const { ensureNotificationEvent } = require('./telegramDeliveryLedger');
+  const revision = isV3NotificationWave(wave) ? Number(wave.activityRevision) : 1;
+  const reminderSuffix = type === 'reminder' ? `:${now.getTime()}` : '';
+  const eventKey = `supplement_wave:${String(wave._id)}:rev:${revision}:${type}${reminderSuffix}`;
+  const recipients = [
+    ...sellers.map((seller) => ({
+      channel: 'private',
+      recipientId: String(seller.telegramId),
+      recipientName: [seller.firstName, seller.lastName].filter(Boolean).join(' '),
+      text,
+      initialStatus: seller.botBlocked ? 'skipped' : 'pending',
+      skipReason: seller.botBlocked ? 'known_bot_blocked' : '',
+    })),
+    ...chatIds.map((chatId) => ({ channel: 'group', recipientId: String(chatId), text })),
+  ];
+
+  const threshold = new Date(now.getTime() - REMINDER_EVERY_MS);
+  return ensureNotificationEvent({
+    eventKey,
+    kind: `supplement_${type}`,
+    sourceType: 'supplement_wave',
+    sourceId: String(wave._id),
+    sourceRevision: revision,
+    deliveryGroupId: String(wave.deliveryGroupId || ''),
+    recipients,
+    metadata: { notificationType: type },
+    now,
+    prepareSourceInTransaction: async ({ session }) => {
+      let query = { _id: wave._id };
+      let update = {};
+      if (isV3NotificationWave(wave)) {
+        if (type === 'opened') {
+          query = { ...query, status: ITEM_STATUS.OPEN, activityRevision: revision, openedNotifiedRevision: { $lt: revision } };
+          update = { $set: { openedNotifiedRevision: revision, lastReminderRevision: revision, lastReminderAt: now } };
+        } else if (type === 'reminder') {
+          query = {
+            ...query,
+            status: ITEM_STATUS.OPEN,
+            activityRevision: revision,
+            openedNotifiedRevision: { $gte: revision },
+            $or: [
+              { lastReminderRevision: { $lt: revision } },
+              { lastReminderAt: null },
+              { lastReminderAt: { $lte: threshold } },
+            ],
+          };
+          update = { $set: { lastReminderRevision: revision, lastReminderAt: now } };
+        } else {
+          const requiredStatus = type === 'frozen' ? ITEM_STATUS.FROZEN : ITEM_STATUS.CANCELLED;
+          const field = type === 'frozen' ? 'frozenNotifiedRevision' : 'cancelledNotifiedRevision';
+          query = { ...query, status: requiredStatus, activityRevision: revision, [field]: { $lt: revision } };
+          update = { $set: { [field]: revision } };
+        }
+      } else if (type === 'opened') {
+        query = { ...query, status: ITEM_STATUS.OPEN, notifiedTypes: { $ne: 'opened' } };
+        update = { $addToSet: { notifiedTypes: 'opened' }, $set: { lastReminderAt: now } };
+      } else if (type === 'reminder') {
+        query = {
+          ...query,
+          status: ITEM_STATUS.OPEN,
+          notifiedTypes: 'opened',
+          $or: [{ lastReminderAt: null }, { lastReminderAt: { $lte: threshold } }],
+        };
+        update = { $set: { lastReminderAt: now } };
+      } else {
+        const requiredStatus = type === 'frozen' ? ITEM_STATUS.FROZEN : ITEM_STATUS.CANCELLED;
+        query = { ...query, status: requiredStatus, notifiedTypes: { $ne: type } };
+        update = { $addToSet: { notifiedTypes: type } };
+      }
+      const marker = await SupplementWave.updateOne(query, update, { session });
+      if (Number(marker?.matchedCount || 0) !== 1) {
+        const err = new Error(`supplement ${type} notification marker already claimed`);
+        err.code = 'supplement_notification_marker_claim_lost';
+        throw err;
+      }
+    },
+  });
+}
+
 async function notifyWaves(waves, type, { now = new Date() } = {}) {
   if (!NOTIFY_TYPES.includes(type)) throw new Error(`supplementNotify: невідомий тип '${type}'`);
-  if (!waves?.length) return { sentPrivate: 0, sentGroups: 0 };
+  if (!waves?.length) return { sentPrivate: 0, sentGroups: 0, queuedPrivate: 0, queuedGroups: 0 };
 
   const { appUrl } = await getSupplementSettings();
-  if (!appUrl) return { sentPrivate: 0, sentGroups: 0 };
-  const { getBot, sendMessageWithRetry } = require('../telegramBot');
-  if (!getBot()) return { sentPrivate: 0, sentGroups: 0 };
+  if (!appUrl) return { sentPrivate: 0, sentGroups: 0, queuedPrivate: 0, queuedGroups: 0 };
+  const { getBot } = require('../telegramBot');
+  if (!getBot()) return { sentPrivate: 0, sentGroups: 0, queuedPrivate: 0, queuedGroups: 0 };
 
-  const claimed = type === 'opened'
-    ? await claimWaveOpened(waves, now)
-    : type === 'reminder'
-      ? await claimWaveReminders(waves, now)
-      : await claimWaveLifecycle(waves, type);
-  if (!claimed.length) return { sentPrivate: 0, sentGroups: 0 };
-
-  const groupIds = [...new Set(claimed.map((wave) => String(wave.deliveryGroupId)))];
+  const groupIds = [...new Set(waves.map((wave) => String(wave.deliveryGroupId)))];
   const [groups, counts, chatIds] = await Promise.all([
     DeliveryGroup.find({ _id: { $in: groupIds } }, 'name').lean(),
-    Promise.all(claimed.map(async (wave) => ({
+    Promise.all(waves.map(async (wave) => ({
       waveId: String(wave._id),
-      count: await SupplementOfferModel.countDocuments({ waveId: wave._id, itemStatus: ITEM_RELATION_STATUS.ACTIVE, status: type === 'frozen' ? ITEM_STATUS.FROZEN : type === 'cancelled' ? ITEM_STATUS.CANCELLED : ITEM_STATUS.OPEN }),
+      count: await SupplementOfferModel.countDocuments({
+        waveId: wave._id,
+        itemStatus: ITEM_RELATION_STATUS.ACTIVE,
+        status: type === 'frozen' ? ITEM_STATUS.FROZEN : type === 'cancelled' ? ITEM_STATUS.CANCELLED : ITEM_STATUS.OPEN,
+      }),
     }))),
     serviceGroupChatIds(),
   ]);
@@ -333,26 +410,36 @@ async function notifyWaves(waves, type, { now = new Date() } = {}) {
 
   let sentPrivate = 0;
   let sentGroups = 0;
-  let deliveredAny = false;
-  for (const wave of claimed) {
+  let queuedPrivate = 0;
+  let queuedGroups = 0;
+
+  for (const wave of waves) {
     const groupId = String(wave.deliveryGroupId);
     const text = buildText(type, {
       groupName: groupNameById.get(groupId) || '',
       appUrl,
       offersCount: countByWave.get(String(wave._id)) || 0,
     });
-    const sellers = await sellersOfGroup(groupId);
-    for (const seller of sellers) {
-      try { await sendMessageWithRetry(seller.telegramId, text); sentPrivate += 1; deliveredAny = true; } catch (_) {}
-      await sleep(SEND_GAP_MS);
+    const sellers = await sellersOfGroup(groupId, { includeBlocked: true });
+    if (!sellers.length && !chatIds.length) continue;
+
+    let prepared;
+    try {
+      prepared = await prepareWaveNotificationEvent(wave, type, { now, text, sellers, chatIds });
+    } catch (err) {
+      if (err?.code === 'supplement_notification_marker_claim_lost') continue;
+      throw err;
     }
-    for (const chatId of chatIds) {
-      try { await sendMessageWithRetry(chatId, text); sentGroups += 1; deliveredAny = true; } catch (_) {}
+    if (prepared?.created) {
+      queuedPrivate += sellers.length;
+      queuedGroups += chatIds.length;
     }
+    // Actual transport is owned by the single global delivery worker. Keeping
+    // preparation and transport separate prevents parallel ordering/supplement
+    // schedulers from multiplying the Telegram send rate.
   }
 
-  if (type === 'opened' && !deliveredAny) await releaseWaveOpened(claimed);
-  return { sentPrivate, sentGroups };
+  return { sentPrivate, sentGroups, queuedPrivate, queuedGroups };
 }
 
 async function findDueWaveNotifications(now = new Date()) {

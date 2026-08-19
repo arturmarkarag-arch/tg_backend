@@ -31,6 +31,7 @@ const SupplementRequest = require('../models/SupplementRequest');
 const { countActiveOffersForGroup } = require('../services/supplementOffers');
 const { getSupplementShiftSummary, getSupplementWorkerHistory } = require('../services/readModels/supplementShiftActivityReadModel');
 const { getTelegramUsernameMap } = require('../utils/telegramUsername');
+const { buildShiftTelegramDeliveryReadModel } = require('../services/readModels/shiftTelegramDeliveryReadModel');
 const { ITEM_RELATION_STATUS, ACTIVE_ITEM_STATUSES, revisionOf } = require('../utils/supplementState');
 
 const {
@@ -1777,75 +1778,88 @@ router.get('/shift-board', requireTelegramRoles(['admin']), async (req, res, nex
           ).lean()
           : [];
 
-        const marks = await CatalogReview.find(
-          { groupId: dgId, sessionId }, 'telegramId userName shopId shopName at',
-        ).lean();
+        const [marks, deliveryLog] = await Promise.all([
+          CatalogReview.find(
+            { groupId: dgId, sessionId }, 'telegramId userName shopId shopName at',
+          ).lean(),
+          buildShiftTelegramDeliveryReadModel({ orderingSessionId: sessionId, deliveryGroupId: dgId }),
+        ]);
+        const notificationSnapshots = deliveryLog.recipientSnapshots || [];
         const reviewUsernameMap = await getTelegramUsernameMap([
           ...staff.map((u) => u.telegramId),
           ...marks.map((m) => m.telegramId),
+          ...notificationSnapshots.map((row) => row.telegramId),
         ]);
 
-        // The roster is a UNION of two sources, not a lookup on one:
-        //   • the marks themselves — historical facts, read from their own
-        //     snapshot (who, which shop, when). These survive the seller being
-        //     moved to another shop, or unassigned entirely, mid-cycle.
-        //   • currently assigned staff — needed only to list who has NOT marked.
-        // Keying purely off today's staff (the first version) meant an unassigned
-        // seller's mark vanished from the board.
-        //
-        // ONE ROW PER PERSON: the key is telegramId alone, never telegramId|shopId.
-        // A mark belongs to the seller (see models/CatalogReview.js), so somebody
-        // moved mid-cycle must not show up twice — marked on the old shop, unmarked
-        // on the new one — freezing the counter at "1 / 2" for one human who cannot
-        // press the button a second time anyway (unique {sessionId, telegramId}).
-        //
-        // WHICH SHOP IS SHOWN: for a MARKED seller it is the SNAPSHOT shop — the
-        // one they stood on when they pressed the button. That is the fact staff
-        // asked to see ("хто на якому магазині натиснув"), and it must not drift
-        // when the person is moved afterwards. Showing their CURRENT shop (the
-        // first version) turned the row into a lie: press on A, move to B, board
-        // says B. Unmarked sellers have no snapshot, so they show their current shop.
-        const markedIds = new Set();
-        const sellers = marks.map((m) => {
+        // Union of immutable marks + current assignment + Telegram recipient
+        // snapshots. A seller who was notified and then unassigned/moved must not
+        // vanish from the current session's delivery audit.
+        const sellerByTelegramId = new Map();
+        for (const m of marks) {
           const tgId = String(m.telegramId);
-          markedIds.add(tgId);
           const shop = shopById.get(String(m.shopId));
-          return {
+          sellerByTelegramId.set(tgId, {
             telegramId: tgId,
-            name: m.userName || String(m.telegramId),
+            name: m.userName || tgId,
             username: reviewUsernameMap.get(tgId) || '',
-            // Prefer the live shop name (renames), fall back to the snapshot —
-            // which is all we have if the shop left the group since.
+            shopId: String(m.shopId || ''),
             shopName: shop?.name || m.shopName || '—',
             shopCity: shop?.cityId?.name || '',
             at: m.at,
-          };
-        });
-
-        for (const u of staff) {
-          if (markedIds.has(String(u.telegramId))) continue;
-          const shop = shopById.get(String(u.shopId));
-          sellers.push({
-            telegramId: String(u.telegramId),
-            name: [u.firstName, u.lastName].filter(Boolean).join(' ') || String(u.telegramId),
-            username: reviewUsernameMap.get(String(u.telegramId)) || '',
-            shopName: shop?.name || '—',
-            shopCity: shop?.cityId?.name || '',
-            at: null,
+            notifications: deliveryLog.byRecipient.get(tgId) || [],
           });
         }
 
+        for (const u of staff) {
+          const tgId = String(u.telegramId);
+          if (sellerByTelegramId.has(tgId)) {
+            const existing = sellerByTelegramId.get(tgId);
+            existing.username = existing.username || reviewUsernameMap.get(tgId) || '';
+            existing.notifications = deliveryLog.byRecipient.get(tgId) || existing.notifications || [];
+            continue;
+          }
+          const shop = shopById.get(String(u.shopId));
+          sellerByTelegramId.set(tgId, {
+            telegramId: tgId,
+            name: [u.firstName, u.lastName].filter(Boolean).join(' ') || tgId,
+            username: reviewUsernameMap.get(tgId) || '',
+            shopId: String(u.shopId || ''),
+            shopName: shop?.name || '—',
+            shopCity: shop?.cityId?.name || '',
+            at: null,
+            notifications: deliveryLog.byRecipient.get(tgId) || [],
+          });
+        }
+
+        for (const snapshot of notificationSnapshots) {
+          const tgId = String(snapshot.telegramId || '');
+          if (!tgId || sellerByTelegramId.has(tgId)) continue;
+          const shop = shopById.get(String(snapshot.shopId || ''));
+          sellerByTelegramId.set(tgId, {
+            telegramId: tgId,
+            name: snapshot.name || tgId,
+            username: reviewUsernameMap.get(tgId) || '',
+            shopId: String(snapshot.shopId || ''),
+            shopName: shop?.name || snapshot.shopName || '—',
+            shopCity: shop?.cityId?.name || '',
+            at: null,
+            notifications: deliveryLog.byRecipient.get(tgId) || [],
+          });
+        }
+
+        const sellers = [...sellerByTelegramId.values()];
         sellers.sort((a, b) => {
-          // Marked first (newest mark on top), then the rest alphabetically by shop.
+          const shopCmp = String(a.shopName).localeCompare(String(b.shopName), 'uk');
+          if (shopCmp) return shopCmp;
           if (!!a.at !== !!b.at) return a.at ? -1 : 1;
-          if (a.at && b.at) return new Date(b.at) - new Date(a.at);
-          return String(a.shopName).localeCompare(String(b.shopName), 'uk');
+          return String(a.name).localeCompare(String(b.name), 'uk');
         });
 
         catalogReview = {
           reviewedCount: sellers.filter((s) => s.at).length,
           totalCount: sellers.length,
           sellers,
+          notificationKinds: ['ordering_open', 'ordering_reminder'],
         };
       }
     } catch (e) {

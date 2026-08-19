@@ -26,6 +26,7 @@ const { startRetentionScheduler } = require('./services/retention');
 const { startSupplementScheduler } = require('./services/supplementScheduler');
 const { startOrderingOpenScheduler } = require('./services/orderingOpenScheduler');
 const { startPickingMaintenanceScheduler } = require('./services/pickingMaintenanceScheduler');
+const { startTelegramDeliveryScheduler } = require('./services/telegramDeliveryScheduler');
 const { enterMaintenance, isMaintenanceActive } = require('./services/maintenanceState');
 
 let httpServer = null;
@@ -175,6 +176,19 @@ async function startServer() {
       models: [require('./models/SupplementWave'), require('./models/SupplementOffer'), require('./models/SupplementRequest')],
     });
 
+
+    await syncCritical({
+      key: 'telegram_delivery_ledger',
+      title: 'Не створилися критичні індекси журналу Telegram-доставки',
+      whatBroke: 'Не підтверджено правило: одна системна подія має лише один delivery-row на конкретного адресата.',
+      howToFix: [
+        'Перевірте db.telegramnotificationevents.getIndexes() і db.telegramnotificationdeliveries.getIndexes().',
+        'Мають існувати UNIQUE eventKey та UNIQUE eventKey+channel+recipientId.',
+        'Виправте дублікати журналу та перезапустіть сервер.',
+      ],
+      models: [require('./models/TelegramNotificationEvent'), require('./models/TelegramNotificationDelivery')],
+    });
+
     await syncCritical({
       key: 'users',
       title: 'Не створилися критичні індекси користувачів',
@@ -224,6 +238,7 @@ async function startServer() {
       startRetentionScheduler();
       startSupplementScheduler();
       startOrderingOpenScheduler();
+      startTelegramDeliveryScheduler();
       startPickingMaintenanceScheduler();
     }
 

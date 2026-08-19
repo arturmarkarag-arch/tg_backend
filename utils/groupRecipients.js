@@ -17,21 +17,26 @@ const Shop = require('../models/Shop');
  * `botBlocked` відсіюється тут, а не в місці відправки: користувач, який
  * заблокував бота, — це не помилка доставки, його просто немає серед адресатів.
  */
-async function sellersOfGroup(deliveryGroupId) {
+async function sellersOfGroup(deliveryGroupId, { includeBlocked = false } = {}) {
   const shops = await Shop.find(
     { deliveryGroupId: String(deliveryGroupId), isActive: true },
-    '_id',
+    '_id name',
   ).lean();
   if (!shops.length) return [];
-  return User.find(
+  const shopById = new Map(shops.map((shop) => [String(shop._id), shop]));
+  const users = await User.find(
     {
       role: { $in: ['seller', 'admin'] },
       shopId: { $in: shops.map((shop) => shop._id) },
-      botBlocked: { $ne: true },
+      ...(includeBlocked ? {} : { botBlocked: { $ne: true } }),
       accountState: { $ne: 'removed' },
     },
-    'telegramId',
+    'telegramId firstName lastName botBlocked shopId',
   ).lean();
+  return users.map((user) => ({
+    ...user,
+    shopName: shopById.get(String(user.shopId))?.name || '',
+  }));
 }
 
 /**

@@ -425,21 +425,27 @@ function isBotBlockedError(error) {
 }
 
 async function sendMessageWithRetry(chatId, text, options = {}, attempts = 3) {
-  try {
-    return await bot.sendMessage(chatId, text, options);
-  } catch (error) {
-    const code = error?.response?.statusCode || error?.code;
-    if (attempts > 1 && (code === 429 || code === 'ETELEGRAM') && !isBotBlockedError(error)) {
-      const retryAfter = error?.response?.body?.parameters?.retry_after || 5;
-      await delay(retryAfter * 1000);
-      return sendMessageWithRetry(chatId, text, options, attempts - 1);
+  const { classifyTelegramSendError, retryDelayMs } = require('./utils/telegramDeliveryPolicy');
+  const maxAttempts = Math.max(1, Number(attempts) || 1);
+  let lastError = null;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      return await bot.sendMessage(chatId, text, options);
+    } catch (error) {
+      lastError = error;
+      const classification = classifyTelegramSendError(error);
+      if (classification.botBlocked) {
+        handleBotBlocked(String(chatId)).catch(() => {});
+      }
+      if (!classification.retryable || attempt >= maxAttempts || classification.botBlocked) {
+        error.deliveryAttempts = attempt;
+        error.telegramClassification = classification;
+        throw error;
+      }
+      await delay(retryDelayMs(classification, attempt));
     }
-    if (isBotBlockedError(error)) {
-      handleBotBlocked(String(chatId)).catch((err) => {
-      });
-    }
-    throw error;
   }
+  throw lastError;
 }
 
 async function sendPhotoWithRetry(chatId, photo, options = {}, attempts = 3) {
@@ -1010,6 +1016,7 @@ module.exports = {
   // Виставлено для сервісів, які самі шлють повідомлення (services/supplementNotify.js):
   // обгортка вже вміє 429-ретрай і позначає користувача, що заблокував бота.
   sendMessageWithRetry,
+  markBotBlocked: handleBotBlocked,
   sendAdminNotification,
   sendRegistrationApprovedMessage,
   isUserInAllowedGroup,

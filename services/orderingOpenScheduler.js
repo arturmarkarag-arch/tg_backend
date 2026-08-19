@@ -5,6 +5,7 @@
 // сама розсилка захищена від дублів прапорцем на сесії, не таймінгом тіку.
 
 const { notifyOrderingOpen } = require('./orderingOpenNotify');
+const { notifyDueOrderingReminders } = require('./orderingReminderNotify');
 const { runAsSchedulerLeader } = require('./schedulerLeader');
 const DeliveryGroup = require('../models/DeliveryGroup');
 const { isOrderingOpen } = require('../utils/orderingSchedule');
@@ -38,12 +39,17 @@ async function runOrderingOpenTick(now = new Date()) {
   // Session lifecycle is server-owned. This runs even when Telegram is disabled,
   // so opening a Mini App tab is never required to create the current session.
   const materialized = await materializeOpenOrderingSessions({ now });
+  let notified = { notifiedGroups: 0, sentPrivate: 0, sentGroups: 0 };
+  let reminders = { activeSessions: 0, preparedEvents: 0, recipients: 0, sent: 0 };
   try {
-    const notified = await notifyOrderingOpen({ now });
-    return { ...materialized, ...notified };
+    notified = await notifyOrderingOpen({ now });
   } catch (err) {
-    return { ...materialized, notifiedGroups: 0, sentPrivate: 0, sentGroups: 0 };
   }
+  try {
+    reminders = await notifyDueOrderingReminders({ now });
+  } catch (err) {
+  }
+  return { ...materialized, ...notified, reminders };
 }
 
 function msUntilNextMinuteBoundary(nowMs = Date.now()) {

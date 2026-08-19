@@ -31,6 +31,8 @@ const checks = [
   'scripts/checkSupplementRevisionCyclesV48_S3.js',
   'scripts/checkSupplementMetadataAuthorityV48_S3_1.js',
   'scripts/checkOrderUnassignState.js',
+  'scripts/checkTelegramDeliveryLedgerV48.js',
+  'scripts/checkOrderingReminderDeliveryV48.js',
 ];
 
 let failed = 0;

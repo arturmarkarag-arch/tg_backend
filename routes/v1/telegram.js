@@ -270,7 +270,8 @@ router.post('/me', asyncHandler(async (req, res) => {
   const initData = getInitDataFromRequest(req);
   if (!initData) throw appError('init_data_required');
 
-  const { valid, telegramId, error } = getTelegramAuth(req, process.env.TELEGRAM_BOT_TOKEN);
+  const auth = getTelegramAuth(req, process.env.TELEGRAM_BOT_TOKEN);
+  const { valid, telegramId, error } = auth;
   if (!valid) throw appError('auth_invalid_init_data', { reason: error });
   if (!telegramId) throw appError('auth_telegram_id_missing');
 

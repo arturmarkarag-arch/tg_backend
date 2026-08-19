@@ -60,6 +60,68 @@ router.post('/openai/settings', telegramAuth, requireTelegramRole('admin'), asyn
   res.json({ model: selectedModel });
 }));
 
+
+// ── Telegram delivery ledger ─────────────────────────────────────────────────
+// Durable per-recipient truth for system broadcasts. `sent` means Telegram
+// returned a Message (message_id/date); it is NOT a read/device receipt.
+router.get('/telegram-delivery/events', telegramAuth, requireTelegramRole('admin'), asyncHandler(async (req, res) => {
+  const { listEvents } = require('../services/telegramDeliveryLedger');
+  const events = await listEvents({
+    deliveryGroupId: String(req.query.deliveryGroupId || ''),
+    kind: String(req.query.kind || ''),
+    limit: req.query.limit,
+  });
+  res.json(events);
+}));
+
+router.get('/telegram-delivery/events/:eventKey', telegramAuth, requireTelegramRole('admin'), asyncHandler(async (req, res) => {
+  const { getEventWithDeliveries } = require('../services/telegramDeliveryLedger');
+  const snapshot = await getEventWithDeliveries(req.params.eventKey);
+  if (!snapshot) return res.status(404).json({ error: 'telegram_delivery_event_not_found', message: 'Журнал розсилки не знайдено' });
+
+  const privateIds = snapshot.deliveries
+    .filter((row) => row.channel === 'private')
+    .map((row) => String(row.recipientId));
+  const [users, orders] = await Promise.all([
+    privateIds.length
+      ? require('../models/User').find({ telegramId: { $in: privateIds } }, 'telegramId firstName lastName lastAppOpenedAt botBlocked shopId').lean()
+      : [],
+    snapshot.event.sourceType === 'ordering_session' && privateIds.length
+      ? require('../models/Order').find(
+          { orderingSessionId: String(snapshot.event.sourceId), buyerTelegramId: { $in: privateIds } },
+          'buyerTelegramId orderNumber status createdAt',
+        ).lean()
+      : [],
+  ]);
+  const userById = new Map(users.map((u) => [String(u.telegramId), u]));
+  const orderById = new Map();
+  for (const order of orders) {
+    const key = String(order.buyerTelegramId || '');
+    if (!orderById.has(key)) orderById.set(key, []);
+    orderById.get(key).push(order);
+  }
+
+  res.json({
+    event: snapshot.event,
+    deliveries: snapshot.deliveries.map((row) => {
+      if (row.channel !== 'private') return row;
+      const user = userById.get(String(row.recipientId));
+      const deliveredAt = row.telegramDate || row.sentAt || null;
+      const lastAppOpenedAt = user?.lastAppOpenedAt || null;
+      const appOpenedAfterSend = Boolean(deliveredAt && lastAppOpenedAt && new Date(lastAppOpenedAt) >= new Date(deliveredAt));
+      return {
+        ...row,
+        recipientName: row.recipientName || [user?.firstName, user?.lastName].filter(Boolean).join(' '),
+        botBlockedNow: Boolean(user?.botBlocked),
+        lastAppOpenedAt,
+        appOpenedAfterSend,
+        orderedInSourceSession: (orderById.get(String(row.recipientId)) || []).length > 0,
+        ordersInSourceSession: orderById.get(String(row.recipientId)) || [],
+      };
+    }),
+  });
+}));
+
 // ── Vision (photo search) settings ────────────────────────────────────────────
 const VISION_THRESHOLD_KEY = 'vision.threshold';
 const VISION_THRESHOLD_DEFAULT = 0.6;

@@ -9,9 +9,9 @@
  *   - приватка кожному продавцю цієї групи — короткий текст лише з дедлайном,
  *     бо людина вже знає, у якій вона групі.
  *
- * Захист від дублів — `OrderingSession.openNotifiedAt`: планувальник тікає
- * щохвилини, і право слати отримує тільки той тік, який атомарно перевів поле
- * з null у дату. Одна сесія = одна розсилка, скільки б процесів не крутилось.
+ * Надійність — durable Telegram delivery ledger: одна подія на orderingSession
+ * і один delivery-row на кожного адресата. `openNotifiedAt` лишився legacy marker
+ * факту, що fan-out атомарно підготовлено, але НЕ є джерелом delivery truth.
  */
 
 const DeliveryGroup = require('../models/DeliveryGroup');
@@ -28,20 +28,13 @@ const { getOrCreateSessionId } = require('../utils/getOrCreateSession');
 const { getSupplementSettings } = require('../utils/supplementSettings');
 const { sellersOfGroup, serviceGroupChatIds } = require('../utils/groupRecipients');
 
-// Пауза між приватними повідомленнями. Те саме значення, що в дозамовленнях:
-// Telegram ріже приблизно на 30 msg/s, 40 мс дає запас і не розтягує розсилку
-// (100 продавців ≈ 4 секунди).
-const SEND_GAP_MS = 40;
-
 // Наскільки пізно ще має сенс казати «замовлення відкрито». Якщо сервер лежав
-// або деплоївся довше — сесію мовчки пропускаємо назавжди (openNotifiedAt так і
-// лишиться null, наступного тіку вона знову не пройде цю перевірку). Свідомий
+// або деплоївся довше — нову подію вже не створюємо. Якщо ж durable event був
+// створений вчасно, його pending/retry deliveries продовжує окремий scheduler. Свідомий
 // вибір: повідомлення «старт замовлень», надіслане за годину до закриття вікна,
 // дезорієнтує сильніше, ніж його відсутність. Це ж правило гасить залп на
 // першому деплої цієї фічі: вікна, відкриті раніше, нікого не розбудять.
 const MAX_LATENESS_MS = 2 * 60 * 60 * 1000;
-
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
  * Чи вікно відкрилось достатньо недавно, щоб про це ще варто було писати.
@@ -119,36 +112,74 @@ function buildPrivateText({ closeLabel, appUrl }) {
 }
 
 /**
- * Атомарно займає сесію під розсилку. Повертає true лише тому викликачу, який
- * реально перевів openNotifiedAt з null у дату.
- *
- * `openNotifiedAt: null` у фільтрі матчить і null, і відсутнє поле — тому сесії,
- * створені до появи цього поля, обробляються без міграції.
+ * Delivery truth no longer lives in OrderingSession.openNotifiedAt.
+ * A notification event + one durable row per recipient are created atomically.
+ * `openNotifiedAt` is retained only as a legacy/session marker that the fan-out
+ * was DURABLY prepared; retries/recovery are driven by TelegramNotificationDelivery.
  */
-async function claimSession(sessionId, now) {
-  const claimed = await OrderingSession.findOneAndUpdate(
-    { _id: sessionId, openNotifiedAt: null },
-    { $set: { openNotifiedAt: now } },
-    { new: true },
-  ).lean();
-  return Boolean(claimed);
-}
+async function prepareOrderingOpenEvent({ sessionId, group, sellers, chatIds, closeLabel, appUrl, groupText, now }) {
+  const { ensureNotificationEvent } = require('./telegramDeliveryLedger');
+  const eventKey = `ordering_open:${String(sessionId)}`;
+  const recipients = [
+    ...sellers.map((seller) => ({
+      channel: 'private',
+      recipientId: String(seller.telegramId),
+      recipientName: [seller.firstName, seller.lastName].filter(Boolean).join(' '),
+      recipientShopId: String(seller.shopId || ''),
+      recipientShopName: String(seller.shopName || ''),
+      text: buildPrivateText({ closeLabel, appUrl }),
+      initialStatus: seller.botBlocked ? 'skipped' : 'pending',
+      skipReason: seller.botBlocked ? 'known_bot_blocked' : '',
+    })),
+    ...chatIds.map((chatId) => ({
+      channel: 'group',
+      recipientId: String(chatId),
+      recipientName: '',
+      text: groupText,
+    })),
+  ];
 
-/** Telegram не прийняв жодного повідомлення — віддаємо сесію наступному тіку. */
-async function releaseSession(sessionId) {
-  await OrderingSession.updateOne({ _id: sessionId }, { $set: { openNotifiedAt: null } });
+  return ensureNotificationEvent({
+    eventKey,
+    kind: 'ordering_open',
+    sourceType: 'ordering_session',
+    sourceId: String(sessionId),
+    sourceRevision: 1,
+    deliveryGroupId: String(group._id),
+    recipients,
+    scheduledAt: now,
+    metadata: {
+      groupName: group.name || '',
+      deliveryDay: Number(group.dayOfWeek),
+    },
+    now,
+    prepareSourceInTransaction: async ({ session }) => {
+      const marker = await OrderingSession.updateOne(
+        { _id: sessionId, openNotifiedAt: null },
+        { $set: { openNotifiedAt: now } },
+        { session },
+      );
+      if (Number(marker?.matchedCount || 0) !== 1) {
+        const err = new Error('ordering-open notification marker was claimed by another deployment');
+        err.code = 'ordering_open_marker_claim_lost';
+        throw err;
+      }
+    },
+  });
 }
 
 async function notifyOrderingOpen({ now = new Date() } = {}) {
-  const { getBot, sendMessageWithRetry } = require('../telegramBot');
-  if (!getBot()) return { notifiedGroups: 0, sentPrivate: 0, sentGroups: 0 };
+  const { getBot } = require('../telegramBot');
+  if (!getBot()) return { notifiedGroups: 0, sentPrivate: 0, sentGroups: 0, queuedPrivate: 0, queuedGroups: 0, sentNow: 0 };
 
   const groups = await DeliveryGroup.find({}, 'name dayOfWeek orderingSchedule').lean();
-
   let notifiedGroups = 0;
+  let queuedPrivate = 0;
+  let queuedGroups = 0;
+  let sentNow = 0;
   let sentPrivate = 0;
   let sentGroups = 0;
-  let chatIds = null; // читаємо лише якщо реально є що слати
+  let chatIds = null;
 
   for (const group of groups) {
     const status = isOrderingOpen(group.orderingSchedule, now);
@@ -156,22 +187,31 @@ async function notifyOrderingOpen({ now = new Date() } = {}) {
     if (!isFreshOpen(getOrderingWindowOpenAt(group.orderingSchedule, now), now)) continue;
 
     const sessionId = await getOrCreateSessionId(String(group._id), group.orderingSchedule);
-    if (!sessionId) continue; // maintenance-режим: сесій не створюємо
+    if (!sessionId) continue;
 
     const session = await OrderingSession.findById(sessionId, 'openNotifiedAt').lean();
-    if (!session || session.openNotifiedAt) continue;
+    if (!session) continue;
 
-    // Група без жодного живого продавця — це конфігураційний артефакт, а не
-    // адресат: поста в спільний чат про неї теж не робимо.
-    const sellers = await sellersOfGroup(String(group._id));
+    // Legacy sessions notified before the ledger existed intentionally remain
+    // untouched. New ledger-backed sessions have an event row and are recovered
+    // by telegramDeliveryScheduler even if this process dies after preparation.
+    if (session.openNotifiedAt) {
+      const Event = require('../models/TelegramNotificationEvent');
+      const ledgerEvent = await Event.findOne(
+        { eventKey: `ordering_open:${String(sessionId)}` },
+        'status',
+      ).lean();
+      if (!ledgerEvent) continue; // legacy pre-ledger send
+      if (ledgerEvent.status === 'completed') continue;
+    }
+
+    const sellers = await sellersOfGroup(String(group._id), { includeBlocked: true });
     if (!sellers.length) continue;
-
-    if (!await claimSession(sessionId, now)) continue;
+    if (chatIds === null) chatIds = await serviceGroupChatIds();
 
     const window = getWindowDescription(group.orderingSchedule, now);
     const appUrl = await miniAppLink();
     const closeLabel = closePhrase(window);
-    const privateText = buildPrivateText({ closeLabel, appUrl });
     const groupText = buildGroupText({
       groupName: group.name,
       deliveryLabel: deliveryDateLabel(group.dayOfWeek, group.orderingSchedule, now),
@@ -179,43 +219,33 @@ async function notifyOrderingOpen({ now = new Date() } = {}) {
       appUrl,
     });
 
-    let deliveredAny = false;
+    const prepared = await prepareOrderingOpenEvent({
+      sessionId,
+      group,
+      sellers,
+      chatIds,
+      closeLabel,
+      appUrl,
+      groupText,
+      now,
+    });
 
-    for (const seller of sellers) {
-      try {
-        await sendMessageWithRetry(seller.telegramId, privateText);
-        sentPrivate += 1;
-        deliveredAny = true;
-      } catch (err) {
-      }
-      await sleep(SEND_GAP_MS);
-    }
-
-    if (chatIds === null) chatIds = await serviceGroupChatIds();
-    for (const chatId of chatIds) {
-      try {
-        await sendMessageWithRetry(chatId, groupText);
-        sentGroups += 1;
-        deliveredAny = true;
-      } catch (err) {
-      }
-    }
-
-    if (deliveredAny) {
+    if (prepared?.created) {
       notifiedGroups += 1;
-    } else {
-      await releaseSession(sessionId);
+      queuedPrivate += sellers.length;
+      queuedGroups += chatIds.length;
     }
+
+    // Event producers only enqueue durable delivery rows. One shared Telegram
+    // delivery worker owns all actual sends across ordering/supplement/reminders,
+    // so concurrent business schedulers can never multiply the global send rate.
   }
 
-  if (notifiedGroups) {
-  }
-  return { notifiedGroups, sentPrivate, sentGroups };
+  return { notifiedGroups, sentPrivate, sentGroups, queuedPrivate, queuedGroups, sentNow };
 }
 
 module.exports = {
   MAX_LATENESS_MS,
-  SEND_GAP_MS,
   isFreshOpen,
   buildGroupText,
   buildPrivateText,
