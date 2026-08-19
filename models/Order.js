@@ -1,3 +1,4 @@
+const { ORDER_STATUS_VALUES, ACTIVE_ORDER_STATUSES } = require('../utils/orderStatus');
 const mongoose = require('mongoose');
 
 const OrderItemSchema = new mongoose.Schema({
@@ -77,7 +78,7 @@ const OrderSchema = new mongoose.Schema(
     // items OOS-cancelled) are written by services/archiveProduct.js via
     // order.save() — they MUST be in the enum, else the OOS path throws a
     // validation error mid-transaction (product not archived, task not completed → 500).
-    status: { type: String, enum: ['new', 'in_progress', 'confirmed', 'fulfilled', 'cancelled', 'expired'], default: 'new' },
+    status: { type: String, enum: ORDER_STATUS_VALUES, default: 'new' },
     totalPrice: { type: Number, default: 0 },
     orderType: { type: String, enum: ['manual', 'direct_allocation'], default: 'manual' },
     receiptId: { type: mongoose.Schema.Types.ObjectId, ref: 'Receipt', default: null },
@@ -107,15 +108,15 @@ OrderSchema.index({ orderNumber: 1 }, { unique: true, sparse: true });
 // partial index makes the invariant hold regardless of Redis: the second insert
 // throws E11000, which the placement handler catches and resolves to the existing
 // order (see routes/orders.js). The partialFilterExpression scopes uniqueness to
-// fully-keyed active orders only, so parked orders (shopId:null), terminal orders,
-// and the no-delivery-group fallback path (empty orderingSessionId) are unaffected.
+// fully-keyed active orders only, so explicit `new_unassign` parked orders, terminal
+// orders, and the no-delivery-group fallback path (empty orderingSessionId) are unaffected.
 OrderSchema.index(
   { buyerTelegramId: 1, shopId: 1, orderingSessionId: 1 },
   {
     unique: true,
     name: 'one_active_order_per_buyer_shop_session',
     partialFilterExpression: {
-      status: { $in: ['new', 'in_progress'] },
+      status: { $in: ACTIVE_ORDER_STATUSES },
       shopId: { $type: 'objectId' },
       orderingSessionId: { $gt: '' },
     },

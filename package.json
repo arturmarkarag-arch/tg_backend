@@ -62,7 +62,8 @@
     "test:read-models:v48.21": "vitest run tests/operationalReadModelsV4821.contract.test.js --hookTimeout=180000 --testTimeout=120000 --no-file-parallelism",
     "test:supplement-wave:v48.s2": "vitest run tests/supplementWaveArchitectureV48S2.contract.test.js --hookTimeout=180000 --testTimeout=120000 --no-file-parallelism",
     "test:supplement-container:v48.s3": "vitest run tests/supplementContainerV48S3.contract.test.js --hookTimeout=180000 --testTimeout=120000 --no-file-parallelism",
-    "test:supplement-metadata:v48.s3.1": "node scripts/checkSupplementMetadataAuthorityV48_S3_1.js"
+    "test:supplement-metadata:v48.s3.1": "node scripts/checkSupplementMetadataAuthorityV48_S3_1.js",
+    "test:order-unassign-state": "node scripts/checkOrderUnassignState.js"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1030.0",

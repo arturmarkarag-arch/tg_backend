@@ -1217,8 +1217,10 @@ async function scenarioConflictUnassign() {
     });
     eq(unassign.status, 200, 'conflict_unassign: unassign action succeeds');
     const parked = await Order.findById(bOrder._id).lean();
-    eq(str(parked.shopId), '', 'conflict_unassign: Order top-level shop cleared');
-    eq(str(parked.buyerSnapshot?.deliveryGroupId), '', 'conflict_unassign: parked Order leaves old delivery group');
+    eq(parked.status, 'new_unassign', 'conflict_unassign: Order moves to explicit parked status');
+    eq(str(parked.shopId), str(world.shops[0]._id), 'conflict_unassign: parked Order keeps shop ownership');
+    eq(str(parked.buyerSnapshot?.deliveryGroupId), str(world.group._id), 'conflict_unassign: parked Order keeps delivery-group ownership');
+    eq(str(parked.orderingSessionId), str((await currentSession(world))._id), 'conflict_unassign: parked Order keeps exact session ownership');
 
     const start = await startPicking(world, wh, true);
     check(start.data?.started === true, 'conflict_unassign: picking starts with remaining valid Order');

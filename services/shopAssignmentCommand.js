@@ -178,7 +178,8 @@ async function assignUserToShopCommand({
 
 /**
  * External/application command for removing the current Shop assignment.
- * Order parking/frozen ownership remains owned by unassignSellerAndPark().
+ * Order parked/frozen ownership remains owned by unassignSellerAndPark().
+ * Parking is represented by Order.status=new_unassign; Order shop/group/session ownership is preserved.
  */
 async function unassignUserFromShopCommand({
   telegramId,

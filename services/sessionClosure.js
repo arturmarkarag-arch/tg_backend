@@ -17,6 +17,7 @@ const SupplementOffer = require('../models/SupplementOffer');
 const { ACTIVE_ITEM_STATUSES, ITEM_RELATION_STATUS } = require('../utils/supplementState');
 const { auditSessionCoverage } = require('./sessionCoverage');
 const { isTerminalOrderItem } = require('../utils/orderItemState');
+const { ORDER_STATUS, isParkedOrderStatus } = require('../utils/orderStatus');
 
 const str = (v) => (v == null ? '' : String(v));
 const terminalItem = isTerminalOrderItem;
@@ -92,14 +93,16 @@ async function auditSessionClosure({ deliveryGroupId, orderingSessionId }) {
     status: { $ne: 'expired' },
   }, '_id orderNumber status buyerTelegramId shopId buyerSnapshot items').lean();
 
-  // An unassigned seller's active Order is intentionally PARKED by
-  // unassignSellerAndPark(): shopId + snapshot shop/group are cleared while the
-  // old orderingSessionId is left as historical provenance until the seller is
-  // assigned again. That is NOT corruption and must not block warehouse closure.
+  // A seller-unassigned Order is an explicit non-operational state. Modern
+  // rows keep shop/group/session ownership and use `new_unassign`; the shape
+  // fallback is retained only so pre-migration parked rows remain non-blocking.
   const isParkedOrder = (o) => (
-    !str(o.shopId) &&
-    !str(o.buyerSnapshot?.shopId) &&
-    !str(o.buyerSnapshot?.deliveryGroupId)
+    isParkedOrderStatus(o?.status) || (
+      [ORDER_STATUS.NEW, ORDER_STATUS.IN_PROGRESS].includes(String(o?.status || '')) &&
+      !str(o.shopId) &&
+      !str(o.buyerSnapshot?.shopId) &&
+      !str(o.buyerSnapshot?.deliveryGroupId)
+    )
   );
   const parkedOrders = sessionOrders.filter(isParkedOrder);
   const operationalOrders = sessionOrders.filter((o) => !isParkedOrder(o));

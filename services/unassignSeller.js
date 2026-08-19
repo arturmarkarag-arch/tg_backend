@@ -6,12 +6,16 @@ const PickingTask = require('../models/PickingTask');
 const { logShopTransition } = require('./shopAudit');
 const { activeOrderShopFilter } = require('../utils/orderShopFilter');
 const { getOrderOwnershipState } = require('../utils/orderOwnership');
+const { ORDER_STATUS } = require('../utils/orderStatus');
 
 // Unassign a seller from their shop. While ordering is still open, an active
-// Order may be PARKED so it can follow the seller on a later assignment. Once
-// ordering closes (or picking starts), the seller is only the author: the Order
-// stays owned by its shop/session and User.shopId changes independently.
-// Dedicated conflict-repair code may explicitly opt into parking a frozen Order.
+// Order may be PARKED by status (`new_unassign`) so it can follow the seller on
+// a later assignment. PARKING MUST NOT destroy Order ownership: shopId,
+// buyerSnapshot shop/group fields and orderingSessionId remain intact. The parked
+// status alone removes it from active/picking/blocker predicates. Once ordering
+// closes (or picking starts), the seller is only the author: the Order stays
+// owned by its shop/session and User.shopId changes independently. Dedicated
+// conflict-repair code may explicitly opt into parking a frozen Order.
 //
 // All writes are scoped to the passed Mongo session.
 async function unassignSellerAndPark({ session, seller, fromShopId, actor, reason, allowFrozenOrderPark = false }) {
@@ -47,19 +51,12 @@ async function unassignSellerAndPark({ session, seller, fromShopId, actor, reaso
       if (inPipeline) { leftInPipelineIds.push(String(ord._id)); continue; }
 
       parkedIds.push(String(ord._id));
-      ord.shopId = null;
-      if (!ord.buyerSnapshot) ord.buyerSnapshot = {};
-      ord.buyerSnapshot.shopId = null;
-      ord.buyerSnapshot.shopName = '';
-      ord.buyerSnapshot.shopCity = '';
-      // CRITICAL: clear the delivery-group ref too — otherwise the order still
-      // matches the OLD group's filter in taskBuilder ('buyerSnapshot.deliveryGroupId'),
-      // gets pulled into the next picking build, and stamps PickingTask.items.shopName
-      // as "невідомий магазин". The order follows the seller; the shop must be
-      // left without seller AND without order, not orphaned in the picking pool.
-      // migrateSellerShop will re-stamp deliveryGroupId on the next assignment.
-      ord.buyerSnapshot.deliveryGroupId = '';
-      ord.markModified('buyerSnapshot');
+      const previousStatus = String(ord.status || ORDER_STATUS.NEW);
+      // The Order keeps immutable/provenance ownership. `new_unassign` is the
+      // ONLY fact needed to remove it from operational work while the seller has
+      // no current shop assignment. Do not null shop/group/session to influence
+      // taskBuilder; taskBuilder already reads ACTIVE order statuses.
+      ord.status = ORDER_STATUS.NEW_UNASSIGN;
       ord.history.push({
         at: new Date(),
         by: String(actor?.telegramId || 'system'),
@@ -69,6 +66,8 @@ async function unassignSellerAndPark({ session, seller, fromShopId, actor, reaso
         meta: {
           fromShopId: shopIdStr,
           reason: reason || 'seller_unassigned',
+          previousStatus,
+          status: ORDER_STATUS.NEW_UNASSIGN,
           ownershipRepair: Boolean(ownership.frozen && allowFrozenOrderPark),
         },
       });
@@ -98,7 +97,7 @@ async function unassignSellerAndPark({ session, seller, fromShopId, actor, reaso
     orderAction: parkedIds.length ? 'parked' : 'none',
     orderId: parkedIds[0] || '',
     orderShopBefore: shopIdStr,
-    orderShopAfter: '',
+    orderShopAfter: shopIdStr,
     note: [
       parkedIds.length ? `parked=[${parkedIds.join(',')}]` : '',
       leftInPipelineIds.length ? `inPipelineStayed=[${leftInPipelineIds.join(',')}]` : '',

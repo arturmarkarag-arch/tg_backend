@@ -17,6 +17,7 @@ const { logShopTransition } = require('./shopAudit');
 const { activeOrderShopFilter } = require('../utils/orderShopFilter');
 const { getOrderOwnershipState } = require('../utils/orderOwnership');
 const { assertOperationalShop, assertAssignableShopRole } = require('../utils/shopOperationalState');
+const { ORDER_STATUS } = require('../utils/orderStatus');
 
 async function ensureOrderNotInPickingPipeline(orderId, session) {
   const exists = await PickingTask.exists({
@@ -162,17 +163,28 @@ async function migrateSellerShop({
         }).session(session);
       }
     } else {
-      // Seller can be temporarily unassigned. In that case pick a parked active
-      // order (no shop attached) and move it into the newly assigned shop.
+      // Seller can be temporarily unassigned. Parked Orders retain their
+      // original shop/group/session ownership and are identified explicitly by
+      // status — never by destructive null ownership fields.
       activeOrder = await Order.findOne({
         buyerTelegramId: existingUser.telegramId,
-        status: { $in: ['new', 'in_progress'] },
-        $or: [
-          { shopId: null },
-          { 'buyerSnapshot.shopId': null },
-          { 'buyerSnapshot.shopId': { $exists: false } },
-        ],
+        status: ORDER_STATUS.NEW_UNASSIGN,
       }).sort({ updatedAt: -1, createdAt: -1 }).session(session);
+
+      // Compatibility for rows parked by pre-new_unassign builds. Do not create
+      // new shape-based parked rows, but allow an existing one to be recovered
+      // through the canonical assignment command instead of stranding it forever.
+      if (!activeOrder) {
+        activeOrder = await Order.findOne({
+          buyerTelegramId: existingUser.telegramId,
+          status: { $in: [ORDER_STATUS.NEW, ORDER_STATUS.IN_PROGRESS] },
+          $or: [
+            { shopId: null },
+            { 'buyerSnapshot.shopId': null },
+            { 'buyerSnapshot.shopId': { $exists: false } },
+          ],
+        }).sort({ updatedAt: -1, createdAt: -1 }).session(session);
+      }
     }
 
     if (activeOrder) {
@@ -196,6 +208,8 @@ async function migrateSellerShop({
         activeOrder.buyerSnapshot.shopAddress = newShopAddress;
         activeOrder.buyerSnapshot.deliveryGroupId = newDeliveryGroupId;
         if (targetSessionId) activeOrder.orderingSessionId = targetSessionId;
+        const restoredFromUnassign = activeOrder.status === ORDER_STATUS.NEW_UNASSIGN;
+        if (restoredFromUnassign) activeOrder.status = ORDER_STATUS.NEW;
         activeOrder.markModified('buyerSnapshot');
         activeOrder.history.push({
           by: String(actor.telegramId),
@@ -207,6 +221,8 @@ async function migrateSellerShop({
             to:   { shopName: newShopName, shopCity: newShopCity, deliveryGroupId: newDeliveryGroupId },
             reason,
             routedToNextSession,
+            restoredFromUnassign,
+            status: restoredFromUnassign ? ORDER_STATUS.NEW : activeOrder.status,
             ownershipRepair: Boolean(ownership.frozen && allowFrozenOrderTransfer),
           },
         });

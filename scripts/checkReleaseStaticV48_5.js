@@ -30,6 +30,7 @@ const checks = [
   'scripts/checkSupplementContainerArchitectureV48_S3.js',
   'scripts/checkSupplementRevisionCyclesV48_S3.js',
   'scripts/checkSupplementMetadataAuthorityV48_S3_1.js',
+  'scripts/checkOrderUnassignState.js',
 ];
 
 let failed = 0;

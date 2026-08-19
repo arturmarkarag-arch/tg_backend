@@ -1,8 +1,7 @@
 'use strict';
 
 const mongoose = require('mongoose');
-
-const ACTIVE_ORDER_STATUSES = ['new', 'in_progress'];
+const { ACTIVE_ORDER_STATUSES } = require('./orderStatus');
 
 /**
  * Build a Mongo filter for an active order that belongs to a shop, matched by

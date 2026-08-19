@@ -87,6 +87,8 @@ async function startServer() {
     console.log('Connected to MongoDB');
     await assertDeliveryGroupSchedulesReady();
     await migrateOrdersToSessionIds();
+    const parkedOrderMigration = await require('./services/orderUnassignStateMigration').migrateLegacyParkedOrders();
+    console.log(`[order-unassign] legacyParked matched=${parkedOrderMigration.matched} modified=${parkedOrderMigration.modified}`);
     const supplementV3Migration = await require('./services/supplementV3Migration').migrateSupplementV3();
     console.log(`[supplement-v3] containers=${supplementV3Migration.containers} merged=${supplementV3Migration.merged}`);
 

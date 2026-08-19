@@ -1,12 +1,15 @@
 'use strict';
 
-const ACTIVE_ORDER_STATUSES = ['new', 'in_progress'];
-const TERMINAL_ORDER_STATUSES = ['fulfilled', 'confirmed', 'cancelled'];
+const {
+  ACTIVE_ORDER_STATUSES,
+  TERMINAL_ORDER_STATUSES,
+  isOperationalOrderStatus,
+} = require('./orderStatus');
 const ARCHIVE_REASONS = new Set(['out_of_stock', 'system_archive']);
 
 function summarizeSessionRows({ tasks = [], orders = [], archivedProductIds = [] } = {}) {
   const archivedIds = new Set((archivedProductIds || []).map((x) => String(x)));
-  const operationalOrders = orders.filter((o) => o && o.status !== 'expired');
+  const operationalOrders = orders.filter((o) => o && isOperationalOrderStatus(o.status));
   const totalOrderCount = operationalOrders.length;
   const completedOrderCount = operationalOrders.filter((o) => TERMINAL_ORDER_STATUSES.includes(o.status)).length;
 
