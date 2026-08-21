@@ -27,6 +27,7 @@ const {
   blocksGenericRepublish,
   deriveReceiptItemSupplementState,
   findActiveReceiptItemSupplementOffer,
+  hasCompletedLifecycle,
   isTerminalReceiptItemSupplementState,
 } = require('../utils/supplementState');
 const { normalizeReceiptPhotoMeta, photoCommentsText } = require('../utils/receiptPhotoMeta');
@@ -330,17 +331,22 @@ router.get('/items-gallery', staffOnly, asyncHandler(async (req, res) => {
       routingSupplement: routing.supplement,
       receiptCompleted: receipt?.status === 'completed',
     });
+    const itemSupplementOffers = offersByItemId.get(String(row._id)) || [];
     const activeSupplementOffer = findActiveReceiptItemSupplementOffer(
-      offersByItemId.get(String(row._id)) || [],
+      itemSupplementOffers,
       supplementState,
     );
+    const displaySupplementOffer = activeSupplementOffer || itemSupplementOffers
+      .filter(hasCompletedLifecycle)
+      .sort((a, b) => new Date(b?.completedAt || b?.frozenAt || b?.openedAt || 0).getTime()
+        - new Date(a?.completedAt || a?.frozenAt || a?.openedAt || 0).getTime())[0] || null;
     return {
       ...row,
       receiptType: receipt?.type || 'regular',
       receiptStatus: receipt?.status || 'draft',
       receiptTargetDeliveryGroupId: receipt?.targetDeliveryGroupId || null,
       supplementState,
-      supplementGroupName: supplementGroupNameByWaveId.get(String(activeSupplementOffer?.waveId || '')) || '',
+      supplementGroupName: supplementGroupNameByWaveId.get(String(displaySupplementOffer?.waveId || '')) || '',
     };
   });
 
@@ -572,6 +578,23 @@ router.post('/supplement-batches/:deliveryGroupId/publish', staffOnly, asyncHand
             return !blockedItemIds.has(String(row._id));
           });
           if (!selectedRows.length) return;
+
+          // Archive is a physical fact, not a routing toggle. A ReceiptItem may
+          // retain routing.supplement for history after its warehouse Product was
+          // archived, but that archived Product can never be republished as a new
+          // supplement revision.
+          const selectedProductIds = selectedRows
+            .map((row) => row.createdProductId)
+            .filter(Boolean);
+          if (selectedProductIds.length) {
+            const archivedProduct = await Product.findOne({
+              _id: { $in: selectedProductIds },
+              status: 'archived',
+            }, '_id').session(mongoSession).lean();
+            if (archivedProduct) {
+              throw appError('receipt_item_in_use', { reasons: 'товар уже в архіві — фізично видавати його більше не можна' });
+            }
+          }
 
           // A cancellation may have made this exact CURRENT delivery
           // session terminal. A real new publication is allowed to reopen only
@@ -914,16 +937,17 @@ router.get('/:id/items', staffOnly, asyncHandler(async (req, res) => {
     ]);
     productMap = Object.fromEntries(products.map((p) => [String(p._id), p]));
     for (const block of blocks) {
-      for (const pid of block.productIds) {
-        blockMap[String(pid)] = block.blockId;
-      }
+      block.productIds.forEach((pid, index) => {
+        blockMap[String(pid)] = { blockId: block.blockId, position: index + 1 };
+      });
     }
   }
 
   const enrichedItems = items.map((item) => {
     const productId = item.createdProductId;
     const product = productId ? productMap[String(productId)] : null;
-    const blockId = productId ? (blockMap[String(productId)] ?? null) : null;
+    const location = productId ? (blockMap[String(productId)] ?? null) : null;
+    const blockId = location?.blockId ?? null;
     const routing = normalizeReceiptItemRouting(item, receipt);
     const itemSupplementOffers = supplementOffersByItemId.get(String(item._id)) || [];
     const supplementState = deriveReceiptItemSupplementState({
@@ -935,12 +959,16 @@ router.get('/:id/items', staffOnly, asyncHandler(async (req, res) => {
       itemSupplementOffers,
       supplementState,
     );
+    const displaySupplementOffer = activeSupplementOffer || itemSupplementOffers
+      .filter(hasCompletedLifecycle)
+      .sort((a, b) => new Date(b?.completedAt || b?.frozenAt || b?.openedAt || 0).getTime()
+        - new Date(a?.completedAt || a?.frozenAt || a?.openedAt || 0).getTime())[0] || null;
     return {
       ...item,
-      currentLocation: { blockId, status: product?.status ?? null },
+      currentLocation: { blockId, position: location?.position ?? null, status: product?.status ?? null },
       productCurrentQty: product?.quantity ?? null,
       supplementState,
-      supplementGroupName: supplementGroupNameByWaveId.get(String(activeSupplementOffer?.waveId || '')) || '',
+      supplementGroupName: supplementGroupNameByWaveId.get(String(displaySupplementOffer?.waveId || '')) || '',
     };
   });
 
@@ -1399,6 +1427,34 @@ router.patch('/items/routing-batch', staffOnly, asyncHandler(async (req, res) =>
   const draftItems = processableItems.filter((item) => item.status !== 'confirmed');
   const confirmedItems = processableItems.filter((item) => item.status === 'confirmed');
 
+  // Business guards are preflighted for the whole selection BEFORE the first
+  // write. A dumb/stale client therefore cannot change 19 rows and discover on
+  // row 20 that one Product is on a shelf or its Supplement is still OPEN.
+  if (confirmedItems.length) {
+    const { preflightReceiptItemRoutingCorrection } = require('../services/receiptRoutingCorrectionCommand');
+    for (const item of confirmedItems) {
+      try {
+        await preflightReceiptItemRoutingCorrection({
+          receiptId: item.receiptId,
+          itemId: item._id,
+          nextRouting: routing,
+        });
+      } catch (err) {
+        failures.push({
+          itemId: String(item._id),
+          error: err?.code || 'internal_error',
+          message: err?.expose ? err.message : 'Не вдалося змінити маршрут товару',
+        });
+      }
+    }
+  }
+
+  if (failures.length) {
+    const short = failures.slice(0, 5).map((row) => row.message).filter(Boolean).join(' · ');
+    const more = failures.length > 5 ? ` · ще ${failures.length - 5}` : '';
+    throw appError('receipt_routing_batch_blocked', { reasons: `${short}${more}` });
+  }
+
   if (draftItems.length) {
     const draftIds = draftItems.map((item) => item._id);
     const session = await mongoose.connection.startSession();
@@ -1454,26 +1510,18 @@ router.patch('/items/routing-batch', staffOnly, asyncHandler(async (req, res) =>
   if (confirmedItems.length) {
     const { correctReceiptItemRouting: correctConfirmedRouting } = require('../services/receiptRoutingCorrectionCommand');
     for (const item of confirmedItems) {
-      try {
-        const result = await correctConfirmedRouting({
-          receiptId: item.receiptId,
-          itemId: item._id,
-          nextRouting: routing,
-          actor: {
-            by: String(req.telegramUser?.telegramId || ''),
-            byName: [req.telegramUser?.firstName, req.telegramUser?.lastName].filter(Boolean).join(' '),
-            byRole: req.telegramUser?.role || 'warehouse',
-          },
-          reason: 'routing_corrected_batch',
-        });
-        if (result?.item) updatedItems.push(result.item);
-      } catch (err) {
-        failures.push({
-          itemId: String(item._id),
-          error: err?.code || 'internal_error',
-          message: err?.expose ? err.message : 'Не вдалося змінити маршрут товару',
-        });
-      }
+      const result = await correctConfirmedRouting({
+        receiptId: item.receiptId,
+        itemId: item._id,
+        nextRouting: routing,
+        actor: {
+          by: String(req.telegramUser?.telegramId || ''),
+          byName: [req.telegramUser?.firstName, req.telegramUser?.lastName].filter(Boolean).join(' '),
+          byRole: req.telegramUser?.role || 'warehouse',
+        },
+        reason: 'routing_corrected_batch',
+      });
+      if (result?.item) updatedItems.push(result.item);
     }
   }
 
@@ -1706,7 +1754,7 @@ router.post('/:id/items/:itemId/add-warehouse-remainder', staffOnly, asyncHandle
       didPromote = true;
       updatedItem = item.toObject();
       updatedItem.routing = nextRouting;
-      updatedItem.currentLocation = { blockId: null, status: product.status ?? null };
+      updatedItem.currentLocation = { blockId: null, position: null, status: product.status ?? null };
       updatedItem.productCurrentQty = product.quantity ?? null;
     });
 
@@ -1819,7 +1867,8 @@ router.post('/:id/items/:itemId/confirm', staffOnly, asyncHandler(async (req, re
           embedTargets.push(['warehouse', product, 'receipt-confirm-warehouse']);
         }
       } else if (needsStandaloneShopProduct(normalizeReceiptItemRouting(item, receipt))) {
-        // Mandatory-only item → shop-OWNED ShopProduct (no warehouse Product/stock).
+        // Mandatory-only / Supplement-only item → shop-OWNED ShopProduct
+        // (visible in Shop Products/New Products, no warehouse Product/stock).
         const sp = await upsertShopOwnedFromReceiptItem(item.toObject(), { session });
         if (sp && String(sp._id) !== String(item.createdShopProductId || '')) {
           item.createdShopProductId = sp._id;
@@ -1831,6 +1880,7 @@ router.post('/:id/items/:itemId/confirm', staffOnly, asyncHandler(async (req, re
       confirmedItem = item.toObject();
       confirmedItem.currentLocation = {
         blockId: null,
+        position: null,
         status: product?.status ?? null,
       };
       confirmedItem.productCurrentQty = product?.quantity ?? null;

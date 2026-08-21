@@ -230,10 +230,10 @@ reservation не вигадуються.
 Admin/warehouse може скасувати current OPEN або FROZEN revision конкретного item.
 
 ```text
-unpacked active requests -> CANCELLED
-packed requests          -> physical/history fact preserved
-item revision            -> CANCELLED
-інші item-slots           -> без змін
+all current ACTIVE requests -> CANCELLED
+packed=true fields          -> audit only on the CANCELLED row
+item revision               -> CANCELLED
+інші item-slots              -> без змін
 ```
 
 Для current UI всі результати скасованої revision зникають. Старі request rows
@@ -249,8 +249,8 @@ item revision            -> CANCELLED
 
 ```text
 кожна OPEN/FROZEN current item revision -> CANCELLED
-unpacked requests                        -> CANCELLED
-packed facts                             -> preserved
+all current ACTIVE requests             -> CANCELLED
+packed fields                            -> audit only, not fulfilment
 ```
 
 Сам `SupplementWave` container не видаляється: інші READY товари можуть пізніше
@@ -261,7 +261,7 @@ packed facts                             -> preserved
 
 Packing дозволений тільки коли **сам item revision** має `status=frozen`.
 
-`packed=true` — фізичний факт, а не lifecycle lock продавця.
+`packed=true` у ACTIVE/FROZEN revision — warehouse progress. Якщо revision штатно скасовано, поле лишається лише audit-фактом і cancelled request більше не є fulfillment.
 
 Всі warehouse current reads/updates мусять перевіряти:
 
@@ -339,14 +339,18 @@ session після завершення старої.
 Route correction:
 
 ```text
-stop affected current supplement revision
-cancel unpacked requests
-preserve packed physical facts
-apply new ReceiptItem.routing
+OPEN seller input -> 409, ZERO MUTATIONS
+FROZEN + supplement remains -> keep current requests
+FROZEN + supplement removed -> annul ALL current requests
+apply allowed ReceiptItem.routing
 invoke canonical artifacts of new route
 recompute container summary in the SAME Mongo transaction
 re-evaluate OrderingSession after commit
 ```
+
+Physical Warehouse guards remain independent: a Product that is/was shelved or has
+Order/Picking history cannot lose `warehouse` through Receipt routing correction.
+Routing correction never calls Archive.
 
 Немає post-commit `.catch(() => {})` lifecycle transition, від якого залежить
 session closure.
@@ -363,9 +367,9 @@ History projections навпаки можуть показувати всі revi
 
 Warehouse demand estimate:
 
-- cancelled/unpacked historical request не рахується як current demand;
-- packed historical request зберігається як physical outbound fact;
-- current active request рахується.
+- будь-який cancelled historical request не рахується як current demand, навіть якщо в audit лишився `packed=true`;
+- current active request рахується;
+- completed/shift history може окремо показувати фактичну роботу та факт подальшого cancellation.
 
 Shift history може показувати packed work усіх revisions тієї exact session, бо
 це історія виконаної фізичної роботи, а не current seller state.

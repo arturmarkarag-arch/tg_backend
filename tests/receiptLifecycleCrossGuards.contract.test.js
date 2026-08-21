@@ -45,12 +45,17 @@ describe('V48.7 receipt cross-lifecycle guards', () => {
     expect(criticalBlock).not.toContain("'totalQty'");
   });
 
-  it('keeps confirmed routing immutable except the additive warehouse-remainder endpoint', () => {
+  it('keeps the direct routing endpoint draft-only and gives confirmed corrections their own guarded command', () => {
     const routingStart = indexOrThrow(receipts, "router.patch('/:id/items/:itemId/routing'");
-    const remainderStart = indexOrThrow(receipts, "router.post('/:id/items/:itemId/add-warehouse-remainder'", { from: routingStart });
-    const routingRoute = sliceIndexesOrThrow(receipts, routingStart, remainderStart, { label: 'receipt routing route' });
+    const correctionStart = indexOrThrow(receipts, "router.patch('/:id/items/:itemId/routing-correction'", { from: routingStart });
+    const routingRoute = sliceIndexesOrThrow(receipts, routingStart, correctionStart, { label: 'receipt draft routing route' });
     expect(routingRoute).toContain("status: 'draft'");
     expect(routingRoute).toContain("throw appError('receipt_route_locked')");
+
+    const remainderStart = indexOrThrow(receipts, "router.post('/:id/items/:itemId/add-warehouse-remainder'", { from: correctionStart });
+    const correctionRoute = sliceIndexesOrThrow(receipts, correctionStart, remainderStart, { label: 'confirmed routing-correction route' });
+    expect(correctionRoute).toContain('correctReceiptItemRouting');
+    expect(correctionRoute).toContain("reason: 'routing_corrected'");
 
     const confirmStart = indexOrThrow(receipts, "router.post('/:id/items/:itemId/confirm'", { from: remainderStart });
     const remainderRoute = sliceIndexesOrThrow(receipts, remainderStart, confirmStart, { label: 'warehouse remainder route' });

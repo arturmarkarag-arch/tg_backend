@@ -95,7 +95,7 @@ function needsWarehouseProduct(routing) {
 
 function needsStandaloneShopProduct(routing) {
   const r = routing || blankRouting();
-  return !!(r.mandatory && !r.warehouse && !r.supplement);
+  return !!((r.mandatory || r.supplement) && !r.warehouse);
 }
 
 function legacyDestinationForRouting(routing) {
@@ -103,7 +103,11 @@ function legacyDestinationForRouting(routing) {
   // This field is compatibility-only. New artifact creation MUST use the explicit
   // helpers above because supplement-only is neither warehouse nor mandatory-shop
   // ownership. Keep `shelf` as the least destructive legacy representation.
-  return needsStandaloneShopProduct(r) ? 'shops' : 'shelf';
+  // Keep legacy destination semantics intentionally narrow: supplement-only is
+  // represented as `shelf` for compatibility even though its CURRENT projection is
+  // a standalone receipt-owned ShopProduct. Artifact ownership must never be
+  // inferred from this legacy field.
+  return (r.mandatory && !r.warehouse && !r.supplement) ? 'shops' : 'shelf';
 }
 
 function validateReceiptItemRouting(

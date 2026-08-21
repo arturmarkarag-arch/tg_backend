@@ -1,15 +1,18 @@
 /**
  * Unified Product archive application command.
  *
- * DB state mutation lives in archiveProductPrimitives so wider workflows (for
- * example Receipt routing correction) can compose the SAME archive semantics in
- * their own transaction. This command owns retry + post-commit side effects.
+ * DB state mutation lives in archiveProductPrimitives so legitimate physical
+ * archive/OOS workflows can compose the SAME semantics in their own transaction.
+ * Receipt routing correction is explicitly NOT one of those workflows. This
+ * command owns retry + post-commit side effects.
  */
 const mongoose = require('mongoose');
 const Block = require('../models/Block');
+const SupplementWave = require('../models/SupplementWave');
 const { getIO } = require('../socket');
 const { refreshPickingTaskPositions } = require('./taskBuilder');
 const { archiveProductInSession, getProductTitle } = require('./archiveProductPrimitives');
+const { withLock } = require('../utils/lock');
 
 const ARCHIVE_MAX_RETRIES = 3;
 
@@ -75,6 +78,23 @@ async function publishArchiveProductOutcome(
     } catch (_) {}
   }
 
+  if (outcome.affectedSupplementWaveIds?.length) {
+    try {
+      const waves = await SupplementWave.find({ _id: { $in: outcome.affectedSupplementWaveIds } }).lean();
+      if (waves.length) await require('./supplementNotify').notifyWaves(waves, 'cancelled');
+      const io = getIO();
+      for (const wave of waves) {
+        io?.emit('supplement_wave_changed', {
+          waveId: String(wave._id),
+          deliveryGroupId: String(wave.deliveryGroupId || ''),
+          orderingSessionId: String(wave.orderingSessionId || ''),
+          status: wave.status,
+          reason: 'product_archived',
+        });
+      }
+    } catch (_) {}
+  }
+
   try {
     const io = getIO();
     io?.emit('product_archived', { productId: String(product._id) });
@@ -107,7 +127,7 @@ async function publishArchiveProductOutcome(
   return { cancelledCount: outcome.cancelledCount || 0 };
 }
 
-async function archiveProduct(
+async function archiveProductUnlocked(
   productOrId,
   { notifyBuyers = false, bot = null, reason = 'manual_archive', actor = null } = {},
 ) {
@@ -137,6 +157,16 @@ async function archiveProduct(
   // performs no duplicate socket/Telegram work.
   if (!committed?.changed) return { cancelledCount: committed?.cancelledCount || 0 };
   return publishArchiveProductOutcome(committed, { notifyBuyers, bot, reason });
+}
+
+
+function archiveProduct(productOrId, options = {}) {
+  const productId = productOrId && productOrId._id ? productOrId._id : productOrId;
+  return withLock(
+    `product:${String(productId || '')}:physical-lifecycle`,
+    () => archiveProductUnlocked(productOrId, options),
+    { ttlMs: 30_000, waitMs: 15_000 },
+  );
 }
 
 module.exports = {

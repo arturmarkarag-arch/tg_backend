@@ -186,9 +186,10 @@ async function pushSharedFieldsToMirror(product, { session = null } = {}) {
   }
 }
 
-// Create/refresh the shop-OWNED ShopProduct for a current mandatory-only receipt
-// item (plus legacy destination='shops' compatibility rows). These goods go
-// straight to warehouse-directed shop distribution and do not create Product stock.
+// Create/refresh the shop-OWNED ShopProduct for a current mandatory-only OR
+// supplement-only receipt item (plus legacy destination='shops' compatibility
+// rows). These routes are visible in «Товари Магазинів» / «Нові Товари» but do
+// not create physical Product stock unless Warehouse is also selected.
 // linkedProductId stays NULL → the record is OWNED by the shop catalog (editable
 // there), as opposed to a warehouse mirror. Idempotent — matched in this order:
 //   1. by receiptItemId (durable anchor for the same receipt item).
@@ -214,8 +215,8 @@ async function upsertShopOwnedFromReceiptItem(item, { session = null } = {}) {
     imageUrl:           item.photoUrl || '',
     labelPositions,
     source:             'receive',
-    // New mandatory-only receipt items are information/distribution records, not
-    // seller-choice catalogue goods. Staff and the "Нові товари" union can see
+    // New mandatory-only / supplement-only receipt items are information/process
+    // records, not ordinary seller-choice catalogue goods. Staff and the "Нові товари" union can see
     // them, but seller-facing ShopProduct browse/search must not present them as a
     // normal selectable product. Legacy destination='shops' rows keep old visibility.
     orderingEnabled:   Number(item.routingVersion || 0) >= 1 ? false : true,

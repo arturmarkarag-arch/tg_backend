@@ -40,8 +40,10 @@ describe('V48.S3 supplement target contract', () => {
     expect(targets).toContain('publications.filter(blocksGenericRepublish)');
   });
 
-  it('allows current delivery states before and during warehouse picking', () => {
+  it('waits for ordinary ordering to close, then allows warehouse-side delivery states', () => {
     expect(targets).toContain("isOrderingOpen(group.orderingSchedule, now).isOpen ? 'ordering_open' : 'awaiting_picking'");
+    expect(targets).toContain("state !== 'ordering_open'");
+    expect(targets).toContain("throw appError('supplement_ordering_still_open'");
     expect(targets).toContain("return 'picking'");
   });
 

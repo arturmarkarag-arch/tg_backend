@@ -96,11 +96,12 @@ check('exact-session current supplement item remains a session-completion blocke
   && closure.includes('SupplementOffer.find')
   && closure.includes('active_supplement_waves'));
 
-check('routing correction stays compensating and preserves packed facts/history',
+check('routing correction blocks OPEN seller input and annuls the whole FROZEN current revision when supplement is removed',
   correction.includes('withdrawReceiptItemFromActiveWaves')
-  && correction.includes('alreadyFulfilledShopIds')
-  && service.includes('const packed = requests.filter((r) => r.packed)')
-  && service.includes('const unpacked = requests.filter((r) => !r.packed)'));
+  && correction.includes('RECEIPT_ITEM_SUPPLEMENT_STATE.OPEN')
+  && service.includes('status: REQUEST_STATUS.ACTIVE')
+  && service.includes('alreadyFulfilledShopIds: []')
+  && !service.includes('const unpacked = requests.filter((r) => !r.packed)'));
 
 check('route correction only rewrites current active item revision',
   correction.includes('status: { $in: ACTIVE_ITEM_STATUSES }')
@@ -108,9 +109,10 @@ check('route correction only rewrites current active item revision',
   && correction.includes('productId: item.createdProductId || null')
   && correction.includes('sourceSnapshotFromReceiptItem(item)'));
 
-check('obsolete Product archive is composed inside route-correction transaction',
-  correction.includes('archiveProductInSession')
-  && !correction.includes('await archiveProduct(')
+check('route correction never archives a Product; archive stays a separate physical command',
+  !correction.includes('archiveProductInSession')
+  && !correction.includes('receipt_routing_correction')
+  && correction.includes("mode: 'warehouse_detach'")
   && archive.includes('archiveProductInSession')
   && primitive.includes('detachProductFromAllBlocks'));
 

@@ -71,13 +71,14 @@ describe('V48.S2 supplement guarantees preserved by V48.S3', () => {
     expect(closure).toContain('active_supplement_waves');
   });
 
-  it('keeps compensating routing correction and preserves packed facts', () => {
+  it('annuls the whole current supplement revision after seller input is frozen', () => {
     const command = read('services/receiptRoutingCorrectionCommand.js');
     const wave = read('services/supplementWaveService.js');
     expect(command).toContain('withdrawReceiptItemFromActiveWaves');
-    expect(command).toContain('alreadyFulfilledShopIds');
-    expect(wave).toContain('const packed = requests.filter((r) => r.packed)');
-    expect(wave).toContain('const unpacked = requests.filter((r) => !r.packed)');
+    expect(command).toContain('RECEIPT_ITEM_SUPPLEMENT_STATE.OPEN');
+    expect(wave).toContain('status: REQUEST_STATUS.ACTIVE');
+    expect(wave).not.toContain('const packed = requests.filter((r) => r.packed)');
+    expect(wave).toContain('alreadyFulfilledShopIds: []');
   });
 
   it('keeps modern lifecycle notifications container-scoped while legacy offer notifications stay isolated', () => {
@@ -89,12 +90,13 @@ describe('V48.S2 supplement guarantees preserved by V48.S3', () => {
     expect((notify.match(/waveId: null/g) || []).length).toBeGreaterThanOrEqual(2);
   });
 
-  it('composes obsolete Product archive inside the route-correction transaction', () => {
+  it('never archives or detaches a physical Product as a routing side effect', () => {
     const command = read('services/receiptRoutingCorrectionCommand.js');
     const archive = read('services/archiveProduct.js');
     const primitive = read('services/archiveProductPrimitives.js');
-    expect(command).toContain('archiveProductInSession');
-    expect(command).not.toContain('await archiveProduct(');
+    expect(command).not.toContain('archiveProductInSession');
+    expect(command).not.toContain('receipt_routing_correction');
+    expect(command).toContain("mode: 'warehouse_detach'");
     expect(archive).toContain('archiveProductInSession');
     expect(primitive).toContain('detachProductFromAllBlocks');
   });

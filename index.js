@@ -21,6 +21,7 @@ const { assertDeliveryGroupSchedulesReady } = require('./utils/deliveryGroupSche
 const { isEnabled: redisEnabled } = require('./utils/redis');
 const Order = require('./models/Order');
 const PickingTask = require('./models/PickingTask');
+const Product = require('./models/Product');
 const Block = require('./models/Block');
 const { startRetentionScheduler } = require('./services/retention');
 const { startSupplementScheduler } = require('./services/supplementScheduler');
@@ -136,6 +137,18 @@ async function startServer() {
         'Виправте дублікати та перезапустіть сервер.',
       ],
       models: [Order],
+    });
+
+    await syncCritical({
+      key: 'receipt_product_identity',
+      title: 'Не створився критичний індекс зв’язку накладна → складський товар',
+      whatBroke: 'Не підтверджено правило: одна позиція накладної може мати лише один фізичний Product.',
+      howToFix: [
+        'Перевірте дублікати products.receiptItemId (не null).',
+        'Для кожного receiptItemId має лишитися рівно один канонічний Product, а ReceiptItem.createdProductId має вказувати на нього.',
+        'Після repair перезапустіть сервер — Product.syncIndexes() створить UNIQUE partial index.',
+      ],
+      models: [Product],
     });
 
     await syncCritical({

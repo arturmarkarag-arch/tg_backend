@@ -24,9 +24,10 @@ const ProductSchema = new mongoose.Schema(
     quantityPerPackage: { type: Number, default: 0 },
     notes: { type: String, default: '' },
     source: { type: String, default: '' },
-    // Normal seller catalogue gate. Supplement-only goods still need a Product
-    // for warehouse location / supplement picking, but must not appear in the
-    // ordinary ordering catalogue unless the worker also selected `На склад`.
+    // Normal seller catalogue gate for PHYSICAL warehouse Products.
+    // Supplement-only / Mandatory-only receipt rows do not create a Product at
+    // all; they use a receipt-owned ShopProduct. Warehouse+Supplement shares this
+    // real Product while remaining excluded from ordinary ordering for that session.
     orderingEnabled: { type: Boolean, default: true },
     // Receiving-route metadata. These are informational flags; received quantity
     // is NOT used to infer either of them.
@@ -97,6 +98,14 @@ ProductSchema.index(
 ProductSchema.index(
   { barcode: 1 },
   { unique: true, partialFilterExpression: { barcode: { $gt: '' } } }
+);
+
+// One physical Product per receipt item. This is the database backstop for the
+// ReceiptItem.createdProductId pointer and prevents routing corrections/retries
+// from ever manufacturing a second Product for the same received row.
+ProductSchema.index(
+  { receiptItemId: 1 },
+  { unique: true, partialFilterExpression: { receiptItemId: { $type: 'objectId' } } },
 );
 
 module.exports = mongoose.model('Product', ProductSchema);

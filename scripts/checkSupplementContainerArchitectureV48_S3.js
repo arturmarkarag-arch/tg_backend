@@ -135,16 +135,17 @@ check('packing requires the item itself to be FROZEN and exact request revision'
   && supplement.includes('revisionOf(fresh)')
   && supplement.includes('revisionOf(head) !== revision')
   && supplement.includes('{ _id: req.params.requestId, revision, status: REQUEST_STATUS.ACTIVE'));
-check('cancel one item cancels only unpacked current-revision requests',
+check('cancel one item annuls every current-revision request, including packed audit rows',
   service.includes('async function cancelOfferRevision')
-  && service.includes('revision, status: REQUEST_STATUS.ACTIVE, packed: false')
+  && service.includes('revision, status: REQUEST_STATUS.ACTIVE')
+  && !/cancelOfferRevision[\s\S]{0,2600}status:\s*REQUEST_STATUS.ACTIVE,\s*packed:\s*false/.test(service)
   && service.includes('offer.status = ITEM_STATUS.CANCELLED'));
 check('staff cancellation of last FROZEN request immediately repairs empty item lifecycle',
   supplement.includes('result.offer.status === ITEM_STATUS.FROZEN')
   && supplement.includes('releaseEmptyOffers(new Date())')
   && supplement.includes('maybeCompleteSession'));
-check('cancel one item preserves packed physical facts',
-  service.includes("packed: false")
+check('cancel one item preserves packed fields only as audit, never as fulfilment',
+  service.includes('Packed fields remain as audit facts')
   && !/cancelOfferRevision[\s\S]{0,3500}\$set:\s*\{[^}]*packed:\s*false/.test(service));
 check('cancel all touches only current OPEN/FROZEN item revisions and leaves container reusable',
   service.includes('async function cancelWave')

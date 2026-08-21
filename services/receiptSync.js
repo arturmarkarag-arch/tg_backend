@@ -35,6 +35,7 @@ const { repriceActiveOrders } = require('../utils/repriceActiveOrders');
 const { labelPositionsFromPhotoMeta, photoCommentsText } = require('../utils/receiptPhotoMeta');
 const { ITEM_STATUS, ITEM_RELATION_STATUS, ACTIVE_ITEM_STATUSES, REQUEST_STATUS, revisionOf, isActiveItemRevision } = require('../utils/supplementState');
 const { sourceSnapshotFromReceiptItem } = require('./supplementWaveService');
+const { normalizeReceiptItemRouting, needsWarehouseProduct, needsStandaloneShopProduct } = require('../utils/receiptRouting');
 
 /** Підписи на фото (позиції ціни/кількості/всіх коментарів) у формі товару. */
 function labelPositionsFromMeta(photoMeta) {
@@ -71,9 +72,12 @@ async function describeItemUsage(item, { session = null, mode = 'destructive' } 
 
   if (item.createdProductId) {
     const productId = item.createdProductId;
-    const product = await ses(Product.findById(productId, 'status').lean());
+    const product = await ses(Product.findById(productId, 'status firstBlockPlacedAt').lean());
 
     if (product && product.status === 'archived') reasons.push('товар уже в архіві');
+    if (mode === 'warehouse_detach' && product?.firstBlockPlacedAt) {
+      reasons.push('товар уже був розміщений на полиці');
+    }
 
     const block = await ses(Block.findOne({ productIds: productId }, 'blockId').lean());
     if (block) reasons.push(`товар стоїть у блоці ${block.blockId}`);
@@ -92,36 +96,38 @@ async function describeItemUsage(item, { session = null, mode = 'destructive' } 
   // - a normal metadata edit may proceed after a modern revision is terminal,
   //   because that revision owns an immutable sourceSnapshot and a later publish
   //   will create revision+1. OPEN/FROZEN work still blocks the edit.
-  const offers = await ses(
-    SupplementOffer.find({ receiptItemId: item._id }, '_id waveId revision status itemStatus deliveryGroupId').lean(),
-  );
-  const legacyOffers = offers.filter((offer) => !offer.waveId);
-  const modernOffers = offers.filter((offer) => offer.waveId);
-  const activeModernOffers = modernOffers.filter(isActiveItemRevision);
+  if (mode !== 'warehouse_detach') {
+    const offers = await ses(
+      SupplementOffer.find({ receiptItemId: item._id }, '_id waveId revision status itemStatus deliveryGroupId').lean(),
+    );
+    const legacyOffers = offers.filter((offer) => !offer.waveId);
+    const modernOffers = offers.filter((offer) => offer.waveId);
+    const activeModernOffers = modernOffers.filter(isActiveItemRevision);
 
-  if (legacyOffers.length > 0 || (item.supplementPublishRequestedAt && modernOffers.length === 0)) {
-    reasons.push('дозамовлення вже передано через старий publication flow');
-  }
+    if (legacyOffers.length > 0 || (item.supplementPublishRequestedAt && modernOffers.length === 0)) {
+      reasons.push('дозамовлення вже передано через старий publication flow');
+    }
 
-  if (mode === 'destructive' && modernOffers.length > 0) {
-    reasons.push('позиція має історію публікацій дозамовлення');
-    const requestCount = await ses(SupplementRequest.countDocuments({
-      offerId: { $in: modernOffers.map((offer) => offer._id) },
-    }));
-    if (requestCount > 0) reasons.push(`історія дозамовлень містить заявки магазинів (${requestCount})`);
-  } else if (activeModernOffers.length > 0) {
-    const statuses = new Set(activeModernOffers.map((offer) => String(offer.status || '')));
-    if (statuses.has(ITEM_STATUS.FROZEN)) reasons.push('дозамовлення цієї позиції вже передано в роботу');
-    else reasons.push('дозамовлення цієї позиції зараз відкрите для магазинів');
+    if (mode === 'destructive' && modernOffers.length > 0) {
+      reasons.push('позиція має історію публікацій дозамовлення');
+      const requestCount = await ses(SupplementRequest.countDocuments({
+        offerId: { $in: modernOffers.map((offer) => offer._id) },
+      }));
+      if (requestCount > 0) reasons.push(`історія дозамовлень містить заявки магазинів (${requestCount})`);
+    } else if (activeModernOffers.length > 0) {
+      const statuses = new Set(activeModernOffers.map((offer) => String(offer.status || '')));
+      if (statuses.has(ITEM_STATUS.FROZEN)) reasons.push('дозамовлення цієї позиції вже передано в роботу');
+      else reasons.push('дозамовлення цієї позиції зараз відкрите для магазинів');
 
-    const requestCount = await ses(SupplementRequest.countDocuments({
-      $or: activeModernOffers.map((offer) => ({
-        offerId: offer._id,
-        revision: revisionOf(offer),
-        status: REQUEST_STATUS.ACTIVE,
-      })),
-    }));
-    if (requestCount > 0) reasons.push(`магазини мають поточні заявки на цей товар (${requestCount})`);
+      const requestCount = await ses(SupplementRequest.countDocuments({
+        $or: activeModernOffers.map((offer) => ({
+          offerId: offer._id,
+          revision: revisionOf(offer),
+          status: REQUEST_STATUS.ACTIVE,
+        })),
+      }));
+      if (requestCount > 0) reasons.push(`магазини мають поточні заявки на цей товар (${requestCount})`);
+    }
   }
 
   return { inUse: reasons.length > 0, reasons };
@@ -197,7 +203,8 @@ async function propagateItemEdit(item, prev, { session = null } = {}) {
   out.supplementWaveIds = supplementSync.waveIds;
   out.supplementChanges = supplementSync.changes;
 
-  if ((item.destination || 'shelf') !== 'shops') {
+  const routing = normalizeReceiptItemRouting(item);
+  if (needsWarehouseProduct(routing)) {
     // Позиція без товару — ще не підтверджена. Товар створить підтвердження.
     if (!item.createdProductId) return out;
     const q = Product.findById(item.createdProductId);
@@ -254,9 +261,10 @@ async function propagateItemEdit(item, prev, { session = null } = {}) {
     return out;
   }
 
-  // Товар магазину: у нього немає складського власника, тому позиція накладної —
-  // єдине джерело правди. upsertShopOwnedFromReceiptItem робить повний $set.
-  if (!item.createdShopProductId) return out;
+  // Standalone receipt-owned ShopProduct covers BOTH Mandatory-only and
+  // Supplement-only routes. `destination` is legacy compatibility only and must
+  // never decide artifact ownership for routingVersion>=1.
+  if (!needsStandaloneShopProduct(routing) || !item.createdShopProductId) return out;
   const sp = await upsertShopOwnedFromReceiptItem(
     typeof item.toObject === 'function' ? item.toObject() : item,
     { session },

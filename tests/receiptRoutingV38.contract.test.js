@@ -110,10 +110,12 @@ describe('receipt routing v38 contract', () => {
     expect(waveService).toContain('sourceSnapshot: sourceSnapshotFromReceiptItem(item)');
   });
 
-  test('supplement target is the current delivery session and may still have ordinary ordering open', () => {
+  test('supplement target is the current delivery session only after ordinary ordering closes', () => {
     expect(supplementTargets).toContain('findCurrentSessionId');
     expect(supplementTargets).toContain('expectedOrderingSessionId');
     expect(supplementTargets).toContain("isOrderingOpen(group.orderingSchedule, now).isOpen ? 'ordering_open' : 'awaiting_picking'");
+    expect(supplementTargets).toContain("state !== 'ordering_open'");
+    expect(supplementTargets).toContain("throw appError('supplement_ordering_still_open'");
     expect(supplementTargets).toContain("return 'picking'");
     expect(supplementTargets).toContain('supplement_target_session_not_started');
     expect(supplementTargets).toContain('supplement_target_session_completed');

@@ -13,7 +13,9 @@ const blocks = read('routes/blocks.js');
 const errors = read('utils/errors.js');
 
 check(targets.includes('findCurrentSessionId') && targets.includes('expectedOrderingSessionId'), 'supplement target resolver pins the current delivery session');
-check(targets.includes("return isOrderingOpen(group.orderingSchedule, now).isOpen ? 'ordering_open' : 'awaiting_picking'"), 'open ordinary session is an eligible current-delivery state, not a prohibition');
+check(targets.includes("return isOrderingOpen(group.orderingSchedule, now).isOpen ? 'ordering_open' : 'awaiting_picking'")
+  && targets.includes("state !== 'ordering_open'")
+  && targets.includes("supplement_ordering_still_open"), 'supplement target waits until the ordinary ordering window is closed');
 check(receipts.includes('createWaveWithItems({') && receipts.includes('orderingSessionId: target.orderingSessionId'), 'modern batch publication creates the Wave immediately in the selected current session');
 check(receipts.includes('withSessionLifecycleLock(firstTarget.orderingSessionId'), 'publication is serialized with session completion');
 check(offers.includes('if (Number(item.supplementBatchVersion || 0) >= 1) continue'), 'legacy reconciliation cannot consume modern Wave rows');

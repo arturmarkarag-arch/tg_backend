@@ -4,6 +4,7 @@ const mongoose = require('mongoose');
 const Block = require('../models/Block');
 const Product = require('../models/Product');
 const { appError } = require('../utils/errors');
+const { withLock } = require('../utils/lock');
 const { refreshPickingTaskPositions } = require('./taskBuilder');
 const { syncMirror } = require('../utils/upsertShopProduct');
 const { pruneInvalidBlockProductIds } = require('./blockMembershipPrimitives');
@@ -21,7 +22,7 @@ async function repairBlockMissingProducts(blockId, session = null) {
   return result.changed;
 }
 
-async function moveProductBetweenBlocks({
+async function moveProductBetweenBlocksUnlocked({
   productId,
   fromBlock,
   toBlock,
@@ -106,7 +107,7 @@ async function moveProductBetweenBlocks({
   };
 }
 
-async function removeProductFromBlock({ blockId, productId, expectedVersion = null }) {
+async function removeProductFromBlockUnlocked({ blockId, productId, expectedVersion = null }) {
   const num = Number(blockId);
   if (!num || num < 1) throw appError('block_invalid_number');
   if (!mongoose.Types.ObjectId.isValid(productId)) throw appError('block_invalid_product_id');
@@ -150,7 +151,7 @@ async function removeProductFromBlock({ blockId, productId, expectedVersion = nu
   return { blockMongoId: updatedRaw._id, blockId: num, productId: String(productId), positionChanges };
 }
 
-async function placeProductInBlock({ blockId, productId, index = null, expectedVersion = null }) {
+async function placeProductInBlockUnlocked({ blockId, productId, index = null, expectedVersion = null }) {
   const num = Number(blockId);
   if (!num || num < 1) throw appError('block_invalid_number');
   if (!productId) throw appError('block_missing_product_id');
@@ -261,6 +262,35 @@ async function placeProductInBlock({ blockId, productId, index = null, expectedV
 
   const positionChanges = await refreshPickingTaskPositions();
   return { blockMongoId: updatedRaw._id, blockId: num, productId: String(productId), positionChanges };
+}
+
+
+function physicalLifecycleLockKey(productId) {
+  return `product:${String(productId || '')}:physical-lifecycle`;
+}
+
+function moveProductBetweenBlocks(args = {}) {
+  return withLock(
+    physicalLifecycleLockKey(args.productId),
+    () => moveProductBetweenBlocksUnlocked(args),
+    { ttlMs: 20_000, waitMs: 10_000 },
+  );
+}
+
+function removeProductFromBlock(args = {}) {
+  return withLock(
+    physicalLifecycleLockKey(args.productId),
+    () => removeProductFromBlockUnlocked(args),
+    { ttlMs: 20_000, waitMs: 10_000 },
+  );
+}
+
+function placeProductInBlock(args = {}) {
+  return withLock(
+    physicalLifecycleLockKey(args.productId),
+    () => placeProductInBlockUnlocked(args),
+    { ttlMs: 20_000, waitMs: 10_000 },
+  );
 }
 
 module.exports = {

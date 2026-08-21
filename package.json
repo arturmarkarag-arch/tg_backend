@@ -65,7 +65,8 @@
     "test:supplement-metadata:v48.s3.1": "node scripts/checkSupplementMetadataAuthorityV48_S3_1.js",
     "test:order-unassign-state": "node scripts/checkOrderUnassignState.js",
     "test:telegram-delivery-ledger": "node scripts/checkTelegramDeliveryLedgerV48.js",
-    "test:ordering-reminder-delivery": "node scripts/checkOrderingReminderDeliveryV48.js"
+    "test:ordering-reminder-delivery": "node scripts/checkOrderingReminderDeliveryV48.js",
+    "test:receipt-supplement:lifecycle": "node scripts/checkReceiptSupplementLifecycle20260821.js"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1030.0",

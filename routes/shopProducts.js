@@ -473,6 +473,7 @@ router.post('/:id/describe', staffOnly, asyncHandler(async (req, res) => {
 router.delete('/:id', staffOnly, asyncHandler(async (req, res) => {
   const item = await ShopProduct.findById(req.params.id).lean();
   if (!item) throw appError('product_not_found');
+  if (item.receiptItemId) throw appError('shopproduct_receipt_owned');
 
   // A LIVE mirror (linked to a non-archived warehouse Product) is warehouse-owned
   // and must not be deleted from here. But an ORPHANED mirror — whose warehouse

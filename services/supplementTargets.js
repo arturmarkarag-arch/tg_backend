@@ -94,6 +94,7 @@ async function describeGroup(group, now = new Date()) {
   const selectable = !!session
     && state !== 'completed'
     && state !== 'upcoming_not_started'
+    && state !== 'ordering_open'
     && shopCount > 0;
 
   return {
@@ -126,9 +127,11 @@ async function describeGroup(group, now = new Date()) {
       : ['Дозамовлення не потрібне: ця група отримає товар у своїй звичайній сесії'],
     note: selectable ? (state === 'supplement_reopenable'
       ? 'Повторний запуск створить нову чисту revision позиції; старі заявки залишаться тільки в історії.'
-      : '') : (state === 'completed'
-      ? 'Завершену без скасованого дозамовлення доставку не можна повторно відкривати через дозамовлення.'
-      : 'Майбутня сесія не є ціллю дозамовлення.'),
+      : '') : (state === 'ordering_open'
+      ? 'Спочатку дочекайтесь закриття звичайного прийому замовлень цієї групи.'
+      : state === 'completed'
+        ? 'Завершену без скасованого дозамовлення доставку не можна повторно відкривати через дозамовлення.'
+        : 'Майбутня сесія не є ціллю дозамовлення.'),
   };
 }
 
@@ -185,10 +188,14 @@ async function resolveSupplementTarget(
     throw appError('supplement_target_session_completed', { group: group.name || '' });
   }
 
+  const state = stateForSession(session, group, now, { reopenableSupplement });
+  if (state === 'ordering_open') {
+    throw appError('supplement_ordering_still_open', { group: group.name || '' });
+  }
+
   const hasActiveShop = await Shop.exists({ deliveryGroupId: gid, isActive: true });
   if (!hasActiveShop) throw appError('supplement_target_no_shops', { group: group.name || '' });
 
-  const state = stateForSession(session, group, now, { reopenableSupplement });
   return {
     deliveryGroupId: gid,
     orderingSessionId: str(session._id),

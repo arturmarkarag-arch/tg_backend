@@ -5,19 +5,123 @@
  *
  * Owns DB mutations only. It MUST run inside a caller-owned Mongo transaction.
  * Application commands are responsible for commit/retry and all post-commit
- * cache/socket/Telegram/derived-position effects.
+ * cache/socket/Telegram/derived-position effects. Receipt routing correction must
+ * never call this primitive: Archive is a separate physical fact, not a route.
  */
 const Order = require('../models/Order');
 const Product = require('../models/Product');
 const PickingTask = require('../models/PickingTask');
 const DeliveryGroup = require('../models/DeliveryGroup');
+const SupplementOffer = require('../models/SupplementOffer');
+const SupplementRequest = require('../models/SupplementRequest');
 const { isOrderingOpen } = require('../utils/orderingSchedule');
 const { resolveOrderStatusAfterCancel } = require('../utils/orderStatus');
 const { buildUnreconciledOosTaskFilter } = require('../utils/pickingOosRecovery');
 const { detachProductFromAllBlocks } = require('./blockMembershipPrimitives');
+const {
+  ACTIVE_ITEM_STATUSES,
+  ITEM_RELATION_STATUS,
+  ITEM_STATUS,
+  REQUEST_STATUS,
+  REQUEST_CANCEL_SOURCE,
+  revisionOf,
+} = require('../utils/supplementState');
 
 function getProductTitle(product) {
   return product.brand || product.model || product.category || `#${product.orderNumber}`;
+}
+
+async function reconcileSupplementForArchivedProduct(product, {
+  session,
+  reason,
+  actor,
+  now,
+} = {}) {
+  const offers = await SupplementOffer.find({
+    productId: product._id,
+    waveId: { $ne: null },
+    itemStatus: ITEM_RELATION_STATUS.ACTIVE,
+    status: { $in: ACTIVE_ITEM_STATUSES },
+  }).session(session);
+  if (!offers.length) return { waveIds: [], sessionIds: [], cancelledRequestCount: 0 };
+
+  const by = String(actor?.by || 'system');
+  const byName = String(actor?.byName || (reason === 'out_of_stock' ? 'Система' : ''));
+  const waveIds = new Set();
+  const sessionIds = new Set();
+  let cancelledRequestCount = 0;
+
+  for (const offer of offers) {
+    const revision = revisionOf(offer);
+    const requests = await SupplementRequest.find({
+      offerId: offer._id,
+      revision,
+      status: REQUEST_STATUS.ACTIVE,
+    }, '_id').session(session).lean();
+
+    if (requests.length) {
+      const requestIds = requests.map((row) => row._id);
+      const write = await SupplementRequest.updateMany(
+        { _id: { $in: requestIds }, revision, status: REQUEST_STATUS.ACTIVE },
+        {
+          $set: {
+            status: REQUEST_STATUS.CANCELLED,
+            cancelledAt: now,
+            cancelledBy: by,
+            cancelledByName: byName,
+            cancelReason: String(reason || 'product_archived'),
+            cancelSource: REQUEST_CANCEL_SOURCE.SYSTEM,
+          },
+          $push: {
+            history: {
+              at: now,
+              by,
+              byName,
+              byRole: String(actor?.byRole || 'system'),
+              action: 'cancelled',
+              meta: {
+                reason: String(reason || 'product_archived'),
+                productArchived: true,
+                revision,
+              },
+            },
+          },
+        },
+        { session },
+      );
+      cancelledRequestCount += Number(write.modifiedCount || write.nModified || 0);
+    }
+
+    offer.itemStatus = ITEM_RELATION_STATUS.WITHDRAWN;
+    offer.withdrawnAt = now;
+    offer.withdrawnBy = by;
+    offer.withdrawnByName = byName;
+    offer.withdrawReason = String(reason || 'product_archived');
+    offer.status = ITEM_STATUS.CANCELLED;
+    offer.cancelledAt = now;
+    offer.cancelledBy = by;
+    offer.cancelledByName = byName;
+    offer.cancelReason = String(reason || 'product_archived');
+    offer.lockedBy = null;
+    offer.lockedAt = null;
+    await offer.save({ session });
+
+    if (offer.waveId) waveIds.add(String(offer.waveId));
+    if (offer.orderingSessionId) sessionIds.add(String(offer.orderingSessionId));
+  }
+
+  // Wave status is a derived container summary and must change in the same
+  // transaction as the request/offer cancellation.
+  const { recomputeWaveSummaryInSession } = require('./supplementWaveService');
+  for (const waveId of waveIds) {
+    await recomputeWaveSummaryInSession(waveId, { session, actor, now });
+  }
+
+  return {
+    waveIds: [...waveIds],
+    sessionIds: [...sessionIds],
+    cancelledRequestCount,
+  };
 }
 
 async function archiveProductInSession(productOrId, {
@@ -39,6 +143,8 @@ async function archiveProductInSession(productOrId, {
       affectedGroupIds: [],
       affectedSessionIds: [],
       affectedBlockIds: [],
+      affectedSupplementWaveIds: [],
+      cancelledSupplementRequestCount: 0,
     };
   }
 
@@ -59,6 +165,8 @@ async function archiveProductInSession(productOrId, {
       affectedGroupIds: [],
       affectedSessionIds: [],
       affectedBlockIds: [],
+      affectedSupplementWaveIds: [],
+      cancelledSupplementRequestCount: 0,
     };
   }
 
@@ -175,7 +283,18 @@ async function archiveProductInSession(productOrId, {
     { session },
   );
 
-  // 3. Archive Product CURRENT state.
+  // 3. A physical archive also terminates any unfinished supplement work for
+  // this same Product. All current-revision seller requests are annulled,
+  // including rows already marked packed; packed fields remain audit only.
+  const supplementOutcome = await reconcileSupplementForArchivedProduct(product, {
+    session,
+    reason,
+    actor,
+    now,
+  });
+  for (const sessionId of supplementOutcome.sessionIds) affectedSessionIds.add(sessionId);
+
+  // 4. Archive Product CURRENT state.
   const oldOrderNumber = product.orderNumber;
   product.status = 'archived';
   product.archivedAt = now;
@@ -187,7 +306,7 @@ async function archiveProductInSession(productOrId, {
   product.orderNumber = 0;
   await product.save({ session });
 
-  // 4. Physical membership is part of the same transaction.
+  // 5. Physical membership is part of the same transaction.
   const detached = await detachProductFromAllBlocks({ productId: product._id, session });
 
   return {
@@ -199,6 +318,8 @@ async function archiveProductInSession(productOrId, {
     affectedGroupIds: [...affectedGroupIds],
     affectedSessionIds: [...affectedSessionIds],
     affectedBlockIds: detached.blockIds || [],
+    affectedSupplementWaveIds: supplementOutcome.waveIds,
+    cancelledSupplementRequestCount: supplementOutcome.cancelledRequestCount,
   };
 }
 

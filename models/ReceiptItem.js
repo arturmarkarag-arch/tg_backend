@@ -63,10 +63,10 @@ const ReceiptItemSchema = new mongoose.Schema(
     supplementBatchVersion: { type: Number, default: 0 },
     supplementPublishRequestedAt: { type: Date, default: null },
 
-    // V48.S2 compensating correction metadata. The full timeline stays in
-    // ReceiptItemLog; this small CURRENT/FUTURE hint prevents a corrected
-    // mandatory flow from duplicating shops that were already physically packed
-    // by an earlier, mistaken supplement route.
+    // Routing-correction audit compatibility. The full timeline stays in
+    // ReceiptItemLog. `alreadyFulfilledShopIds` is retained for old documents/API
+    // shape only; current supplement cancellation annuls the whole revision and
+    // writes this list empty.
     routingCorrection: {
       correctedAt: { type: Date, default: null },
       correctedBy: { type: String, default: '' },

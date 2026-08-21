@@ -161,6 +161,7 @@ const ERRORS = {
   product_block_id_invalid: { status: 400, message: 'Невірний ідентифікатор блока' },
   product_filenames_required:{ status: 400, message: 'Не вказано файли зображень' },
   shopproduct_edit_on_warehouse:{ status: 403, message: 'Цей товар належить складу й редагується на сторінці Складу. Тут він лише відображається.' },
+  shopproduct_receipt_owned:  { status: 409, message: 'Цей товар створений накладною. Його маршрут і видимість змінюються через накладну, а не прямим видаленням з «Товари Магазинів».' },
   product_upload_failed_generic: { status: 500, message: 'Не вдалося завантажити' },
   telegram_groups_not_configured: { status: 500, message: 'Не налаштовано Telegram-групи для розсилок' },
   telegram_bot_not_initialized:   { status: 500, message: 'Telegram-бот не ініціалізований' },
@@ -258,7 +259,9 @@ const ERRORS = {
   receipt_routing_batch_too_large: { status: 400, message: 'За один раз можна обробити не більше 100 товарів' },
   receipt_routing_batch_draft_only: { status: 409, message: 'Пакетний маршрут доступний лише для товарів, які ще не підтверджені' },
   receipt_routing_batch_regular_only: { status: 409, message: 'Пакетний маршрут недоступний для старих накладних-дозамовлень' },
-  receipt_supplement_already_completed: { status: 409, message: 'Дозамовлення цього товару вже виконано' },
+  receipt_routing_batch_blocked: { status: 409, message: ({ reasons } = {}) =>
+                                `Пакетну зміну не виконано. Жоден товар не змінено.${reasons ? ` ${reasons}` : ''}` },
+  receipt_supplement_already_completed: { status: 409, message: 'Дозамовлення цього товару вже виконано. Це завершений історичний факт: зняти або повторно увімкнути «Дозамовлення» через накладну не можна.' },
   receipt_destination_required: { status: 400, message: 'Вкажіть призначення: «Склад» або «Магазини»' },
   receipt_route_required: { status: 422, message: 'Оберіть, куди піде товар: «На склад», «Обовʼязковий» або «Дозамовлення»' },
   receipt_route_conflict: { status: 422, message: '«Обовʼязковий» і «Дозамовлення» не можна вибрати одночасно' },
@@ -282,6 +285,8 @@ const ERRORS = {
                                 'Ціну, кількість і коментар правити можна (підписи на фото перемалюються).' },
   receipt_supplement_wave_closed: { status: 409, message:
                                 'Прийом заявок на це дозамовлення вже закрито — нову позицію додати нікому' },
+  receipt_supplement_route_open: { status: 409, message:
+                                'Дозамовлення цього товару зараз відкрите для продавців. Спочатку закрийте прийом заявок («Передати в роботу»), після цього маршрут можна змінити.' },
   supplement_target_required: { status: 400, message: 'Оберіть групу доставки, для якої відкрити дозамовлення' },
   supplement_target_not_found:{ status: 404, message: 'Обрану групу доставки більше не існує — оновіть список і виберіть іншу' },
   supplement_wave_not_found: { status: 404, message: 'Хвилю дозамовлення не знайдено' },
@@ -298,8 +303,8 @@ const ERRORS = {
   product_supplement_session_only: { status: 409, message: 'Цей товар у поточній доставці доступний через дозамовлення, а не через звичайне замовлення' },
   supplement_ordering_still_open: { status: 409, message: ({ group } = {}) =>
                                 `У групі «${group || 'без назви'}» звичайна сесія замовлень ще відкрита. Дозамовлення відкриваємо тільки після її закриття.` },
-  // Єдина причина відмови, що лишилась: показувати хвилю нікому. Стан вікна
-  // замовлень і збирання групу НЕ блокує — рішення за працівником.
+  // Після hard-guard на ordering_open єдина додаткова причина відмови —
+  // показувати хвилю нікому. Збирання після закриття ordering не блокує target.
   supplement_target_no_shops: { status: 409, message: ({ group } = {}) =>
                                 `У групі «${group || 'без назви'}» немає активних магазинів — дозамовлення нікому показувати` },
 

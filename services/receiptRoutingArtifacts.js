@@ -27,6 +27,9 @@ async function ensureReceiptItemProduct(item, session, receipt = null) {
   if (item.createdProductId) {
     product = await Product.findById(item.createdProductId).session(session);
     if (product) {
+      if (product.status === 'archived') {
+        throw appError('receipt_item_in_use', { reasons: 'товар уже в архіві' });
+      }
       if (!item.stockApplied) product.quantity = Number(item.routingVersion || 0) >= 1 ? 0 : item.totalQty;
       if (item.price !== null) product.price = item.price;
       if (item.qtyPerPackage) product.quantityPerPackage = item.qtyPerPackage;
@@ -44,6 +47,29 @@ async function ensureReceiptItemProduct(item, session, receipt = null) {
       }
       return product;
     }
+  }
+
+  // Repair a lost ReceiptItem -> Product pointer before creating anything new.
+  // `receiptItemId` is the durable identity anchor; a missing pointer must never
+  // create a second physical Product for the same received item.
+  const byReceiptItem = await Product.findOne({ receiptItemId: item._id }).session(session);
+  if (byReceiptItem) {
+    if (byReceiptItem.status === 'archived') {
+      throw appError('receipt_item_in_use', { reasons: 'товар уже в архіві' });
+    }
+    item.createdProductId = byReceiptItem._id;
+    if (!item.stockApplied) item.stockApplied = true;
+    await item.save({ session });
+    product = byReceiptItem;
+    if (item.price !== null) product.price = item.price;
+    if (item.qtyPerPackage) product.quantityPerPackage = item.qtyPerPackage;
+    product.notes = photoCommentsText(item.photoMeta);
+    product.labelPositions = labelPositionsFromMeta(item.photoMeta);
+    product.orderingEnabled = orderingEnabled;
+    product.mandatoryDistribution = !!routing.mandatory;
+    product.mayNotReachAllShops = !!routing.mayNotReachAllShops;
+    await product.save({ session });
+    return product;
   }
 
   const maxProduct = await Product.findOne(
@@ -107,4 +133,54 @@ async function convertReceiptShopOwnedToWarehouseMirror(item, product, session) 
   return syncMirror(product, { session });
 }
 
-module.exports = { ensureReceiptItemProduct, convertReceiptShopOwnedToWarehouseMirror };
+
+async function convertReceiptWarehouseToShopOwned(item, product, session) {
+  if (!product?._id) return null;
+  const productId = product._id;
+  let shopProduct = await ShopProduct.findOne({ linkedProductId: productId }).session(session);
+
+  if (shopProduct) {
+    const conflicting = await ShopProduct.findOne({
+      receiptItemId: item._id,
+      linkedProductId: null,
+      _id: { $ne: shopProduct._id },
+    }).session(session);
+    if (conflicting) {
+      // Integrity fail-closed: never silently choose between two receipt-owned
+      // catalogue identities.
+      throw appError('receipt_item_in_use', { reasons: 'для позиції існує дубль товару в «Товари Магазинів»' });
+    }
+
+    shopProduct.linkedProductId = null;
+    shopProduct.receiptItemId = item._id;
+    await shopProduct.save({ session });
+
+    const productVector = await ProductVector.findOne({ productId }).session(session);
+    if (productVector) {
+      const existingShopVector = await ProductVector.exists({ shopProductId: shopProduct._id }).session(session);
+      if (existingShopVector) {
+        await ProductVector.deleteOne({ _id: productVector._id }).session(session);
+      } else {
+        productVector.shopProductId = shopProduct._id;
+        productVector.productId = undefined;
+        await productVector.save({ session });
+      }
+    }
+  }
+
+  // No mirror yet: the caller will create the standalone ShopProduct from the
+  // ReceiptItem after the Product is removed; the stale warehouse vector cannot
+  // survive a hard projection rollback.
+  if (!shopProduct) {
+    await ProductVector.deleteMany({ productId }).session(session);
+  }
+
+  await Product.deleteOne({ _id: productId }).session(session);
+  item.createdProductId = null;
+  item.stockApplied = false;
+  item.createdShopProductId = shopProduct?._id || null;
+  await item.save({ session });
+  return shopProduct;
+}
+
+module.exports = { ensureReceiptItemProduct, convertReceiptShopOwnedToWarehouseMirror, convertReceiptWarehouseToShopOwned };

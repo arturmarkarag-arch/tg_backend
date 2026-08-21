@@ -344,11 +344,11 @@ async function cancelOfferRevision(offerId, actor = {}, reason = 'cancelled_by_s
         if (!ACTIVE_ITEM_STATUSES.includes(offer.status)) throw Object.assign(new Error('offer closed'), { code: 'supplement_closed' });
 
         const revision = revisionOf(offer);
-        const pending = await SupplementRequest.find({ offerId: offer._id, revision, status: REQUEST_STATUS.ACTIVE, packed: false }, '_id').session(mongoSession).lean();
+        const pending = await SupplementRequest.find({ offerId: offer._id, revision, status: REQUEST_STATUS.ACTIVE }, '_id packed').session(mongoSession).lean();
         cancelledRequestIds = pending.map((r) => str(r._id));
         if (pending.length) {
           await SupplementRequest.updateMany(
-            { _id: { $in: pending.map((r) => r._id) }, revision, status: REQUEST_STATUS.ACTIVE, packed: false },
+            { _id: { $in: pending.map((r) => r._id) }, revision, status: REQUEST_STATUS.ACTIVE },
             {
               $set: { status: REQUEST_STATUS.CANCELLED, cancelledAt: now, cancelledBy: by, cancelledByName: byName, cancelReason: str(reason), cancelSource: REQUEST_CANCEL_SOURCE.STAFF },
               $push: { history: { at: now, by, byName, action: 'cancelled', meta: { reason: str(reason), staffCancelled: true, revision } } },
@@ -378,7 +378,11 @@ async function cancelOfferRevision(offerId, actor = {}, reason = 'cancelled_by_s
   }, { ttlMs: 10_000, waitMs: 5_000 });
 }
 
-/** Cancel all CURRENT open/frozen item revisions in the container. Container stays reusable. */
+/** Cancel all CURRENT open/frozen item revisions in the container.
+ * Every seller request in the current revision is annulled, including a row that
+ * warehouse already marked packed. Packed fields remain as audit facts on the
+ * cancelled historical revision, but cancelled rows are no longer fulfillment.
+ * Container stays reusable for a clean revision/restart. */
 async function cancelWave(waveId, actor = {}, reason = 'cancelled_by_admin', now = new Date()) {
   const id = str(waveId);
   if (!mongoose.Types.ObjectId.isValid(id)) throw Object.assign(new Error('wave not found'), { code: 'supplement_wave_not_found' });
@@ -395,7 +399,7 @@ async function cancelWave(waveId, actor = {}, reason = 'cancelled_by_admin', now
         for (const offer of offers) {
           const revision = revisionOf(offer);
           await SupplementRequest.updateMany(
-            { offerId: offer._id, revision, status: REQUEST_STATUS.ACTIVE, packed: false },
+            { offerId: offer._id, revision, status: REQUEST_STATUS.ACTIVE },
             {
               $set: { status: REQUEST_STATUS.CANCELLED, cancelledAt: now, cancelledBy: by, cancelledByName: byName, cancelReason: str(reason), cancelSource: REQUEST_CANCEL_SOURCE.STAFF },
               $push: { history: { at: now, by, byName, action: 'cancelled', meta: { reason: str(reason), waveCancelled: true, revision } } },
@@ -432,8 +436,10 @@ async function cancelWave(waveId, actor = {}, reason = 'cancelled_by_admin', now
 }
 
 /**
- * Route correction: cancel only current non-terminal item revisions derived from
- * this ReceiptItem. Packed facts remain. Wave summary is recomputed INSIDE the
+ * Route correction after seller input is closed: annul every request in the
+ * current non-terminal revision derived from this ReceiptItem, then withdraw that
+ * publication relation. Packed fields remain only as audit facts on CANCELLED rows.
+ * Wave summary is recomputed INSIDE the
  * same transaction, eliminating the old post-commit crash window.
  */
 async function withdrawReceiptItemFromActiveWaves({ receiptItemId, actor = {}, reason = 'routing_corrected', session = null, now = new Date() }) {
@@ -443,7 +449,6 @@ async function withdrawReceiptItemFromActiveWaves({ receiptItemId, actor = {}, r
   if (!offers.length) return { waveIds: [], alreadyFulfilledShopIds: [], cancelledRequestIds: [] };
 
   const { by, byName } = actorFields(actor);
-  const packedShopIds = new Set();
   const cancelledRequestIds = [];
   const waveIds = new Set();
 
@@ -452,16 +457,13 @@ async function withdrawReceiptItemFromActiveWaves({ receiptItemId, actor = {}, r
     let rq = SupplementRequest.find({ offerId: offer._id, revision, status: REQUEST_STATUS.ACTIVE });
     if (session) rq = rq.session(session);
     const requests = await rq;
-    const packed = requests.filter((r) => r.packed);
-    const unpacked = requests.filter((r) => !r.packed);
-    packed.forEach((r) => packedShopIds.add(str(r.shopId)));
-    cancelledRequestIds.push(...unpacked.map((r) => str(r._id)));
-    if (unpacked.length) {
+    cancelledRequestIds.push(...requests.map((r) => str(r._id)));
+    if (requests.length) {
       await SupplementRequest.updateMany(
-        { _id: { $in: unpacked.map((r) => r._id) }, revision, packed: false },
+        { _id: { $in: requests.map((r) => r._id) }, revision, status: REQUEST_STATUS.ACTIVE },
         {
-          $set: { status: REQUEST_STATUS.CANCELLED, cancelledAt: now, cancelledBy: by, cancelledByName: byName, cancelReason: reason, cancelSource: REQUEST_CANCEL_SOURCE.SYSTEM },
-          $push: { history: { at: now, by, byName, action: 'cancelled', meta: { reason, correction: true, revision } } },
+          $set: { status: REQUEST_STATUS.CANCELLED, cancelledAt: now, cancelledBy: by, cancelledByName: byName, cancelReason: reason, cancelSource: REQUEST_CANCEL_SOURCE.STAFF },
+          $push: { history: { at: now, by, byName, action: 'cancelled', meta: { reason, correction: true, revision, annulledByStaff: true } } },
         },
         session ? { session } : undefined,
       );
@@ -483,7 +485,11 @@ async function withdrawReceiptItemFromActiveWaves({ receiptItemId, actor = {}, r
   }
 
   for (const waveId of waveIds) await recomputeWaveSummaryInSession(waveId, { session, actor, now });
-  return { waveIds: [...waveIds], alreadyFulfilledShopIds: [...packedShopIds], cancelledRequestIds };
+  // Every request of the cancelled revision is annulled, including rows that had
+  // already been marked packed. There are therefore no shops that remain
+  // fulfilled by this cancelled revision. The legacy field stays empty only for
+  // schema/API compatibility.
+  return { waveIds: [...waveIds], alreadyFulfilledShopIds: [], cancelledRequestIds };
 }
 
 async function recomputeWaveCompletion(waveId, actor = {}, now = new Date()) {

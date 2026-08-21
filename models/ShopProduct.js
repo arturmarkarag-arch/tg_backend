@@ -42,8 +42,8 @@ const ShopProductSchema = new mongoose.Schema(
       ref: 'Product',
       default: null,
     },
-    // Set ONLY for a shop-OWNED product created from a current mandatory-only
-    // receipt item (or a legacy destination='shops' row). This is the idempotency
+    // Set ONLY for a shop-OWNED product created from a current mandatory-only or
+    // supplement-only receipt item (or a legacy destination='shops' row). This is the idempotency
     // anchor: re-confirming the same
     // receipt item refreshes THIS doc instead of creating a duplicate (which a
     // barcodeless item would otherwise do on every confirm). `default: undefined`
