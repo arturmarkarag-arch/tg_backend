@@ -106,6 +106,7 @@ describe('per-group ordering schedule contracts', () => {
     expect(route).toContain('sessionOrder || sessionTask || sessionSupplement || livePickingSession');
     expect(route).not.toContain("currentSession.pickingStatus !== 'pending'");
     expect(route).toContain('targetUsed');
+    expect(route).toContain('targetHasLiveWork');
     expect(route).toContain('openNotifiedAt');
     expect(route).toContain('getOrderingWindowBoundsForOpenDate');
     expect(route).toContain('scheduleSnapshot: requestedSchedule');

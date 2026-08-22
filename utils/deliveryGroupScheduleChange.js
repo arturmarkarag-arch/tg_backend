@@ -9,6 +9,7 @@
 function shouldBlockUsedTargetSession({
   currentSessionId,
   requestedSessionId,
+  targetHasLiveWork,
   targetUsed,
   requestedWindowIsOpen,
 }) {
@@ -16,8 +17,7 @@ function shouldBlockUsedTargetSession({
     requestedSessionId
     && currentSessionId
     && String(requestedSessionId) !== String(currentSessionId)
-    && targetUsed
-    && requestedWindowIsOpen
+    && (targetHasLiveWork || (targetUsed && requestedWindowIsOpen))
   );
 }
 

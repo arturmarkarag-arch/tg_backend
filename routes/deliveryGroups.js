@@ -353,25 +353,55 @@ router.patch('/:id', telegramAuth, requireTelegramRole('admin'), asyncHandler(as
     ).lean();
     if (requestedSession) {
       const requestedId = String(requestedSession._id);
-      const [targetOrderCount, targetTaskCount, targetSupplementCount] = await Promise.all([
+      const [
+        targetOrderCount,
+        targetActiveOrder,
+        targetTaskCount,
+        targetOpenTask,
+        targetSupplementCount,
+        targetActiveSupplement,
+      ] = await Promise.all([
         Order.countDocuments({ orderingSessionId: requestedId }),
+        Order.exists({
+          orderingSessionId: requestedId,
+          status: { $in: ACTIVE_ORDER_STATUSES },
+        }),
         PickingTask.countDocuments({ orderingSessionId: requestedId }),
+        PickingTask.exists({
+          orderingSessionId: requestedId,
+          status: { $in: ['pending', 'locked'] },
+        }),
         SupplementOffer.countDocuments({ orderingSessionId: requestedId, waveId: { $ne: null } }),
+        SupplementOffer.exists({
+          orderingSessionId: requestedId,
+          waveId: { $ne: null },
+          itemStatus: ITEM_RELATION_STATUS.ACTIVE,
+          status: { $in: ACTIVE_ITEM_STATUSES },
+        }),
       ]);
       const targetHasWork = targetOrderCount > 0
         || targetTaskCount > 0
         || targetSupplementCount > 0
         || requestedSession.pickingStatus !== 'pending';
+      const targetHasLiveWork = Boolean(
+        targetActiveOrder
+        || targetOpenTask
+        || targetActiveSupplement
+        || ['confirmed', 'in_progress'].includes(requestedSession.pickingStatus)
+      );
       const targetUsed = targetHasWork || Boolean(requestedSession.openNotifiedAt);
 
       if (shouldBlockUsedTargetSession({
         currentSessionId,
         requestedSessionId: requestedId,
+        targetHasLiveWork,
         targetUsed,
         requestedWindowIsOpen,
       })) {
         throw appError('group_day_change_session_active', {
-          reason: `новий розклад повторно відкрив би вже використану сесію ${requestedOpenDate}`,
+          reason: targetHasLiveWork
+            ? `новий розклад потрапляє в сесію ${requestedOpenDate} з активною роботою`
+            : `новий розклад повторно відкрив би вже використану сесію ${requestedOpenDate}`,
         });
       }
 

@@ -6,6 +6,7 @@ describe('delivery-group schedule target-session safety', () => {
   const base = {
     currentSessionId: 'current-session',
     requestedSessionId: 'historical-target',
+    targetHasLiveWork: false,
     targetUsed: true,
   };
 
@@ -20,6 +21,14 @@ describe('delivery-group schedule target-session safety', () => {
     expect(shouldBlockUsedTargetSession({
       ...base,
       requestedWindowIsOpen: true,
+    })).toBe(true);
+  });
+
+  it('blocks live work in a different target even while its window is closed', () => {
+    expect(shouldBlockUsedTargetSession({
+      ...base,
+      targetHasLiveWork: true,
+      requestedWindowIsOpen: false,
     })).toBe(true);
   });
 
