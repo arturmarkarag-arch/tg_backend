@@ -5,7 +5,7 @@
  *
  * The V35 unit tests only grep `routes/deliveryGroups.js` for strings. This script
  * proves the real behaviour: it drives PATCH /api/delivery-groups/:id through the
- * real Express app against the TEST cluster and checks the 6 acceptance cases from
+ * real Express app against the TEST cluster and checks the acceptance cases from
  * V35-SESSION-STATUS-TEST-INSTRUCTIONS.md §5.
  *
  * Safety:
@@ -258,8 +258,8 @@ async function scenarioLivePickingBlocks(S) {
     reasonOf(res).slice(0, 120));
 }
 
-async function scenarioUsedTargetBlocks(S) {
-  console.log('\n5) safety: новий розклад потрапляє в уже використану сесію');
+async function scenarioClosedUsedTargetAllows(S) {
+  console.log('\n5) закритий новий розклад може посилатися на стару used-сесію до наступного старту');
   const group = await makeGroup('used-target', S.closedA, S.deliveryDay);
   await makeSession(group, S.closedA, 'pending'); // current: порожня, нічого живого
 
@@ -277,9 +277,12 @@ async function scenarioUsedTargetBlocks(S) {
   await makeOrder(group, target, 'fulfilled'); // терміналка, але сесія вже ВИКОРИСТАНА
 
   const res = await patch(group, shifted, shiftedDeliveryDay);
-  check(res.status === 409, 'PATCH → 409', `status=${res.status}`);
-  check(reasonOf(res).includes('використану сесію'), 'причина — used target session',
-    reasonOf(res).slice(0, 140));
+  check(res.status === 200, 'PATCH → 200: закрита used-сесія не блокує майбутній цикл',
+    `status=${res.status} error=${res.data?.error || ''}`);
+
+  const after = await OrderingSession.findById(target._id).lean();
+  check(String(after.pickingStatus) === 'pending' && !after.scheduleSnapshot,
+    'історична used-сесія лишилася недоторканою');
 }
 
 async function scenarioReopenCompletedBlocks(S) {
@@ -425,7 +428,7 @@ async function main() {
     await scenarioActiveOrderBlocks(schedules);
     await scenarioPendingTaskBlocks(schedules);
     await scenarioLivePickingBlocks(schedules);
-    await scenarioUsedTargetBlocks(schedules);
+    await scenarioClosedUsedTargetAllows(schedules);
     await scenarioReopenCompletedBlocks(schedules);
   } finally {
     let clean = false;

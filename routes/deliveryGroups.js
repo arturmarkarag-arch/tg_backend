@@ -21,6 +21,7 @@ const { getOrCreateSessionId } = require('../utils/getOrCreateSession');
 const { pushSessionEvent } = require('../utils/sessionStatus');
 const { openItemArrayFilter } = require('../utils/orderItemState');
 const { normalizeDeliveryGroup } = require('../utils/deliveryGroupHelpers');
+const { shouldBlockUsedTargetSession } = require('../utils/deliveryGroupScheduleChange');
 const { ACTIVE_ORDER_STATUSES } = require('../services/sessionPresentation');
 const { getIO } = require('../socket');
 
@@ -345,6 +346,7 @@ router.patch('/:id', telegramAuth, requireTelegramRole('admin'), asyncHandler(as
     // OrderingSession as the new current session. Empty pending read-created
     // sessions are safe to discard and will be recreated with a fresh snapshot.
     const requestedOpenDate = getOpenDateWarsaw(requestedSchedule);
+    const requestedWindowIsOpen = isOrderingOpen(requestedSchedule).isOpen;
     const requestedSession = await OrderingSession.findOne(
       { groupId: groupIdStr, openDate: requestedOpenDate },
       '_id pickingStatus openNotifiedAt',
@@ -362,18 +364,21 @@ router.patch('/:id', telegramAuth, requireTelegramRole('admin'), asyncHandler(as
         || requestedSession.pickingStatus !== 'pending';
       const targetUsed = targetHasWork || Boolean(requestedSession.openNotifiedAt);
 
-      if (requestedId !== String(currentSessionId) && targetUsed) {
+      if (shouldBlockUsedTargetSession({
+        currentSessionId,
+        requestedSessionId: requestedId,
+        targetUsed,
+        requestedWindowIsOpen,
+      })) {
         throw appError('group_day_change_session_active', {
-          reason: `новий розклад потрапляє в уже використану сесію ${requestedOpenDate}`,
+          reason: `новий розклад повторно відкрив би вже використану сесію ${requestedOpenDate}`,
         });
       }
 
-      // Read-only screens and the open-notification scheduler can materialise an
-      // otherwise empty pending session. If there are still no orders/tasks and
-      // picking never started, it is safe to refresh its bounds/snapshot. Keep
-      // openNotifiedAt intact: a reschedule must never duplicate an already-sent
-      // Telegram opening broadcast.
-      if (!targetHasWork) {
+      // Never rewrite a used historical session, even while allowing a CLOSED
+      // future configuration to reference its old openDate until the next
+      // weekly start. Only a genuinely unused materialised shell is refreshable.
+      if (!targetUsed) {
         emptyTargetSession = { id: requestedId, openDate: requestedOpenDate };
       }
     }
@@ -381,7 +386,7 @@ router.patch('/:id', telegramAuth, requireTelegramRole('admin'), asyncHandler(as
     // Do not reopen an already processed current cycle merely by moving the
     // close boundary forward. New settings then wait naturally for the next
     // weekly start instead of mixing new orders into completed picking.
-    if (isOrderingOpen(requestedSchedule).isOpen && currentSession?.pickingStatus === 'completed') {
+    if (requestedWindowIsOpen && currentSession?.pickingStatus === 'completed') {
       throw appError('group_day_change_session_active', {
         reason: 'новий розклад повторно відкрив би вже завершену поточну сесію',
       });

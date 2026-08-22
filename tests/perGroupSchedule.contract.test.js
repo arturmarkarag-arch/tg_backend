@@ -103,16 +103,19 @@ describe('per-group ordering schedule contracts', () => {
     expect(route).toContain("status: { $in: ACTIVE_ORDER_STATUSES }");
     expect(route).toContain("status: { $in: ['pending', 'locked'] }");
     expect(route).toContain("pickingStatus: { $in: ['confirmed', 'in_progress'] }");
-    expect(route).toContain('sessionOrder || sessionTask || livePickingSession');
+    expect(route).toContain('sessionOrder || sessionTask || sessionSupplement || livePickingSession');
     expect(route).not.toContain("currentSession.pickingStatus !== 'pending'");
     expect(route).toContain('targetUsed');
     expect(route).toContain('openNotifiedAt');
     expect(route).toContain('getOrderingWindowBoundsForOpenDate');
     expect(route).toContain('scheduleSnapshot: requestedSchedule');
-    // A completed session may be followed by a schedule edit, but the edit may
-    // never reopen that already processed cycle or land on another used session.
+    // A completed session may be followed by a schedule edit. Closed future
+    // configuration may temporarily resolve to old history, but must never
+    // reopen that already processed cycle or another used session.
+    expect(route).toContain('shouldBlockUsedTargetSession');
+    expect(route).toContain('requestedWindowIsOpen');
     expect(route).toContain('повторно відкрив би вже завершену поточну сесію');
-    expect(route).toContain('новий розклад потрапляє в уже використану сесію');
+    expect(route).toContain('новий розклад повторно відкрив би вже використану сесію');
     expect(route).toContain("recordRescheduleOnSession = currentSession?.pickingStatus === 'pending'");
     expect(route).toContain('timingIsChanging && oldSessionId && recordRescheduleOnSession');
   });
