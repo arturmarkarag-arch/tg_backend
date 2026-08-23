@@ -190,14 +190,16 @@ describe('V48.20 Mutation Authority contract', () => {
     expect(offenders).toEqual([]);
   });
 
-  it('supplement topology guard belongs to Wave/session ownership, never child request rows', () => {
+  it('supplement topology guard uses exact-session current item/revision authority', () => {
     const command = read('services/shopTopologyCommand.js');
-    // V48.S2 resolved the former F-09 policy. CURRENT Shop topology is blocked by
-    // non-terminal work owned by the exact OrderingSession aggregate. Child item
-    // / request rows are not allowed to become topology authority.
-    expect(command).toContain('SupplementWave');
-    expect(command).toContain('orderingSessionId');
-    expect(command).not.toContain('SupplementOffer');
-    expect(command).not.toContain('SupplementRequest');
+    // V48.S3 keeps SupplementWave as a stable container. The current Offer
+    // revision owns item lifecycle, while an exact revision-scoped Request is
+    // needed only for the narrower "can this Shop be deactivated?" guard.
+    expect(command).toContain('SupplementOffer.find');
+    expect(command).toContain('orderingSessionId: String(currentSession._id)');
+    expect(command).toContain('itemStatus: ITEM_RELATION_STATUS.ACTIVE');
+    expect(command).toContain('status: { $in: ACTIVE_ITEM_STATUSES }');
+    expect(command).toContain('SupplementRequest.exists');
+    expect(command).toContain('revision: revisionOf(offer)');
   });
 });
