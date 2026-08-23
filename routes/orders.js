@@ -48,7 +48,6 @@ function pushOrderAddedEventIfStarted(orderingSessionId, order, actor) {
 }
 const { appError, asyncHandler } = require('../utils/errors');
 const { normalizeDeliveryGroup } = require('../utils/deliveryGroupHelpers');
-const cache = require('../utils/cache');
 const { getShop, getDeliveryGroup } = require('../utils/modelCache');
 const { withLock } = require('../utils/lock');
 const { assignUserToShopCommand, unassignUserFromShopCommand } = require('../services/shopAssignmentCommand');
@@ -57,15 +56,6 @@ const { reconcileLateOrderStrict } = require('../services/lateOrderReconcile');
 const { isRemovedUser } = require('../utils/userAccountState');
 const { getTelegramUsernameMap } = require('../utils/telegramUsername');
 const { getSupplementExcludedProductIds, assertProductOrdinaryOrderable } = require('../services/supplementSessionExclusion');
-
-async function getAllDeliveryGroups() {
-  let groups = await cache.get(cache.KEYS.DELIVERY_GROUPS);
-  if (!groups) {
-    groups = await DeliveryGroup.find().lean();
-    await cache.set(cache.KEYS.DELIVERY_GROUPS, groups);
-  }
-  return groups;
-}
 
 const router = express.Router();
 const staffOnly = requireTelegramRoles(['admin', 'warehouse']);
@@ -279,29 +269,42 @@ async function orderNeverLived(order, session) {
   return !task;
 }
 
+async function requireExactConflictSession(deliveryGroupId, orderingSessionId) {
+  const groupId = String(deliveryGroupId || '').trim();
+  const sessionId = String(orderingSessionId || '').trim();
+  if (!mongoose.isValidObjectId(groupId)) {
+    throw appError('validation_failed', { field: 'deliveryGroupId' });
+  }
+  if (!mongoose.isValidObjectId(sessionId)) {
+    throw appError('validation_failed', { field: 'orderingSessionId' });
+  }
+
+  const group = normalizeDeliveryGroup(await DeliveryGroup.findById(groupId).lean());
+  if (!group) throw appError('group_not_found');
+  const session = await OrderingSession.findOne({ _id: sessionId, groupId }, '_id').lean();
+  if (!session) throw appError('ordering_session_not_found');
+
+  // A conflict action opened on an old tab must never repair another cycle.
+  const currentSessionId = await findCurrentSessionId(groupId, group.orderingSchedule);
+  if (String(currentSessionId || '') !== sessionId) throw appError('ordering_session_changed');
+  return { groupId, sessionId };
+}
+
 /**
- * GET /conflicts — returns shops with 2+ orders from different sellers in active sessions.
+ * GET /conflicts — exact selected-group/session conflicts only.
  * Admin and warehouse only.
  */
 router.get('/conflicts', staffOnly, async (req, res) => {
-  // Collect all active delivery groups with their current sessionId so we can filter
-  // only orders that belong to the CURRENT ordering session — stale unresolved orders
-  // from previous sessions should not pollute today's picking dashboard.
-  const allGroups = (await getAllDeliveryGroups()).map(normalizeDeliveryGroup);
-
-  const sessionIdResults = await Promise.all(
-    allGroups.map((group) => findCurrentSessionId(String(group._id), group.orderingSchedule)),
+  const { groupId, sessionId } = await requireExactConflictSession(
+    req.query.deliveryGroupId,
+    req.query.orderingSessionId,
   );
-  const currentSessionIds = new Set(sessionIdResults.filter(Boolean));
-
-  const sessionFilter = currentSessionIds.size > 0
-    ? { orderingSessionId: { $in: [...currentSessionIds] } }
-    : {};
 
   const activeOrders = await Order.find({
+    orderingSessionId: sessionId,
+    'buyerSnapshot.deliveryGroupId': groupId,
     status: { $in: ['new', 'in_progress'] },
-    ...sessionFilter,
-  }).select('shopId buyerSnapshot buyerTelegramId orderNumber _id createdAt items').lean();
+  }).select('shopId buyerSnapshot buyerTelegramId orderNumber orderingSessionId _id createdAt items').lean();
 
   // Group by shopId
   const byShop = new Map();
@@ -352,6 +355,8 @@ router.get('/conflicts', staffOnly, async (req, res) => {
     }));
     return {
       shopId,
+      deliveryGroupId: groupId,
+      orderingSessionId: sessionId,
       ...shopInfoById[shopId],
       orders,
     };
@@ -372,12 +377,26 @@ router.get('/conflicts', staffOnly, async (req, res) => {
  */
 router.post('/conflicts/resolve', staffOnly, asyncHandler(async (req, res) => {
   const actor = req.telegramUser;
-  const { shopId, buyerTelegramId, action, toShopId } = req.body || {};
+  const {
+    shopId,
+    buyerTelegramId,
+    action,
+    toShopId,
+    deliveryGroupId,
+    orderingSessionId,
+  } = req.body || {};
 
   if (!shopId || !buyerTelegramId || !['move', 'unassign'].includes(action)) {
     throw appError('conflict_resolve_invalid');
   }
   if (action === 'move' && !toShopId) throw appError('conflict_target_required');
+  const { sessionId } = await requireExactConflictSession(deliveryGroupId, orderingSessionId);
+
+  const targetOrder = await Order.findOne(activeOrderShopFilter(shopId, {
+    buyerTelegramId: String(buyerTelegramId),
+    orderingSessionId: sessionId,
+  }), '_id').lean();
+  if (!targetOrder) throw appError('ordering_session_changed');
 
   const seller = await User.findOne({ telegramId: String(buyerTelegramId) }).lean();
   if (!seller) throw appError('conflict_seller_not_found');
@@ -391,6 +410,7 @@ router.post('/conflicts/resolve', staffOnly, asyncHandler(async (req, res) => {
       // Explicit pre-picking ownership repair. Ordinary assignment changes never
       // park a frozen Order; conflict repair deliberately may do so before picking.
       allowFrozenOrderPark: true,
+      orderingSessionId: sessionId,
       updateLastSeller: true,
     });
   } else {
@@ -411,6 +431,7 @@ router.post('/conflicts/resolve', staffOnly, asyncHandler(async (req, res) => {
       // Same explicit ownership-repair exception as before; the command owns the
       // transaction/publication, the HTTP route only chooses intent.
       allowFrozenOrderTransfer: true,
+      expectedOrderingSessionId: sessionId,
     });
   }
 

@@ -88,25 +88,22 @@ function closePhrase(window) {
 function buildGroupText({ groupName, deliveryLabel, closeLabel, appUrl }) {
   const name = groupName || 'Група доставки';
   return [
-    '🟢',
+    '‼️‼️‼️',
     `Замовлення відкрито — ${name}`,
-    '',
-    `Доставка — ${deliveryLabel}.`,
-    `Замовлення закриються ${closeLabel}.`,
-    '',
-    'Відкрийте додаток → «Товари» і зробіть замовлення.',
+    '👇👇👇',
+    'Перейдить за посиланням 👉 Настиність «Відкрити» 👉 «Товари» і зробіть замовлення.',
+    '👇👇👇',
     appUrl,
   ].filter((line) => line !== '').join('\n');
 }
 
 function buildPrivateText({ closeLabel, appUrl }) {
   return [
-    '🟢',
+    '‼️‼️‼️',
     'Замовлення відкрито',
     '',
-    `Закриються ${closeLabel}.`,
-    '',
-    'Відкрийте додаток → «Товари» і зробіть замовлення.',
+    'Перейдить за посиланням 👉 Настиність «Відкрити» 👉 «Товари» і зробіть замовлення.',
+    '👇👇👇',
     appUrl,
   ].filter((line) => line !== '').join('\n');
 }

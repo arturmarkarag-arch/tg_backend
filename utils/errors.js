@@ -76,6 +76,9 @@ const ERRORS = {
   group_has_history:        { status: 409, message: ({ sessions = 0 } = {}) =>
                                 `Не можна видалити групу: ${sessions} сесія(й) уже містять історію замовлень/збирання. Історичні дані не видаляються каскадно.` },
 
+  ordering_session_not_found:{ status: 404, message: 'Сесію замовлень не знайдено' },
+  ordering_session_changed:  { status: 409, message: 'Сесія замовлень змінилася. Оновіть екран і повторіть дію.' },
+
   // ── Cities ─────────────────────────────────────────────────────────────────
   city_not_found:           { status: 404, message: 'Місто не знайдено' },
   city_has_shops:           { status: 400, message: ({ shopCount } = {}) =>

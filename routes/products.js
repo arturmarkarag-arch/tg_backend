@@ -13,6 +13,7 @@ const ShopProduct = require('../models/ShopProduct');
 const { pushSharedFieldsToMirror, syncMirror } = require('../utils/upsertShopProduct');
 const { repriceActiveOrders } = require('../utils/repriceActiveOrders');
 const Order = require('../models/Order');
+const OrderingSession = require('../models/OrderingSession');
 const ReceiptItem = require('../models/ReceiptItem');
 const SupplementOffer = require('../models/SupplementOffer');
 const { getSupplementExcludedProductIds } = require('../services/supplementSessionExclusion');
@@ -1054,22 +1055,14 @@ async function getActiveDeliveryGroups() {
   return groups.map(normalizeDeliveryGroup);
 }
 
-// GET /api/v1/products/:id/who-ordered — shops with active-session orders for this product
-router.get('/:id/who-ordered', staffOnly, asyncHandler(async (req, res) => {
-  const allGroups = await getActiveDeliveryGroups();
-  const sessionIdResults = await Promise.all(
-    allGroups.map((group) => findCurrentSessionId(String(group._id), group.orderingSchedule)),
-  );
-  const currentSessionIds = new Set(sessionIdResults.filter(Boolean));
-
-  if (currentSessionIds.size === 0) {
-    return res.json({ shops: [] });
-  }
-
+async function buildWhoOrderedSection({ productId, orderingSessionId, group }) {
+  // Session identity is the boundary. Even the global catalogue executes one
+  // exact query per section instead of flattening several sessions into one
+  // `$in` result that can no longer explain which cycle a shop belongs to.
   const orders = await Order.find({
-    'items.productId': req.params.id,
+    orderingSessionId: String(orderingSessionId),
+    'items.productId': productId,
     status: { $in: ['new', 'in_progress', 'confirmed'] },
-    orderingSessionId: { $in: [...currentSessionIds] },
   }).select('buyerSnapshot').lean();
 
   const byShop = new Map();
@@ -1077,61 +1070,64 @@ router.get('/:id/who-ordered', staffOnly, asyncHandler(async (req, res) => {
     const shopId = String(order.buyerSnapshot?.shopId || '');
     if (!shopId || byShop.has(shopId)) continue;
     byShop.set(shopId, {
+      shopId,
       shopName: order.buyerSnapshot?.shopName || '?',
       shopCity: order.buyerSnapshot?.shopCity || '',
     });
   }
 
-  const activeGroupIds = new Set(allGroups.map((group) => String(group._id)));
-  const activeShopIds = await Shop.find(
-    { deliveryGroupId: { $in: [...activeGroupIds] } },
-    '_id'
-  ).lean().then((shops) => shops.map((shop) => String(shop._id)));
+  return {
+    orderingSessionId: String(orderingSessionId),
+    groupId: String(group?._id || group?.groupId || ''),
+    groupName: group?.name || '',
+    dayOfWeek: Number(group?.dayOfWeek),
+    shops: [...byShop.values()],
+  };
+}
 
-  const cartKey = `cartState.orderItems.${req.params.id}`;
-  const cartUsers = await User.find(
-    {
-      role: 'seller',
-      $and: [
-        {
-          $or: [
-            { deliveryGroupId: { $in: [...activeGroupIds] } },
-            { shopId: { $in: activeShopIds } },
-          ],
-        },
-        {
-          $or: [
-            { [cartKey]: { $gt: 0 } },
-            { 'cartState.orderItemIds': req.params.id },
-          ],
-        },
-      ],
-    },
-    'shopId'
-  ).lean();
+// GET /api/v1/products/:id/who-ordered
+// Exact mode: ?orderingSessionId=<id> returns only that session.
+// Global staff catalogue: returns separate exact-session sections per group.
+router.get('/:id/who-ordered', staffOnly, asyncHandler(async (req, res) => {
+  const requestedSessionId = String(req.query.orderingSessionId || '').trim();
+  const allGroups = await getActiveDeliveryGroups();
 
-  const missingShopIds = new Set();
-  for (const user of cartUsers) {
-    const shopId = String(user.shopId || '');
-    if (shopId && !byShop.has(shopId)) missingShopIds.add(shopId);
-  }
-
-  if (missingShopIds.size > 0) {
-    const shops = await Shop.find({ _id: { $in: [...missingShopIds] } }).populate('cityId', 'name').lean();
-    const shopById = new Map(shops.map((shop) => [String(shop._id), shop]));
-
-    for (const user of cartUsers) {
-      const shopId = String(user.shopId || '');
-      if (!shopId || byShop.has(shopId)) continue;
-      const shop = shopById.get(shopId);
-      byShop.set(shopId, {
-        shopName: shop?.name || '?',
-        shopCity: shop?.cityId?.name || '',
-      });
+  if (requestedSessionId) {
+    if (!mongoose.isValidObjectId(requestedSessionId)) {
+      throw appError('validation_failed', { field: 'orderingSessionId' });
     }
+    const session = await OrderingSession.findById(requestedSessionId, 'groupId openDate').lean();
+    if (!session) throw appError('ordering_session_not_found');
+    const group = allGroups.find((entry) => String(entry._id) === String(session.groupId)) || {
+      _id: session.groupId,
+      name: '',
+      dayOfWeek: null,
+    };
+    const section = await buildWhoOrderedSection({
+      productId: req.params.id,
+      orderingSessionId: requestedSessionId,
+      group,
+    });
+    return res.json({ orderingSessionId: requestedSessionId, shops: section.shops });
   }
 
-  res.json({ shops: [...byShop.values()] });
+  const sections = (await Promise.all(allGroups.map(async (group) => {
+    const orderingSessionId = await findCurrentSessionId(String(group._id), group.orderingSchedule);
+    if (!orderingSessionId) return null;
+    return buildWhoOrderedSection({
+      productId: req.params.id,
+      orderingSessionId,
+      group,
+    });
+  })))
+    .filter((section) => section?.shops?.length)
+    .sort((a, b) => {
+      const aDay = a.dayOfWeek === 0 ? 7 : a.dayOfWeek;
+      const bDay = b.dayOfWeek === 0 ? 7 : b.dayOfWeek;
+      return aDay - bDay || a.groupName.localeCompare(b.groupName, 'uk');
+    });
+
+  return res.json({ sections });
 }));
 
 // Proxy an image through the server so the browser canvas can draw it without
