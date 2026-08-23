@@ -137,12 +137,18 @@ router.get('/', asyncHandler(async (req, res) => {
     // for just the shops in this response so we never ship full history arrays.
     const lastExByShopName = await computeLastExSellersByShopName(shops);
 
-    // Active order flags — only when filtered by deliveryGroupId (for reassign modal)
+    // Active-order flags are meaningful only inside an exact session. A group
+    // alone is not enough: unresolved rows from an earlier cycle must not mark a
+    // conflict target as occupied.
     const activeOrderShopIds = new Set();
-    if (req.query.deliveryGroupId) {
+    const orderingSessionId = String(req.query.orderingSessionId || '').trim();
+    if (orderingSessionId) {
+      if (!mongoose.isValidObjectId(orderingSessionId)) {
+        throw appError('validation_failed', { field: 'orderingSessionId' });
+      }
       const activeOrders = await Order.find({
         status: { $in: ['new', 'in_progress'] },
-        'buyerSnapshot.deliveryGroupId': req.query.deliveryGroupId,
+        orderingSessionId,
       }).select('shopId').lean();
       for (const o of activeOrders) {
         if (o.shopId) activeOrderShopIds.add(String(o.shopId));

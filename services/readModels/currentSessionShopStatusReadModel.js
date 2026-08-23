@@ -26,8 +26,6 @@ function resolveOrderShopId(order) {
 }
 
 function mapSeller(user, usernameMap, membershipByTelegramId = new Map()) {
-  const items = user.cartState?.orderItems;
-  const itemObj = items instanceof Map ? Object.fromEntries(items) : (items || {});
   return {
     name: [user.firstName, user.lastName].filter(Boolean).join(' ') || String(user.telegramId),
     telegramId: String(user.telegramId),
@@ -36,21 +34,14 @@ function mapSeller(user, usernameMap, membershipByTelegramId = new Map()) {
     accountState: user.accountState || 'active',
     botBlocked: user.botBlocked === true,
     announcementGroupMember: membershipByTelegramId.get(String(user.telegramId)) ?? null,
-    hasCart: Object.keys(itemObj).length > 0,
+    // Legacy User.cartState has no orderingSessionId and is never evidence of
+    // work in this exact session. Orders below are the sole authority.
+    hasCart: false,
   };
 }
 
-function buildCartItemsByShop(users) {
-  const result = {};
-  for (const user of users) {
-    const shopId = String(user.shopId || '');
-    if (!shopId) continue;
-    const items = user.cartState?.orderItems;
-    if (!items) continue;
-    const itemObj = items instanceof Map ? Object.fromEntries(items) : items;
-    result[shopId] = (result[shopId] || 0) + Object.keys(itemObj).length;
-  }
-  return result;
+function buildCartItemsByShop() {
+  return {};
 }
 
 function buildOrderedBuyerIdsByShop(orders) {
@@ -102,7 +93,7 @@ async function buildCurrentSessionShopStatusReadModel(group, { windowOpen }) {
   const sellers = shopIds.length ? await User.find({
     role: { $in: ASSIGNED_SHOP_ROLES },
     shopId: { $in: shopIds },
-  }).select('shopId firstName lastName telegramId cartState role accountState botBlocked').lean() : [];
+  }).select('shopId firstName lastName telegramId role accountState botBlocked').lean() : [];
 
   const usernameMap = await getTelegramUsernameMap([
     ...sellers.map((seller) => seller.telegramId),
@@ -218,8 +209,6 @@ async function buildCurrentSessionShopStatusReadModel(group, { windowOpen }) {
     const telegramId = String(mark.telegramId);
     const liveSeller = sellerByTelegramId.get(telegramId);
     if (liveSeller && String(liveSeller.shopId) === snapshotShopId) continue;
-    const items = liveSeller?.cartState?.orderItems;
-    const itemObj = items instanceof Map ? Object.fromEntries(items) : (items || {});
     if (!markedSellersBySnapshotShop[snapshotShopId]) markedSellersBySnapshotShop[snapshotShopId] = [];
     markedSellersBySnapshotShop[snapshotShopId].push({
       name: liveSeller
@@ -227,7 +216,7 @@ async function buildCurrentSessionShopStatusReadModel(group, { windowOpen }) {
         : (mark.userName || telegramId),
       telegramId,
       role: liveSeller?.role || 'seller',
-      hasCart: Object.keys(itemObj).length > 0,
+      hasCart: false,
       movedAway: true,
     });
   }

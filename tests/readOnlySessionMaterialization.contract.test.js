@@ -16,15 +16,17 @@ describe('read-only session materialization contract', () => {
     );
   });
 
-  it('read-only conflict/product/shop-status views use findCurrentSessionId', () => {
+  it('read-only conflict/product/shop-status views resolve existing exact session identity', () => {
     const orders = read('routes/orders.js');
     const products = read('routes/products.js');
     const currentShopStatus = read('services/readModels/currentSessionShopStatusReadModel.js');
     const shopProducts = read('services/readModels/currentSessionShopProductsReadModel.js');
     const groupSessions = read('services/readModels/deliveryGroupSessionSummaryReadModel.js');
 
-    expect(orders).toContain('allGroups.map((group) => findCurrentSessionId');
-    expect(products).toContain('allGroups.map((group) => findCurrentSessionId');
+    expect(orders).toContain('const currentSessionId = await findCurrentSessionId(groupId, group.orderingSchedule)');
+    expect(orders).toContain('orderingSessionId: sessionId');
+    expect(products).toContain('const orderingSessionId = await findCurrentSessionId(String(group._id), group.orderingSchedule)');
+    expect(products).toContain('orderingSessionId: String(orderingSessionId)');
     expect(currentShopStatus).toContain('findCurrentSessionId(String(group._id), group.orderingSchedule)');
     expect(shopProducts).toContain('findCurrentSessionId(String(group._id), group.orderingSchedule)');
     expect(groupSessions).toContain('findCurrentSessionId(');

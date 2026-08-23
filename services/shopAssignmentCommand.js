@@ -131,6 +131,7 @@ async function assignUserToShopCommand({
   pushHistory = true,
   updateLastSeller = true,
   allowFrozenOrderTransfer = false,
+  expectedOrderingSessionId = null,
 }) {
   const tid = str(telegramId).trim();
   const targetId = str(shopId).trim();
@@ -165,6 +166,7 @@ async function assignUserToShopCommand({
           pushHistory,
           updateLastSeller,
           allowFrozenOrderTransfer,
+          expectedOrderingSessionId,
         });
       });
       return out;
@@ -188,6 +190,7 @@ async function unassignUserFromShopCommand({
   userPatch = null,
   updateLastSeller = true,
   allowFrozenOrderPark = false,
+  orderingSessionId = null,
 }) {
   const tid = str(telegramId).trim();
   if (!tid) throw appError('user_not_found');
@@ -217,6 +220,7 @@ async function unassignUserFromShopCommand({
           actor,
           reason,
           allowFrozenOrderPark,
+          orderingSessionId,
         });
 
         if (updateLastSeller && fromShopId) {

@@ -50,6 +50,7 @@ async function migrateSellerShop({
   pushHistory = true,
   updateLastSeller = true,
   allowFrozenOrderTransfer = false,
+  expectedOrderingSessionId = null,
 }) {
   // This is the canonical CURRENT assignment command. Enforce both ends here,
   // not merely in the HTTP caller: every transport (admin route, transfer flow,
@@ -156,10 +157,15 @@ async function migrateSellerShop({
       // dropped it into a picking run it never belonged to and re-sessioned it
       // behind the operator's back. Stale orders surface separately via picking
       // start-session's `staleWarnings` for explicit manual handling.
-      if (oldSessionId) {
+      if (expectedOrderingSessionId
+        && String(oldSessionId || '') !== String(expectedOrderingSessionId)) {
+        throw appError('ordering_session_changed');
+      }
+      const sourceSessionId = expectedOrderingSessionId || oldSessionId;
+      if (sourceSessionId) {
         activeOrder = await Order.findOne({
           ...legacyOrderQuery,
-          orderingSessionId: oldSessionId,
+          orderingSessionId: String(sourceSessionId),
         }).session(session);
       }
     } else {

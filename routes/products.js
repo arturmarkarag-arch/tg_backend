@@ -19,7 +19,6 @@ const SupplementOffer = require('../models/SupplementOffer');
 const { getSupplementExcludedProductIds } = require('../services/supplementSessionExclusion');
 const SupplementRequest = require('../models/SupplementRequest');
 const { REQUEST_STATUS } = require('../utils/supplementState');
-const User = require('../models/User');
 const Shop = require('../models/Shop');
 const DeliveryGroup = require('../models/DeliveryGroup');
 const SearchProduct = require('../models/SearchProduct');

@@ -18,7 +18,15 @@ const { ORDER_STATUS } = require('../utils/orderStatus');
 // conflict-repair code may explicitly opt into parking a frozen Order.
 //
 // All writes are scoped to the passed Mongo session.
-async function unassignSellerAndPark({ session, seller, fromShopId, actor, reason, allowFrozenOrderPark = false }) {
+async function unassignSellerAndPark({
+  session,
+  seller,
+  fromShopId,
+  actor,
+  reason,
+  allowFrozenOrderPark = false,
+  orderingSessionId = null,
+}) {
   const shopIdStr = fromShopId ? String(fromShopId) : (seller.shopId ? String(seller.shopId) : '');
   const fromShop = shopIdStr
     ? await Shop.findById(shopIdStr, 'deliveryGroupId').session(session).lean()
@@ -34,7 +42,10 @@ async function unassignSellerAndPark({ session, seller, fromShopId, actor, reaso
     // Legacy/direct-add orders may have a null top-level shopId while
     // buyerSnapshot.shopId holds the real shop — top-level only would skip them.
     const activeOrders = await Order.find(
-      activeOrderShopFilter(shopIdStr, { buyerTelegramId: String(seller.telegramId) }),
+      activeOrderShopFilter(shopIdStr, {
+        buyerTelegramId: String(seller.telegramId),
+        ...(orderingSessionId ? { orderingSessionId: String(orderingSessionId) } : {}),
+      }),
     ).session(session);
 
     for (const ord of activeOrders) {
