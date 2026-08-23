@@ -46,6 +46,10 @@ describe('exact ordering-session isolation', () => {
     expect(readRoute).not.toMatch(/orderingSessionId:\s*\{\s*\$in/);
     expect(writeRoute).toContain('orderingSessionId: sessionId');
     expect(writeRoute).toContain('expectedOrderingSessionId: sessionId');
+
+    const picking = read('routes/picking.js');
+    expect(picking).toContain('orderingSessionId: String(currentSessionId)');
+    expect(picking).toContain('orderingSessionId: currentSessionId ? String(currentSessionId) : null');
   });
 
   it('current-session shop status does not project session-less cartState as work', () => {

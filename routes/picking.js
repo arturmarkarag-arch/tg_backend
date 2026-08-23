@@ -154,6 +154,7 @@ async function buildReadOnlyPickingSessionSnapshot(deliveryGroupId, { now = new 
       windowOpen: true,
       message: windowState.message || '',
       windowCloseAt: getOrderingWindowCloseAt(group.orderingSchedule, now).toISOString(),
+      orderingSessionId: sessionId ? String(sessionId) : null,
       pickingStatus: null,
       phase: 'ordering_open',
       presentationMode: 'ordering_open',
@@ -190,6 +191,7 @@ async function buildReadOnlyPickingSessionSnapshot(deliveryGroupId, { now = new 
     session,
   });
   const baseEnvelope = {
+    orderingSessionId: sessionId ? String(sessionId) : null,
     pickingStatus,
     phase,
     presentationMode,
@@ -414,6 +416,7 @@ router.post('/start-session', requireTelegramRoles(['warehouse', 'admin']), asyn
       const supplementCount = await countActiveOffersForGroup(deliveryGroupId, { orderingSessionId: existingSessionId });
       return res.json({
         upcomingPreflight: true,
+        orderingSessionId: existingSessionId ? String(existingSessionId) : null,
         presentationMode,
         nextOrderingOpenAt: nextOrderingOpenAt.toISOString(),
         pickingStatus: existingSession?.pickingStatus || null,
@@ -487,6 +490,7 @@ router.post('/start-session', requireTelegramRoles(['warehouse', 'admin']), asyn
     const supplementCount = await countActiveOffersForGroup(deliveryGroupId, { orderingSessionId: currentSessionId });
 
     const baseEnvelope = {
+      orderingSessionId: String(currentSessionId),
       pickingStatus: session?.pickingStatus || 'pending',
       phase: basePhase,
       presentationMode: basePhase,
@@ -638,6 +642,7 @@ router.post('/start-session', requireTelegramRoles(['warehouse', 'admin']), asyn
         : confirmedDoc;
       return res.json({
         noOrders: true,
+        orderingSessionId: String(currentSessionId),
         staleWarnings,
         pickingStatus: finalDoc?.pickingStatus || 'completed',
         phase: await computeSessionPhase({
@@ -657,6 +662,7 @@ router.post('/start-session', requireTelegramRoles(['warehouse', 'admin']), asyn
 
     return res.json({
       started: true,
+      orderingSessionId: String(currentSessionId),
       taskCount: builtCount,
       staleWarnings,
       pickingStatus: confirmedDoc?.pickingStatus || 'confirmed',
@@ -1152,6 +1158,7 @@ router.get('/queue-stats', requireTelegramRoles(['warehouse', 'admin']), async (
 
     res.json({
       pendingCount, lockedByMeCount, lockedByOtherCount, activeCount,
+      orderingSessionId: currentSessionId ? String(currentSessionId) : null,
       orderedPositions, pickingStatus, events, phase, sessionSummary, groupDayOfWeek,
       presentationMode, nextOrderingOpenAt, windowOpen, windowCloseAt, windowMessage,
       serverNow, pickingReadyAt, pickingReady, pickingReadyInMs,
