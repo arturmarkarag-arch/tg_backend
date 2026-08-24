@@ -1084,9 +1084,33 @@ async function buildWhoOrderedSection({ productId, orderingSessionId, group }) {
   };
 }
 
+/**
+ * The single group whose ordering window opened most recently.
+ *
+ * Delivery groups do NOT run in parallel — they take turns across the week
+ * (group A opens 15:00, closes 07:00, dead air until 15:00 when group B opens).
+ * So at any instant exactly one group is "the live cycle": the one that opened
+ * last. It stays live while its window is open, through the dead air after it
+ * closes and through picking — until the NEXT group's window opens.
+ *
+ * getOrderingWindowOpenAt returns the most recent PAST open moment for a
+ * schedule, so the max over all groups is exactly that group.
+ */
+function pickLastOpenedGroup(groups = [], now = new Date()) {
+  let best = null;
+  let bestAt = -Infinity;
+  for (const group of groups) {
+    const openedAt = getOrderingWindowOpenAt(group.orderingSchedule, now).getTime();
+    if (!Number.isFinite(openedAt) || openedAt <= bestAt) continue;
+    bestAt = openedAt;
+    best = group;
+  }
+  return best;
+}
+
 // GET /api/v1/products/:id/who-ordered
 // Exact mode: ?orderingSessionId=<id> returns only that session.
-// Global staff catalogue: returns separate exact-session sections per group.
+// Global staff catalogue: the one live cycle — see pickLastOpenedGroup.
 router.get('/:id/who-ordered', staffOnly, asyncHandler(async (req, res) => {
   const requestedSessionId = String(req.query.orderingSessionId || '').trim();
   const allGroups = await getActiveDeliveryGroups();
@@ -1110,22 +1134,25 @@ router.get('/:id/who-ordered', staffOnly, asyncHandler(async (req, res) => {
     return res.json({ orderingSessionId: requestedSessionId, shops: section.shops });
   }
 
-  const sections = (await Promise.all(allGroups.map(async (group) => {
-    const orderingSessionId = await findCurrentSessionId(String(group._id), group.orderingSchedule);
-    if (!orderingSessionId) return null;
-    return buildWhoOrderedSection({
-      productId: req.params.id,
-      orderingSessionId,
-      group,
-    });
-  })))
-    .filter((section) => section?.shops?.length)
-    .sort((a, b) => {
-      const aDay = a.dayOfWeek === 0 ? 7 : a.dayOfWeek;
-      const bDay = b.dayOfWeek === 0 ? 7 : b.dayOfWeek;
-      return aDay - bDay || a.groupName.localeCompare(b.groupName, 'uk');
-    });
+  // Staff have no group of their own, so the server picks the live cycle for
+  // them. One group, never a merged list: fanning out over every group is what
+  // made this panel read like "all sessions of all shops".
+  const liveGroup = pickLastOpenedGroup(allGroups);
+  if (!liveGroup) return res.json({ sections: [] });
 
+  const orderingSessionId = await findCurrentSessionId(
+    String(liveGroup._id),
+    liveGroup.orderingSchedule,
+  );
+  if (!orderingSessionId) return res.json({ sections: [] });
+
+  const section = await buildWhoOrderedSection({
+    productId: req.params.id,
+    orderingSessionId,
+    group: liveGroup,
+  });
+
+  const sections = section.shops.length ? [section] : [];
   return res.json({ sections });
 }));
 
@@ -1690,3 +1717,6 @@ module.exports = router;
 // Shared with routes/navBadges.js so the aggregated badge endpoint counts
 // "new products" by exactly the same definition as /new-list.
 module.exports.newProductsPipeline = newProductsPipeline;
+// Exported for schedule diagnostics: which delivery group owns the live cycle
+// is a claim worth checking against real group schedules, not just by reading.
+module.exports.pickLastOpenedGroup = pickLastOpenedGroup;
