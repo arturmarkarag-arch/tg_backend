@@ -10,6 +10,18 @@ function isLiveOrderItem(item) {
   return !isTerminalOrderItem(item);
 }
 
+// Canonical Mongo predicate for one OrderItem that still represents warehouse work.
+// Keep this in the same module as the in-memory predicate so query-time and
+// runtime eligibility cannot drift apart.
+function liveOrderItemMongoMatch() {
+  return {
+    packed: { $ne: true },
+    cancelled: { $ne: true },
+    skipped: { $ne: true },
+    voided: { $ne: true },
+  };
+}
+
 /**
  * Expiring an Order removes it from the delivery cycle, but its still-open lines
  * must retain an explicit terminal outcome for history/analytics. This is NOT
@@ -41,6 +53,7 @@ function openItemArrayFilter(alias = 'open') {
 module.exports = {
   isTerminalOrderItem,
   isLiveOrderItem,
+  liveOrderItemMongoMatch,
   voidOpenOrderItems,
   openItemArrayFilter,
 };

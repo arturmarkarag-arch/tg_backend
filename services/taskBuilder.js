@@ -5,6 +5,7 @@ const PickingTask = require('../models/PickingTask');
 const Order = require('../models/Order');
 const User = require('../models/User');
 const { withLock } = require('../utils/lock');
+const { buildLiveActiveOrderFilter } = require('../utils/orderStatus');
 
 /**
  * Returns a Map of productId → { blockId, index } for each productId
@@ -94,13 +95,14 @@ async function buildPickingTasksImpl(targetDeliveryGroupId = null, options = {})
     }
 
     // 2. Take all active orders and build missing picking tasks.
-    const orderFilter = { status: { $in: ['new', 'in_progress'] } };
+    const orderScope = {};
     if (targetDeliveryGroupId !== null) {
-      orderFilter['buyerSnapshot.deliveryGroupId'] = String(targetDeliveryGroupId);
+      orderScope['buyerSnapshot.deliveryGroupId'] = String(targetDeliveryGroupId);
     }
     if (orderingSessionId) {
-      orderFilter.orderingSessionId = orderingSessionId;
+      orderScope.orderingSessionId = orderingSessionId;
     }
+    const orderFilter = buildLiveActiveOrderFilter(orderScope);
 
     const orders = await Order.find(orderFilter)
       // Only _id + status are read off the populated product below; pulling the full

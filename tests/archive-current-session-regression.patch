@@ -1,0 +1,138 @@
+--- a/scripts/liveOrderPickingE2E.js
++++ b/scripts/liveOrderPickingE2E.js
+@@ -1271,6 +1271,126 @@
+   } catch (e) { e.world = world; throw e; }
+ }
+ 
++
++/**
++ * Regression: a Product may be archived globally while THIS delivery group is
++ * still accepting orders (e.g. warehouse discovers during the previous group's
++ * picking that stock is exhausted). The archive command must terminalize the
++ * current session's affected OrderItem, and that dead line must NOT become a
++ * coverage blocker. Remaining valid goods still start and pick normally.
++ */
++async function scenarioArchiveDuringOpenOrdering() {
++  const world = await createWorld('archive_during_open_ordering', {
++    shops: 1, sellers: 1, warehouse: 1, products: 2,
++  });
++  try {
++    const seller = world.sellers[0];
++    const wh = world.warehouses[0];
++    const [goneProduct, liveProduct] = world.products;
++
++    const order = await placeOrder(world, seller, [
++      { product: goneProduct, quantity: 2 },
++      { product: liveProduct, quantity: 1 },
++    ], 'archive-while-open');
++    const sid = str(order.orderingSessionId);
++
++    // Canonical warehouse archive path. Archive ownership is global; it does not
++    // matter which group's picking exposed the physical stockout.
++    const archived = await api('DELETE', `/api/products/${goneProduct._id}`, wh);
++    eq(archived.status, 200, 'archive_open: canonical warehouse archive succeeds');
++    eq((await Product.findById(goneProduct._id).lean()).status, 'archived', 'archive_open: Product becomes archived');
++
++    const afterArchive = await Order.findById(order._id).lean();
++    const goneLine = afterArchive.items.find((i) => str(i.productId) === str(goneProduct._id));
++    const liveLine = afterArchive.items.find((i) => str(i.productId) === str(liveProduct._id));
++    check(Boolean(goneLine?.cancelled) && !goneLine?.packed, 'archive_open: archived item becomes terminal cancelled');
++    check(Boolean(liveLine) && !liveLine.cancelled && !liveLine.skipped && !liveLine.packed, 'archive_open: unrelated item stays live');
++    eq(afterArchive.status, 'new', 'archive_open: Order remains editable while ordering window is open');
++
++    await moveWorldToClosedPhase(world);
++    const coverage = await auditSessionCoverage({
++      deliveryGroupId: str(world.group._id),
++      orderingSessionId: sid,
++    });
++    check(coverage.ok, 'archive_open: cancelled archived line creates NO coverage gap', `gaps=${JSON.stringify(coverage.gaps || [])}`);
++
++    const start = await startPicking(world, wh, true);
++    check(
++      start.status === 200 && start.data?.started === true,
++      'archive_open: picking starts with the remaining valid product',
++      `payload=${JSON.stringify(start.data || {})}`,
++    );
++    check(start.data?.coverageGaps !== true && start.data?.unresolved !== true, 'archive_open: archive causes neither coverage nor conflict blocker');
++
++    const tasks = await getPendingTasks(world, sid);
++    eq(tasks.length, 1, 'archive_open: exactly one task is built for the surviving product');
++    eq(str(tasks[0]?.productId), str(liveProduct._id), 'archive_open: task belongs only to the surviving product');
++
++    await completeEveryPendingTask(world, wh, sid);
++    await assertSessionCompleted(sid, 'archive_open');
++    return world;
++  } catch (e) { e.world = world; throw e; }
++}
++
++/**
++ * Regression for the subtle edge case: two sellers of ONE shop ordered only a
++ * product that was then archived while ordering was still open. archiveProduct
++ * correctly cancels both lines but intentionally keeps both Orders status=new so
++ * sellers may keep editing until close. Those status-only shells contain ZERO
++ * live work and therefore must NOT be treated as a cross-seller conflict.
++ *
++ * CURRENT runtime is expected to fail this test if start-session groups conflicts
++ * by Order.status without first requiring at least one live OrderItem.
++ */
++async function scenarioArchivedOnlyOrdersNoConflict() {
++  const world = await createWorld('archived_only_orders_no_conflict', {
++    shops: 1, sellers: 2, warehouse: 1, products: 1, sellerShopIndexes: [0, 0],
++  });
++  try {
++    const [a, b] = world.sellers;
++    const wh = world.warehouses[0];
++    const product = world.products[0];
++
++    const orderA = await placeOrder(world, a, [{ product, quantity: 1 }], 'a');
++    const orderB = await placeOrder(world, b, [{ product, quantity: 1 }], 'b');
++    const sid = str(orderA.orderingSessionId);
++    eq(str(orderB.orderingSessionId), sid, 'archive_conflict: both sellers belong to the same current session');
++
++    const archived = await api('DELETE', `/api/products/${product._id}`, wh);
++    eq(archived.status, 200, 'archive_conflict: canonical warehouse archive succeeds');
++
++    const [afterA, afterB] = await Promise.all([
++      Order.findById(orderA._id).lean(),
++      Order.findById(orderB._id).lean(),
++    ]);
++    check(afterA.items.every((i) => i.cancelled || i.skipped || i.packed || i.voided), 'archive_conflict: seller A has no live positions');
++    check(afterB.items.every((i) => i.cancelled || i.skipped || i.packed || i.voided), 'archive_conflict: seller B has no live positions');
++    eq(afterA.status, 'new', 'archive_conflict: seller A Order status stays new while window is open');
++    eq(afterB.status, 'new', 'archive_conflict: seller B Order status stays new while window is open');
++
++    await moveWorldToClosedPhase(world);
++    const coverage = await auditSessionCoverage({
++      deliveryGroupId: str(world.group._id),
++      orderingSessionId: sid,
++    });
++    check(coverage.ok, 'archive_conflict: archived-only Orders create NO coverage gaps', `gaps=${JSON.stringify(coverage.gaps || [])}`);
++
++    const start = await startPicking(world, wh, true);
++    check(
++      start.status === 200 && start.data?.unresolved !== true,
++      'archive_conflict: dead archived-only Orders do NOT create a seller conflict',
++      `payload=${JSON.stringify(start.data || {})}`,
++    );
++    check(
++      start.status === 200 && start.data?.noOrders === true,
++      'archive_conflict: session closes cleanly as noOrders when no live positions remain',
++      `payload=${JSON.stringify(start.data || {})}`,
++    );
++    await assertSessionCompleted(sid, 'archive_conflict');
++    return world;
++  } catch (e) { e.world = world; throw e; }
++}
++
+ async function createDirectOldOrder(world, { sessionId, seller, shop, product, qty = 1 }) {
+   const order = await Order.create({
+     buyerTelegramId: str(seller.telegramId),
+@@ -1620,6 +1740,8 @@
+   ['conflict_relocate', scenarioConflictRelocate],
+   ['conflict_unassign', scenarioConflictUnassign],
+   ['coverage', scenarioCoverage],
++  ['archive_during_open_ordering', scenarioArchiveDuringOpenOrdering],
++  ['archived_only_orders_no_conflict', scenarioArchivedOnlyOrdersNoConflict],
+   ['isolation', scenarioIsolation],
+   ['barrier', scenarioBarrier],
+   ['short_pick', scenarioShortPick],

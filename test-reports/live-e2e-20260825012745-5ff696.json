@@ -1,0 +1,288 @@
+{
+  "runId": "20260825012745-5ff696",
+  "marker": "__LIVE_E2E__20260825012745-5ff696",
+  "createdAt": "2026-08-25T01:28:08.799Z",
+  "db": "tg_manager",
+  "redisWasConfiguredButIsolated": true,
+  "execute": true,
+  "requestedScenarios": [
+    "archive_during_open_ordering",
+    "archived_only_orders_no_conflict"
+  ],
+  "summary": {
+    "passedScenarios": 2,
+    "failedScenarios": 0,
+    "passedAssertions": 51,
+    "failedAssertions": 0
+  },
+  "scenarios": [
+    {
+      "name": "archive_during_open_ordering",
+      "ok": true,
+      "durationMs": 6018
+    },
+    {
+      "name": "archived_only_orders_no_conflict",
+      "ok": true,
+      "durationMs": 4835
+    }
+  ],
+  "assertions": [
+    {
+      "ok": true,
+      "name": "MongoDB connection",
+      "details": "db=tg_manager host=ac-hq2xfhf-shard-00-02.epfky0s.mongodb.net allowed=epfky0s.mongodb.net"
+    },
+    {
+      "ok": true,
+      "name": "No active global live-harness lease",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "Synthetic per-group schedule can represent ordering-open phase",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "Synthetic per-group schedule can represent picking-allowed phase",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "Critical Order active uniqueness index exists",
+      "details": "value=one_active_order_per_buyer_shop_session"
+    },
+    {
+      "ok": true,
+      "name": "Critical PickingTask session-scoped uniqueness index exists",
+      "details": "value=one_active_task_per_product_group_session"
+    },
+    {
+      "ok": true,
+      "name": "OrderingSession groupId+openDate unique index exists",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "Critical Block partial unique index exists",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "MongoDB transaction round-trip",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "No previous LIVE_E2E fixture leftovers or orphan manifests",
+      "details": "rows=0 manifests=0"
+    },
+    {
+      "ok": true,
+      "name": "Live Redis is isolated from this suite",
+      "details": "REDIS_URL existed but is disabled in test process"
+    },
+    {
+      "ok": true,
+      "name": "Ephemeral real Express app is writable",
+      "details": "status=ok"
+    },
+    {
+      "ok": true,
+      "name": "archive_during_open_ordering: synthetic per-group ordering window starts open",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "archive_during_open_ordering: HTTP order accepted",
+      "details": "status=201 error="
+    },
+    {
+      "ok": true,
+      "name": "archive_open: canonical warehouse archive succeeds",
+      "details": "actual=200 expected=200"
+    },
+    {
+      "ok": true,
+      "name": "archive_open: Product becomes archived",
+      "details": "actual=\"archived\" expected=\"archived\""
+    },
+    {
+      "ok": true,
+      "name": "archive_open: archived item becomes terminal cancelled",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "archive_open: unrelated item stays live",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "archive_open: Order remains editable while ordering window is open",
+      "details": "actual=\"new\" expected=\"new\""
+    },
+    {
+      "ok": true,
+      "name": "archive_during_open_ordering: closed synthetic schedule exists",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "archive_during_open_ordering: ordering session identity survives open→closed test phase",
+      "details": "actual=\"6a8cef982eb81429774be6cd\" expected=\"6a8cef982eb81429774be6cd\""
+    },
+    {
+      "ok": true,
+      "name": "archive_during_open_ordering: picking phase window is closed",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "archive_open: picking starts with the remaining valid product",
+      "details": "payload={\"started\":true,\"orderingSessionId\":\"6a8cef982eb81429774be6cd\",\"taskCount\":1,\"staleWarnings\":[],\"pickingStatus\":\"confirmed\",\"phase\":\"picking\",\"events\":[{\"at\":\"2026-08-25T01:27:52.244Z\",\"type\":\"created\",\"by\":\"\",\"byName\":\"\"},{\"at\":\"2026-08-25T01:27:56.465Z\",\"type\":\"picking_confirmed\",\"by\":\"-9912725378348100\",\"byName\":\"E2E_archive_during_open_ordering_W1 20260825012745-5ff696\",\"meta\":{\"taskCount\":1}}],\"vocab\":{\"statuses\":{\"pending\":{\"label\":\"Очікує підтвердження\",\"chip\":\"chip-warning\"},\"confirmed\":{\"label\":\"Підтверджено\",\"chip\":\"chip-active\"},\"in_progress\":{\"label\":\"В роботі\",\"chip\":\"chip-active\"},\"completed\":{\"label\":\"Завершено\",\"chip\":\"chip-success\"}},\"events\":{\"created\":{\"label\":\"Створено\"},\"picking_confirmed\":{\"label\":\"Підтверджено\"},\"picking_cancelled\":{\"label\":\"Старт скасовано\"},\"picking_in_progress\":{\"label\":\"В роботі\"},\"picking_completed\":{\"label\":\"Завершено\"},\"order_added\":{\"label\":\"Оновлена\"},\"rescheduled\":{\"label\":\"Перенесена\"},\"hours_changed\":{\"label\":\"Змінені години\"},\"window_closed\":{\"label\":\"Закінчилась\"}},\"phases\":{\"ordering_open\":{\"label\":\"Приймає замовлення\",\"chip\":\"chip-active\"},\"awaiting_picking\":{\"label\":\"Готово до збирання\",\"chip\":\"chip-warning\"},\"picking\":{\"label\":\"Збирається\",\"chip\":\"chip-active\"},\"completed\":{\"label\":\"Зібрано\",\"chip\":\"chip-success\"},\"idle\":{\"label\":\"Замовлень немає\",\"chip\":\"chip-warning\"}}},\"supplementCount\":0}"
+    },
+    {
+      "ok": true,
+      "name": "archive_open: archive causes neither coverage nor conflict blocker",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "archive_open: cancelled archived line creates NO coverage gap after task build",
+      "details": "gaps=[]"
+    },
+    {
+      "ok": true,
+      "name": "archive_open: exactly one task is built for the surviving product",
+      "details": "actual=1 expected=1"
+    },
+    {
+      "ok": true,
+      "name": "archive_open: task belongs only to the surviving product",
+      "details": "actual=\"6a8cef9810913560c4a0dd1b\" expected=\"6a8cef9810913560c4a0dd1b\""
+    },
+    {
+      "ok": true,
+      "name": "Task claim succeeds",
+      "details": "status=200 error="
+    },
+    {
+      "ok": true,
+      "name": "Task complete endpoint succeeds",
+      "details": "status=200 error="
+    },
+    {
+      "ok": true,
+      "name": "archive_open: session completed",
+      "details": "actual=\"completed\" expected=\"completed\""
+    },
+    {
+      "ok": true,
+      "name": "archive_open: pickingCompletedAt stamped",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "archive_during_open_ordering: SCENARIO PASS",
+      "details": "6018 ms"
+    },
+    {
+      "ok": true,
+      "name": "archived_only_orders_no_conflict: synthetic per-group ordering window starts open",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "archived_only_orders_no_conflict: HTTP order accepted",
+      "details": "status=201 error="
+    },
+    {
+      "ok": true,
+      "name": "archived_only_orders_no_conflict: HTTP order accepted",
+      "details": "status=201 error="
+    },
+    {
+      "ok": true,
+      "name": "archive_conflict: both sellers belong to the same current session",
+      "details": "actual=\"6a8cefa12eb81429774be6d2\" expected=\"6a8cefa12eb81429774be6d2\""
+    },
+    {
+      "ok": true,
+      "name": "archive_conflict: canonical warehouse archive succeeds",
+      "details": "actual=200 expected=200"
+    },
+    {
+      "ok": true,
+      "name": "archive_conflict: seller A has no live positions",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "archive_conflict: seller B has no live positions",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "archive_conflict: seller A Order status stays new while window is open",
+      "details": "actual=\"new\" expected=\"new\""
+    },
+    {
+      "ok": true,
+      "name": "archive_conflict: seller B Order status stays new while window is open",
+      "details": "actual=\"new\" expected=\"new\""
+    },
+    {
+      "ok": true,
+      "name": "archived_only_orders_no_conflict: closed synthetic schedule exists",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "archived_only_orders_no_conflict: ordering session identity survives open→closed test phase",
+      "details": "actual=\"6a8cefa12eb81429774be6d2\" expected=\"6a8cefa12eb81429774be6d2\""
+    },
+    {
+      "ok": true,
+      "name": "archived_only_orders_no_conflict: picking phase window is closed",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "archive_conflict: archived-only Orders create NO coverage gaps",
+      "details": "gaps=[]"
+    },
+    {
+      "ok": true,
+      "name": "archive_conflict: dead archived-only Orders do NOT create a seller conflict",
+      "details": "payload={\"noOrders\":true,\"orderingSessionId\":\"6a8cefa12eb81429774be6d2\",\"staleWarnings\":[],\"pickingStatus\":\"completed\",\"phase\":\"idle\",\"events\":[{\"at\":\"2026-08-25T01:28:00.571Z\",\"type\":\"created\",\"by\":\"\",\"byName\":\"\"},{\"at\":\"2026-08-25T01:28:04.659Z\",\"type\":\"picking_confirmed\",\"by\":\"-9912809125414100\",\"byName\":\"E2E_archived_only_orders_no_conflict_W1 20260825012745-5ff696\",\"meta\":{\"taskCount\":0}},{\"at\":\"2026-08-25T01:28:05.076Z\",\"type\":\"picking_completed\",\"by\":\"-9912809125414100\",\"byName\":\"E2E_archived_only_orders_no_conflict_W1 20260825012745-5ff696\",\"meta\":{\"reason\":\"empty\"}}],\"vocab\":{\"statuses\":{\"pending\":{\"label\":\"Очікує підтвердження\",\"chip\":\"chip-warning\"},\"confirmed\":{\"label\":\"Підтверджено\",\"chip\":\"chip-active\"},\"in_progress\":{\"label\":\"В роботі\",\"chip\":\"chip-active\"},\"completed\":{\"label\":\"Завершено\",\"chip\":\"chip-success\"}},\"events\":{\"created\":{\"label\":\"Створено\"},\"picking_confirmed\":{\"label\":\"Підтверджено\"},\"picking_cancelled\":{\"label\":\"Старт скасовано\"},\"picking_in_progress\":{\"label\":\"В роботі\"},\"picking_completed\":{\"label\":\"Завершено\"},\"order_added\":{\"label\":\"Оновлена\"},\"rescheduled\":{\"label\":\"Перенесена\"},\"hours_changed\":{\"label\":\"Змінені години\"},\"window_closed\":{\"label\":\"Закінчилась\"}},\"phases\":{\"ordering_open\":{\"label\":\"Приймає замовлення\",\"chip\":\"chip-active\"},\"awaiting_picking\":{\"label\":\"Готово до збирання\",\"chip\":\"chip-warning\"},\"picking\":{\"label\":\"Збирається\",\"chip\":\"chip-active\"},\"completed\":{\"label\":\"Зібрано\",\"chip\":\"chip-success\"},\"idle\":{\"label\":\"Замовлень немає\",\"chip\":\"chip-warning\"}}},\"supplementCount\":0}"
+    },
+    {
+      "ok": true,
+      "name": "archive_conflict: session closes cleanly as noOrders when no live positions remain",
+      "details": "payload={\"noOrders\":true,\"orderingSessionId\":\"6a8cefa12eb81429774be6d2\",\"staleWarnings\":[],\"pickingStatus\":\"completed\",\"phase\":\"idle\",\"events\":[{\"at\":\"2026-08-25T01:28:00.571Z\",\"type\":\"created\",\"by\":\"\",\"byName\":\"\"},{\"at\":\"2026-08-25T01:28:04.659Z\",\"type\":\"picking_confirmed\",\"by\":\"-9912809125414100\",\"byName\":\"E2E_archived_only_orders_no_conflict_W1 20260825012745-5ff696\",\"meta\":{\"taskCount\":0}},{\"at\":\"2026-08-25T01:28:05.076Z\",\"type\":\"picking_completed\",\"by\":\"-9912809125414100\",\"byName\":\"E2E_archived_only_orders_no_conflict_W1 20260825012745-5ff696\",\"meta\":{\"reason\":\"empty\"}}],\"vocab\":{\"statuses\":{\"pending\":{\"label\":\"Очікує підтвердження\",\"chip\":\"chip-warning\"},\"confirmed\":{\"label\":\"Підтверджено\",\"chip\":\"chip-active\"},\"in_progress\":{\"label\":\"В роботі\",\"chip\":\"chip-active\"},\"completed\":{\"label\":\"Завершено\",\"chip\":\"chip-success\"}},\"events\":{\"created\":{\"label\":\"Створено\"},\"picking_confirmed\":{\"label\":\"Підтверджено\"},\"picking_cancelled\":{\"label\":\"Старт скасовано\"},\"picking_in_progress\":{\"label\":\"В роботі\"},\"picking_completed\":{\"label\":\"Завершено\"},\"order_added\":{\"label\":\"Оновлена\"},\"rescheduled\":{\"label\":\"Перенесена\"},\"hours_changed\":{\"label\":\"Змінені години\"},\"window_closed\":{\"label\":\"Закінчилась\"}},\"phases\":{\"ordering_open\":{\"label\":\"Приймає замовлення\",\"chip\":\"chip-active\"},\"awaiting_picking\":{\"label\":\"Готово до збирання\",\"chip\":\"chip-warning\"},\"picking\":{\"label\":\"Збирається\",\"chip\":\"chip-active\"},\"completed\":{\"label\":\"Зібрано\",\"chip\":\"chip-success\"},\"idle\":{\"label\":\"Замовлень немає\",\"chip\":\"chip-warning\"}}},\"supplementCount\":0}"
+    },
+    {
+      "ok": true,
+      "name": "archive_conflict: session completed",
+      "details": "actual=\"completed\" expected=\"completed\""
+    },
+    {
+      "ok": true,
+      "name": "archive_conflict: pickingCompletedAt stamped",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "archived_only_orders_no_conflict: SCENARIO PASS",
+      "details": "4835 ms"
+    },
+    {
+      "ok": true,
+      "name": "No unrelated TEST data changed during live E2E",
+      "details": "fingerprints identical"
+    }
+  ],
+  "preserved": []
+}

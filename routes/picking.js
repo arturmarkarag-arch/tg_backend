@@ -33,6 +33,7 @@ const { getSupplementShiftSummary, getSupplementWorkerHistory } = require('../se
 const { getTelegramUsernameMap } = require('../utils/telegramUsername');
 const { buildShiftTelegramDeliveryReadModel } = require('../services/readModels/shiftTelegramDeliveryReadModel');
 const { ITEM_RELATION_STATUS, ACTIVE_ITEM_STATUSES, revisionOf } = require('../utils/supplementState');
+const { buildLiveActiveOrderFilter } = require('../utils/orderStatus');
 
 const {
   findAndLockNext,
@@ -518,11 +519,10 @@ router.post('/start-session', requireTelegramRoles(['warehouse', 'admin']), asyn
 
     // 5. Confirm flow — block on unresolved cross-seller conflicts.
     const sessionActiveOrders = await Order.find(
-      {
+      buildLiveActiveOrderFilter({
         'buyerSnapshot.deliveryGroupId': String(deliveryGroupId),
-        status: { $in: ['new', 'in_progress'] },
         orderingSessionId: currentSessionId,
-      },
+      }),
       '_id shopId buyerSnapshot buyerTelegramId orderNumber',
     ).lean();
 

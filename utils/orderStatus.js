@@ -1,6 +1,6 @@
 'use strict';
 
-const { isTerminalOrderItem } = require('./orderItemState');
+const { isTerminalOrderItem, liveOrderItemMongoMatch } = require('./orderItemState');
 
 /**
  * Canonical Order status vocabulary.
@@ -58,6 +58,25 @@ function resolveOrderStatusAfterCancel(order, orderingOpenNow) {
   return allUndelivered ? ORDER_STATUS.CANCELLED : ORDER_STATUS.CONFIRMED;
 }
 
+
+/**
+ * Canonical predicate for an Order that still carries ordinary warehouse work.
+ * Status alone is insufficient: while ordering is open, archive/OOS cancellation
+ * intentionally leaves Order.status='new' so the seller may keep editing. Such a
+ * status-only shell must not create picking conflicts or tasks.
+ */
+function hasLiveOrderItems(order) {
+  return Array.isArray(order?.items) && order.items.some((item) => !isTerminalOrderItem(item));
+}
+
+function buildLiveActiveOrderFilter(extra = {}) {
+  return {
+    ...extra,
+    status: { $in: ACTIVE_ORDER_STATUSES },
+    items: { $elemMatch: liveOrderItemMongoMatch() },
+  };
+}
+
 function isActiveOrderStatus(status) {
   return ACTIVE_ORDER_STATUSES.includes(String(status || ''));
 }
@@ -77,6 +96,8 @@ module.exports = {
   ACTIVE_ORDER_STATUSES,
   PARKED_ORDER_STATUSES,
   TERMINAL_ORDER_STATUSES,
+  hasLiveOrderItems,
+  buildLiveActiveOrderFilter,
   isActiveOrderStatus,
   isParkedOrderStatus,
   isOperationalOrderStatus,

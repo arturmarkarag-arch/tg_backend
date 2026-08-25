@@ -32,6 +32,7 @@ const checks = [
   'scripts/checkSupplementMetadataAuthorityV48_S3_1.js',
   'scripts/checkReceiptSupplementLifecycle20260821.js',
   'scripts/checkOrderUnassignState.js',
+  'scripts/checkConflictLiveHarnessSessionIsolation.js',
   'scripts/checkTelegramDeliveryLedgerV48.js',
   'scripts/checkOrderingReminderDeliveryV48.js',
 ];

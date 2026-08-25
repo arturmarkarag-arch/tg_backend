@@ -16,6 +16,7 @@ const { updateShopTopologyCommand } = require('../services/shopTopologyCommand')
 const { activeOrderShopFilter } = require('../utils/orderShopFilter');
 const { getTelegramUsernameMap } = require('../utils/telegramUsername');
 const { ASSIGNED_SHOP_ROLES, buildCurrentAssignment } = require('../utils/shopOperationalState');
+const { buildLiveActiveOrderFilter } = require('../utils/orderStatus');
 
 const router = express.Router();
 
@@ -146,10 +147,9 @@ router.get('/', asyncHandler(async (req, res) => {
       if (!mongoose.isValidObjectId(orderingSessionId)) {
         throw appError('validation_failed', { field: 'orderingSessionId' });
       }
-      const activeOrders = await Order.find({
-        status: { $in: ['new', 'in_progress'] },
+      const activeOrders = await Order.find(buildLiveActiveOrderFilter({
         orderingSessionId,
-      }).select('shopId').lean();
+      })).select('shopId').lean();
       for (const o of activeOrders) {
         if (o.shopId) activeOrderShopIds.add(String(o.shopId));
       }

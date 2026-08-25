@@ -798,6 +798,7 @@ async function runMass() {
     const targetShopIndex = targetsStart + j;
     moves.push(api('POST', '/api/v1/orders/conflicts/resolve', wh0, {
       shopId: str(world.shops[sourceShopIndex]._id), buyerTelegramId: str(seller.telegramId), action: 'move', toShopId: str(world.shops[targetShopIndex]._id),
+      deliveryGroupId: str(world.group._id), orderingSessionId: str(currentSessionId),
     }, 'POST conflict-resolve'));
   }
   const moveResults = await Promise.all(moves);

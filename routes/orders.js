@@ -17,6 +17,7 @@ const { isOrderingOpen, getOrderingWindowOpenAt } = require('../utils/orderingSc
 const { getOrCreateSessionId, findCurrentSessionId } = require('../utils/getOrCreateSession');
 const { ensureSessionSeq } = require('../utils/sessionSeq');
 const { voidOpenOrderItems } = require('../utils/orderItemState');
+const { buildLiveActiveOrderFilter } = require('../utils/orderStatus');
 const OrderingSession = require('../models/OrderingSession');
 const { pushSessionEvent } = require('../utils/sessionStatus');
 
@@ -300,11 +301,10 @@ router.get('/conflicts', staffOnly, async (req, res) => {
     req.query.orderingSessionId,
   );
 
-  const activeOrders = await Order.find({
+  const activeOrders = await Order.find(buildLiveActiveOrderFilter({
     orderingSessionId: sessionId,
     'buyerSnapshot.deliveryGroupId': groupId,
-    status: { $in: ['new', 'in_progress'] },
-  }).select('shopId buyerSnapshot buyerTelegramId orderNumber orderingSessionId _id createdAt items').lean();
+  })).select('shopId buyerSnapshot buyerTelegramId orderNumber orderingSessionId _id createdAt items').lean();
 
   // Group by shopId
   const byShop = new Map();
