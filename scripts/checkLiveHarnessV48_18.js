@@ -99,12 +99,10 @@ check(!String(pkg.scripts['test:live:contracts:full'] || '').includes('--scenari
 check(String(pkg.scripts['test:live:boot:v48.18'] || '').includes('-r ../dev-use-test-db.js'), 'real boot npm command is protected by TEST DB preload');
 
 // The V48.16 class of false failures/false greens came from source.slice(indexOf(...))
-// with a missing -1 anchor. Keep one algorithmic indexOf test explicitly exempt;
-// all source-contract tests must use sourceContract helpers now.
+// with a missing -1 anchor. All source-contract tests must use sourceContract helpers now.
 const testFiles = walk(path.join(ROOT, 'tests')).filter((file) => /(?:\.contract)?\.test\.js$/.test(file));
 const unsafeIndexFiles = [];
 for (const file of testFiles) {
-  if (file.endsWith(`${path.sep}sellerVisualOrderingAlgo.test.js`)) continue;
   const source = fs.readFileSync(file, 'utf8');
   if (source.includes('.indexOf(')) unsafeIndexFiles.push(path.relative(ROOT, file));
 }

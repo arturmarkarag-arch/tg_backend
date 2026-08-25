@@ -13,6 +13,7 @@ function assert(condition, message) {
 }
 
 const routes = read('routes/products.js');
+const productModel = read('models/Product.js');
 const base = sliceBetweenOrThrow(
   routes,
   'async function getSellerCatalogBasePipeline(req)',
@@ -32,7 +33,8 @@ const position = sliceBetweenOrThrow(
   { label: 'seller catalog position route' },
 );
 
-assert(routes.includes('const SELLER_CATALOG_SORT = Object.freeze({ orderNumber: 1, createdAt: -1, _id: 1 });'), 'seller order is stable and deterministic');
+assert(routes.includes('const SELLER_CATALOG_SORT = Object.freeze({ orderNumber: 1 });'), 'seller order is stable and deterministic');
+assert(productModel.includes('{ orderNumber: 1 }') && productModel.includes('unique: true') && productModel.includes("status: { $in: ['pending', 'active'] }"), 'orderNumber is DB-unique for live Products');
 assert(base.includes("status: 'active'"), 'seller catalogue requires active warehouse status');
 assert(base.includes('orderingEnabled: { $ne: false }'), 'ordinary-order gate is preserved');
 assert(base.includes("'_block.0': { $exists: true }"), 'real Block membership is required');
@@ -48,7 +50,7 @@ assert(routes.includes('function parseCatalogPageInteger(value, fallback, min, m
 assert(!catalog.includes('ids.slice('), 'catalogue never pages an all-products id array in Node');
 
 assert(position.includes('const beforeMatch = {'), 'position resolver uses the ordinary-order comparator');
-assert(position.includes("{ orderNumber: { $lt: targetOrderNumber } }"), 'position resolver counts lower order numbers');
+assert(position.includes("const beforeMatch = { orderNumber: { $lt: target.orderNumber } };"), 'position resolver counts lower order numbers only');
 assert(position.includes("{ $count: 'count' }"), 'position and total are counted in Mongo');
 assert(!position.includes('.indexOf('), 'position resolver never builds and scans a global id sequence');
 assert(!routes.includes('try { orderingSessionId = await findCurrentSessionId'), 'session lookup fails closed instead of disabling supplement exclusion');

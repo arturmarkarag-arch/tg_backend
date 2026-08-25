@@ -8,6 +8,7 @@ const read = (rel) => fs.readFileSync(path.join(__dirname, '..', rel), 'utf8');
 
 describe('seller ordinary catalogue source contract', () => {
   const routes = read('routes/products.js');
+  const productModel = read('models/Product.js');
   const base = sliceBetweenOrThrow(
     routes,
     'async function getSellerCatalogBasePipeline(req)',
@@ -37,7 +38,10 @@ describe('seller ordinary catalogue source contract', () => {
   });
 
   test('sorts and pages in Mongo without vector ordering or a global id array', () => {
-    expect(routes).toContain('const SELLER_CATALOG_SORT = Object.freeze({ orderNumber: 1, createdAt: -1, _id: 1 });');
+    expect(routes).toContain('const SELLER_CATALOG_SORT = Object.freeze({ orderNumber: 1 });');
+    expect(productModel).toContain('{ orderNumber: 1 }');
+    expect(productModel).toContain('unique: true');
+    expect(productModel).toContain("status: { $in: ['pending', 'active'] }");
     expect(page).toContain('{ $sort: SELLER_CATALOG_SORT }');
     expect(page).toContain('{ $skip: offset }');
     expect(page).toContain('{ $limit: limit }');
@@ -52,8 +56,8 @@ describe('seller ordinary catalogue source contract', () => {
 
   test('position uses the identical ordinary comparator and Mongo counts', () => {
     expect(position).toContain('const beforeMatch = {');
-    expect(position).toContain('{ orderNumber: { $lt: targetOrderNumber } }');
-    expect(position).toContain('{ orderNumber: targetOrderNumber, createdAt: { $gt: target.createdAt } }');
+    expect(position).toContain('const beforeMatch = { orderNumber: { $lt: target.orderNumber } };');
+    expect(position).not.toContain('createdAt: { $gt:');
     expect(position).toContain("{ $count: 'count' }");
   });
 });

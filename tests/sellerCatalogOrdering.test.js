@@ -73,7 +73,7 @@ function createProduct(orderNumber, overrides = {}) {
 }
 
 describe('seller ordinary catalogue HTTP ordering', () => {
-  test('returns only eligible products in stable Mongo pages and resolves matching positions', async () => {
+  test('returns only eligible products in orderNumber Mongo pages and resolves matching positions', async () => {
     const [third, first, second, pending, disabled, archived, offShelf] = await Promise.all([
       createProduct(30),
       createProduct(10),

@@ -60,8 +60,40 @@ if (receipts.includes('Date.parse(req.query.dateFrom') || receipts.includes('Dat
 if (!archive.includes('formatWarsawDateKey(p.archivedAt)')) fail('archive grouping is not based on Warsaw calendar dates');
 if (/archivedAt[^\n]*toISOString\(\)\.slice\(0,\s*10\)/.test(archive)) fail('archive still groups by UTC date key');
 
-if (!products.includes('formatWarsawDateKey(new Date())')) fail('product catalogue day cache is not Warsaw-scoped');
 if (!products.includes('warsawDateKeyToUtcRange(dateFilter)')) fail('product date_filter is not interpreted as a Warsaw day');
+
+// Business-date policy: converting the CURRENT instant to a YYYY-MM-DD key must
+// go through the shared Warsaw helper. UTC/local component arithmetic remains
+// allowed for already-parsed date-key parts inside the helper itself.
+const businessDayPatternOffenders = [];
+for (const dirName of ['routes', 'services', 'utils']) {
+  const dir = path.join(root, dirName);
+  const stack = [dir];
+  while (stack.length) {
+    const current = stack.pop();
+    for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+      const full = path.join(current, entry.name);
+      if (entry.isDirectory()) {
+        stack.push(full);
+        continue;
+      }
+      if (!entry.name.endsWith('.js')) continue;
+      const rel = path.relative(root, full).replaceAll('\\', '/');
+      if (rel === 'utils/warsawDateTime.js') continue;
+      const source = fs.readFileSync(full, 'utf8');
+      const bad = [
+        /new Date\(\)\.toISOString\(\)\.slice\(\s*0\s*,\s*10\s*\)/,
+        /new Date\(\)\.toISOString\(\)\.split\(\s*['"]T['"]\s*\)\s*\[\s*0\s*\]/,
+        /new Date\(\)\.getUTC(?:FullYear|Month|Date)\s*\(/,
+        /new Date\(\)\.get(?:FullYear|Month|Date)\s*\(/,
+      ];
+      if (bad.some((re) => re.test(source))) businessDayPatternOffenders.push(rel);
+    }
+  }
+}
+if (businessDayPatternOffenders.length) {
+  fail(`current business day must use formatWarsawDateKey(): ${[...new Set(businessDayPatternOffenders)].join(', ')}`);
+}
 if (/dateFilter[^\n]*T00:00:00/.test(products)) fail('product date_filter still constructs a raw UTC midnight');
 
 if (!telegram.includes('formatWarsawDateTime(new Date())')) fail('Telegram registration timestamp is not Warsaw/DD.MM/24h');

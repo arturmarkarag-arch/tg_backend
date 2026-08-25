@@ -11,7 +11,7 @@ but MongoDB now performs the stable ordinary ordering and pagination directly:
 2. current-session SupplementWave products excluded;
 3. seller-cycle cutoff applied;
 4. real Block membership required;
-5. `orderNumber ASC`, `createdAt DESC`, `_id ASC`;
+5. `orderNumber ASC` — the single catalogue ordering authority;
 6. `$skip` and `$limit` applied in MongoDB.
 
 Pagination inputs are normalized to bounded integers before reaching MongoDB.
@@ -19,7 +19,7 @@ Current-session lookup errors fail closed instead of silently disabling the
 SupplementWave exclusion.
 
 `GET /api/v1/products/catalog/:id/position` uses the same eligibility pipeline and
-counts rows that sort before the target. It no longer builds or scans a global ID list.
+counts rows with a lower `orderNumber`. It no longer builds or scans a global ID list.
 
 ## Removed hot-path work
 
@@ -31,3 +31,8 @@ counts rows that sort before the target. It no longer builds or scans a global I
 
 ProductVector and embedding generation remain available for actual visual/photo search.
 The client keeps the dedicated catalogue URLs, paging, deep links and restore behavior.
+
+
+## Ordering authority
+
+`Product.orderNumber` is required and UNIQUE for non-archived Products. `createdAt` is metadata, not a fallback ordering rule. If the DB ever violates the unique index, that is an integrity failure to repair — the catalogue must not invent a second heuristic order.
