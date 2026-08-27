@@ -1,0 +1,232 @@
+{
+  "runId": "20260825013557-ef3f74",
+  "marker": "__LIVE_E2E__20260825013557-ef3f74",
+  "createdAt": "2026-08-25T01:36:24.568Z",
+  "db": "tg_manager",
+  "redisWasConfiguredButIsolated": true,
+  "execute": true,
+  "requestedScenarios": [
+    "conflict_relocate",
+    "conflict_unassign"
+  ],
+  "summary": {
+    "passedScenarios": 0,
+    "failedScenarios": 2,
+    "passedAssertions": 37,
+    "failedAssertions": 2
+  },
+  "scenarios": [
+    {
+      "name": "conflict_relocate",
+      "ok": false,
+      "durationMs": 8188,
+      "error": "status=200 payload={\"coverageGaps\":true,\"gaps\":[{\"productId\":\"6a8cf185f2e0d992eab3d5b3\",\"reason\":\"no_task\",\"productTitle\":\"__LIVE_E2E__20260825013557-ef3f74:conflict_relocate:P1\",\"productOrderNumber\":1681080667,\"imageUrl\":null,\"shops\":[{\"orderId\":\"6a8cf186f2e0d992eab3d5da\",\"orderNumber\":953578048,\"shopName\":\"__LIVE_E2E__20260825013557-ef3f74:conflict_relocate:shop:2\",\"shopCity\":\"\",\"quantity\":1}],\"totalQty\":1}],\"orderingSessionId\":\"6a8cf1852eb81429774be73f\",\"pickingStatus\":\"pending\",\"phase\":\"awaiting_picking\",\"presentationMode\":\"awaiting_picking\",\"nextOrderingOpenAt\":\"2026-09-01T01:00:00.000Z\",\"sessionSummary\":null,\"groupDayOfWeek\":2,\"events\":[{\"at\":\"2026-08-25T01:36:04.702Z\",\"type\":\"created\",\"by\":\"\",\"byName\":\"\"}],\"vocab\":{\"statuses\":{\"pending\":{\"label\":\"Очікує підтвердження\",\"chip\":\"chip-warning\"},\"confirmed\":{\"label\":\"Підтверджено\",\"chip\":\"chip-active\"},\"in_progress\":{\"label\":\"В роботі\",\"chip\":\"chip-active\"},\"completed\":{\"label\":\"Завершено\",\"chip\":\"chip-success\"}},\"events\":{\"created\":{\"label\":\"Створено\"},\"picking_confirmed\":{\"label\":\"Підтверджено\"},\"picking_cancelled\":{\"label\":\"Старт скасовано\"},\"picking_in_progress\":{\"label\":\"В роботі\"},\"picking_completed\":{\"label\":\"Завершено\"},\"order_added\":{\"label\":\"Оновлена\"},\"rescheduled\":{\"label\":\"Перенесена\"},\"hours_changed\":{\"label\":\"Змінені години\"},\"window_closed\":{\"label\":\"Закінчилась\"}},\"phases\":{\"ordering_open\":{\"label\":\"Приймає замовлення\",\"chip\":\"chip-active\"},\"awaiting_picking\":{\"label\":\"Готово до збирання\",\"chip\":\"chip-warning\"},\"picking\":{\"label\":\"Збирається\",\"chip\":\"chip-active\"},\"completed\":{\"label\":\"Зібрано\",\"chip\":\"chip-success\"},\"idle\":{\"label\":\"Замовлень немає\",\"chip\":\"chip-warning\"}}},\"supplementCount\":0}",
+      "assertionName": "conflict_relocate: start succeeds only after all current conflicts are gone"
+    },
+    {
+      "name": "conflict_unassign",
+      "ok": false,
+      "durationMs": 5498,
+      "error": "status=200 payload={\"coverageGaps\":true,\"gaps\":[{\"productId\":\"6a8cf18ff2e0d992eab3d6bf\",\"reason\":\"no_task\",\"productTitle\":\"__LIVE_E2E__20260825013557-ef3f74:conflict_unassign:P1\",\"productOrderNumber\":1559835983,\"imageUrl\":null,\"shops\":[{\"orderId\":\"6a8cf191f2e0d992eab3d6e6\",\"orderNumber\":953578051,\"shopName\":\"__LIVE_E2E__20260825013557-ef3f74:conflict_unassign:shop:1\",\"shopCity\":\"\",\"quantity\":1}],\"totalQty\":1}],\"orderingSessionId\":\"6a8cf18f2eb81429774be747\",\"pickingStatus\":\"pending\",\"phase\":\"awaiting_picking\",\"presentationMode\":\"awaiting_picking\",\"nextOrderingOpenAt\":\"2026-09-01T01:00:00.000Z\",\"sessionSummary\":null,\"groupDayOfWeek\":2,\"events\":[{\"at\":\"2026-08-25T01:36:15.261Z\",\"type\":\"created\",\"by\":\"\",\"byName\":\"\"}],\"vocab\":{\"statuses\":{\"pending\":{\"label\":\"Очікує підтвердження\",\"chip\":\"chip-warning\"},\"confirmed\":{\"label\":\"Підтверджено\",\"chip\":\"chip-active\"},\"in_progress\":{\"label\":\"В роботі\",\"chip\":\"chip-active\"},\"completed\":{\"label\":\"Завершено\",\"chip\":\"chip-success\"}},\"events\":{\"created\":{\"label\":\"Створено\"},\"picking_confirmed\":{\"label\":\"Підтверджено\"},\"picking_cancelled\":{\"label\":\"Старт скасовано\"},\"picking_in_progress\":{\"label\":\"В роботі\"},\"picking_completed\":{\"label\":\"Завершено\"},\"order_added\":{\"label\":\"Оновлена\"},\"rescheduled\":{\"label\":\"Перенесена\"},\"hours_changed\":{\"label\":\"Змінені години\"},\"window_closed\":{\"label\":\"Закінчилась\"}},\"phases\":{\"ordering_open\":{\"label\":\"Приймає замовлення\",\"chip\":\"chip-active\"},\"awaiting_picking\":{\"label\":\"Готово до збирання\",\"chip\":\"chip-warning\"},\"picking\":{\"label\":\"Збирається\",\"chip\":\"chip-active\"},\"completed\":{\"label\":\"Зібрано\",\"chip\":\"chip-success\"},\"idle\":{\"label\":\"Замовлень немає\",\"chip\":\"chip-warning\"}}},\"supplementCount\":0}",
+      "assertionName": "conflict_unassign: picking starts with remaining valid Order"
+    }
+  ],
+  "assertions": [
+    {
+      "ok": true,
+      "name": "MongoDB connection",
+      "details": "db=tg_manager host=ac-hq2xfhf-shard-00-01.epfky0s.mongodb.net allowed=epfky0s.mongodb.net"
+    },
+    {
+      "ok": true,
+      "name": "No active global live-harness lease",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "Synthetic per-group schedule can represent ordering-open phase",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "Synthetic per-group schedule can represent picking-allowed phase",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "Critical Order active uniqueness index exists",
+      "details": "value=one_active_order_per_buyer_shop_session"
+    },
+    {
+      "ok": true,
+      "name": "Critical PickingTask session-scoped uniqueness index exists",
+      "details": "value=one_active_task_per_product_group_session"
+    },
+    {
+      "ok": true,
+      "name": "OrderingSession groupId+openDate unique index exists",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "Critical Block partial unique index exists",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "MongoDB transaction round-trip",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "No previous LIVE_E2E fixture leftovers or orphan manifests",
+      "details": "rows=0 manifests=0"
+    },
+    {
+      "ok": true,
+      "name": "Live Redis is isolated from this suite",
+      "details": "REDIS_URL existed but is disabled in test process"
+    },
+    {
+      "ok": true,
+      "name": "Ephemeral real Express app is writable",
+      "details": "status=ok"
+    },
+    {
+      "ok": true,
+      "name": "conflict_relocate: synthetic per-group ordering window starts open",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "conflict_relocate: HTTP order accepted",
+      "details": "status=201 error="
+    },
+    {
+      "ok": true,
+      "name": "conflict_relocate: HTTP order accepted",
+      "details": "status=201 error="
+    },
+    {
+      "ok": true,
+      "name": "conflict_relocate: HTTP order accepted",
+      "details": "status=201 error="
+    },
+    {
+      "ok": true,
+      "name": "conflict_relocate: closed synthetic schedule exists",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "conflict_relocate: ordering session identity survives open→closed test phase",
+      "details": "actual=\"6a8cf1852eb81429774be73f\" expected=\"6a8cf1852eb81429774be73f\""
+    },
+    {
+      "ok": true,
+      "name": "conflict_relocate: picking phase window is closed",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "conflict_relocate: initial source-shop conflict blocks start",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "conflict_relocate: permissive move to shop with another ACTIVE Order is allowed",
+      "details": "actual=200 expected=200"
+    },
+    {
+      "ok": true,
+      "name": "conflict_relocate: conflict relocates to target and STILL blocks picking start",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "conflict_relocate: target shop is reported as the new conflict",
+      "details": "value=__LIVE_E2E__20260825013557-ef3f74:conflict_relocate:shop:2"
+    },
+    {
+      "ok": true,
+      "name": "conflict_relocate: operator can unassign after relocated conflict",
+      "details": "actual=200 expected=200"
+    },
+    {
+      "ok": false,
+      "name": "conflict_relocate: start succeeds only after all current conflicts are gone",
+      "details": "status=200 payload={\"coverageGaps\":true,\"gaps\":[{\"productId\":\"6a8cf185f2e0d992eab3d5b3\",\"reason\":\"no_task\",\"productTitle\":\"__LIVE_E2E__20260825013557-ef3f74:conflict_relocate:P1\",\"productOrderNumber\":1681080667,\"imageUrl\":null,\"shops\":[{\"orderId\":\"6a8cf186f2e0d992eab3d5da\",\"orderNumber\":953578048,\"shopName\":\"__LIVE_E2E__20260825013557-ef3f74:conflict_relocate:shop:2\",\"shopCity\":\"\",\"quantity\":1}],\"totalQty\":1}],\"orderingSessionId\":\"6a8cf1852eb81429774be73f\",\"pickingStatus\":\"pending\",\"phase\":\"awaiting_picking\",\"presentationMode\":\"awaiting_picking\",\"nextOrderingOpenAt\":\"2026-09-01T01:00:00.000Z\",\"sessionSummary\":null,\"groupDayOfWeek\":2,\"events\":[{\"at\":\"2026-08-25T01:36:04.702Z\",\"type\":\"created\",\"by\":\"\",\"byName\":\"\"}],\"vocab\":{\"statuses\":{\"pending\":{\"label\":\"Очікує підтвердження\",\"chip\":\"chip-warning\"},\"confirmed\":{\"label\":\"Підтверджено\",\"chip\":\"chip-active\"},\"in_progress\":{\"label\":\"В роботі\",\"chip\":\"chip-active\"},\"completed\":{\"label\":\"Завершено\",\"chip\":\"chip-success\"}},\"events\":{\"created\":{\"label\":\"Створено\"},\"picking_confirmed\":{\"label\":\"Підтверджено\"},\"picking_cancelled\":{\"label\":\"Старт скасовано\"},\"picking_in_progress\":{\"label\":\"В роботі\"},\"picking_completed\":{\"label\":\"Завершено\"},\"order_added\":{\"label\":\"Оновлена\"},\"rescheduled\":{\"label\":\"Перенесена\"},\"hours_changed\":{\"label\":\"Змінені години\"},\"window_closed\":{\"label\":\"Закінчилась\"}},\"phases\":{\"ordering_open\":{\"label\":\"Приймає замовлення\",\"chip\":\"chip-active\"},\"awaiting_picking\":{\"label\":\"Готово до збирання\",\"chip\":\"chip-warning\"},\"picking\":{\"label\":\"Збирається\",\"chip\":\"chip-active\"},\"completed\":{\"label\":\"Зібрано\",\"chip\":\"chip-success\"},\"idle\":{\"label\":\"Замовлень немає\",\"chip\":\"chip-warning\"}}},\"supplementCount\":0}"
+    },
+    {
+      "ok": true,
+      "name": "conflict_unassign: synthetic per-group ordering window starts open",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "conflict_unassign: HTTP order accepted",
+      "details": "status=201 error="
+    },
+    {
+      "ok": true,
+      "name": "conflict_unassign: HTTP order accepted",
+      "details": "status=201 error="
+    },
+    {
+      "ok": true,
+      "name": "conflict_unassign: closed synthetic schedule exists",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "conflict_unassign: ordering session identity survives open→closed test phase",
+      "details": "actual=\"6a8cf18f2eb81429774be747\" expected=\"6a8cf18f2eb81429774be747\""
+    },
+    {
+      "ok": true,
+      "name": "conflict_unassign: picking phase window is closed",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "conflict_unassign: conflict blocks start before unassign",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "conflict_unassign: unassign action succeeds",
+      "details": "actual=200 expected=200"
+    },
+    {
+      "ok": true,
+      "name": "conflict_unassign: Order moves to explicit parked status",
+      "details": "actual=\"new_unassign\" expected=\"new_unassign\""
+    },
+    {
+      "ok": true,
+      "name": "conflict_unassign: parked Order keeps shop ownership",
+      "details": "actual=\"6a8cf18ff2e0d992eab3d6b2\" expected=\"6a8cf18ff2e0d992eab3d6b2\""
+    },
+    {
+      "ok": true,
+      "name": "conflict_unassign: parked Order keeps delivery-group ownership",
+      "details": "actual=\"6a8cf18ff2e0d992eab3d6ac\" expected=\"6a8cf18ff2e0d992eab3d6ac\""
+    },
+    {
+      "ok": true,
+      "name": "conflict_unassign: parked Order keeps exact session ownership",
+      "details": "actual=\"6a8cf18f2eb81429774be747\" expected=\"6a8cf18f2eb81429774be747\""
+    },
+    {
+      "ok": false,
+      "name": "conflict_unassign: picking starts with remaining valid Order",
+      "details": "status=200 payload={\"coverageGaps\":true,\"gaps\":[{\"productId\":\"6a8cf18ff2e0d992eab3d6bf\",\"reason\":\"no_task\",\"productTitle\":\"__LIVE_E2E__20260825013557-ef3f74:conflict_unassign:P1\",\"productOrderNumber\":1559835983,\"imageUrl\":null,\"shops\":[{\"orderId\":\"6a8cf191f2e0d992eab3d6e6\",\"orderNumber\":953578051,\"shopName\":\"__LIVE_E2E__20260825013557-ef3f74:conflict_unassign:shop:1\",\"shopCity\":\"\",\"quantity\":1}],\"totalQty\":1}],\"orderingSessionId\":\"6a8cf18f2eb81429774be747\",\"pickingStatus\":\"pending\",\"phase\":\"awaiting_picking\",\"presentationMode\":\"awaiting_picking\",\"nextOrderingOpenAt\":\"2026-09-01T01:00:00.000Z\",\"sessionSummary\":null,\"groupDayOfWeek\":2,\"events\":[{\"at\":\"2026-08-25T01:36:15.261Z\",\"type\":\"created\",\"by\":\"\",\"byName\":\"\"}],\"vocab\":{\"statuses\":{\"pending\":{\"label\":\"Очікує підтвердження\",\"chip\":\"chip-warning\"},\"confirmed\":{\"label\":\"Підтверджено\",\"chip\":\"chip-active\"},\"in_progress\":{\"label\":\"В роботі\",\"chip\":\"chip-active\"},\"completed\":{\"label\":\"Завершено\",\"chip\":\"chip-success\"}},\"events\":{\"created\":{\"label\":\"Створено\"},\"picking_confirmed\":{\"label\":\"Підтверджено\"},\"picking_cancelled\":{\"label\":\"Старт скасовано\"},\"picking_in_progress\":{\"label\":\"В роботі\"},\"picking_completed\":{\"label\":\"Завершено\"},\"order_added\":{\"label\":\"Оновлена\"},\"rescheduled\":{\"label\":\"Перенесена\"},\"hours_changed\":{\"label\":\"Змінені години\"},\"window_closed\":{\"label\":\"Закінчилась\"}},\"phases\":{\"ordering_open\":{\"label\":\"Приймає замовлення\",\"chip\":\"chip-active\"},\"awaiting_picking\":{\"label\":\"Готово до збирання\",\"chip\":\"chip-warning\"},\"picking\":{\"label\":\"Збирається\",\"chip\":\"chip-active\"},\"completed\":{\"label\":\"Зібрано\",\"chip\":\"chip-success\"},\"idle\":{\"label\":\"Замовлень немає\",\"chip\":\"chip-warning\"}}},\"supplementCount\":0}"
+    },
+    {
+      "ok": true,
+      "name": "No unrelated TEST data changed during live E2E",
+      "details": "fingerprints identical"
+    }
+  ],
+  "preserved": []
+}

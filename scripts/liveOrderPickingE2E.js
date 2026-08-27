@@ -1199,7 +1199,11 @@ async function scenarioConflictRelocate() {
     eq(unassign.status, 200, 'conflict_relocate: operator can unassign after relocated conflict');
 
     const start = await startPicking(world, wh, true);
-    check(start.data?.started === true, 'conflict_relocate: start succeeds only after all current conflicts are gone');
+    check(
+      start.data?.started === true,
+      'conflict_relocate: start succeeds only after all current conflicts are gone',
+      `status=${start.status} payload=${JSON.stringify(start.data || {})}`,
+    );
     const session = await currentSession(world);
     await completeEveryPendingTask(world, wh, session._id);
     await assertSessionCompleted(session._id, 'conflict_relocate');
@@ -1231,7 +1235,11 @@ async function scenarioConflictUnassign() {
     eq(str(parked.orderingSessionId), str((await currentSession(world))._id), 'conflict_unassign: parked Order keeps exact session ownership');
 
     const start = await startPicking(world, wh, true);
-    check(start.data?.started === true, 'conflict_unassign: picking starts with remaining valid Order');
+    check(
+      start.data?.started === true,
+      'conflict_unassign: picking starts with remaining valid Order',
+      `status=${start.status} payload=${JSON.stringify(start.data || {})}`,
+    );
     const session = await currentSession(world);
     await completeEveryPendingTask(world, wh, session._id);
     await assertSessionCompleted(session._id, 'conflict_unassign');

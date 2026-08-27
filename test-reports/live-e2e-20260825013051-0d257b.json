@@ -1,0 +1,232 @@
+{
+  "runId": "20260825013051-0d257b",
+  "marker": "__LIVE_E2E__20260825013051-0d257b",
+  "createdAt": "2026-08-25T01:31:17.182Z",
+  "db": "tg_manager",
+  "redisWasConfiguredButIsolated": true,
+  "execute": true,
+  "requestedScenarios": [
+    "conflict_relocate",
+    "conflict_unassign"
+  ],
+  "summary": {
+    "passedScenarios": 0,
+    "failedScenarios": 2,
+    "passedAssertions": 37,
+    "failedAssertions": 2
+  },
+  "scenarios": [
+    {
+      "name": "conflict_relocate",
+      "ok": false,
+      "durationMs": 7738,
+      "error": "conflict_relocate: start succeeds only after all current conflicts are gone",
+      "assertionName": "conflict_relocate: start succeeds only after all current conflicts are gone"
+    },
+    {
+      "name": "conflict_unassign",
+      "ok": false,
+      "durationMs": 5161,
+      "error": "conflict_unassign: picking starts with remaining valid Order",
+      "assertionName": "conflict_unassign: picking starts with remaining valid Order"
+    }
+  ],
+  "assertions": [
+    {
+      "ok": true,
+      "name": "MongoDB connection",
+      "details": "db=tg_manager host=ac-hq2xfhf-shard-00-00.epfky0s.mongodb.net allowed=epfky0s.mongodb.net"
+    },
+    {
+      "ok": true,
+      "name": "No active global live-harness lease",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "Synthetic per-group schedule can represent ordering-open phase",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "Synthetic per-group schedule can represent picking-allowed phase",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "Critical Order active uniqueness index exists",
+      "details": "value=one_active_order_per_buyer_shop_session"
+    },
+    {
+      "ok": true,
+      "name": "Critical PickingTask session-scoped uniqueness index exists",
+      "details": "value=one_active_task_per_product_group_session"
+    },
+    {
+      "ok": true,
+      "name": "OrderingSession groupId+openDate unique index exists",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "Critical Block partial unique index exists",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "MongoDB transaction round-trip",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "No previous LIVE_E2E fixture leftovers or orphan manifests",
+      "details": "rows=0 manifests=0"
+    },
+    {
+      "ok": true,
+      "name": "Live Redis is isolated from this suite",
+      "details": "REDIS_URL existed but is disabled in test process"
+    },
+    {
+      "ok": true,
+      "name": "Ephemeral real Express app is writable",
+      "details": "status=ok"
+    },
+    {
+      "ok": true,
+      "name": "conflict_relocate: synthetic per-group ordering window starts open",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "conflict_relocate: HTTP order accepted",
+      "details": "status=201 error="
+    },
+    {
+      "ok": true,
+      "name": "conflict_relocate: HTTP order accepted",
+      "details": "status=201 error="
+    },
+    {
+      "ok": true,
+      "name": "conflict_relocate: HTTP order accepted",
+      "details": "status=201 error="
+    },
+    {
+      "ok": true,
+      "name": "conflict_relocate: closed synthetic schedule exists",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "conflict_relocate: ordering session identity survives open→closed test phase",
+      "details": "actual=\"6a8cf0522eb81429774be706\" expected=\"6a8cf0522eb81429774be706\""
+    },
+    {
+      "ok": true,
+      "name": "conflict_relocate: picking phase window is closed",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "conflict_relocate: initial source-shop conflict blocks start",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "conflict_relocate: permissive move to shop with another ACTIVE Order is allowed",
+      "details": "actual=200 expected=200"
+    },
+    {
+      "ok": true,
+      "name": "conflict_relocate: conflict relocates to target and STILL blocks picking start",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "conflict_relocate: target shop is reported as the new conflict",
+      "details": "value=__LIVE_E2E__20260825013051-0d257b:conflict_relocate:shop:2"
+    },
+    {
+      "ok": true,
+      "name": "conflict_relocate: operator can unassign after relocated conflict",
+      "details": "actual=200 expected=200"
+    },
+    {
+      "ok": false,
+      "name": "conflict_relocate: start succeeds only after all current conflicts are gone",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "conflict_unassign: synthetic per-group ordering window starts open",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "conflict_unassign: HTTP order accepted",
+      "details": "status=201 error="
+    },
+    {
+      "ok": true,
+      "name": "conflict_unassign: HTTP order accepted",
+      "details": "status=201 error="
+    },
+    {
+      "ok": true,
+      "name": "conflict_unassign: closed synthetic schedule exists",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "conflict_unassign: ordering session identity survives open→closed test phase",
+      "details": "actual=\"6a8cf05d2eb81429774be709\" expected=\"6a8cf05d2eb81429774be709\""
+    },
+    {
+      "ok": true,
+      "name": "conflict_unassign: picking phase window is closed",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "conflict_unassign: conflict blocks start before unassign",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "conflict_unassign: unassign action succeeds",
+      "details": "actual=200 expected=200"
+    },
+    {
+      "ok": true,
+      "name": "conflict_unassign: Order moves to explicit parked status",
+      "details": "actual=\"new_unassign\" expected=\"new_unassign\""
+    },
+    {
+      "ok": true,
+      "name": "conflict_unassign: parked Order keeps shop ownership",
+      "details": "actual=\"6a8cf05c79c6ed6ccb17e14b\" expected=\"6a8cf05c79c6ed6ccb17e14b\""
+    },
+    {
+      "ok": true,
+      "name": "conflict_unassign: parked Order keeps delivery-group ownership",
+      "details": "actual=\"6a8cf05c79c6ed6ccb17e145\" expected=\"6a8cf05c79c6ed6ccb17e145\""
+    },
+    {
+      "ok": true,
+      "name": "conflict_unassign: parked Order keeps exact session ownership",
+      "details": "actual=\"6a8cf05d2eb81429774be709\" expected=\"6a8cf05d2eb81429774be709\""
+    },
+    {
+      "ok": false,
+      "name": "conflict_unassign: picking starts with remaining valid Order",
+      "details": ""
+    },
+    {
+      "ok": true,
+      "name": "No unrelated TEST data changed during live E2E",
+      "details": "fingerprints identical"
+    }
+  ],
+  "preserved": []
+}

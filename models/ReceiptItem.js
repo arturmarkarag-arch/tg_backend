@@ -12,14 +12,61 @@ const PhotoCommentSchema = new mongoose.Schema(
   { _id: false },
 );
 
+
+const TelegramNewProductSchema = new mongoose.Schema(
+  {
+    status: {
+      type: String,
+      enum: ['not_sent', 'queued', 'sending', 'retry_wait', 'sent', 'failed', 'unknown', 'expired'],
+      default: 'not_sent',
+    },
+    chatId: { type: String, default: '' },
+    messageId: { type: Number, default: null },
+    telegramPhotoFileId: { type: String, default: '' },
+
+    // Canonical Telegram payload. Only user-visible publication data belongs in
+    // the hash/snapshots; canvas label positions intentionally do not.
+    desiredHash: { type: String, default: '' },
+    desiredSnapshot: { type: mongoose.Schema.Types.Mixed, default: null },
+    desiredCaption: { type: String, default: '' },
+    appliedHash: { type: String, default: '' },
+    appliedSnapshot: { type: mongoose.Schema.Types.Mixed, default: null },
+    appliedCaption: { type: String, default: '' },
+
+    requestedAt: { type: Date, default: null },
+    requestedBy: { type: String, default: '' },
+    sentAt: { type: Date, default: null },
+    editedAt: { type: Date, default: null },
+    attempts: { type: Number, default: 0 },
+    nextAttemptAt: { type: Date, default: null },
+    leaseUntil: { type: Date, default: null },
+    lastAttemptAt: { type: Date, default: null },
+    possibleDuplicate: { type: Boolean, default: false },
+    lastError: { type: mongoose.Schema.Types.Mixed, default: () => ({}) },
+
+    // Remember the worker's answer for the exact canonical payload. This stops a
+    // visual-only re-save (moving price/comment labels) from asking again.
+    lastDecision: { type: String, enum: ['', 'publish', 'skip'], default: '' },
+    lastDecisionHash: { type: String, default: '' },
+    lastDecisionAt: { type: Date, default: null },
+    lastDecisionBy: { type: String, default: '' },
+  },
+  { _id: false },
+);
+
 const ReceiptItemSchema = new mongoose.Schema(
   {
     receiptId: { type: mongoose.Schema.Types.ObjectId, ref: 'Receipt', required: true },
 
-    // Multi-worker ownership: only this user (or admin) may edit owner-only
-    // receiving fields and delete the item. Required for new items; legacy rows
-    // created before this field existed simply have it unset.
+    // Immutable provenance only: who physically accepted the row. It is NOT an
+    // edit lock; every warehouse/admin user may edit. Delete policy stays separate.
     createdBy: { type: String, default: '' },
+
+    // Optimistic-concurrency clocks. Legacy rows read as revision 0.
+    // editRevision protects receiving/commercial/photo metadata; routingRevision
+    // protects route choices independently so cosmetic edits never block routing.
+    editRevision: { type: Number, default: 0, min: 0 },
+    routingRevision: { type: Number, default: 0, min: 0 },
 
     // Per-item publication confirmation. In the current staged regular flow the
     // receiving Receipt may be completed before this happens; confirmation later
@@ -120,8 +167,22 @@ const ReceiptItemSchema = new mongoose.Schema(
     // shop-owned ShopProduct created with linkedProductId:null. Tracked for
     // idempotency + unconfirm/rollback compatibility.
     createdShopProductId: { type: mongoose.Schema.Types.ObjectId, ref: 'ShopProduct', default: null },
+
+
+    // Durable publication state for the dedicated Telegram «Нові Товари» group.
+    // One receipt item owns at most one live Telegram post; subsequent accepted
+    // changes converge by editing messageId instead of creating duplicates.
+    telegramNewProduct: { type: TelegramNewProductSchema, default: () => ({}) },
   },
   { timestamps: true }
 );
+
+// The Telegram scheduler checks due/expired publication work every few seconds.
+// Keep that operational scan bounded as receipt history grows.
+ReceiptItemSchema.index({
+  'telegramNewProduct.status': 1,
+  'telegramNewProduct.nextAttemptAt': 1,
+  'telegramNewProduct.leaseUntil': 1,
+});
 
 module.exports = mongoose.model('ReceiptItem', ReceiptItemSchema);

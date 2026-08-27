@@ -1,26 +1,28 @@
 /**
  * Multi-worker receipt item rules.
  *
- * Ownership model:
- *   - The worker who added an item (item.createdBy) — plus any admin — may edit
- *     owner-only receiving fields / routing and delete/confirm it.
- *   - Any other warehouse/admin user may edit ONLY the shared shop-facing fields
- *     (price, qtyPerPackage).
+ * `createdBy` is immutable provenance (who physically accepted the row), NOT an
+ * edit lock. Every authenticated receipt staff member (admin or warehouse) may
+ * prepare, route, confirm and correct a row. Concurrency is protected separately
+ * by per-row edit/routing revisions, so widening permissions never becomes
+ * last-write-wins ownership stealing.
  *
- * `totalQty` is retained as received-quantity reference data. It is NOT used to
- * infer leftovers or automatically choose a route.
+ * Deletion deliberately stays narrower: draft rows may be removed by their
+ * original receiver or an admin; confirmed rows only by an admin.
  */
 
 const { appError } = require('./errors');
 const { normalizeReceiptItemRouting, validateReceiptItemRouting } = require('./receiptRouting');
 
-const OWNER_ONLY_FIELDS = new Set([
-  'totalQty', 'originalPhotoUrl', 'destination', 'routing', 'deliveryGroupIds', 'qtyPerShop',
+const OWNER_ONLY_FIELDS = new Set([]);
+const SHARED_FIELDS = new Set([
+  'price', 'qtyPerPackage', 'photoUrl', 'photoMeta', 'totalQty', 'originalPhotoUrl',
+  'destination', 'routing', 'deliveryGroupIds', 'qtyPerShop',
 ]);
 
-// `photoUrl` may be re-rendered by the shared Stage-2 preparation flow while the
-// clean source photo (`originalPhotoUrl`) remains owner/admin-only receiving data.
-const SHARED_FIELDS = new Set(['price', 'qtyPerPackage', 'photoUrl', 'photoMeta']);
+function isReceiptStaff(user) {
+  return !!user && (user.role === 'admin' || user.role === 'warehouse');
+}
 
 function isOwnerOrAdmin(user, item) {
   if (!user) return false;
@@ -29,15 +31,7 @@ function isOwnerOrAdmin(user, item) {
 }
 
 function assertCanEditItem(user, item, changedFields) {
-  if (isOwnerOrAdmin(user, item)) return;
-
-  // A non-owner may participate only in Stage 2 shared commercial preparation.
-  // Do not rely on a blacklist here: newly-added receiving/business fields must
-  // be denied by default until they are explicitly classified as shared.
-  const disallowed = (changedFields || []).filter((f) => !SHARED_FIELDS.has(f));
-  if (disallowed.length > 0) {
-    throw appError('receipt_item_forbidden_edit', { owner: item.createdBy || '' });
-  }
+  if (!isReceiptStaff(user)) throw appError('forbidden');
 }
 
 function assertCanDeleteItem(user, item) {
@@ -51,9 +45,7 @@ function assertCanDeleteItem(user, item) {
 }
 
 function assertCanConfirmItem(user, item) {
-  if (!isOwnerOrAdmin(user, item)) {
-    throw appError('receipt_item_forbidden_confirm');
-  }
+  if (!isReceiptStaff(user)) throw appError('forbidden');
 }
 
 function preparationMissingFields(item) {
@@ -117,6 +109,7 @@ function assertItemReadyToConfirm(item, receipt = null) {
 module.exports = {
   OWNER_ONLY_FIELDS,
   SHARED_FIELDS,
+  isReceiptStaff,
   isOwnerOrAdmin,
   assertCanEditItem,
   assertCanDeleteItem,

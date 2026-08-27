@@ -45,6 +45,10 @@ const ERRORS = {
                                 'Скасування, перепризначення та зміна ключових даних заблоковані.' },
   receipt_item_not_found:   { status: 404, message: 'Позицію не знайдено' },
   receipt_save_failed:      { status: 500, message: 'Не вдалося оновити позицію' },
+  receipt_item_stale:       { status: 409, message: ({ currentRevision } = {}) =>
+                                `Цей товар уже змінив інший працівник${currentRevision != null ? ` (актуальна версія: ${currentRevision})` : ''}. Ваші застарілі дані не були записані. Оновіть картку і повторіть.` },
+  receipt_route_stale:      { status: 409, message: ({ currentRevision } = {}) =>
+                                `Маршрут цього товару вже змінив інший працівник${currentRevision != null ? ` (актуальна версія: ${currentRevision})` : ''}. Ваш маршрут не був записаний. Оновіть картку і повторіть.` },
   receipt_commit_failed:    { status: 500, message: 'Не вдалося провести накладну' },
   receipt_delete_item_failed:{ status: 500, message: 'Не вдалося видалити позицію' },
 
@@ -168,6 +172,11 @@ const ERRORS = {
   product_upload_failed_generic: { status: 500, message: 'Не вдалося завантажити' },
   telegram_groups_not_configured: { status: 500, message: 'Не налаштовано Telegram-групи для розсилок' },
   telegram_bot_not_initialized:   { status: 500, message: 'Telegram-бот не ініціалізований' },
+  telegram_new_products_group_invalid: { status: 400, message: 'ID Telegram-групи «Нові Товари» має бути числом' },
+  telegram_new_products_group_not_configured: { status: 409, message: 'Telegram-групу «Нові Товари» не налаштовано' },
+  telegram_new_products_original_photo_missing: { status: 422, message: 'Для публікації потрібне чисте оригінальне фото товару' },
+  telegram_new_products_decision_invalid: { status: 400, message: 'Невірна дія для Telegram-публікації' },
+  telegram_new_products_delivery_unknown: { status: 409, message: 'Telegram міг прийняти попередню публікацію, але сервер не отримав message_id. Автоматичний повтор заблоковано, щоб не створити дублікат.' },
   search_r2_public_url_missing:   { status: 503, message: 'R2_PUBLIC_URL не сконфігуровано' },
   search_no_existing_request:     { status: 404, message: 'Запит для цього штрихкоду не знайдено' },
   search_resend_rate_limited:     { status: 429, message: 'Забагато повторних запитів для цього штрихкоду. Спробуйте пізніше' },
@@ -246,14 +255,13 @@ const ERRORS = {
   receipt_log_action_required: { status: 400, message: 'Поле action обовʼязкове' },
 
   // ── Receipts (multi-worker) ────────────────────────────────────────────────
-  receipt_item_forbidden_edit: { status: 403, message: ({ owner } = {}) =>
-                                `Цю позицію додав інший працівник${owner ? ` (${owner})` : ''}. Ви можете редагувати лише ціну та кількість в упаковці.` },
+  receipt_item_forbidden_edit: { status: 403, message: 'Редагувати прийомку можуть лише працівники складу та адміністратори.' },
   receipt_item_forbidden_delete: { status: 403, message: 'Видалити позицію може лише працівник, який її додав' },
-  receipt_item_forbidden_confirm: { status: 403, message: 'Підтвердити позицію може лише працівник, який її додав' },
-  receipt_item_already_confirmed: { status: 409, message: 'Позицію вже підтверджено — зміни заборонені. Зніміть підтвердження, щоб редагувати.' },
+  receipt_item_forbidden_confirm: { status: 403, message: 'Підтвердити позицію можуть лише працівники складу та адміністратори.' },
+  receipt_item_already_confirmed: { status: 409, message: 'Підтверджену позицію видалити може лише адміністратор.' },
   receipt_item_not_confirmed_yet: { status: 409, message: 'Позиція ще не підтверджена' },
   receipt_items_not_all_confirmed: { status: 409, message: ({ pending } = {}) =>
-                                `Не всі позиції підтверджені (${pending ?? '?'} без підпису). Кожен працівник має підтвердити свої позиції перед проведенням.` },
+                                `Не всі позиції підтверджені (${pending ?? '?'} без підпису). Підтвердіть усі позиції перед проведенням.` },
   receipt_item_incomplete: { status: 422, message: ({ fields } = {}) =>
                                 `Щоб підтвердити позицію, заповніть: ${fields || 'усі обовʼязкові поля'}.` },
   receipt_item_not_prepared: { status: 422, message: ({ fields } = {}) =>

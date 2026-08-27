@@ -60,7 +60,7 @@ const {
 } = require('../services/receiptSync');
 
 const staffOnly = requireTelegramRoles(['admin', 'warehouse']);
-const RECEIPT_GALLERY_FIELDS = '_id receiptId photoUrl originalPhotoUrl totalQty destination routingVersion routing price qtyPerPackage status createdBy supplementBatchVersion supplementPublishRequestedAt';
+const RECEIPT_GALLERY_FIELDS = '_id receiptId photoUrl originalPhotoUrl totalQty destination routingVersion routing price qtyPerPackage status createdBy editRevision routingRevision supplementBatchVersion supplementPublishRequestedAt telegramNewProduct.status telegramNewProduct.appliedHash telegramNewProduct.desiredHash telegramNewProduct.lastDecision telegramNewProduct.lastDecisionHash telegramNewProduct.lastDecisionAt telegramNewProduct.sentAt telegramNewProduct.editedAt telegramNewProduct.requestedAt telegramNewProduct.lastError telegramNewProduct.possibleDuplicate';
 
 async function supplementGroupNamesByWaveForOffers(offers = []) {
   const waveIds = [...new Set(offers
@@ -323,6 +323,7 @@ router.get('/items-gallery', staffOnly, asyncHandler(async (req, res) => {
     offersByItemId.set(itemId, [...(offersByItemId.get(itemId) || []), offer]);
   }
   const receiptById = new Map(receipts.map((receipt) => [String(receipt._id), receipt]));
+  const { isPublicationExpired } = require('../services/receiptNewProductTelegram');
   const items = rows.map((row) => {
     const receipt = receiptById.get(String(row.receiptId || ''));
     const routing = normalizeReceiptItemRouting(row, receipt);
@@ -347,6 +348,11 @@ router.get('/items-gallery', staffOnly, asyncHandler(async (req, res) => {
       receiptTargetDeliveryGroupId: receipt?.targetDeliveryGroupId || null,
       supplementState,
       supplementGroupName: supplementGroupNameByWaveId.get(String(displaySupplementOffer?.waveId || '')) || '',
+      telegramNewProduct: {
+        ...(row.telegramNewProduct || {}),
+        expired: String(row.telegramNewProduct?.status || '') === 'expired'
+          || isPublicationExpired(row.telegramNewProduct || {}),
+      },
     };
   });
 
@@ -907,6 +913,7 @@ router.get('/:id/items', staffOnly, asyncHandler(async (req, res) => {
   const receipt = await Receipt.findById(req.params.id);
   if (!receipt) throw appError('receipt_not_found');
 
+  const { isPublicationExpired } = require('../services/receiptNewProductTelegram');
   const items = await ReceiptItem.find({ receiptId: receipt._id }).sort({ createdAt: -1 }).lean();
 
   const supplementOffers = items.length
@@ -969,6 +976,11 @@ router.get('/:id/items', staffOnly, asyncHandler(async (req, res) => {
       productCurrentQty: product?.quantity ?? null,
       supplementState,
       supplementGroupName: supplementGroupNameByWaveId.get(String(displaySupplementOffer?.waveId || '')) || '',
+      telegramNewProduct: {
+        ...(item.telegramNewProduct || {}),
+        expired: String(item.telegramNewProduct?.status || '') === 'expired'
+          || isPublicationExpired(item.telegramNewProduct || {}),
+      },
     };
   });
 
@@ -1015,6 +1027,14 @@ router.patch('/:id/items/:itemId', staffOnly, asyncHandler(async (req, res) => {
   }
 
   const parsed = await parseMultipart(req);
+
+  let expectedEditRevision = null;
+  if (parsed.fields.expectedEditRevision !== undefined) {
+    expectedEditRevision = parseIntField(parsed.fields.expectedEditRevision, -1);
+    if (!Number.isInteger(expectedEditRevision) || expectedEditRevision < 0) {
+      throw appError('validation_failed', { field: 'expectedEditRevision' });
+    }
+  }
 
   // ── Розбір payload. `undefined` = поле не надсилали → лишається як є ───────
   let nextDestination;
@@ -1134,6 +1154,15 @@ router.patch('/:id/items/:itemId', staffOnly, asyncHandler(async (req, res) => {
 
       assertCanEditItem(req.user, item, changedFields);
 
+      // Modern clients pin the revision they actually edited. If another worker
+      // committed receiving/commercial data meanwhile, reject instead of silently
+      // overwriting their newer values. Legacy clients without the token remain
+      // readable during rollout, but every current client sends it.
+      if (changedFields.length > 0 && expectedEditRevision !== null
+          && Number(item.editRevision || 0) !== expectedEditRevision) {
+        throw appError('receipt_item_stale', { currentRevision: Number(item.editRevision || 0) });
+      }
+
       // Once a product has entered an operational flow, the receipt must not be
       // used as a back door to change what sellers/warehouse are working with.
       // Cosmetic overlay/comment edits remain allowed because they do not change
@@ -1184,6 +1213,7 @@ router.patch('/:id/items/:itemId', staffOnly, asyncHandler(async (req, res) => {
         item.photoUrl = r2Url('products', photoFilename);
         item.photoName = photoFilename;
       }
+      if (changedFields.length > 0) item.editRevision = Number(item.editRevision || 0) + 1;
 
       // A confirmed row is already a published system item. Draft rows may keep
       // price/package empty while receiving, but once confirmed we never allow an
@@ -1268,6 +1298,45 @@ router.patch('/:id/items/:itemId', staffOnly, asyncHandler(async (req, res) => {
   res.json(item);
 }));
 
+// ── TELEGRAM «НОВІ ТОВАРИ» ────────────────────────────────────────────────
+// Publication is a side effect of an already-saved receipt item. Route/preparation
+// persistence never waits for Telegram and never rolls back because Telegram is
+// unavailable. The POST only records the worker's decision + durable desired
+// payload; the shared Telegram scheduler performs the Bot API call in background.
+router.get('/:id/items/:itemId/telegram-new-product', staffOnly, asyncHandler(async (req, res) => {
+  const { getPublicationState } = require('../services/receiptNewProductTelegram');
+  const state = await getPublicationState(req.params.id, req.params.itemId);
+  if (!state) throw appError('receipt_item_not_found');
+  res.json(state);
+}));
+
+router.post('/:id/items/:itemId/telegram-new-product', staffOnly, asyncHandler(async (req, res) => {
+  const item = await ReceiptItem.findOne({ _id: req.params.itemId, receiptId: req.params.id }).lean();
+  if (!item) throw appError('receipt_item_not_found');
+  assertCanConfirmItem(req.user, item);
+  if (item.status !== 'confirmed') throw appError('receipt_item_not_confirmed_yet');
+
+  const { recordDecision } = require('../services/receiptNewProductTelegram');
+  try {
+    const state = await recordDecision({
+      receiptId: req.params.id,
+      itemId: req.params.itemId,
+      decision: String(req.body?.decision || ''),
+      actorId: String(req.telegramUser?.telegramId || ''),
+      forceUnknownRetry: req.body?.forceUnknownRetry === true,
+    });
+    if (!state) throw appError('receipt_item_not_found');
+    res.json(state);
+  } catch (err) {
+    const code = String(err?.message || '');
+    if (code === 'telegram_new_products_group_not_configured') throw appError(code);
+    if (code === 'telegram_new_products_original_photo_missing') throw appError(code);
+    if (code === 'telegram_new_products_decision_invalid') throw appError(code);
+    if (code === 'telegram_new_products_delivery_unknown') throw appError(code);
+    throw err;
+  }
+}));
+
 // ВИДАЛЕННЯ ПОЗИЦІЇ (DELETE)
 /**
  * Видалити рядок можна і з проведеної накладної — але лише поки товар, який він
@@ -1291,7 +1360,7 @@ router.delete('/:id/items/:itemId', staffOnly, asyncHandler(async (req, res) => 
       ).session(session);
       if (!item) throw appError('receipt_item_not_found');
 
-      // Only the worker who added it (or admin) may delete, and a confirmed item
+      // Delete policy stays narrower than edit policy: original receiver/admin for drafts; confirmed rows
       // is admin-only. Checked inside the txn so a concurrent confirm cannot slip
       // between the check and the delete.
       assertCanDeleteItem(req.user, item);
@@ -1357,6 +1426,18 @@ router.patch('/items/routing-batch', staffOnly, asyncHandler(async (req, res) =>
     throw appError('validation_failed', { field: 'itemIds' });
   }
 
+  const expectedRoutingRevisions = req.body?.expectedRoutingRevisions
+    && typeof req.body.expectedRoutingRevisions === 'object'
+    && !Array.isArray(req.body.expectedRoutingRevisions)
+      ? req.body.expectedRoutingRevisions
+      : {};
+  for (const [itemId, raw] of Object.entries(expectedRoutingRevisions)) {
+    const value = Number(raw);
+    if (!itemIds.includes(String(itemId)) || !Number.isInteger(value) || value < 0) {
+      throw appError('validation_failed', { field: 'expectedRoutingRevisions' });
+    }
+  }
+
   const body = req.body?.routing || {};
   const routing = {
     warehouse: body.warehouse === true,
@@ -1381,6 +1462,10 @@ router.patch('/items/routing-batch', staffOnly, asyncHandler(async (req, res) =>
   for (const item of items) {
     if (item.status === 'confirmed') assertCanConfirmItem(req.user, item);
     else assertCanEditItem(req.user, item, ['routing']);
+    const expected = expectedRoutingRevisions[String(item._id)];
+    if (expected !== undefined && Number(item.routingRevision || 0) !== Number(expected)) {
+      throw appError('receipt_route_stale', { currentRevision: Number(item.routingRevision || 0) });
+    }
   }
 
   const receiptIds = [...new Set(items.map((item) => String(item.receiptId || '')).filter(Boolean))];
@@ -1438,6 +1523,7 @@ router.patch('/items/routing-batch', staffOnly, asyncHandler(async (req, res) =>
           receiptId: item.receiptId,
           itemId: item._id,
           nextRouting: routing,
+          expectedRoutingRevision: expectedRoutingRevisions[String(item._id)] ?? null,
         });
       } catch (err) {
         failures.push({
@@ -1461,21 +1547,38 @@ router.patch('/items/routing-batch', staffOnly, asyncHandler(async (req, res) =>
     let draftUpdatedItems = [];
     try {
       await session.withTransaction(async () => {
-        const result = await ReceiptItem.updateMany(
-          { _id: { $in: draftIds }, status: 'draft' },
-          {
-            $set: {
-              routingVersion: 1,
-              routing,
-              destination: legacyDestinationForRouting(routing),
-              supplementBatchVersion: routing.supplement ? 2 : 0,
-              supplementPublishRequestedAt: null,
+        for (const draftItem of draftItems) {
+          const expected = expectedRoutingRevisions[String(draftItem._id)];
+          const result = await ReceiptItem.updateOne(
+            {
+              _id: draftItem._id,
+              status: 'draft',
+              ...(expected === undefined
+                ? {}
+                : Number(expected) === 0
+                  ? { $or: [{ routingRevision: 0 }, { routingRevision: { $exists: false } }] }
+                  : { routingRevision: Number(expected) }),
             },
-          },
-          { session },
-        );
-        if (Number(result.matchedCount ?? result.n ?? 0) !== draftIds.length) {
-          throw appError('receipt_routing_batch_draft_only');
+            {
+              $set: {
+                routingVersion: 1,
+                routing,
+                destination: legacyDestinationForRouting(routing),
+                supplementBatchVersion: routing.supplement ? 2 : 0,
+                supplementPublishRequestedAt: null,
+              },
+              $inc: { routingRevision: 1 },
+            },
+            { session },
+          );
+          if (Number(result.matchedCount ?? result.n ?? 0) !== 1) {
+            const live = await ReceiptItem.findById(draftItem._id, 'status routingRevision').session(session).lean();
+            if (live?.status === 'draft' && expected !== undefined
+                && Number(live.routingRevision || 0) !== Number(expected)) {
+              throw appError('receipt_route_stale', { currentRevision: Number(live.routingRevision || 0) });
+            }
+            throw appError('receipt_routing_batch_draft_only');
+          }
         }
 
         const logs = draftItems.map((item) => ({
@@ -1520,6 +1623,7 @@ router.patch('/items/routing-batch', staffOnly, asyncHandler(async (req, res) =>
           byRole: req.telegramUser?.role || 'warehouse',
         },
         reason: 'routing_corrected_batch',
+        expectedRoutingRevision: expectedRoutingRevisions[String(item._id)] ?? null,
       });
       if (result?.item) updatedItems.push(result.item);
     }
@@ -1538,7 +1642,7 @@ router.patch('/:id/items/:itemId/routing', staffOnly, asyncHandler(async (req, r
   const receipt = await Receipt.findById(req.params.id).lean();
   if (!receipt) throw appError('receipt_not_found');
 
-  // First read is for ownership only. The actual write below is a single atomic
+  // First read is for authorization/readiness only. The actual write below is a single atomic
   // status=draft CAS, so it cannot race a confirm into "artifacts from route A,
   // flags from route B".
   const authItem = await ReceiptItem.findOne({ _id: req.params.itemId, receiptId: req.params.id }).lean();
@@ -1548,6 +1652,13 @@ router.patch('/:id/items/:itemId/routing', staffOnly, asyncHandler(async (req, r
   assertItemReadyForRouting(authItem);
 
   const body = req.body || {};
+  const expectedRoutingRevision = body.expectedRoutingRevision == null
+    ? null
+    : Number(body.expectedRoutingRevision);
+  if (expectedRoutingRevision !== null
+      && (!Number.isInteger(expectedRoutingRevision) || expectedRoutingRevision < 0)) {
+    throw appError('validation_failed', { field: 'expectedRoutingRevision' });
+  }
   const routing = {
     warehouse: body.warehouse === true,
     mandatory: body.mandatory === true,
@@ -1609,6 +1720,11 @@ router.patch('/:id/items/:itemId/routing', staffOnly, asyncHandler(async (req, r
       totalQty: { $gte: 1 },
       price: { $gt: 0 },
       qtyPerPackage: { $gte: 1 },
+      ...(expectedRoutingRevision === null
+        ? {}
+        : expectedRoutingRevision === 0
+          ? { $or: [{ routingRevision: 0 }, { routingRevision: { $exists: false } }] }
+          : { routingRevision: expectedRoutingRevision }),
     },
     {
       $set: {
@@ -1624,6 +1740,7 @@ router.patch('/:id/items/:itemId/routing', staffOnly, asyncHandler(async (req, r
           : 0,
         supplementPublishRequestedAt: null,
       },
+      $inc: { routingRevision: 1 },
     },
     { new: false },
   );
@@ -1631,6 +1748,11 @@ router.patch('/:id/items/:itemId/routing', staffOnly, asyncHandler(async (req, r
     const currentItem = await ReceiptItem.findOne({ _id: req.params.itemId, receiptId: req.params.id }).lean();
     if (!currentItem) throw appError('receipt_item_not_found');
     if (currentItem.status === 'draft') assertItemReadyForRouting(currentItem);
+    if (currentItem.status === 'draft'
+        && expectedRoutingRevision !== null
+        && Number(currentItem.routingRevision || 0) !== expectedRoutingRevision) {
+      throw appError('receipt_route_stale', { currentRevision: Number(currentItem.routingRevision || 0) });
+    }
     throw appError('receipt_route_locked');
   }
 
@@ -1663,6 +1785,11 @@ router.patch('/:id/items/:itemId/routing-correction', staffOnly, asyncHandler(as
   assertCanConfirmItem(req.user, item);
 
   const body = req.body || {};
+  const expectedRoutingRevision = body.expectedRoutingRevision == null ? null : Number(body.expectedRoutingRevision);
+  if (expectedRoutingRevision !== null
+      && (!Number.isInteger(expectedRoutingRevision) || expectedRoutingRevision < 0)) {
+    throw appError('validation_failed', { field: 'expectedRoutingRevision' });
+  }
   const { correctReceiptItemRouting } = require('../services/receiptRoutingCorrectionCommand');
   const result = await correctReceiptItemRouting({
     receiptId: req.params.id,
@@ -1679,6 +1806,7 @@ router.patch('/:id/items/:itemId/routing-correction', staffOnly, asyncHandler(as
       byRole: req.telegramUser?.role || 'warehouse',
     },
     reason: String(body.reason || 'routing_corrected'),
+    expectedRoutingRevision,
   });
   res.json(result.item);
 }));
@@ -1791,7 +1919,7 @@ router.post('/:id/items/:itemId/add-warehouse-remainder', staffOnly, asyncHandle
 }));
 
 // ── CONFIRM / UNCONFIRM A SINGLE ITEM ─────────────────────────────────────
-// Only the worker who added the item (or an admin) may sign it off. A receipt
+// Any warehouse/admin worker may sign it off. `createdBy` is audit provenance only. A receipt
 // can only be committed once every non-deleted item is confirmed.
 //
 // Підтвердження працює і в проведеній накладній: рядок, доданий після
@@ -1813,6 +1941,22 @@ router.post('/:id/items/:itemId/confirm', staffOnly, asyncHandler(async (req, re
       receiptDoc = receipt;
 
       assertCanConfirmItem(req.user, item);
+      const expectedEditRevision = req.body?.expectedEditRevision == null ? null : Number(req.body.expectedEditRevision);
+      const expectedRoutingRevision = req.body?.expectedRoutingRevision == null ? null : Number(req.body.expectedRoutingRevision);
+      if (expectedEditRevision !== null
+          && (!Number.isInteger(expectedEditRevision) || expectedEditRevision < 0)) {
+        throw appError('validation_failed', { field: 'expectedEditRevision' });
+      }
+      if (expectedRoutingRevision !== null
+          && (!Number.isInteger(expectedRoutingRevision) || expectedRoutingRevision < 0)) {
+        throw appError('validation_failed', { field: 'expectedRoutingRevision' });
+      }
+      if (expectedEditRevision !== null && Number(item.editRevision || 0) !== expectedEditRevision) {
+        throw appError('receipt_item_stale', { currentRevision: Number(item.editRevision || 0) });
+      }
+      if (expectedRoutingRevision !== null && Number(item.routingRevision || 0) !== expectedRoutingRevision) {
+        throw appError('receipt_route_stale', { currentRevision: Number(item.routingRevision || 0) });
+      }
       assertItemReadyToConfirm(item, receipt);
 
       // A cached v1 item may already carry an explicit group before batch publication.
@@ -2183,7 +2327,7 @@ router.post('/:id/commit', staffOnly, asyncHandler(async (req, res) => {
     const items = await ReceiptItem.find({ receiptId: receipt._id }).session(session);
     if (!items.length) throw appError('receipt_no_items');
 
-    // Multi-worker gate: every item must be signed off by its owner first.
+    // Multi-worker gate: every item must be confirmed before commit; any warehouse/admin may confirm.
     const pendingConfirm = items.filter((item) => item.status !== 'confirmed').length;
     if (pendingConfirm > 0) {
       throw appError('receipt_items_not_all_confirmed', { pending: pendingConfirm });

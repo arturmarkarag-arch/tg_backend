@@ -101,7 +101,7 @@ async function assertRoutingCorrectionAllowed({ item, receipt, nextRouting, sess
   return { previous, supplementState: lifecycle.state, activeOffer: lifecycle.activeOffer };
 }
 
-async function preflightReceiptItemRoutingCorrection({ receiptId, itemId, nextRouting }) {
+async function preflightReceiptItemRoutingCorrection({ receiptId, itemId, nextRouting, expectedRoutingRevision = null }) {
   const rid = str(receiptId);
   const iid = str(itemId);
   const receipt = await Receipt.findById(rid).lean();
@@ -109,6 +109,10 @@ async function preflightReceiptItemRoutingCorrection({ receiptId, itemId, nextRo
   if (!receipt) throw appError('receipt_not_found');
   if (!item) throw appError('receipt_item_not_found');
   if (item.status !== 'confirmed') throw appError('receipt_item_not_confirmed_yet');
+  if (expectedRoutingRevision !== null
+      && Number(item.routingRevision || 0) !== Number(expectedRoutingRevision)) {
+    throw appError('receipt_route_stale', { currentRevision: Number(item.routingRevision || 0) });
+  }
 
   const previous = normalizeReceiptItemRouting(item, receipt);
   const requested = {
@@ -137,6 +141,7 @@ async function correctReceiptItemRouting({
   nextRouting,
   actor = {},
   reason = 'routing_corrected',
+  expectedRoutingRevision = null,
 }) {
   const rid = str(receiptId);
   const iid = str(itemId);
@@ -146,6 +151,10 @@ async function correctReceiptItemRouting({
     if (!preReceipt) throw appError('receipt_not_found');
     if (!preItem) throw appError('receipt_item_not_found');
     if (preItem.status !== 'confirmed') throw appError('receipt_item_not_confirmed_yet');
+    if (expectedRoutingRevision !== null
+        && Number(preItem.routingRevision || 0) !== Number(expectedRoutingRevision)) {
+      throw appError('receipt_route_stale', { currentRevision: Number(preItem.routingRevision || 0) });
+    }
 
     const previousRouting = normalizeReceiptItemRouting(preItem, preReceipt);
     const requested = {
@@ -185,7 +194,11 @@ async function correctReceiptItemRouting({
         if (item.status !== 'confirmed') throw appError('receipt_item_not_confirmed_yet');
 
         const livePrevious = normalizeReceiptItemRouting(item, receipt);
-        if (!sameRouting(livePrevious, previousRouting)) throw appError('receipt_route_locked');
+        if (expectedRoutingRevision !== null
+            && Number(item.routingRevision || 0) !== Number(expectedRoutingRevision)) {
+          throw appError('receipt_route_stale', { currentRevision: Number(item.routingRevision || 0) });
+        }
+        if (!sameRouting(livePrevious, previousRouting)) throw appError('receipt_route_stale', { currentRevision: Number(item.routingRevision || 0) });
 
         await assertRoutingCorrectionAllowed({
           item,
@@ -221,6 +234,7 @@ async function correctReceiptItemRouting({
             : null,
         };
         item.destination = legacyDestinationForRouting(item.routing);
+        item.routingRevision = Number(item.routingRevision || 0) + 1;
 
         if (!item.routing.supplement) {
           item.supplementBatchVersion = 0;
