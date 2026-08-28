@@ -22,6 +22,8 @@ const { isEnabled: redisEnabled } = require('./utils/redis');
 const Order = require('./models/Order');
 const PickingTask = require('./models/PickingTask');
 const Product = require('./models/Product');
+const Receipt = require('./models/Receipt');
+const ReceiptItem = require('./models/ReceiptItem');
 const Block = require('./models/Block');
 const { startRetentionScheduler } = require('./services/retention');
 const { startSupplementScheduler } = require('./services/supplementScheduler');
@@ -137,6 +139,18 @@ async function startServer() {
         'Виправте дублікати та перезапустіть сервер.',
       ],
       models: [Order],
+    });
+
+    await syncCritical({
+      key: 'receipt_bulk_intake_identity',
+      title: 'Не створилися критичні індекси масової прийомки',
+      whatBroke: 'Не підтверджено ідемпотентність bulk-intake: один batchId має створювати лише одну технічну накладну, а один clientItemId — одну позицію в ній.',
+      howToFix: [
+        'Перевірте db.receipts.getIndexes() і db.receiptitems.getIndexes().',
+        'intakeBatchId має бути UNIQUE partial для string, а receiptId+intakeClientItemId — UNIQUE partial для string.',
+        'Знайдіть і виправте дублікати intakeBatchId або receiptId+intakeClientItemId, після чого перезапустіть сервер.',
+      ],
+      models: [Receipt, ReceiptItem],
     });
 
     await syncCritical({

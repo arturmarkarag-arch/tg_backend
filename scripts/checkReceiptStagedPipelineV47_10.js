@@ -23,9 +23,20 @@ assert.match(permissions, /function assertItemReadyForRouting\(item\)/);
 assert.match(errors, /receipt_item_not_prepared/);
 
 // Current routing endpoint checks readiness and re-checks it in the atomic CAS.
+// Modern routingVersion>=1 rows deliberately do NOT require received quantity;
+// legacy rows keep that stock-bearing guard.
 assert.match(routes, /assertItemReadyForRouting\(authItem\)/);
-assert.match(routes, /status:\s*'draft',[\s\S]*photoUrl:\s*\{ \$nin: \['', null\] \},[\s\S]*totalQty:\s*\{ \$gte: 1 \},[\s\S]*price:\s*\{ \$gt: 0 \},[\s\S]*qtyPerPackage:\s*\{ \$gte: 1 \}/);
+assert.match(routes, /status:\s*'draft',[\s\S]*photoUrl:\s*\{ \$nin: \['', null\] \},[\s\S]*routingVersion[\s\S]*price:\s*\{ \$gt: 0 \},[\s\S]*qtyPerPackage:\s*\{ \$gte: 1 \}/);
+assert.match(routes, /Number\(authItem\.routingVersion \|\| 0\) >= 1 \? \{\} : \{ totalQty: \{ \$gte: 1 \} \}/);
 assert.match(routes, /if \(currentItem\.status === 'draft'\) assertItemReadyForRouting\(currentItem\)/);
+assert.match(permissions, /!isModernReceiptItem\(item\)[\s\S]*Number\(item\?\.totalQty\) >= 1/);
+
+// Batch routing is not allowed to bypass the same preparation gate.
+assert.match(routes, /router\.patch\('\/items\/routing-batch'[\s\S]*assertItemReadyForRouting\(item\)/);
+
+// Modern mass intake creates completed technical receipts with draft items and
+// unknown received quantity, instead of forcing a fake zero.
+assert.match(routes, /router\.post\('\/bulk-intake'[\s\S]*intakeMode:\s*'bulk'[\s\S]*status:\s*'draft'[\s\S]*routingVersion:\s*1[\s\S]*totalQty:\s*null/);
 
 // Cached legacy create cannot smuggle a destination through before preparation.
 assert.match(routes, /else if \(parsed\.fields\.destination !== undefined\)[\s\S]*assertItemReadyForRouting\(\{[\s\S]*price: initialPrice,[\s\S]*qtyPerPackage: initialQtyPerPackage/);

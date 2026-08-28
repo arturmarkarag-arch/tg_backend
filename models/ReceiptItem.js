@@ -85,8 +85,8 @@ const ReceiptItemSchema = new mongoose.Schema(
     destination: { type: String, enum: ['shelf', 'shops'], default: 'shelf' },
 
     // Real per-item routing. The current pipeline is staged:
-    // receiving (photo + totalQty) -> preparation (price + qtyPerPackage) ->
-    // routing. A new item can sit with every flag=false until Stage 2 is ready.
+    // receiving (photo; totalQty is optional metadata for modern rows) -> preparation
+    // (price + qtyPerPackage) -> routing. A new item can sit with every flag=false until Stage 2 is ready.
     // `warehouse` may combine with mandatory OR supplement;
     // mandatory+supplement is forbidden by the route validator.
     routingVersion: { type: Number, default: 0 },
@@ -140,9 +140,16 @@ const ReceiptItemSchema = new mongoose.Schema(
       qtyPos:   { type: mongoose.Schema.Types.Mixed, default: null },
     },
 
-    // Physical quantity received. This is intentionally stored directly — no
-    // pallet/box structure and no derived shelf/transit quantity copies.
-    totalQty: { type: Number, required: true, min: 1 },
+    // Optional receiving/reference quantity for the modern routing flow. `null`
+    // means the worker has not entered it yet; zero is never a valid received
+    // quantity. For routingVersion < 1 legacy rows the server still requires this
+    // field and preserves the historical stock-delta behaviour.
+    totalQty: { type: Number, default: null, min: 1 },
+
+    // Stable position inside an automatically-created bulk intake. These fields
+    // are audit/idempotency metadata only and never identify the business Product.
+    intakeClientItemId: { type: String, default: null },
+    intakeIndex: { type: Number, default: null, min: 0 },
 
     // LEGACY direct-to-shops allocation fields. Current UI does not collect or
     // use them: mandatory distribution is a manual warehouse decision and the
@@ -177,7 +184,13 @@ const ReceiptItemSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
-// The Telegram scheduler checks due/expired publication work every few seconds.
+// Durable idempotency for one client file inside one bulk-intake receipt.
+ReceiptItemSchema.index(
+  { receiptId: 1, intakeClientItemId: 1 },
+  { unique: true, partialFilterExpression: { intakeClientItemId: { $type: 'string' } } },
+);
+
+// The Telegram scheduler checks due publication work every few seconds.
 // Keep that operational scan bounded as receipt history grows.
 ReceiptItemSchema.index({
   'telegramNewProduct.status': 1,

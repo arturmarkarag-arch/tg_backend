@@ -35,6 +35,7 @@ const cache = require('../utils/cache');
 const { buildWarehouseStockEstimate } = require('../utils/warehouseStockEstimate');
 const { appendProductsToBlockDocument } = require('../services/blockMembershipPrimitives');
 const { hasReceiptCommercialMutation, syncReceiptItemCommercialMetadataFromProduct } = require('../services/receiptCommercialMetadataCommand');
+const { allocateProductOrderNumber, allocateProductOrderNumbers, withProductOrderNumberLock } = require('../services/productOrderNumber');
 
 const staffOnly = requireTelegramRoles(['admin', 'warehouse']);
 const registeredOnly = requireTelegramRoles(['seller', 'admin', 'warehouse']);
@@ -951,16 +952,19 @@ router.patch('/reorder', staffOnly, asyncHandler(async (req, res) => {
     },
   }));
 
-  // bulkWrite is not atomic by itself — a partial failure would leave the catalog
-  // half-reordered. Wrap it in a transaction so the whole batch commits or none.
-  const session = await mongoose.connection.startSession();
-  try {
-    await session.withTransaction(async () => {
-      await Product.bulkWrite(bulkOps, { session });
-    });
-  } finally {
-    session.endSession();
-  }
+  // Reorder shares the same order-number lane as automatic allocation. Otherwise
+  // a new receipt Product could allocate a catalogue-tail number while this
+  // transaction is rewriting the active sequence.
+  await withProductOrderNumberLock(async () => {
+    const session = await mongoose.connection.startSession();
+    try {
+      await session.withTransaction(async () => {
+        await Product.bulkWrite(bulkOps, { session });
+      });
+    } finally {
+      session.endSession();
+    }
+  });
   res.json({ message: 'Order updated' });
 }));
 
@@ -1214,52 +1218,54 @@ router.post('/block-upload-photos', staffOnly, asyncHandler(async (req, res) => 
   const blockExists = await Block.exists({ blockId });
   if (!blockExists) throw appError('block_not_found');
 
-  const session = await mongoose.connection.startSession();
   let results = [];
   let createdProducts = [];
   let savedBlock;
-  try {
-    await session.withTransaction(async () => {
-      results = []; // reset on retry
-      createdProducts = []; // reset on retry
-      const block = await Block.findOne({ blockId }).session(session);
-      if (!block) throw appError('block_not_found');
+  await withProductOrderNumberLock(async () => {
+    const session = await mongoose.connection.startSession();
+    try {
+      await session.withTransaction(async () => {
+        results = []; // reset on retry
+        createdProducts = []; // reset on retry
+        const block = await Block.findOne({ blockId }).session(session);
+        if (!block) throw appError('block_not_found');
 
-      // Read max orderNumber inside the transaction to prevent race conditions
-      const maxProduct = await Product.findOne({ status: { $ne: 'archived' } }, 'orderNumber').sort({ orderNumber: -1 }).session(session).lean();
-      let nextOrderNumber = (maxProduct?.orderNumber ?? 0) + 1;
+        // The global order-number lane stays held through this transaction COMMIT.
+        // Nested allocation is re-entrant, so another create/reorder cannot occupy
+        // a reserved slot between allocation and commit.
+        const { numbers: reservedOrderNumbers } = await allocateProductOrderNumbers(filenames.length);
 
-      for (const filename of filenames) {
-        const safeFilename = String(filename).replace(/[^a-zA-Z0-9._-]/g, '');
-        const imageUrl = r2PublicUrl('products', safeFilename);
-        const [product] = await Product.create([{
-          orderNumber: nextOrderNumber,
-          price: 0,
-          quantity: 0,
-          // block_photo products bypass накладна/Надходження and go STRAIGHT into a
-          // block, so they are live immediately → 'active', not 'pending'. 'pending'
-          // is reserved for the receive flow (restored/incoming awaiting placement).
-          status: 'active',
-          source: 'block_photo',
-          imageUrls: [imageUrl],
-          imageNames: [safeFilename],
-          originalImageUrl: imageUrl,
-        }], { session });
-        nextOrderNumber += 1;
-        results.push({ productId: String(product._id), imageUrl, index: results.length });
-        createdProducts.push(product);
-      }
+        for (const [fileIndex, filename] of filenames.entries()) {
+          const safeFilename = String(filename).replace(/[^a-zA-Z0-9._-]/g, '');
+          const imageUrl = r2PublicUrl('products', safeFilename);
+          const [product] = await Product.create([{
+            orderNumber: reservedOrderNumbers[fileIndex],
+            price: 0,
+            quantity: 0,
+            // block_photo products bypass накладна/Надходження and go STRAIGHT into a
+            // block, so they are live immediately → 'active', not 'pending'. 'pending'
+            // is reserved for the receive flow (restored/incoming awaiting placement).
+            status: 'active',
+            source: 'block_photo',
+            imageUrls: [imageUrl],
+            imageNames: [safeFilename],
+            originalImageUrl: imageUrl,
+          }], { session });
+          results.push({ productId: String(product._id), imageUrl, index: results.length });
+          createdProducts.push(product);
+        }
 
-      await appendProductsToBlockDocument({
-        block,
-        productIds: createdProducts.map((product) => product._id),
-        session,
+        await appendProductsToBlockDocument({
+          block,
+          productIds: createdProducts.map((product) => product._id),
+          session,
+        });
+        savedBlock = block;
       });
-      savedBlock = block;
-    });
-  } finally {
-    session.endSession();
-  }
+    } finally {
+      session.endSession();
+    }
+  });
 
   // Mirror every uploaded product into the shop catalogue ("Товари Магазинів"),
   // exactly as receipt items mirror on confirm — every product that reaches the
@@ -1316,36 +1322,34 @@ router.post('/receive', staffOnly, asyncHandler(async (req, res) => {
   const origImageUrl = originalFilename ? r2PublicUrl('originals', originalFilename) : imageUrl;
   const barcode = String(body.barcode || '').trim();
 
-  // Read max orderNumber AND insert the new product inside the same transaction
-  // so two concurrent /receive requests cannot read the same max and produce
-  // duplicate orderNumbers (race — fixed by the transaction's snapshot read).
+  // Allocate from the shared Product order-number lane and keep that lane held
+  // through transaction COMMIT, so concurrent create/reorder paths cannot occupy
+  // the same catalogue position between reservation and persistence.
   let product;
-  const session = await mongoose.connection.startSession();
-  try {
-    await session.withTransaction(async () => {
-      const maxProduct = await Product.findOne({ status: { $ne: 'archived' } }, 'orderNumber')
-        .sort({ orderNumber: -1 })
-        .session(session)
-        .lean();
-      const nextOrderNumber = (maxProduct?.orderNumber ?? 0) + 1;
-      const [created] = await Product.create([{
-        orderNumber: nextOrderNumber,
-        price,
-        quantity,
-        quantityPerPackage,
-        barcode,
-        status: explicitPending ? 'pending' : isConfirmed ? 'active' : 'pending',
-        source: 'receive',
-        notes: body.notes ? String(body.notes) : '',
-        originalImageUrl: origImageUrl,
-        imageUrls: [imageUrl],
-        imageNames: [filename],
-      }], { session });
-      product = created;
-    });
-  } finally {
-    session.endSession();
-  }
+  await withProductOrderNumberLock(async () => {
+    const session = await mongoose.connection.startSession();
+    try {
+      await session.withTransaction(async () => {
+        const nextOrderNumber = await allocateProductOrderNumber();
+        const [created] = await Product.create([{
+          orderNumber: nextOrderNumber,
+          price,
+          quantity,
+          quantityPerPackage,
+          barcode,
+          status: explicitPending ? 'pending' : isConfirmed ? 'active' : 'pending',
+          source: 'receive',
+          notes: body.notes ? String(body.notes) : '',
+          originalImageUrl: origImageUrl,
+          imageUrls: [imageUrl],
+          imageNames: [filename],
+        }], { session });
+        product = created;
+      });
+    } finally {
+      session.endSession();
+    }
+  });
 
   if (product.status === 'active') {
     syncMirror(product).catch(() => {});
@@ -1387,27 +1391,29 @@ router.post('/', staffOnly, asyncHandler(async (req, res) => {
   // leave a hole in orderNumber sequence (everything shifted, but the new
   // product never inserted). Wrap them in one transaction.
   let product;
-  const session = await mongoose.connection.startSession();
-  try {
-    await session.withTransaction(async () => {
-      await shiftUp({ orderNumber: { $gte: parsedOrderNumber } }, session);
-      const [created] = await Product.create([{
-        orderNumber: parsedOrderNumber,
-        price,
-        quantity,
-        warehouse: warehouse || '',
-        category: category || '',
-        brand: currentBrand,
-        model: model || '',
-        status: status || 'pending',
-        imageUrls,
-        imageNames,
-      }], { session });
-      product = created;
-    });
-  } finally {
-    session.endSession();
-  }
+  await withProductOrderNumberLock(async () => {
+    const session = await mongoose.connection.startSession();
+    try {
+      await session.withTransaction(async () => {
+        await shiftUp({ orderNumber: { $gte: parsedOrderNumber } }, session);
+        const [created] = await Product.create([{
+          orderNumber: parsedOrderNumber,
+          price,
+          quantity,
+          warehouse: warehouse || '',
+          category: category || '',
+          brand: currentBrand,
+          model: model || '',
+          status: status || 'pending',
+          imageUrls,
+          imageNames,
+        }], { session });
+        product = created;
+      });
+    } finally {
+      session.endSession();
+    }
+  });
 
   res.status(201).json(product);
 }));
@@ -1500,52 +1506,57 @@ router.patch('/:id', staffOnly, asyncHandler(async (req, res) => {
   let receiptMetadataResult = null;
 
   if (needsSession) {
-    const session = await mongoose.connection.startSession();
-    try {
-      await session.withTransaction(async () => {
-        receiptMetadataResult = null; // withTransaction may retry the callback
-        if (orderChanged) {
-          // status:{$ne:archived} — archived products hold orderNumber:0 and must
-          // never be touched by a reorder shift. Matches archiveProduct/archive.js;
-          // this PATCH path was the lone shifter missing the filter.
-          if (parsedOrderNumber < previousOrderNumber) {
-            await shiftUp(
-              { _id: { $ne: product._id }, status: { $ne: 'archived' }, orderNumber: { $gte: parsedOrderNumber, $lt: previousOrderNumber } },
+    const runSessionMutation = async () => {
+      const session = await mongoose.connection.startSession();
+      try {
+        await session.withTransaction(async () => {
+          receiptMetadataResult = null; // withTransaction may retry the callback
+          if (orderChanged) {
+            // status:{$ne:archived} — archived products hold orderNumber:0 and must
+            // never be touched by a reorder shift. Matches archiveProduct/archive.js.
+            if (parsedOrderNumber < previousOrderNumber) {
+              await shiftUp(
+                { _id: { $ne: product._id }, status: { $ne: 'archived' }, orderNumber: { $gte: parsedOrderNumber, $lt: previousOrderNumber } },
+                session,
+              );
+            } else {
+              await shiftDown(
+                { _id: { $ne: product._id }, status: { $ne: 'archived' }, orderNumber: { $gt: previousOrderNumber, $lte: parsedOrderNumber } },
+                session,
+              );
+            }
+          }
+          await product.save({ session });
+          if (receiptCommercialChanged) {
+            const u = req.telegramUser || {};
+            receiptMetadataResult = await syncReceiptItemCommercialMetadataFromProduct(product, fields, {
               session,
-            );
-          } else {
-            await shiftDown(
-              { _id: { $ne: product._id }, status: { $ne: 'archived' }, orderNumber: { $gt: previousOrderNumber, $lte: parsedOrderNumber } },
-              session,
+              actor: {
+                telegramId: String(u.telegramId || ''),
+                firstName: u.firstName || '',
+                lastName: u.lastName || '',
+              },
+              source: 'warehouse_product',
+            });
+          }
+          if (barcodeChanged) {
+            await ShopProduct.findOneAndUpdate(
+              { linkedProductId: product._id },
+              { $set: { barcode: product.barcode } },
+              { session },
             );
           }
-        }
-        await product.save({ session });
-        if (receiptCommercialChanged) {
-          const u = req.telegramUser || {};
-          receiptMetadataResult = await syncReceiptItemCommercialMetadataFromProduct(product, fields, {
-            session,
-            actor: {
-              telegramId: String(u.telegramId || ''),
-              firstName: u.firstName || '',
-              lastName: u.lastName || '',
-            },
-            source: 'warehouse_product',
-          });
-        }
-        if (barcodeChanged) {
-          await ShopProduct.findOneAndUpdate(
-            { linkedProductId: product._id },
-            { $set: { barcode: product.barcode } },
-            { session },
-          );
-        }
-      });
+        });
+      } finally {
+        session.endSession();
+      }
+    };
+    try {
+      if (orderChanged) await withProductOrderNumberLock(runSessionMutation);
+      else await runSessionMutation();
     } catch (err) {
       if (err.code === 11000 && err.keyPattern?.barcode) throw appError('product_barcode_duplicate');
       throw err;
-    } finally {
-      session.endSession();
     }
   } else {
     try {

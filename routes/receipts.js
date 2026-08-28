@@ -22,6 +22,7 @@ const { getGeminiStatus } = require('../geminiClient');
 const { describeImageUrl } = require('../utils/productDescribe');
 const { appError, asyncHandler } = require('../utils/errors');
 const { withLock } = require('../utils/lock');
+const { withProductOrderNumberLock } = require('../services/productOrderNumber');
 const {
   RECEIPT_ITEM_SUPPLEMENT_STATE,
   blocksGenericRepublish,
@@ -84,7 +85,7 @@ async function supplementGroupNamesByWaveForOffers(offers = []) {
 }
 
 const FIELD_LABELS = {
-  totalQty: 'Загальна к-сть',
+  totalQty: 'Приїхало',
   destination: 'Куди',
   price: 'Ціна',
   qtyPerPackage: 'В упаковці',
@@ -169,6 +170,14 @@ function safeUploadName(v) {
 function parseIntField(val, fallback = 0) {
   const n = Math.trunc(Number(val));
   return Number.isFinite(n) && n >= 0 ? n : fallback;
+}
+
+function parseOptionalPositiveInt(val, fieldName = 'totalQty') {
+  if (val === undefined) return undefined;
+  if (val === null || String(val).trim() === '') return null;
+  const n = Number(val);
+  if (!Number.isInteger(n) || n < 1) throw appError('validation_failed', { field: fieldName });
+  return n;
 }
 
 /**
@@ -718,6 +727,130 @@ async function getNextReceiptNumber() {
 
 const RECEIPT_TYPES = ['regular', 'supplement'];
 
+async function bulkIntakeResponse(receipt) {
+  const items = await ReceiptItem.find({ receiptId: receipt._id })
+    .sort({ intakeIndex: 1, createdAt: 1, _id: 1 })
+    .lean();
+  return { receipt, items, createdCount: items.length };
+}
+
+// Modern receiving command. One multi-file selection becomes one technical,
+// already-completed Receipt and N draft ReceiptItems. Workers operate on the
+// photo cards; the Receipt exists only as a durable audit/container boundary.
+// `batchId` makes an unknown HTTP result safe to retry without duplicate rows.
+router.post('/bulk-intake', staffOnly, asyncHandler(async (req, res) => {
+  const batchId = String(req.body?.batchId || '').trim();
+  if (!/^[a-zA-Z0-9_-]{8,128}$/.test(batchId)) throw appError('receipt_bulk_batch_invalid');
+
+  const incoming = Array.isArray(req.body?.items) ? req.body.items : [];
+  if (incoming.length === 0) throw appError('receipt_bulk_empty');
+  if (incoming.length > 100) throw appError('receipt_bulk_too_large');
+
+  const seenClientIds = new Set();
+  const items = incoming.map((row, index) => {
+    const photoFilename = safeUploadName(row?.photoFilename);
+    const originalFilename = safeUploadName(row?.originalFilename || row?.photoFilename);
+    const clientItemId = String(row?.clientItemId || '').trim();
+    if (!photoFilename || !originalFilename) throw appError('receipt_photo_required');
+    if (!/^[a-zA-Z0-9_-]{4,128}$/.test(clientItemId) || seenClientIds.has(clientItemId)) {
+      throw appError('validation_failed', { field: 'clientItemId' });
+    }
+    seenClientIds.add(clientItemId);
+    return { photoFilename, originalFilename, clientItemId, intakeIndex: index };
+  });
+
+  const existing = await Receipt.findOne({ intakeBatchId: batchId }).lean();
+  if (existing) return res.json(await bulkIntakeResponse(existing));
+
+  const receiptNumber = await getNextReceiptNumber();
+  const now = new Date();
+  const session = await mongoose.connection.startSession();
+  let receiptDoc = null;
+  let createdDocs = [];
+  try {
+    await session.withTransaction(async () => {
+      createdDocs = [];
+      const already = await Receipt.findOne({ intakeBatchId: batchId }).session(session);
+      if (already) {
+        receiptDoc = already;
+        createdDocs = await ReceiptItem.find({ receiptId: already._id })
+          .sort({ intakeIndex: 1, createdAt: 1, _id: 1 })
+          .session(session);
+        return;
+      }
+
+      const [receipt] = await Receipt.create([{
+        receiptNumber,
+        status: 'completed',
+        completedAt: now,
+        type: 'regular',
+        createdBy: String(req.user.telegramId),
+        intakeMode: 'bulk',
+        intakeBatchId: batchId,
+      }], { session });
+      receiptDoc = receipt;
+
+      const docs = items.map((row) => ({
+        receiptId: receipt._id,
+        createdBy: String(req.user.telegramId),
+        status: 'draft',
+        destination: 'shelf',
+        routingVersion: 1,
+        routing: blankRouting(),
+        photoUrl: r2Url('products', row.photoFilename),
+        photoName: row.photoFilename,
+        originalPhotoUrl: r2Url('originals', row.originalFilename),
+        totalQty: null,
+        price: null,
+        qtyPerPackage: null,
+        intakeClientItemId: row.clientItemId,
+        intakeIndex: row.intakeIndex,
+      }));
+      createdDocs = await ReceiptItem.insertMany(docs, { session });
+    });
+  } catch (err) {
+    // Two retries with the same batchId may race. The unique batch index elects
+    // one winner; the loser returns that durable result instead of surfacing a
+    // fake failure or creating another Receipt.
+    if (err?.code === 11000 && (err?.keyPattern?.intakeBatchId || err?.keyValue?.intakeBatchId)) {
+      const winner = await Receipt.findOne({ intakeBatchId: batchId }).lean();
+      if (winner) return res.json(await bulkIntakeResponse(winner));
+    }
+    throw err;
+  } finally {
+    session.endSession();
+  }
+
+  const receipt = receiptDoc?.toObject ? receiptDoc.toObject() : receiptDoc;
+  const created = createdDocs.map((doc) => (doc?.toObject ? doc.toObject() : doc));
+
+  // Audit is deliberately post-commit: Mongo may rerun transaction callbacks.
+  ReceiptItemLog.create({
+    receiptId: receipt._id,
+    itemName: receipt.receiptNumber,
+    action: 'receipt_create',
+    actor: getActor(req),
+    meta: { intakeMode: 'bulk', batchId, itemsCount: created.length },
+  }).catch(() => {});
+  if (created.length) {
+    ReceiptItemLog.insertMany(created.map((item) => ({
+      receiptId: receipt._id,
+      itemId: item._id,
+      itemName: item.name || '',
+      action: 'create',
+      actor: getActor(req),
+      meta: { intakeMode: 'bulk', batchId },
+    })), { ordered: false }).catch(() => {});
+  }
+
+  const io = getIO();
+  if (io) {
+    for (const item of created) io.to(`receipt_${String(receipt._id)}`).emit('receipt_item_added', item);
+  }
+
+  res.status(201).json({ receipt, items: created, createdCount: created.length });
+}));
+
 router.post('/', staffOnly, asyncHandler(async (req, res) => {
   // LEGACY compatibility: current UI always posts type='regular' and chooses
   // supplement per item after receiving. We still accept the old whole-receipt
@@ -819,9 +952,14 @@ router.post('/:id/items', staffOnly, asyncHandler(async (req, res) => {
 
   if (!photoFilename) throw appError('receipt_photo_required');
 
-  // Єдине поле фізичної кількості в накладній.
-  const totalQty = parseIntField(parsed.fields.totalQty);
-  if (!Number.isInteger(totalQty) || totalQty < 1) throw appError('receipt_qty_invalid');
+  // Modern staged intake may start from the photo alone. `null` means the
+  // physical received quantity has not been entered yet. Legacy whole-receipt
+  // supplement rows still require it because their stock contract depends on it.
+  const parsedTotalQty = parseOptionalPositiveInt(parsed.fields.totalQty);
+  const totalQty = parsedTotalQty === undefined ? null : parsedTotalQty;
+  if (receipt.type === 'supplement' && !(Number(totalQty) >= 1)) {
+    throw appError('receipt_qty_invalid');
+  }
 
   // Current Stage 1 UI never sends these. We still parse them so a cached legacy
   // client can create an already-prepared row, but a legacy destination must NOT
@@ -841,6 +979,7 @@ router.post('/:id/items', staffOnly, asyncHandler(async (req, res) => {
     assertItemReadyForRouting({
       photoUrl: r2Url('products', photoFilename),
       totalQty,
+      routingVersion: 1,
       price: initialPrice,
       qtyPerPackage: initialQtyPerPackage,
     });
@@ -1052,8 +1191,7 @@ router.patch('/:id/items/:itemId', staffOnly, asyncHandler(async (req, res) => {
 
   let nextTotalQty;
   if (parsed.fields.totalQty !== undefined) {
-    nextTotalQty = parseIntField(parsed.fields.totalQty, 0);
-    if (!Number.isInteger(nextTotalQty) || nextTotalQty < 1) throw appError('receipt_qty_invalid');
+    nextTotalQty = parseOptionalPositiveInt(parsed.fields.totalQty);
   }
 
   let nextDeliveryGroupIds;
@@ -1134,7 +1272,10 @@ router.patch('/:id/items/:itemId', staffOnly, asyncHandler(async (req, res) => {
       const destination = Number(item.routingVersion || 0) >= 1
         ? (item.destination || 'shelf')
         : (nextDestination ?? (item.destination || 'shelf'));
-      const totalQty = nextTotalQty ?? item.totalQty;
+      const totalQty = nextTotalQty !== undefined ? nextTotalQty : item.totalQty;
+      if (Number(item.routingVersion || 0) < 1 && !(Number(totalQty) >= 1)) {
+        throw appError('receipt_qty_invalid');
+      }
       const deliveryGroupIds = nextDeliveryGroupIds ?? (item.deliveryGroupIds || []);
       const qtyPerShop = nextQtyPerShop ?? (item.qtyPerShop || 0);
 
@@ -1407,8 +1548,8 @@ router.delete('/:id/items/:itemId', staffOnly, asyncHandler(async (req, res) => 
 }));
 
 // ── ROUTING AFTER RECEIVING + COMMERCIAL PREPARATION ───────────────────────
-// Stage 1 saves photo + received quantity. Stage 2 requires price + package
-// quantity. Only then may Stage 3 choose routing on the item card. Draft rows are
+// Stage 1 saves the photo; received quantity is optional reference metadata in
+// modern rows. Stage 2 requires price + package quantity. Only then may Stage 3 choose routing on the item card. Draft rows are
 // freely routable. Confirmed primary routes are immutable EXCEPT the explicit
 // additive `add-warehouse-remainder` operation below (false -> true warehouse only).
 
@@ -1461,7 +1602,13 @@ router.patch('/items/routing-batch', staffOnly, asyncHandler(async (req, res) =>
   if (items.length !== itemIds.length) throw appError('receipt_item_not_found');
   for (const item of items) {
     if (item.status === 'confirmed') assertCanConfirmItem(req.user, item);
-    else assertCanEditItem(req.user, item, ['routing']);
+    else {
+      assertCanEditItem(req.user, item, ['routing']);
+      // Batch routing must obey exactly the same Stage-2 readiness contract as
+      // the single-item route endpoint. It may never be a back door around
+      // price/package preparation.
+      assertItemReadyForRouting(item);
+    }
     const expected = expectedRoutingRevisions[String(item._id)];
     if (expected !== undefined && Number(item.routingRevision || 0) !== Number(expected)) {
       throw appError('receipt_route_stale', { currentRevision: Number(item.routingRevision || 0) });
@@ -1717,7 +1864,7 @@ router.patch('/:id/items/:itemId/routing', staffOnly, asyncHandler(async (req, r
       receiptId: req.params.id,
       status: 'draft',
       photoUrl: { $nin: ['', null] },
-      totalQty: { $gte: 1 },
+      ...(Number(authItem.routingVersion || 0) >= 1 ? {} : { totalQty: { $gte: 1 } }),
       price: { $gt: 0 },
       qtyPerPackage: { $gte: 1 },
       ...(expectedRoutingRevision === null
@@ -1824,7 +1971,7 @@ router.post('/:id/items/:itemId/add-warehouse-remainder', staffOnly, asyncHandle
   let didPromote = false;
 
   try {
-    await session.withTransaction(async () => {
+    await withProductOrderNumberLock(() => session.withTransaction(async () => {
       const receipt = await Receipt.findById(req.params.id).session(session);
       const item = await ReceiptItem.findOne({ _id: req.params.itemId, receiptId: req.params.id }).session(session);
       if (!receipt) throw appError('receipt_not_found');
@@ -1884,7 +2031,7 @@ router.post('/:id/items/:itemId/add-warehouse-remainder', staffOnly, asyncHandle
       updatedItem.routing = nextRouting;
       updatedItem.currentLocation = { blockId: null, position: null, status: product.status ?? null };
       updatedItem.productCurrentQty = product.quantity ?? null;
-    });
+    }));
 
     if (didPromote && productForEmbedding) embedProductAsync(productForEmbedding, 'receipt-remainder-to-warehouse');
 
@@ -1932,7 +2079,7 @@ router.post('/:id/items/:itemId/confirm', staffOnly, asyncHandler(async (req, re
     // ShopProducts that need (re)embedding — scheduled AFTER commit so we never
     // embed a doc that could still roll back. Reset on every transaction attempt.
     let embedTargets = [];
-    await session.withTransaction(async () => {
+    await withProductOrderNumberLock(() => session.withTransaction(async () => {
       embedTargets = [];
       const receipt = await Receipt.findById(req.params.id).session(session);
       const item = await ReceiptItem.findOne({ _id: req.params.itemId, receiptId: req.params.id }).session(session);
@@ -2028,7 +2175,7 @@ router.post('/:id/items/:itemId/confirm', staffOnly, asyncHandler(async (req, re
         status: product?.status ?? null,
       };
       confirmedItem.productCurrentQty = product?.quantity ?? null;
-    });
+    }));
     // Audit log AFTER commit (not inside the callback): withTransaction re-runs the
     // callback on a WriteConflict, so an in-callback create would write one log row
     // per attempt — and a row even if the transaction ultimately aborted.
@@ -2198,16 +2345,16 @@ router.post('/:id/commit', staffOnly, asyncHandler(async (req, res) => {
   if (receiptCheck.type === 'regular') {
     const receivingItems = await ReceiptItem.find(
       { receiptId: receiptCheck._id },
-      '_id photoUrl totalQty routingVersion',
+      '_id photoUrl routingVersion',
     ).lean();
 
     const currentReceivingFlow = receivingItems.length > 0
       && receivingItems.every((item) => Number(item.routingVersion || 0) >= 1);
 
     if (currentReceivingFlow) {
-      const incomplete = receivingItems.find((item) => !item.photoUrl || !(Number(item.totalQty) >= 1));
+      const incomplete = receivingItems.find((item) => !item.photoUrl);
       if (incomplete) {
-        throw appError('receipt_item_incomplete', { fields: 'фото, кількість що приїхала' });
+        throw appError('receipt_item_incomplete', { fields: 'фото' });
       }
 
       const receipt = await Receipt.findOneAndUpdate(
@@ -2287,9 +2434,10 @@ router.post('/:id/commit', staffOnly, asyncHandler(async (req, res) => {
   }
 
   const session = await mongoose.connection.startSession();
-  session.startTransaction();
+  await withProductOrderNumberLock(async () => {
+    session.startTransaction();
 
-  try {
+    try {
     // Atomic CAS: draft → completed. Виконуємо ПЕРШИМ кроком транзакції, щоб
     // паралельний PATCH/DELETE item (який теж перевіряє status='draft' у своїй
     // транзакції) гарантовано побачив новий статус і відмовив запит, а не
@@ -2514,7 +2662,8 @@ router.post('/:id/commit', staffOnly, asyncHandler(async (req, res) => {
     const fresh = await Receipt.findById(req.params.id).lean();
     if (fresh && fresh.status === 'completed') throw appError('receipt_already_completed');
     throw appError('receipt_commit_failed');
-  }
+    }
+  });
 }));
 
 // ── POST /:id/items/:itemId/describe — generate + cache the item description ──

@@ -21,6 +21,7 @@ const { getOrCreateSessionId } = require('../utils/getOrCreateSession');
 const ShopTransferRequest = require('../models/ShopTransferRequest');
 const cache = require('../utils/cache');
 const { getIO } = require('../socket');
+const { allocateProductOrderNumber, withProductOrderNumberLock } = require('../services/productOrderNumber');
 
 // Test-only schedule helpers. They operate on the synthetic DeliveryGroup only;
 // production AppSetting('ordering.schedule') is never touched.
@@ -1221,47 +1222,46 @@ router.post('/test-upload-image', express.raw({ type: () => true, limit: '30mb' 
   // Step 4 & 5: create Product + append to block's productIds (transaction)
   // positionIndex = 1-based index of the new product in the block (after all existing ones)
   let productId, positionIndex, orderNumber, blockProductCount;
-  const session = await mongoose.connection.startSession();
-  try {
-    await session.withTransaction(async () => {
-      const block = await Block.findOne({ blockId: targetBlockMeta.blockId }).session(session);
-      if (!block) throw new Error('block_disappeared');
+  await withProductOrderNumberLock(async () => {
+    const session = await mongoose.connection.startSession();
+    try {
+      await session.withTransaction(async () => {
+        const block = await Block.findOne({ blockId: targetBlockMeta.blockId }).session(session);
+        if (!block) throw new Error('block_disappeared');
 
-      // Clean stale/missing product refs through the same membership primitive
-      // used by production maintenance before computing the append position.
-      await pruneInvalidBlockProductIds({ blockId: block.blockId, session, removeArchived: false });
-      const freshBlock = await Block.findById(block._id).session(session);
-      if (!freshBlock) throw new Error('block_disappeared');
+        // Clean stale/missing product refs through the same membership primitive
+        // used by production maintenance before computing the append position.
+        await pruneInvalidBlockProductIds({ blockId: block.blockId, session, removeArchived: false });
+        const freshBlock = await Block.findById(block._id).session(session);
+        if (!freshBlock) throw new Error('block_disappeared');
 
-      // Resolve how many valid product slots are currently in the block.
-      blockProductCount = freshBlock.productIds.length;
+        // Resolve how many valid product slots are currently in the block.
+        blockProductCount = freshBlock.productIds.length;
+        orderNumber = await allocateProductOrderNumber();
 
-      const maxDoc = await Product.findOne({ status: { $ne: 'archived' } }, 'orderNumber')
-        .sort({ orderNumber: -1 }).session(session).lean();
-      orderNumber = (maxDoc?.orderNumber ?? 0) + 1;
+        const [product] = await Product.create([{
+          orderNumber,
+          price: 0,
+          quantity: 0,
+          status: 'pending',
+          source: 'block_photo',
+          name: `TestImg${TEST_MARKER}`,
+          imageUrls: [imageUrl],
+          imageNames: [filename],
+          originalImageUrl: imageUrl,
+        }], { session });
 
-      const [product] = await Product.create([{
-        orderNumber,
-        price: 0,
-        quantity: 0,
-        status: 'pending',
-        source: 'block_photo',
-        name: `TestImg${TEST_MARKER}`,
-        imageUrls: [imageUrl],
-        imageNames: [filename],
-        originalImageUrl: imageUrl,
-      }], { session });
+        // Append to end — positionIndex is 1-based. Even the admin test route
+        // uses the canonical membership primitive instead of writing productIds itself.
+        await appendProductsToBlockDocument({ block: freshBlock, productIds: [product._id], session });
 
-      // Append to end — positionIndex is 1-based. Even the admin test route
-      // uses the canonical membership primitive instead of writing productIds itself.
-      await appendProductsToBlockDocument({ block: freshBlock, productIds: [product._id], session });
-
-      productId = String(product._id);
-      positionIndex = freshBlock.productIds.length; // position after push = last slot
-    });
-  } finally {
-    session.endSession();
-  }
+        productId = String(product._id);
+        positionIndex = freshBlock.productIds.length; // position after push = last slot
+      });
+    } finally {
+      session.endSession();
+    }
+  });
 
   // Notify UI
   try {

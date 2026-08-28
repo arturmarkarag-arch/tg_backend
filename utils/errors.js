@@ -251,7 +251,10 @@ const ERRORS = {
   receipt_items_fetch_failed:{ status: 500, message: 'Не вдалося отримати позиції накладної' },
   receipt_log_fetch_failed: { status: 500, message: 'Не вдалося отримати журнал' },
   receipt_log_failed:       { status: 500, message: 'Не вдалося записати лог' },
-  receipt_qty_invalid:      { status: 400, message: 'Загальна кількість має бути додатнім цілим числом' },
+  receipt_qty_invalid:      { status: 400, message: 'Кількість, що приїхала, має бути додатнім цілим числом' },
+  receipt_bulk_empty:       { status: 400, message: 'Оберіть хоча б одне фото товару' },
+  receipt_bulk_too_large:   { status: 400, message: 'За один раз можна додати не більше 100 фото' },
+  receipt_bulk_batch_invalid:{ status: 400, message: 'Некоректний ідентифікатор масового завантаження' },
   receipt_log_action_required: { status: 400, message: 'Поле action обовʼязкове' },
 
   // ── Receipts (multi-worker) ────────────────────────────────────────────────

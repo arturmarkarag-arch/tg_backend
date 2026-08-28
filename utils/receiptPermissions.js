@@ -48,10 +48,19 @@ function assertCanConfirmItem(user, item) {
   if (!isReceiptStaff(user)) throw appError('forbidden');
 }
 
+function isModernReceiptItem(item) {
+  return Number(item?.routingVersion || 0) >= 1;
+}
+
 function preparationMissingFields(item) {
   const missing = [];
   if (!item?.photoUrl) missing.push('фото');
-  if (!(Number(item?.totalQty) >= 1)) missing.push('кількість що приїхала');
+  // `totalQty` is optional receiving metadata in the modern staged flow. Legacy
+  // rows still require it because their Product.quantity historically derives
+  // from this field and dropping it would corrupt the old stock contract.
+  if (!isModernReceiptItem(item) && !(Number(item?.totalQty) >= 1)) {
+    missing.push('кількість що приїхала');
+  }
   if (!(Number(item?.price) > 0)) missing.push('ціна');
   if (!(Number(item?.qtyPerPackage) >= 1)) missing.push('кількість в упаковці');
   return missing;
@@ -70,7 +79,7 @@ function assertItemReadyForRouting(item) {
 
 /**
  * Confirmation completeness:
- *   - photo + received qty are receiving requirements;
+ *   - photo is the receiving requirement; received qty is optional for modern rows;
  *   - price and package quantity may be filled later while the row is draft,
  *     but BOTH are mandatory before confirmation/publication;
  *   - a route must be chosen before confirmation.
@@ -114,6 +123,7 @@ module.exports = {
   assertCanEditItem,
   assertCanDeleteItem,
   assertCanConfirmItem,
+  isModernReceiptItem,
   preparationMissingFields,
   assertItemReadyForRouting,
   assertItemReadyToConfirm,

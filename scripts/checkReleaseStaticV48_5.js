@@ -9,6 +9,7 @@ const checks = [
   'scripts/checkQuerySocketV47_6.js',
   'scripts/checkCoreFlowsV47_7.js',
   'scripts/checkReceiptStagedPipelineV47_10.js',
+  'scripts/checkReceiptMassIntake20260828.js',
   'scripts/checkV47_12SupplementTailBlocks.js',
   'scripts/checkV47_14ReceiptPhotoComments.js',
   'scripts/checkV47_15WarehouseRemainder.js',

@@ -17,6 +17,7 @@ const {
   isNormalOrderingEnabled,
 } = require('../utils/receiptRouting');
 const { appError } = require('../utils/errors');
+const { allocateProductOrderNumber } = require('./productOrderNumber');
 
 async function ensureReceiptItemProduct(item, session, receipt = null) {
   const routing = normalizeReceiptItemRouting(item, receipt);
@@ -72,11 +73,10 @@ async function ensureReceiptItemProduct(item, session, receipt = null) {
     return product;
   }
 
-  const maxProduct = await Product.findOne(
-    { status: { $ne: 'archived' } },
-    'orderNumber',
-  ).sort({ orderNumber: -1 }).session(session).lean();
-  const nextOrderNumber = (maxProduct?.orderNumber ?? 0) + 1;
+  // Order number allocation is global and serialized outside the transaction.
+  // Never derive max+1 from the transaction snapshot: two simultaneous confirms
+  // may share that snapshot and would otherwise choose the same number.
+  const nextOrderNumber = await allocateProductOrderNumber();
 
   product = new Product({
     orderNumber: nextOrderNumber,

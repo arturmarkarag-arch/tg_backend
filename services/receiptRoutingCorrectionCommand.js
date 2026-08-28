@@ -17,6 +17,7 @@ const ProductVector = require('../models/ProductVector');
 const SupplementWave = require('../models/SupplementWave');
 const SupplementOffer = require('../models/SupplementOffer');
 const { withLock } = require('../utils/lock');
+const { withProductOrderNumberLock } = require('./productOrderNumber');
 const { appError } = require('../utils/errors');
 const {
   normalizeReceiptItemRouting,
@@ -186,7 +187,7 @@ async function correctReceiptItemRouting({
     let productForMirror = null;
     let shopProductForEmbedding = null;
     try {
-      await mongoSession.withTransaction(async () => {
+      await withProductOrderNumberLock(() => mongoSession.withTransaction(async () => {
         const receipt = await Receipt.findById(rid).session(mongoSession);
         const item = await ReceiptItem.findOne({ _id: iid, receiptId: rid }).session(mongoSession);
         if (!receipt) throw appError('receipt_not_found');
@@ -310,7 +311,7 @@ async function correctReceiptItemRouting({
           sessionIdsToReevaluate = [...new Set(waves.map((w) => str(w.orderingSessionId)).filter(Boolean))];
         }
         updatedItem = item.toObject();
-      });
+      }));
     } finally {
       await mongoSession.endSession();
     }
