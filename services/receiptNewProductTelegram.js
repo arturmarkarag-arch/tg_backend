@@ -81,7 +81,7 @@ function buildSnapshot(item, receipt = null) {
   // The route validator forbids mayNotReachAllShops together with warehouse, so
   // these two labels cannot contradict one another in a valid current row.
   const routeLabel = routing.warehouse
-    ? 'На лайки'
+    ? 'Буде на лайках'
     : (routing.mandatory && routing.mayNotReachAllShops ? 'Приїде не всім' : '');
   const comments = normalizePhotoComments(item?.photoMeta).map((row) => row.text);
   return {
