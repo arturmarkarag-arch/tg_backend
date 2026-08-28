@@ -12,7 +12,6 @@ const NEW_PRODUCTS_GROUP_KEY = 'telegram.newProductsGroupId';
 const SEND_LEASE_MS = 90 * 1000;
 const MAX_ATTEMPTS = 5;
 const TELEGRAM_PHOTO_CAPTION_LIMIT = 1024;
-const PUBLICATION_TTL_MS = 14 * 24 * 60 * 60 * 1000;
 
 function normalizeGroupId(value) {
   const groupId = String(value ?? '').trim();
@@ -52,7 +51,7 @@ function displayNumber(value) {
 function buildCaption(snapshot) {
   const head = [
     `Ціна: ${displayNumber(snapshot.price)} zł`,
-    `В упаковці: ${displayNumber(snapshot.qtyPerPackage)} шт.`,
+    `В упаковці: ${displayNumber(snapshot.qtyPerPackage)}`,
   ];
   const routeLine = String(snapshot.routeLabel || '');
   const commentsLine = Array.isArray(snapshot.comments)
@@ -82,7 +81,7 @@ function buildSnapshot(item, receipt = null) {
   // The route validator forbids mayNotReachAllShops together with warehouse, so
   // these two labels cannot contradict one another in a valid current row.
   const routeLabel = routing.warehouse
-    ? 'Буде на лайках'
+    ? 'На лайки'
     : (routing.mandatory && routing.mayNotReachAllShops ? 'Приїде не всім' : '');
   const comments = normalizePhotoComments(item?.photoMeta).map((row) => row.text);
   return {
@@ -114,25 +113,14 @@ function buildDesired(item, receipt = null) {
   };
 }
 
-function publicationExpiresAt(state = {}) {
-  const sentAtMs = new Date(state.sentAt || 0).getTime();
-  if (!Number.isFinite(sentAtMs) || sentAtMs <= 0) return null;
-  return new Date(sentAtMs + PUBLICATION_TTL_MS);
-}
-
-function isPublicationExpired(state = {}, now = new Date()) {
-  const expiresAt = publicationExpiresAt(state);
-  return !!expiresAt && expiresAt.getTime() <= now.getTime();
-}
-
 function publicState(item, { groupId = '', desired = null } = {}) {
   const state = item?.telegramNewProduct || {};
   const wanted = desired || buildDesired(item);
   const hasMessage = Number.isFinite(Number(state.messageId)) && Number(state.messageId) > 0 && !!String(state.chatId || '');
   const persistedStatus = String(state.status || 'not_sent');
-  const expired = hasMessage && isPublicationExpired(state);
-  const status = expired ? 'expired' : persistedStatus;
-  const expiresAt = publicationExpiresAt(state);
+  // Legacy rows may still contain status='expired' from the removed 14-day TTL feature.
+  // Treat them as normal existing publications; no time-based lifecycle exists anymore.
+  const status = persistedStatus === 'expired' ? (hasMessage ? 'sent' : 'not_sent') : persistedStatus;
   const appliedHash = String(state.appliedHash || '');
   const queuedHash = String(state.desiredHash || '');
   const relevantChanged = !!appliedHash && appliedHash !== wanted.hash;
@@ -167,12 +155,9 @@ function publicState(item, { groupId = '', desired = null } = {}) {
   // recordDecision() can replace a queued payload atomically, or—if sendPhoto is
   // already in flight—store the new desired hash so the worker converges by
   // editing the resulting message after the create finishes.
-  if (expired) action = 'none';
+  const outOfSync = skippedCurrent && action === 'update';
 
-  const outOfSync = !expired && skippedCurrent && action === 'update';
-
-  const shouldPrompt = !expired
-    && !problem
+  const shouldPrompt = !problem
     && (action === 'publish' || action === 'update')
     && !alreadyDecidedForCurrent
     && (hasMessage ? canUpdate : canCreate);
@@ -182,7 +167,7 @@ function publicState(item, { groupId = '', desired = null } = {}) {
     action,
     shouldPrompt,
     configured: !!groupId,
-    canPublish: expired ? false : (hasMessage ? canUpdate : canCreate),
+    canPublish: hasMessage ? canUpdate : canCreate,
     hasMessage,
     hasRelevantChanges: action === 'update',
     outOfSync,
@@ -200,8 +185,6 @@ function publicState(item, { groupId = '', desired = null } = {}) {
     requestedAt: state.requestedAt || null,
     lastError: state.lastError || {},
     possibleDuplicate: status === 'unknown' || !!state.possibleDuplicate,
-    expired,
-    expiresAt,
   };
 }
 
@@ -220,21 +203,6 @@ async function recordDecision({ receiptId, itemId, decision, actorId = '', force
   const state = item.telegramNewProduct || {};
   const status = String(state.status || 'not_sent');
   const hasMessage = Number.isFinite(Number(state.messageId)) && Number(state.messageId) > 0 && !!String(state.chatId || '');
-  if (hasMessage && isPublicationExpired(state)) {
-    await ReceiptItem.updateOne(
-      { _id: itemId, receiptId },
-      {
-        $set: {
-          'telegramNewProduct.status': 'expired',
-          'telegramNewProduct.leaseUntil': null,
-          'telegramNewProduct.nextAttemptAt': null,
-        },
-      },
-    );
-    const expiredItem = await ReceiptItem.findOne({ _id: itemId, receiptId }).lean();
-    return publicState(expiredItem, { groupId, desired });
-  }
-
   if (decision === 'skip') {
     const updated = await ReceiptItem.findOneAndUpdate(
       { _id: itemId, receiptId },
@@ -345,12 +313,7 @@ async function recoverExpiredSending(now = new Date()) {
   for (const item of expired) {
     const state = item.telegramNewProduct || {};
     const hasMessage = Number.isFinite(Number(state.messageId)) && Number(state.messageId) > 0;
-    if (hasMessage && isPublicationExpired(state, now)) {
-      await ReceiptItem.updateOne(
-        { _id: item._id, 'telegramNewProduct.status': 'sending', 'telegramNewProduct.leaseUntil': { $lte: now } },
-        { $set: { 'telegramNewProduct.status': 'expired', 'telegramNewProduct.nextAttemptAt': null, 'telegramNewProduct.leaseUntil': null } },
-      );
-    } else if (hasMessage) {
+    if (hasMessage) {
       // editMessageCaption/editMessageMedia are safe to retry for the same target.
       await ReceiptItem.updateOne(
         { _id: item._id, 'telegramNewProduct.status': 'sending', 'telegramNewProduct.leaseUntil': { $lte: now } },
@@ -488,13 +451,6 @@ async function markFailure(item, error, operation, now = new Date()) {
 
 async function sendClaimed(item) {
   const state = item.telegramNewProduct || {};
-  if (Number(state.messageId) > 0 && isPublicationExpired(state)) {
-    await ReceiptItem.updateOne(
-      { _id: item._id, 'telegramNewProduct.status': 'sending' },
-      { $set: { 'telegramNewProduct.status': 'expired', 'telegramNewProduct.leaseUntil': null, 'telegramNewProduct.nextAttemptAt': null } },
-    );
-    return { sent: false, operation: 'expired' };
-  }
   const snapshot = state.desiredSnapshot || {};
   const caption = String(state.desiredCaption || buildCaption(snapshot));
   const sentHash = String(state.desiredHash || '');
@@ -553,9 +509,6 @@ module.exports = {
   SEND_LEASE_MS,
   MAX_ATTEMPTS,
   TELEGRAM_PHOTO_CAPTION_LIMIT,
-  PUBLICATION_TTL_MS,
-  publicationExpiresAt,
-  isPublicationExpired,
   getNewProductsGroupId,
   setNewProductsGroupId,
   buildSnapshot,

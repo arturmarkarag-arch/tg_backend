@@ -383,42 +383,16 @@ router.delete('/telegram-support-admins/:username', telegramAuth, requireTelegra
 // ── Telegram «Нові Товари» ────────────────────────────────────────────────
 // One dedicated destination, DB-only. It is intentionally independent from the
 // bot-authorized groups and «Група ціна на товар» lists.
-const NEW_PRODUCTS_AUTO_DELETE_SECONDS = 14 * 24 * 60 * 60;
-async function telegramNewProductsGroupInfo(groupId) {
-  const normalized = String(groupId || '');
-  if (!normalized) return { groupId: '', autoDeleteSeconds: null, autoDelete14Days: false, autoDeleteChecked: false };
-  const { getBot } = require('../telegramBot');
-  const bot = getBot();
-  if (!bot) return { groupId: normalized, autoDeleteSeconds: null, autoDelete14Days: false, autoDeleteChecked: false };
-  try {
-    const chat = await Promise.race([
-      bot.getChat(normalized),
-      new Promise((_, reject) => setTimeout(() => reject(new Error('telegram_get_chat_timeout')), 3000)),
-    ]);
-    const seconds = Number(chat?.message_auto_delete_time || 0);
-    return {
-      groupId: normalized,
-      autoDeleteSeconds: seconds || 0,
-      autoDelete14Days: seconds === NEW_PRODUCTS_AUTO_DELETE_SECONDS,
-      autoDeleteChecked: true,
-    };
-  } catch (_) {
-    // Saving the destination must not depend on Telegram being reachable. This is
-    // a diagnostic only; Bot API can read the TTL but cannot configure it.
-    return { groupId: normalized, autoDeleteSeconds: null, autoDelete14Days: false, autoDeleteChecked: false };
-  }
-}
-
 router.get('/telegram-new-products-group', telegramAuth, requireTelegramRole('admin'), asyncHandler(async (req, res) => {
   const { getNewProductsGroupId } = require('../services/receiptNewProductTelegram');
-  res.json(await telegramNewProductsGroupInfo(await getNewProductsGroupId()));
+  res.json({ groupId: await getNewProductsGroupId() });
 }));
 
 router.post('/telegram-new-products-group', telegramAuth, requireTelegramRole('admin'), asyncHandler(async (req, res) => {
   const { setNewProductsGroupId } = require('../services/receiptNewProductTelegram');
   try {
     const groupId = await setNewProductsGroupId(req.body?.groupId);
-    res.json(await telegramNewProductsGroupInfo(groupId));
+    res.json({ groupId });
   } catch (err) {
     if (err?.message === 'telegram_new_products_group_invalid') throw appError('telegram_new_products_group_invalid');
     throw err;

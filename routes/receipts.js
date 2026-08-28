@@ -323,7 +323,6 @@ router.get('/items-gallery', staffOnly, asyncHandler(async (req, res) => {
     offersByItemId.set(itemId, [...(offersByItemId.get(itemId) || []), offer]);
   }
   const receiptById = new Map(receipts.map((receipt) => [String(receipt._id), receipt]));
-  const { isPublicationExpired } = require('../services/receiptNewProductTelegram');
   const items = rows.map((row) => {
     const receipt = receiptById.get(String(row.receiptId || ''));
     const routing = normalizeReceiptItemRouting(row, receipt);
@@ -350,8 +349,9 @@ router.get('/items-gallery', staffOnly, asyncHandler(async (req, res) => {
       supplementGroupName: supplementGroupNameByWaveId.get(String(displaySupplementOffer?.waveId || '')) || '',
       telegramNewProduct: {
         ...(row.telegramNewProduct || {}),
-        expired: String(row.telegramNewProduct?.status || '') === 'expired'
-          || isPublicationExpired(row.telegramNewProduct || {}),
+        status: String(row.telegramNewProduct?.status || '') === 'expired'
+          ? (Number(row.telegramNewProduct?.messageId) > 0 ? 'sent' : 'not_sent')
+          : String(row.telegramNewProduct?.status || 'not_sent'),
       },
     };
   });
@@ -913,7 +913,6 @@ router.get('/:id/items', staffOnly, asyncHandler(async (req, res) => {
   const receipt = await Receipt.findById(req.params.id);
   if (!receipt) throw appError('receipt_not_found');
 
-  const { isPublicationExpired } = require('../services/receiptNewProductTelegram');
   const items = await ReceiptItem.find({ receiptId: receipt._id }).sort({ createdAt: -1 }).lean();
 
   const supplementOffers = items.length
@@ -978,8 +977,9 @@ router.get('/:id/items', staffOnly, asyncHandler(async (req, res) => {
       supplementGroupName: supplementGroupNameByWaveId.get(String(displaySupplementOffer?.waveId || '')) || '',
       telegramNewProduct: {
         ...(item.telegramNewProduct || {}),
-        expired: String(item.telegramNewProduct?.status || '') === 'expired'
-          || isPublicationExpired(item.telegramNewProduct || {}),
+        status: String(item.telegramNewProduct?.status || '') === 'expired'
+          ? (Number(item.telegramNewProduct?.messageId) > 0 ? 'sent' : 'not_sent')
+          : String(item.telegramNewProduct?.status || 'not_sent'),
       },
     };
   });
