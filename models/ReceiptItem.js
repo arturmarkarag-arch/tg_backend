@@ -144,7 +144,14 @@ const ReceiptItemSchema = new mongoose.Schema(
     // means the worker has not entered it yet; zero is never a valid received
     // quantity. For routingVersion < 1 legacy rows the server still requires this
     // field and preserves the historical stock-delta behaviour.
-    totalQty: { type: Number, default: null, min: 1 },
+    totalQty: {
+      type: Number,
+      default: null,
+      validate: {
+        validator: (value) => value == null || (Number.isFinite(value) && value > 0),
+        message: 'totalQty must be greater than 0',
+      },
+    },
 
     // Stable position inside an automatically-created bulk intake. These fields
     // are audit/idempotency metadata only and never identify the business Product.

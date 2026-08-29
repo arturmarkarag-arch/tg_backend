@@ -172,13 +172,15 @@ function parseIntField(val, fallback = 0) {
   return Number.isFinite(n) && n >= 0 ? n : fallback;
 }
 
-function parseOptionalPositiveInt(val, fieldName = 'totalQty') {
+function parseOptionalPositiveNumber(val, fieldName = 'totalQty') {
   if (val === undefined) return undefined;
   if (val === null || String(val).trim() === '') return null;
-  const n = Number(val);
-  if (!Number.isInteger(n) || n < 1) throw appError('validation_failed', { field: fieldName });
+  const normalized = typeof val === 'string' ? val.trim().replace(',', '.') : val;
+  const n = Number(normalized);
+  if (!Number.isFinite(n) || !(n > 0)) throw appError('validation_failed', { field: fieldName });
   return n;
 }
+
 
 /**
  * Parses a form-field string to a finite number (price, qtyPerPackage).
@@ -187,7 +189,8 @@ function parseOptionalPositiveInt(val, fieldName = 'totalQty') {
  */
 function parseNumberField(val, fieldName) {
   if (val === undefined || val === null || val === '') return null;
-  const n = Number(val);
+  const normalized = typeof val === 'string' ? val.trim().replace(',', '.') : val;
+  const n = Number(normalized);
   if (!Number.isFinite(n)) throw appError('validation_failed', { field: fieldName });
   return n;
 }
@@ -955,9 +958,9 @@ router.post('/:id/items', staffOnly, asyncHandler(async (req, res) => {
   // Modern staged intake may start from the photo alone. `null` means the
   // physical received quantity has not been entered yet. Legacy whole-receipt
   // supplement rows still require it because their stock contract depends on it.
-  const parsedTotalQty = parseOptionalPositiveInt(parsed.fields.totalQty);
+  const parsedTotalQty = parseOptionalPositiveNumber(parsed.fields.totalQty);
   const totalQty = parsedTotalQty === undefined ? null : parsedTotalQty;
-  if (receipt.type === 'supplement' && !(Number(totalQty) >= 1)) {
+  if (receipt.type === 'supplement' && !(Number(totalQty) > 0)) {
     throw appError('receipt_qty_invalid');
   }
 
@@ -1191,7 +1194,7 @@ router.patch('/:id/items/:itemId', staffOnly, asyncHandler(async (req, res) => {
 
   let nextTotalQty;
   if (parsed.fields.totalQty !== undefined) {
-    nextTotalQty = parseOptionalPositiveInt(parsed.fields.totalQty);
+    nextTotalQty = parseOptionalPositiveNumber(parsed.fields.totalQty);
   }
 
   let nextDeliveryGroupIds;
@@ -1273,7 +1276,7 @@ router.patch('/:id/items/:itemId', staffOnly, asyncHandler(async (req, res) => {
         ? (item.destination || 'shelf')
         : (nextDestination ?? (item.destination || 'shelf'));
       const totalQty = nextTotalQty !== undefined ? nextTotalQty : item.totalQty;
-      if (Number(item.routingVersion || 0) < 1 && !(Number(totalQty) >= 1)) {
+      if (Number(item.routingVersion || 0) < 1 && !(Number(totalQty) > 0)) {
         throw appError('receipt_qty_invalid');
       }
       const deliveryGroupIds = nextDeliveryGroupIds ?? (item.deliveryGroupIds || []);
@@ -1864,7 +1867,7 @@ router.patch('/:id/items/:itemId/routing', staffOnly, asyncHandler(async (req, r
       receiptId: req.params.id,
       status: 'draft',
       photoUrl: { $nin: ['', null] },
-      ...(Number(authItem.routingVersion || 0) >= 1 ? {} : { totalQty: { $gte: 1 } }),
+      ...(Number(authItem.routingVersion || 0) >= 1 ? {} : { totalQty: { $gt: 0 } }),
       price: { $gt: 0 },
       qtyPerPackage: { $gte: 1 },
       ...(expectedRoutingRevision === null

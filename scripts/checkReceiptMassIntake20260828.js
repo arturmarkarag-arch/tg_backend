@@ -34,8 +34,14 @@ check('bulk command identity has DB unique backstops',
   && itemModel.includes('{ receiptId: 1, intakeClientItemId: 1 }') && itemModel.includes("partialFilterExpression: { intakeClientItemId: { $type: 'string' } }"));
 check('bulk identity indexes are startup-critical',
   index.includes("key: 'receipt_bulk_intake_identity'") && index.includes('models: [Receipt, ReceiptItem]'));
+
+check('received quantity accepts positive decimals end-to-end',
+  receipts.includes('function parseOptionalPositiveNumber')
+  && receipts.includes("replace(',', '.')")
+  && receipts.includes('Number.isFinite(n) || !(n > 0)')
+  && !receipts.includes('parseOptionalPositiveInt'));
 check('totalQty is nullable in schema',
-  /totalQty:\s*\{\s*type:\s*Number,\s*default:\s*null,\s*min:\s*1\s*\}/.test(itemModel));
+  /totalQty:\s*\{[\s\S]*type:\s*Number,[\s\S]*default:\s*null,[\s\S]*value > 0[\s\S]*\}/.test(itemModel));
 check('modern readiness omits totalQty while legacy still requires it',
   permissions.includes('isModernReceiptItem') && permissions.includes('if (!isModernReceiptItem(item)')
   && permissions.includes("missing.push('кількість що приїхала')"));
@@ -58,7 +64,7 @@ check('legacy direct Product max-order allocator is absent',
   !/Product\.findOne\([\s\S]{0,220}?sort\(\{\s*orderNumber:\s*-1/i.test(productOrderSources));
 
 if (failed) {
-  console.error(`Receipt mass-intake contract: FAIL (${failed}/12)`);
+  console.error(`Receipt mass-intake contract: FAIL (${failed}/13)`);
   process.exit(1);
 }
-console.log('Receipt mass-intake contract: PASS (12/12)');
+console.log('Receipt mass-intake contract: PASS (13/13)');
