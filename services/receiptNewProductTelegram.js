@@ -51,7 +51,7 @@ function displayNumber(value) {
 function buildCaption(snapshot) {
   const head = [
     `Ціна: ${displayNumber(snapshot.price)} zł`,
-    `В упаковці: ${displayNumber(snapshot.qtyPerPackage)}`,
+    `Кількість: ${displayNumber(snapshot.qtyPerPackage)} шт`,
   ];
   const routeLine = String(snapshot.routeLabel || '');
   const commentsLine = Array.isArray(snapshot.comments)

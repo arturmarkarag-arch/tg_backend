@@ -148,8 +148,8 @@ const ReceiptItemSchema = new mongoose.Schema(
       type: Number,
       default: null,
       validate: {
-        validator: (value) => value == null || (Number.isFinite(value) && value > 0),
-        message: 'totalQty must be greater than 0',
+        validator: (value) => value == null || (Number.isInteger(value) && value >= 1),
+        message: 'totalQty must be a positive integer',
       },
     },
 

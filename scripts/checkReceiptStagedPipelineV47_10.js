@@ -27,9 +27,9 @@ assert.match(errors, /receipt_item_not_prepared/);
 // legacy rows keep that stock-bearing guard.
 assert.match(routes, /assertItemReadyForRouting\(authItem\)/);
 assert.match(routes, /status:\s*'draft',[\s\S]*photoUrl:\s*\{ \$nin: \['', null\] \},[\s\S]*routingVersion[\s\S]*price:\s*\{ \$gt: 0 \},[\s\S]*qtyPerPackage:\s*\{ \$gte: 1 \}/);
-assert.match(routes, /Number\(authItem\.routingVersion \|\| 0\) >= 1 \? \{\} : \{ totalQty: \{ \$gt: 0 \} \}/);
+assert.match(routes, /Number\(authItem\.routingVersion \|\| 0\) >= 1 \? \{\} : \{ totalQty: \{ \$gte: 1 \} \}/);
 assert.match(routes, /if \(currentItem\.status === 'draft'\) assertItemReadyForRouting\(currentItem\)/);
-assert.match(permissions, /!isModernReceiptItem\(item\)[\s\S]*Number\(item\?\.totalQty\) > 0/);
+assert.match(permissions, /!isModernReceiptItem\(item\)[\s\S]*Number\.isInteger\(Number\(item\?\.totalQty\)\)[\s\S]*Number\(item\?\.totalQty\) >= 1/);
 
 // Batch routing is not allowed to bypass the same preparation gate.
 assert.match(routes, /router\.patch\('\/items\/routing-batch'[\s\S]*assertItemReadyForRouting\(item\)/);

@@ -42,10 +42,10 @@ describe('receipt routing v38 contract', () => {
     expect(routing).toContain("reason: 'may_not_reach_with_warehouse'");
   });
 
-  test('received quantity is optional modern metadata, accepts positive decimals, and is not automatic stock', () => {
-    expect(itemModel).toContain('validator: (value) => value == null || (Number.isFinite(value) && value > 0)');
-    expect(permissions).toContain("if (!isModernReceiptItem(item) && !(Number(item?.totalQty) > 0))");
-    expect(receipts).toContain('function parseOptionalPositiveNumber');
+  test('received quantity is optional modern metadata, remains integer-only, and is not automatic stock', () => {
+    expect(itemModel).toContain('validator: (value) => value == null || (Number.isInteger(value) && value >= 1)');
+    expect(permissions).toContain("if (!isModernReceiptItem(item) && !(Number.isInteger(Number(item?.totalQty)) && Number(item?.totalQty) >= 1))");
+    expect(receipts).toContain('function parseOptionalPositiveInt');
     expect(receipts).toContain('Number(item.routingVersion || 0) >= 1 ? 0 : item.totalQty');
     expect(blocks).toContain("{ source: 'receipt' }");
   });

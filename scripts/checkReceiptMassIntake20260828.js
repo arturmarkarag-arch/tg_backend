@@ -35,13 +35,14 @@ check('bulk command identity has DB unique backstops',
 check('bulk identity indexes are startup-critical',
   index.includes("key: 'receipt_bulk_intake_identity'") && index.includes('models: [Receipt, ReceiptItem]'));
 
-check('received quantity accepts positive decimals end-to-end',
-  receipts.includes('function parseOptionalPositiveNumber')
-  && receipts.includes("replace(',', '.')")
-  && receipts.includes('Number.isFinite(n) || !(n > 0)')
-  && !receipts.includes('parseOptionalPositiveInt'));
-check('totalQty is nullable in schema',
-  /totalQty:\s*\{[\s\S]*type:\s*Number,[\s\S]*default:\s*null,[\s\S]*value > 0[\s\S]*\}/.test(itemModel));
+check('received quantity is an optional positive integer end-to-end',
+  receipts.includes('function parseOptionalPositiveInt')
+  && receipts.includes('Number.isInteger(n) || n < 1')
+  && !receipts.includes('parseOptionalPositiveNumber'));
+check('price parser keeps decimal comma support',
+  receipts.includes('function parseNumberField') && receipts.includes("replace(',', '.')"));
+check('totalQty is nullable positive-integer metadata in schema',
+  /totalQty:\s*\{[\s\S]*type:\s*Number,[\s\S]*default:\s*null,[\s\S]*Number\.isInteger\(value\)[\s\S]*value >= 1[\s\S]*\}/.test(itemModel));
 check('modern readiness omits totalQty while legacy still requires it',
   permissions.includes('isModernReceiptItem') && permissions.includes('if (!isModernReceiptItem(item)')
   && permissions.includes("missing.push('кількість що приїхала')"));
@@ -49,6 +50,8 @@ check('single and batch routing share Stage-2 readiness',
   (receipts.match(/assertItemReadyForRouting\(item\);/g) || []).length >= 2);
 check('Telegram route copy is Буде на лайках',
   telegram.includes("'Буде на лайках'") && !telegram.includes("'На лайки'"));
+check('Telegram package quantity includes шт unit',
+  telegram.includes('`Кількість: ${displayNumber(snapshot.qtyPerPackage)} шт`'));
 check('Product order allocation owns one re-entrant global lane through commit',
   orderLane.includes('AsyncLocalStorage') && orderLane.includes('lockContext.getStore()?.held === true')
   && orderLane.includes("const LOCK_NAME = 'product-order-number'"));
@@ -64,7 +67,7 @@ check('legacy direct Product max-order allocator is absent',
   !/Product\.findOne\([\s\S]{0,220}?sort\(\{\s*orderNumber:\s*-1/i.test(productOrderSources));
 
 if (failed) {
-  console.error(`Receipt mass-intake contract: FAIL (${failed}/13)`);
+  console.error(`Receipt mass-intake contract: FAIL (${failed}/15)`);
   process.exit(1);
 }
-console.log('Receipt mass-intake contract: PASS (13/13)');
+console.log('Receipt mass-intake contract: PASS (15/15)');

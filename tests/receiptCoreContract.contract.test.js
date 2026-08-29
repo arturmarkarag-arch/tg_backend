@@ -11,11 +11,11 @@ const supplement = read('services/supplementOffers.js');
 const waveService = read('services/supplementWaveService.js');
 
 describe('receipt core contract', () => {
-  test('totalQty remains the single received quantity and supports positive decimals', () => {
-    expect(model).toContain('validator: (value) => value == null || (Number.isFinite(value) && value > 0)');
-    expect(permissions).toContain("if (!isModernReceiptItem(item) && !(Number(item?.totalQty) > 0))");
-    expect(route).toContain('function parseOptionalPositiveNumber');
-    expect(route).not.toContain('parseOptionalPositiveInt');
+  test('totalQty remains the single received quantity and remains a positive integer', () => {
+    expect(model).toContain('validator: (value) => value == null || (Number.isInteger(value) && value >= 1)');
+    expect(permissions).toContain("if (!isModernReceiptItem(item) && !(Number.isInteger(Number(item?.totalQty)) && Number(item?.totalQty) >= 1))");
+    expect(route).toContain('function parseOptionalPositiveInt');
+    expect(route).not.toContain('parseOptionalPositiveNumber');
   });
 
   test('legacy receipt structure, split, matching and evidence fields are absent', () => {

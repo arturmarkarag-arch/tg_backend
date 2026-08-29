@@ -58,7 +58,7 @@ function preparationMissingFields(item) {
   // `totalQty` is optional receiving metadata in the modern staged flow. Legacy
   // rows still require it because their Product.quantity historically derives
   // from this field and dropping it would corrupt the old stock contract.
-  if (!isModernReceiptItem(item) && !(Number(item?.totalQty) > 0)) {
+  if (!isModernReceiptItem(item) && !(Number.isInteger(Number(item?.totalQty)) && Number(item?.totalQty) >= 1)) {
     missing.push('кількість що приїхала');
   }
   if (!(Number(item?.price) > 0)) missing.push('ціна');
