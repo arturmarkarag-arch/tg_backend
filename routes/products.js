@@ -36,6 +36,7 @@ const { buildWarehouseStockEstimate } = require('../utils/warehouseStockEstimate
 const { appendProductsToBlockDocument } = require('../services/blockMembershipPrimitives');
 const { hasReceiptCommercialMutation, syncReceiptItemCommercialMetadataFromProduct } = require('../services/receiptCommercialMetadataCommand');
 const { allocateProductOrderNumber, allocateProductOrderNumbers, withProductOrderNumberLock } = require('../services/productOrderNumber');
+const { parseDecimalNumber } = require('../utils/decimalNumber');
 
 const staffOnly = requireTelegramRoles(['admin', 'warehouse']);
 const registeredOnly = requireTelegramRoles(['seller', 'admin', 'warehouse']);
@@ -1314,7 +1315,8 @@ router.post('/receive', staffOnly, asyncHandler(async (req, res) => {
   const quantity = Number(body.quantity ?? 0);
   if (!Number.isInteger(quantity) || quantity < 0) throw appError('product_quantity_invalid');
 
-  const price = body.price !== undefined && body.price !== '' ? Number(body.price) : 0;
+  const parsedPrice = body.price !== undefined && body.price !== '' ? parseDecimalNumber(body.price) : 0;
+  const price = Number.isFinite(parsedPrice) ? parsedPrice : 0;
   const quantityPerPackage = body.quantityPerPackage !== undefined && body.quantityPerPackage !== '' ? Number(body.quantityPerPackage) : 0;
   const isConfirmed = price > 0 && quantityPerPackage > 0;
   const explicitPending = body.status === 'pending';
@@ -1371,7 +1373,8 @@ router.post('/receive', staffOnly, asyncHandler(async (req, res) => {
 router.post('/', staffOnly, asyncHandler(async (req, res) => {
   const fields = req.body;
   const { orderNumber, name, category, brand, model, warehouse, status } = fields;
-  const price = Number(fields.price ?? 0);
+  const parsedPrice = parseDecimalNumber(fields.price ?? 0);
+  const price = Number.isFinite(parsedPrice) ? parsedPrice : 0;
   const quantity = Number(fields.quantity ?? 0);
   const parsedOrderNumber = Number(orderNumber ?? 0);
   const currentBrand = brand || name || '';
@@ -1458,7 +1461,7 @@ router.patch('/:id', staffOnly, asyncHandler(async (req, res) => {
   }
   const previousPrice = Number(product.price || 0);
   if (price !== undefined) {
-    const p = Number(price);
+    const p = parseDecimalNumber(price);
     if (Number.isFinite(p)) product.price = p;
   }
   if (quantity !== undefined) {
@@ -1578,8 +1581,8 @@ router.patch('/:id', staffOnly, asyncHandler(async (req, res) => {
 
   // Re-price ACTIVE orders so the whole order stays in one price epoch (shared with
   // the write-through shop edit). confirmed/fulfilled orders are intentionally untouched.
-  if (price !== undefined && Number(price) !== previousPrice && !receiptCommercialChanged) {
-    await repriceActiveOrders(product._id, Number(price));
+  if (price !== undefined && Number(product.price) !== previousPrice && !receiptCommercialChanged) {
+    await repriceActiveOrders(product._id, Number(product.price));
   }
 
   // Delete replaced R2 images after successful DB save — orphaned objects are

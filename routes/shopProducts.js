@@ -15,6 +15,7 @@ const { productCataloguePatch, shopProductCataloguePatch } = require('../utils/c
 const { getGeminiStatus } = require('../geminiClient');
 const { describeImageUrl } = require('../utils/productDescribe');
 const { hasReceiptCommercialMutation, syncReceiptItemCommercialMetadataFromProduct, syncReceiptItemCommercialMetadataFromShopProduct } = require('../services/receiptCommercialMetadataCommand');
+const { parseDecimalNumber } = require('../utils/decimalNumber');
 
 const staffOnly  = requireTelegramRoles(['admin', 'warehouse']);
 const adminOnly  = requireTelegramRoles(['admin']);
@@ -141,7 +142,7 @@ router.post('/', staffOnly, asyncHandler(async (req, res) => {
     const item = await ShopProduct.create({
       barcode:            String(barcode || '').trim(),
       name:               String(name    || '').trim(),
-      price:              Number(price)  || 0,
+      price:              parseDecimalNumber(price) || 0,
       quantityPerPackage: Number(quantityPerPackage) || 0,
       notes:              String(notes  || '').trim(),
       source:             ['receive', 'seller', 'manual'].includes(source) ? source : 'manual',
@@ -178,7 +179,7 @@ async function editMirrorThroughToWarehouse(product, fields, req, res) {
 
   if (fields.name               !== undefined) product.name               = String(fields.name).trim();
   if (fields.barcode            !== undefined) product.barcode            = String(fields.barcode).trim();
-  if (fields.price              !== undefined) { const p = Number(fields.price); if (Number.isFinite(p)) product.price = p; }
+  if (fields.price              !== undefined) { const p = parseDecimalNumber(fields.price); if (Number.isFinite(p)) product.price = p; }
   if (fields.quantityPerPackage !== undefined) product.quantityPerPackage = Number(fields.quantityPerPackage) || 0;
   if (fields.notes              !== undefined) product.notes              = String(fields.notes).trim();
   if (fields.labelPositions     !== undefined) {
@@ -294,7 +295,7 @@ router.patch('/:id', staffOnly, asyncHandler(async (req, res) => {
   // ── Scalar fields ──────────────────────────────────────────────────────────
   if (fields.name               !== undefined) item.name               = String(fields.name).trim();
   if (fields.barcode            !== undefined) item.barcode            = String(fields.barcode).trim();
-  if (fields.price              !== undefined) item.price              = Number(fields.price) || 0;
+  if (fields.price              !== undefined) item.price              = parseDecimalNumber(fields.price) || 0;
   if (fields.quantityPerPackage !== undefined) item.quantityPerPackage = Number(fields.quantityPerPackage) || 0;
   if (fields.notes              !== undefined) item.notes              = String(fields.notes).trim();
   if (fields.labelPositions     !== undefined) {

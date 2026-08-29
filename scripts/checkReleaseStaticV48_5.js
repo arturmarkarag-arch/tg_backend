@@ -10,6 +10,7 @@ const checks = [
   'scripts/checkCoreFlowsV47_7.js',
   'scripts/checkReceiptStagedPipelineV47_10.js',
   'scripts/checkReceiptMassIntake20260828.js',
+  'scripts/checkPriceDecimalInput20260829.js',
   'scripts/checkV47_12SupplementTailBlocks.js',
   'scripts/checkV47_14ReceiptPhotoComments.js',
   'scripts/checkV47_15WarehouseRemainder.js',
