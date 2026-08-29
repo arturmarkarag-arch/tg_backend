@@ -7,6 +7,7 @@ const { normalizePhotoComments } = require('../utils/receiptPhotoMeta');
 const { normalizeReceiptItemRouting } = require('../utils/receiptRouting');
 const { classifyTelegramSendError, retryDelayMs } = require('../utils/telegramDeliveryPolicy');
 const { withLock } = require('../utils/lock');
+const { formatCompactDecimal } = require('../utils/decimalDisplay');
 
 const NEW_PRODUCTS_GROUP_KEY = 'telegram.newProductsGroupId';
 const SEND_LEASE_MS = 90 * 1000;
@@ -42,10 +43,7 @@ function stableNumber(value) {
 }
 
 function displayNumber(value) {
-  if (value === null || value === undefined || value === '') return '';
-  const n = Number(value);
-  if (!Number.isFinite(n)) return '';
-  return new Intl.NumberFormat('uk-UA', { maximumFractionDigits: 2 }).format(n);
+  return formatCompactDecimal(value, '');
 }
 
 function buildCaption(snapshot) {
