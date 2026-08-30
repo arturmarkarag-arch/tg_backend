@@ -31,10 +31,12 @@ describe('seller-unassigned Order state contract', () => {
     expect(src).not.toContain("ord.buyerSnapshot.deliveryGroupId = ''");
   });
 
-  it('restores an eligible parked order through the canonical assignment command', () => {
-    const src = read('services/migrateSellerShop.js');
-    expect(src).toContain('status: ORDER_STATUS.NEW_UNASSIGN');
-    expect(src).toContain('if (restoredFromUnassign) activeOrder.status = ORDER_STATUS.NEW');
-    expect(src).toContain('const ownership = await getOrderOwnershipState(activeOrder, { session });');
+  it('restores an eligible parked order through the canonical ownership resolver', () => {
+    const migrate = read('services/migrateSellerShop.js');
+    const resolver = read('services/sellerOrderAssignment.js');
+    expect(migrate).toContain('resolveSellerAssignmentOrder({');
+    expect(resolver).toContain('PARKED_ORDER_STATUSES');
+    expect(resolver).toContain('const canonicalParked = transferable.filter((row) => row.parked);');
+    expect(migrate).toContain('if (restoredFromUnassign) activeOrder.status = ORDER_STATUS.NEW');
   });
 });

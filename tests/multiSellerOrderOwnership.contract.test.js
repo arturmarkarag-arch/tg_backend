@@ -31,9 +31,10 @@ describe('multi-seller + shop-owned order contract', () => {
 
   test('ordinary seller moves cannot rewrite a frozen shop-owned order', () => {
     expect(migrate).toContain('allowFrozenOrderTransfer = false');
-    expect(migrate).toContain('shopOwnedOrder = activeOrder');
+    expect(migrate).toContain('shopOwnedOrder = resolution.stayedOrder');
     expect(unassign).toContain('allowFrozenOrderPark = false');
-    expect(unassign).toContain('shopOwnedIds.push(String(ord._id))');
+    expect(unassign).toContain('for (const row of resolution.rows)');
+    expect(unassign).toContain('if (!row.frozen');
     expect(docs).toContain('The seller remains the historical');
   });
 

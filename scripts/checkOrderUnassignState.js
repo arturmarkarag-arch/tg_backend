@@ -23,6 +23,7 @@ const status = require('../utils/orderStatus');
 const orderModel = read('models/Order.js');
 const unassign = read('services/unassignSeller.js');
 const migrate = read('services/migrateSellerShop.js');
+const assignmentResolver = read('services/sellerOrderAssignment.js');
 const closure = read('services/sessionClosure.js');
 const summary = read('utils/sessionSummaryMath.js');
 const migration = read('services/orderUnassignStateMigration.js');
@@ -50,8 +51,10 @@ check('unassign parks by status without destroying ownership', () =>
   !unassign.includes('ord.buyerSnapshot.shopId = null') &&
   !unassign.includes("ord.buyerSnapshot.deliveryGroupId = ''"));
 
-check('assignment finds explicit parked state', () =>
-  migrate.includes('status: ORDER_STATUS.NEW_UNASSIGN'));
+check('assignment resolves explicit parked state through canonical ownership resolver', () =>
+  migrate.includes('resolveSellerAssignmentOrder({') &&
+  assignmentResolver.includes('PARKED_ORDER_STATUSES') &&
+  assignmentResolver.includes('canonicalParked'));
 
 check('assignment restores parked mutable order to new', () =>
   migrate.includes('if (restoredFromUnassign) activeOrder.status = ORDER_STATUS.NEW'));

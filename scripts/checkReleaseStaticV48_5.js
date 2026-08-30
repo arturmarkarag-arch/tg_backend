@@ -28,6 +28,7 @@ const checks = [
   'scripts/checkLiveHarnessV48_18.js',
   'scripts/checkDataStateArchitectureV48_19.js',
   'scripts/checkMutationAuthorityV48_20.js',
+  'scripts/checkSellerAssignmentArchitecture20260830.js',
   'scripts/checkOperationalReadModelsV48_21.js',
   'scripts/checkSupplementContainerArchitectureV48_S3.js',
   'scripts/checkSupplementRevisionCyclesV48_S3.js',

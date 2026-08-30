@@ -424,7 +424,15 @@ router.patch('/:id/sellers', telegramAuth, requireTelegramRole('admin'), asyncHa
 
         // Removals: unassign + park not-yet-picked orders so they follow the seller.
         for (const tgId of toRemove) {
-          const seller = await User.findOne({ telegramId: tgId }).session(session);
+          // `toRemove` was computed before the transaction for UI diff only. Re-check
+          // CURRENT assignment inside every transaction attempt: if this seller was
+          // concurrently moved to another Shop, bulk-editing THIS Shop must not
+          // unassign them from their new Shop based on a stale list snapshot.
+          const seller = await User.findOne({
+            telegramId: tgId,
+            role: 'seller',
+            shopId: shopIdStr,
+          }).session(session);
           if (!seller) continue;
           const transition = await unassignSellerAndPark({
             session,

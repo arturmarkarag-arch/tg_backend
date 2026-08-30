@@ -52,7 +52,7 @@ describe('V48.20 Mutation Authority contract', () => {
     const migration = read('services/migrateSellerShop.js');
     const unassign = read('services/unassignSeller.js');
 
-    expect(command).toContain('if (!result.assignmentChanged) return result');
+    expect(command).toContain('if (!result.assignmentChanged && !result.orderChanged) return result');
     expect(command).toContain("emit('shop_status_changed', { groupId })");
     expect(command).toContain("io.emit('delivery_groups_updated')");
     expect(command).toContain('result.orderChanged && result.sellerTelegramId');

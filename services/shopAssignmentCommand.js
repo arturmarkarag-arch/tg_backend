@@ -84,27 +84,38 @@ async function publishShopAssignmentTransition(input = {}) {
     if (typeof result.invalidate === 'function') {
       await result.invalidate();
     } else {
-      if (result.fromShopId) await invalidateShop(result.fromShopId);
-      if (result.toShopId && result.toShopId !== result.fromShopId) {
-        await invalidateShop(result.toShopId);
-      }
+      const shopIds = [...new Set([
+        result.fromShopId,
+        result.toShopId,
+        ...(Array.isArray(result.affectedShopIds) ? result.affectedShopIds : []),
+      ].filter(Boolean).map(String))];
+      for (const shopId of shopIds) await invalidateShop(shopId);
     }
   } catch (_) { /* best-effort cache publication */ }
 
-  if (!result.assignmentChanged) return result;
+  // Publication is topology/event driven, not assignment-only. Explicit Order
+  // ownership repair may change a live Order while User.shopId is already correct
+  // (or while the historical author account no longer exists). Such a change must
+  // still refresh affected picking groups and the seller order projection.
+  if (!result.assignmentChanged && !result.orderChanged) return result;
 
   try {
     const io = getIO();
     if (!io) return result;
 
-    const groups = [...new Set([result.prevGroupId, result.newGroupId].filter(Boolean))];
+    const groups = [...new Set([
+      result.prevGroupId,
+      result.newGroupId,
+      ...(Array.isArray(result.affectedGroupIds) ? result.affectedGroupIds : []),
+    ].filter(Boolean).map(String))];
     for (const groupId of groups) {
       io.to(`picking_group_${groupId}`).emit('shop_status_changed', { groupId });
     }
 
-    // Seller counts / topology on the group selector can change even when no
-    // Order moved (initial assignment, unassign, cross-group move with no cart).
-    if (result.prevGroupId !== result.newGroupId) {
+    // Seller counts / topology on the group selector change only when CURRENT
+    // assignment topology changes. A pure Order ownership repair must not pretend
+    // that sellers moved between groups.
+    if (result.assignmentChanged && result.prevGroupId !== result.newGroupId) {
       io.emit('delivery_groups_updated');
     }
 

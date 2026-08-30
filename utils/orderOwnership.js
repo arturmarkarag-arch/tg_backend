@@ -26,11 +26,27 @@ function isOwnershipFrozenFromSession(sessionDoc, now = new Date()) {
 }
 
 async function getOrderOwnershipState(order, { session = null, now = new Date() } = {}) {
+  // A task referencing this Order is direct operational evidence that warehouse
+  // ownership has started. Treat it as frozen even if a damaged/lagging session
+  // row still says `pending`; assignment code must fail closed rather than move a
+  // live warehouse Order because two lifecycle projections temporarily disagree.
+  if (order?._id) {
+    const PickingTask = require('../models/PickingTask');
+    let pipelineQuery = PickingTask.exists({
+      'items.orderId': order._id,
+      status: { $in: ['pending', 'locked', 'completed'] },
+    });
+    if (session) pipelineQuery = pipelineQuery.session(session);
+    if (await pipelineQuery) {
+      return { frozen: true, reason: 'picking_pipeline', session: null };
+    }
+  }
+
   const orderingSessionId = order?.orderingSessionId ? String(order.orderingSessionId) : '';
   if (!orderingSessionId) return { frozen: false, reason: 'no_ordering_session', session: null };
 
   const OrderingSession = require('../models/OrderingSession');
-  let query = OrderingSession.findById(orderingSessionId, '_id closeAt pickingStatus openDate');
+  let query = OrderingSession.findById(orderingSessionId, '_id groupId closeAt pickingStatus openDate');
   if (session) query = query.session(session);
   const sessionDoc = await query.lean();
   // A non-empty historical session id whose document is missing is unsafe to

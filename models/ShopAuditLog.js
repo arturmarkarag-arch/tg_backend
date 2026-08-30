@@ -21,12 +21,12 @@ const ShopAuditLogSchema = new mongoose.Schema({
 
   // Which code path produced this transition (reason string passed by caller).
   reason:           { type: String, default: '' },
-  // Logical source: 'migrate' | 'unassign' | 'raw_leak'
+  // Logical source: 'migrate' | 'unassign' | 'order_snapshot_repair' | legacy diagnostics
   source:           { type: String, default: '' },
 
   // What happened to the seller's active order:
   // 'moved'  — followed the seller to the new shop
-  // 'parked' — detached (shopId=null), will follow on next assignment
+  // 'parked' — status=new_unassign; Shop/group/session ownership is preserved
   // 'none'   — seller had no active order
   // 'left_behind' — order stayed on a shop the seller no longer belongs to (BUG signal)
   orderAction:      { type: String, default: 'none' },

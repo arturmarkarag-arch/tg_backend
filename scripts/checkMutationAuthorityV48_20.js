@@ -63,7 +63,7 @@ check('assignment application command owns lock + transaction + low-level primit
   assignment.includes('withLock(`user:${tid}:shop`') && assignment.includes('session.withTransaction(async () =>')
   && assignment.includes('migrateSellerShop({') && assignment.includes('unassignSellerAndPark({'));
 check('assignment publisher is topology-driven rather than movedOrder-driven',
-  assignment.includes('if (!result.assignmentChanged) return result')
+  assignment.includes('if (!result.assignmentChanged && !result.orderChanged) return result')
   && assignment.includes("emit('shop_status_changed', { groupId })")
   && assignment.includes("io.emit('delivery_groups_updated')"));
 check('migration/unassignment expose transition metadata even without an Order move',

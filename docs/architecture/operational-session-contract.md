@@ -96,5 +96,34 @@ rewrite any of these Order ownership fields:
 
 After that freeze, `User.shopId` may change independently. The seller remains the historical
 author, while the closed-session Order stays with the shop/session where it was placed.
-A dedicated pre-picking conflict-repair endpoint is the only intentional ownership override;
-it must be explicit and auditable, never an implicit side effect of moving the User.
+
+### Seller assignment Order resolution
+
+Ordinary `User -> Shop` assignment MUST discover the seller's mutable Order from actual
+seller/order ownership state, not from an assumed session bucket. In particular, CURRENT or
+NEXT is **never** a source lookup rule. A mutable Order may have been routed into the immediate
+next cycle because the destination CURRENT session had already entered picking; it still remains
+the seller's transferable Order until ownership freezes.
+
+Canonical rules:
+
+- classify all non-terminal seller Orders through the shared ownership lifecycle;
+- frozen/history Orders are visibility-only and never block a new assignment or a new week;
+- at most ONE non-frozen/transferable Order may exist for the seller's CURRENT assignment;
+- if one transferable Order exists, its Shop must match `User.shopId` before the mutation;
+- `new_unassign` is the only canonical parked mutable shape while `User.shopId=null`;
+- multiple transferable Orders, Shop/snapshot disagreement, or a mutable Order on a different
+  CURRENT Shop are invariant violations: fail closed instead of guessing;
+- after an assignment write, the same invariant is checked again inside the transaction.
+
+Only after the source Order has been resolved does destination routing answer a separate
+question: which session of the target Shop can accept it. The CURRENT session is
+used while `pickingStatus === 'pending'`; once picking has started, assignment routes the
+mutable Order to NEXT. `closeAt` is a source-ownership rule, not a destination-routing rule.
+The session chosen for the destination must never
+determine whether the source Order is visible to migration.
+
+Explicit staff ownership repair is a separate intent from ordinary profile assignment. It may
+repair a closed, pre-picking Order when the operator deliberately selects it, but it must share
+the same seller-assignment lock, destination routing, transactional post-invariant and durable
+audit. Physical picking ownership is never overridden.

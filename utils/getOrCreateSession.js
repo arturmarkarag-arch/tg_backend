@@ -18,11 +18,13 @@ function addDaysToDateStr(dateStr, days) {
   return `${yy}-${mm}-${dd}`;
 }
 
-async function upsertSession(gid, openDate, schedule) {
+async function upsertSession(gid, openDate, schedule, { session = null } = {}) {
   // Hot/read path first: polling an already-materialised session must be a READ,
   // not a findOneAndUpdate. With Mongoose timestamps the old $setOnInsert upsert
   // still bumped updatedAt on every poll even when nothing changed.
-  const existing = await OrderingSession.findOne({ groupId: gid, openDate });
+  let existingQuery = OrderingSession.findOne({ groupId: gid, openDate });
+  if (session) existingQuery = existingQuery.session(session);
+  const existing = await existingQuery;
   if (existing) return existing;
 
   // Only a genuinely missing session reaches the race-safe upsert below.
@@ -42,11 +44,13 @@ async function upsertSession(gid, openDate, schedule) {
           events: [{ at: new Date(), type: 'created' }],
         },
       },
-      { upsert: true, new: true },
+      { upsert: true, new: true, ...(session ? { session } : {}) },
     );
   } catch (err) {
     if (err && err.code === 11000) {
-      const existing = await OrderingSession.findOne({ groupId: gid, openDate });
+      let retryQuery = OrderingSession.findOne({ groupId: gid, openDate });
+      if (session) retryQuery = retryQuery.session(session);
+      const existing = await retryQuery;
       if (existing) return existing;
     }
     throw err;
@@ -58,38 +62,44 @@ async function upsertSession(gid, openDate, schedule) {
  * Session identity is {groupId, openDate}, where openDate is derived ONLY from
  * the group's explicit orderingSchedule.start* fields.
  */
-async function getOrCreateSessionId(groupId, schedule) {
+async function getOrCreateSessionId(groupId, schedule, { session = null } = {}) {
   const gid = String(groupId);
   const normalizedSchedule = normalizeOrderingSchedule(schedule);
   const openDate = getOpenDateWarsaw(normalizedSchedule);
 
   if (isMaintenanceActive()) {
-    const existing = await OrderingSession.findOne({ groupId: gid, openDate }, '_id').lean();
+    let query = OrderingSession.findOne({ groupId: gid, openDate }, '_id');
+    if (session) query = query.session(session);
+    const existing = await query.lean();
     return existing ? String(existing._id) : null;
   }
 
-  const doc = await upsertSession(gid, openDate, normalizedSchedule);
+  const doc = await upsertSession(gid, openDate, normalizedSchedule, { session });
   return String(doc._id);
 }
 
-async function findCurrentSessionId(groupId, schedule) {
+async function findCurrentSessionId(groupId, schedule, { session = null } = {}) {
   const openDate = getOpenDateWarsaw(normalizeOrderingSchedule(schedule));
-  const doc = await OrderingSession.findOne({ groupId: String(groupId), openDate }, '_id').lean();
+  let query = OrderingSession.findOne({ groupId: String(groupId), openDate }, '_id');
+  if (session) query = query.session(session);
+  const doc = await query.lean();
   return doc ? String(doc._id) : null;
 }
 
-async function getOrCreateNextSessionId(groupId, schedule) {
+async function getOrCreateNextSessionId(groupId, schedule, { session = null } = {}) {
   const gid = String(groupId);
   const normalizedSchedule = normalizeOrderingSchedule(schedule);
   const currentOpenDate = getOpenDateWarsaw(normalizedSchedule);
   const nextOpenDate = addDaysToDateStr(currentOpenDate, 7);
 
   if (isMaintenanceActive()) {
-    const existing = await OrderingSession.findOne({ groupId: gid, openDate: nextOpenDate }, '_id').lean();
+    let query = OrderingSession.findOne({ groupId: gid, openDate: nextOpenDate }, '_id');
+    if (session) query = query.session(session);
+    const existing = await query.lean();
     return existing ? String(existing._id) : null;
   }
 
-  const doc = await upsertSession(gid, nextOpenDate, normalizedSchedule);
+  const doc = await upsertSession(gid, nextOpenDate, normalizedSchedule, { session });
   return String(doc._id);
 }
 

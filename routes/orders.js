@@ -51,12 +51,17 @@ const { appError, asyncHandler } = require('../utils/errors');
 const { normalizeDeliveryGroup } = require('../utils/deliveryGroupHelpers');
 const { getShop, getDeliveryGroup } = require('../utils/modelCache');
 const { withLock } = require('../utils/lock');
-const { assignUserToShopCommand, unassignUserFromShopCommand } = require('../services/shopAssignmentCommand');
+const { assignUserToShopCommand, unassignUserFromShopCommand, publishShopAssignmentTransition } = require('../services/shopAssignmentCommand');
 const { activeOrderShopFilter } = require('../utils/orderShopFilter');
 const { reconcileLateOrderStrict } = require('../services/lateOrderReconcile');
 const { isRemovedUser } = require('../utils/userAccountState');
 const { getTelegramUsernameMap } = require('../utils/telegramUsername');
 const { getSupplementExcludedProductIds, assertProductOrdinaryOrderable } = require('../services/supplementSessionExclusion');
+const { resolveAssignmentDestination } = require('../services/orderAssignmentRouting');
+const { assertSellerAssignmentOrderInvariant } = require('../services/sellerOrderAssignment');
+const { getOrderOwnershipState } = require('../utils/orderOwnership');
+const { assertOperationalShop } = require('../utils/shopOperationalState');
+const { logShopTransition } = require('../services/shopAudit');
 
 const router = express.Router();
 const staffOnly = requireTelegramRoles(['admin', 'warehouse']);
@@ -89,6 +94,18 @@ function actorFromReq(req) {
   };
 }
 
+
+async function updateSellerStateForExpectedAssignment({ telegramId, shopId, set, session }) {
+  const result = await User.updateOne(
+    { telegramId: String(telegramId), shopId },
+    { $set: set },
+    { session },
+  );
+  const matched = Number(result?.matchedCount ?? result?.n ?? 0);
+  if (matched !== 1) throw appError('seller_assignment_changed');
+  return result;
+}
+
 async function ensureOrderIsStale(order, session = null) {
   const groupId = order?.buyerSnapshot?.deliveryGroupId ? String(order.buyerSnapshot.deliveryGroupId) : '';
   if (!groupId) return;
@@ -98,7 +115,11 @@ async function ensureOrderIsStale(order, session = null) {
   if (!group) return;
 
   const normalizedGroup = normalizeDeliveryGroup(group);
-  const currentSessionId = await getOrCreateSessionId(String(normalizedGroup._id), normalizedGroup.orderingSchedule);
+  const currentSessionId = await getOrCreateSessionId(
+    String(normalizedGroup._id),
+    normalizedGroup.orderingSchedule,
+    session ? { session } : {},
+  );
   if (String(order.orderingSessionId || '') === String(currentSessionId || '')) {
     throw appError('validation_failed', { field: 'orderingSessionId', details: 'order_is_current_session' });
   }
@@ -984,18 +1005,22 @@ async function placeOrderImpl(req, res) {
     // оформити те саме. Тепер або обидві дії проходять, або жодна.
     {
       const activePositions = (order.items || []).filter((i) => !i.cancelled && !i.skipped && !i.voided).length;
-      await User.updateOne(
-        { telegramId: buyer.telegramId },
-        {
-          $set: {
-            'cartState.lastOrderPositions': activePositions,
-            'cartState.orderItems': {},
-            'cartState.orderItemIds': [],
-            'cartState.updatedAt': new Date(),
-          },
+      // The request topology (buyer/shop/session) was resolved before the
+      // transaction. Assignment changes use another command/lock, so a tx retry
+      // MUST NOT blindly reuse that stale shop. Make the User write conditional on
+      // the same assignment; if another transaction moved the seller, this whole
+      // Order transaction aborts instead of committing an Order to the old Shop.
+      await updateSellerStateForExpectedAssignment({
+        telegramId: buyer.telegramId,
+        shopId: buyer.shopId,
+        session: mongoSession,
+        set: {
+          'cartState.lastOrderPositions': activePositions,
+          'cartState.orderItems': {},
+          'cartState.orderItemIds': [],
+          'cartState.updatedAt': new Date(),
         },
-        { session: mongoSession },
-      );
+      });
     }
 
     });
@@ -1098,155 +1123,256 @@ async function placeOrderImpl(req, res) {
   return res.status(201).json(responseBody);
 }
 
-// PATCH /:id/snapshot — admin reassigns order to a different shop
+// PATCH /:id/snapshot — explicit staff ownership repair for one Order.
+// This is NOT an ordinary User -> Shop assignment path. It may repair a closed,
+// pre-picking Order, but it shares the seller assignment lock, destination router,
+// post-write invariant and post-commit publication with the canonical assignment
+// subsystem. That keeps manual repair from becoming a second, weaker truth.
 router.patch('/:id/snapshot', staffOnly, async (req, res) => {
-  const { shopId } = req.body;
-  if (!shopId) throw appError('order_shop_required');
+  const targetShopId = String(req.body?.shopId || '').trim();
+  if (!targetShopId) throw appError('order_shop_required');
 
-  // Target shop is an immutable reference for this request — safe to load once
-  // outside the transaction.
-  const shop = await Shop.findById(shopId).populate('cityId', 'name').lean();
-  if (!shop) throw appError('order_shop_not_found');
+  // buyerTelegramId is immutable Order provenance and is used only to choose the
+  // same distributed lock as assignUserToShopCommand/unassignUserFromShopCommand.
+  // The full Order is ALWAYS re-read inside every transaction attempt below.
+  const lockSeed = await Order.findById(req.params.id, 'buyerTelegramId').lean();
+  if (!lockSeed) throw appError('order_not_found');
+  const sellerTelegramId = String(lockSeed.buyerTelegramId || '').trim();
+  const lockKey = sellerTelegramId
+    ? `user:${sellerTelegramId}:shop`
+    : `order:${String(req.params.id)}:snapshot`;
 
-  // All writes (Order, PickingTask, User) must commit atomically — partial commits
-  // would leave the buyer pointing at one shop while the order points at another,
-  // causing phantom conflicts and stale buyerSnapshot data on the next /orders POST.
-  //
-  // CRITICAL: the order is read INSIDE the transaction (not once up-front). On a
-  // WriteConflict, withTransaction re-runs this callback; a closure-captured
-  // pre-tx document would carry a stale `items` array, and re-saving it would
-  // silently revert a seller's concurrent set-item-qty / remove-item edit that
-  // committed in between. Re-reading per attempt makes every retry start from the
-  // current document, so the last writer's items survive.
-  const session = await mongoose.connection.startSession();
   let order = null;
-  let prevGroupId = null;
+  let targetShop = null;
+  let transition = null;
   let txConflict = null;
   let notActiveStatus = null;
-  try {
-    await session.withTransaction(async () => {
-      // reset per-attempt so a retry recomputes cleanly
-      txConflict = null;
-      notActiveStatus = null;
 
-      const fresh = await Order.findById(req.params.id).session(session);
-      if (!fresh) throw appError('order_not_found');
+  await withLock(lockKey, async () => {
+    const session = await mongoose.connection.startSession();
+    try {
+      await session.withTransaction(async () => {
+        // reset per-attempt so a transaction retry recomputes from authoritative data
+        txConflict = null;
+        notActiveStatus = null;
+        transition = null;
 
-      // Only allow reassigning active orders — moving fulfilled/cancelled orders
-      // would relocate the buyer based on historical data.
-      if (!['new', 'in_progress'].includes(fresh.status)) {
-        notActiveStatus = fresh.status;
-        throw Object.assign(new Error('order_not_active'), { code: 'order_not_active' });
-      }
-
-      // Hard guard: once the order is in the picking pipeline, reassignment is forbidden.
-      await ensureOrderNotInPickingPipeline(fresh._id, session);
-
-      // Target shop must not already hold someone else's active order — that would
-      // create a fresh conflict. Re-checked here (inside the tx) so two concurrent
-      // admins can't both pass; only one commits, the other aborts cleanly.
-      const conflictInTx = await Order.findOne(
-        activeOrderShopFilter(shop._id, { _id: { $ne: fresh._id } }),
-      ).session(session).lean();
-      if (conflictInTx) {
-        txConflict = true;
-        // Plain Error → aborts without a TransientTransactionError retry.
-        throw Object.assign(new Error('tx_conflict'), { code: 'target_shop_has_order' });
-      }
-
-      prevGroupId = fresh.buyerSnapshot?.deliveryGroupId
-        ? String(fresh.buyerSnapshot.deliveryGroupId)
-        : null;
-      const prevSnapshot = fresh.buyerSnapshot
-        ? { shopName: fresh.buyerSnapshot.shopName, shopCity: fresh.buyerSnapshot.shopCity }
-        : null;
-
-      // Resolve delivery group data once inside the transaction
-      let newSessionId = null;
-      if (shop.deliveryGroupId) {
-        const newGroup = await DeliveryGroup.findById(shop.deliveryGroupId).session(session).lean();
-        if (newGroup) {
-          newSessionId = await getOrCreateSessionId(String(newGroup._id), newGroup.orderingSchedule);
+        const fresh = await Order.findById(req.params.id).session(session);
+        if (!fresh) throw appError('order_not_found');
+        if (sellerTelegramId && String(fresh.buyerTelegramId || '') !== sellerTelegramId) {
+          throw appError('seller_order_assignment_invariant', { kind: 'order_author_changed' });
         }
-      }
 
-      if (!fresh.buyerSnapshot) fresh.buyerSnapshot = {};
-      fresh.buyerSnapshot.shopId = String(shop._id);
-      fresh.buyerSnapshot.shopName = shop.name || '';
-      fresh.buyerSnapshot.shopCity = shop.cityId?.name || '';
-      fresh.buyerSnapshot.deliveryGroupId = shop.deliveryGroupId ? String(shop.deliveryGroupId) : '';
-      fresh.shopId = shop._id;
-      if (newSessionId) fresh.orderingSessionId = newSessionId;
-      fresh.markModified('buyerSnapshot');
-      fresh.history.push({
-        ...actorFromReq(req),
-        action: 'shop_reassigned',
-        meta: { from: prevSnapshot, to: { shopName: shop.name || '', shopCity: shop.cityId?.name || '' } },
-      });
+        // Only live Orders are repairable here. Terminal/history rows are immutable.
+        if (!['new', 'in_progress'].includes(fresh.status)) {
+          notActiveStatus = fresh.status;
+          throw Object.assign(new Error('order_not_active'), { code: 'order_not_active' });
+        }
 
-      await fresh.save({ session });
-      order = fresh;
+        // Physical picking ownership is never overrideable, even by this staff repair.
+        await ensureOrderNotInPickingPipeline(fresh._id, session);
+        const sourceOwnership = await getOrderOwnershipState(fresh, { session, now: new Date() });
+        if (sourceOwnership.reason === 'picking_pipeline' || sourceOwnership.reason === 'picking_started') {
+          throw appError('order_picking_started');
+        }
 
-      // Sync shopName in any active PickingTask items that reference this order.
-      // Failure here MUST abort the transaction — picking workers would otherwise
-      // see a stale shop name on items they're packing.
-      await PickingTask.updateMany(
-        { 'items.orderId': fresh._id, status: { $in: ['pending', 'locked'] } },
-        { $set: { 'items.$[elem].shopName': shop.name || '' } },
-        { arrayFilters: [{ 'elem.orderId': fresh._id }], session },
-      );
+        // Re-read target topology INSIDE the transaction. A route-level Shop snapshot
+        // may become inactive or move groups before commit and must not be trusted.
+        targetShop = await Shop.findById(targetShopId)
+          .populate('cityId', 'name')
+          .session(session)
+          .lean();
+        if (!targetShop) throw appError('order_shop_not_found');
+        assertOperationalShop(targetShop, appError);
 
-      // Update the buyer: прив'язуємо до нового магазину (група/зона виводяться з
-      // нього) і чистимо кошик, бо активне замовлення переїхало.
-      if (fresh.buyerTelegramId) {
-        const userUpdate = {
-          shopId: shop._id,
-          'cartState.orderItems': {},
-          'cartState.orderItemIds': [],
-          'cartState.updatedAt': new Date(),
-          'cartState.reservedForGroupId': null,
-        };
-        await User.updateOne(
-          { telegramId: fresh.buyerTelegramId },
-          { $set: userUpdate },
-          { session },
+        // WHERE is a separate decision from WHICH Order is being repaired.
+        // CURRENT is the target while picking is pending; once the warehouse
+        // plan has started, the same repair is routed to NEXT.
+        const destination = await resolveAssignmentDestination({
+          shop: targetShop,
+          session,
+        });
+        const newSessionId = destination.targetSessionId;
+
+        // A historical active-status row from an older frozen session must NEVER
+        // block today's explicit repair. Conflict is an operational property of
+        // the exact destination cycle, so scope the check to that session.
+        const conflictInTx = await Order.findOne(
+          activeOrderShopFilter(targetShop._id, {
+            _id: { $ne: fresh._id },
+            orderingSessionId: newSessionId,
+          }),
+        ).session(session).lean();
+        if (conflictInTx) {
+          txConflict = true;
+          throw Object.assign(new Error('tx_conflict'), { code: 'target_shop_has_order' });
+        }
+
+        const orderSourceShopId = String(fresh.shopId || fresh.buyerSnapshot?.shopId || '');
+        const orderSourceGroupId = fresh.buyerSnapshot?.deliveryGroupId
+          ? String(fresh.buyerSnapshot.deliveryGroupId)
+          : null;
+        const prevSnapshot = fresh.buyerSnapshot
+          ? { shopName: fresh.buyerSnapshot.shopName, shopCity: fresh.buyerSnapshot.shopCity }
+          : null;
+
+        const currentUserRow = fresh.buyerTelegramId
+          ? await User.findOne({ telegramId: fresh.buyerTelegramId }).session(session).lean()
+          : null;
+        // A soft-removed User is historical identity only. Never reactivate their
+        // CURRENT assignment as a side effect of repairing an Order authored by
+        // that account.
+        const currentUser = currentUserRow && !isRemovedUser(currentUserRow)
+          ? currentUserRow
+          : null;
+        const userSourceShopId = currentUser?.shopId ? String(currentUser.shopId) : null;
+        let userSourceGroupId = null;
+        if (userSourceShopId) {
+          const userSourceShop = await Shop.findById(userSourceShopId, 'deliveryGroupId').session(session).lean();
+          userSourceGroupId = userSourceShop?.deliveryGroupId ? String(userSourceShop.deliveryGroupId) : null;
+        }
+
+        if (!fresh.buyerSnapshot) fresh.buyerSnapshot = {};
+        fresh.buyerSnapshot.shopId = String(targetShop._id);
+        fresh.buyerSnapshot.shopName = targetShop.name || '';
+        fresh.buyerSnapshot.shopCity = targetShop.cityId?.name || '';
+        fresh.buyerSnapshot.shopAddress = targetShop.address || '';
+        fresh.buyerSnapshot.deliveryGroupId = targetShop.deliveryGroupId ? String(targetShop.deliveryGroupId) : '';
+        fresh.shopId = targetShop._id;
+        fresh.orderingSessionId = newSessionId;
+        fresh.markModified('buyerSnapshot');
+        fresh.history.push({
+          ...actorFromReq(req),
+          action: 'shop_reassigned',
+          meta: {
+            from: prevSnapshot,
+            to: { shopName: targetShop.name || '', shopCity: targetShop.cityId?.name || '' },
+            ownershipRepair: true,
+            sourceOwnershipReason: sourceOwnership.reason,
+            routedToNextSession: destination.routedToNextSession,
+            routeReason: destination.routeReason,
+          },
+        });
+
+        await fresh.save({ session });
+        order = fresh;
+
+        // Normally empty because physical pipeline ownership is blocked above. Keep
+        // the projection update transactional as defence for legacy task shapes.
+        await PickingTask.updateMany(
+          { 'items.orderId': fresh._id, status: { $in: ['pending', 'locked'] } },
+          { $set: { 'items.$[elem].shopName': targetShop.name || '' } },
+          { arrayFilters: [{ 'elem.orderId': fresh._id }], session },
         );
-      }
-    });
-  } catch (err) {
-    // order_not_active is a clean 409, not a 500 — surface it as before.
-    if (err && err.code === 'order_not_active') {
-      return res.status(409).json({
-        error: 'order_not_active',
-        message: `Замовлення вже ${notActiveStatus === 'fulfilled' ? 'виконано' : 'скасовано'} — перенос неможливий.`,
+
+        // Preserve the endpoint's historical semantics: when the buyer account
+        // still exists, this explicit repair also changes CURRENT User.shopId.
+        // The post-write invariant guarantees this cannot silently leave another
+        // mutable Order behind on a different Shop.
+        if (currentUser) {
+          const userUpdate = {
+            shopId: targetShop._id,
+            'cartState.orderItems': {},
+            'cartState.orderItemIds': [],
+            'cartState.updatedAt': new Date(),
+            'cartState.reservedForGroupId': null,
+          };
+          const userWrite = await User.updateOne(
+            { _id: currentUser._id },
+            { $set: userUpdate },
+            { session },
+          );
+          if (Number(userWrite?.matchedCount ?? userWrite?.n ?? 0) !== 1) {
+            throw appError('seller_assignment_changed');
+          }
+
+          await assertSellerAssignmentOrderInvariant({
+            sellerTelegramId: fresh.buyerTelegramId,
+            currentShopId: String(targetShop._id),
+            session,
+            now: new Date(),
+          });
+
+          transition = {
+            fromShopId: userSourceShopId,
+            toShopId: String(targetShop._id),
+            prevGroupId: userSourceGroupId,
+            newGroupId: String(targetShop.deliveryGroupId || ''),
+            affectedShopIds: [orderSourceShopId].filter(Boolean),
+            affectedGroupIds: [orderSourceGroupId].filter(Boolean),
+            sellerTelegramId: String(fresh.buyerTelegramId),
+            assignmentChanged: userSourceShopId !== String(targetShop._id),
+            orderChanged: true,
+          };
+        } else {
+          // No ACTIVE User row means buyerTelegramId is provenance only. Repair the
+          // Order, but do not invent/reactivate a CURRENT assignment. The order
+          // transition still publishes both source and target group refreshes.
+          transition = {
+            fromShopId: orderSourceShopId || null,
+            toShopId: String(targetShop._id),
+            prevGroupId: orderSourceGroupId,
+            newGroupId: String(targetShop.deliveryGroupId || ''),
+            sellerTelegramId: String(fresh.buyerTelegramId || ''),
+            assignmentChanged: false,
+            orderChanged: true,
+          };
+        }
+
+        await logShopTransition(session, {
+          ...actorFromReq(req),
+          actorTelegramId: String(req.telegramUser?.telegramId || ''),
+          actorName: [req.telegramUser?.firstName, req.telegramUser?.lastName].filter(Boolean).join(' '),
+          actorRole: req.telegramUser?.role || '',
+          sellerTelegramId: String(fresh.buyerTelegramId || ''),
+          sellerName: currentUser
+            ? [currentUser.firstName, currentUser.lastName].filter(Boolean).join(' ')
+            : '',
+          fromShopId: userSourceShopId || orderSourceShopId,
+          fromShopName: prevSnapshot?.shopName || '',
+          toShopId: String(targetShop._id),
+          toShopName: targetShop.name || '',
+          reason: 'manual_order_snapshot_repair',
+          source: 'order_snapshot_repair',
+          orderAction: 'moved',
+          orderId: String(fresh._id),
+          orderShopBefore: orderSourceShopId,
+          orderShopAfter: String(targetShop._id),
+          note: [
+            `sourceOwnership=${sourceOwnership.reason}`,
+            `route=${destination.routeReason}`,
+            orderSourceShopId && userSourceShopId && orderSourceShopId !== userSourceShopId
+              ? `orderSourceShop=${orderSourceShopId}`
+              : '',
+          ].filter(Boolean).join(' '),
+        });
       });
+    } catch (err) {
+      if (err && err.code === 'order_not_active') {
+        return res.status(409).json({
+          error: 'order_not_active',
+          message: `Замовлення вже ${notActiveStatus === 'fulfilled' ? 'виконано' : 'скасовано'} — перенос неможливий.`,
+        });
+      }
+      if (!(err && err.code === 'target_shop_has_order')) throw err;
+    } finally {
+      await session.endSession();
     }
-    // target_shop_has_order is handled via the txConflict flag below; any other
-    // error propagates to the central handler.
-    if (!(err && err.code === 'target_shop_has_order')) throw err;
-  } finally {
-    session.endSession();
-  }
+  });
+
+  // The withLock callback may already have sent the clean order_not_active 409.
+  if (res.headersSent) return;
 
   if (txConflict) {
     return res.status(409).json({
       error: 'target_shop_has_order',
-      message: `Магазин "${shop.name}" вже має активне замовлення. Переніс створить конфлікт. Спочатку вирішіть той конфлікт.`,
+      message: `Магазин "${targetShop?.name || targetShopId}" вже має активне замовлення. Переніс створить конфлікт. Спочатку вирішіть той конфлікт.`,
     });
   }
 
-  // Notify picking dashboards: both the old group and the new group need to refresh
-  try {
-    const io = getIO();
-    if (io) {
-      const newGroupId = shop.deliveryGroupId ? String(shop.deliveryGroupId) : null;
-      if (prevGroupId) io.to(`picking_group_${prevGroupId}`).emit('shop_status_changed', { groupId: prevGroupId });
-      if (newGroupId && newGroupId !== prevGroupId) io.to(`picking_group_${newGroupId}`).emit('shop_status_changed', { groupId: newGroupId });
-      if (order.buyerTelegramId) io.emit('user_order_updated', { buyerTelegramId: order.buyerTelegramId });
-      io.emit('delivery_groups_updated');
-    }
-  } catch (emitError) {
-  }
+  // One post-commit publication contract for ordinary assignment and explicit
+  // repair. Mongo is authoritative; cache/socket publication remains best-effort.
+  if (transition) await publishShopAssignmentTransition(transition);
 
   res.json(order);
 });
@@ -1278,36 +1404,52 @@ router.post('/:id/stale/restore-to-cart', telegramAuth, adminOnly, asyncHandler(
       const activeItems = (staleOrder.items || []).filter((i) => !i.cancelled && !i.skipped && !i.voided && Number(i.quantity) > 0);
       if (activeItems.length === 0) throw appError('validation_failed', { field: 'items' });
 
-      // Resolve current ordering session for the buyer's delivery group.
-      // Пріоритет — знімок замовлення; якщо його немає, беремо з ПОТОЧНОГО магазину
-      // покупця (раніше тут читалася копія User.deliveryGroupId).
-      let deliveryGroupId = staleOrder.buyerSnapshot?.deliveryGroupId
-        ? String(staleOrder.buyerSnapshot.deliveryGroupId)
-        : null;
-      if (!deliveryGroupId && buyer.shopId) {
-        const buyerShop = await Shop.findById(buyer.shopId).session(mongoSession).lean();
-        deliveryGroupId = buyerShop?.deliveryGroupId ? String(buyerShop.deliveryGroupId) : null;
-      }
+      // A stale Order's snapshot is HISTORY, never CURRENT assignment authority.
+      // Restore into the buyer's actual Shop as read inside this transaction. This
+      // prevents an old Warsaw snapshot from recreating live work in Warsaw after
+      // the seller has already moved to Poznań.
+      if (!buyer.shopId) throw appError('no_shop');
+      const buyerShop = await Shop.findById(buyer.shopId)
+        .populate('cityId', 'name')
+        .session(mongoSession)
+        .lean();
+      assertOperationalShop(buyerShop, appError);
+      const deliveryGroupId = buyerShop.deliveryGroupId ? String(buyerShop.deliveryGroupId) : '';
       if (!deliveryGroupId) throw appError('no_delivery_group');
-      const group = normalizeDeliveryGroup(await getDeliveryGroup(deliveryGroupId));
-      if (!group) throw appError('delivery_group_not_found');
-      const currentSessionId = await getOrCreateSessionId(String(group._id), group.orderingSchedule);
+
+      // Destination routing is shared with seller assignment/repair. If CURRENT
+      // picking already started, restoring into CURRENT would strand the Order
+      // outside the built plan, so route it to NEXT instead.
+      const destination = await resolveAssignmentDestination({
+        shop: buyerShop,
+        session: mongoSession,
+      });
+      const targetSessionId = destination.targetSessionId;
+
+      const currentBuyerSnapshot = {
+        shopId: buyerShop._id,
+        shopName: buyerShop.name || '',
+        shopCity: buyerShop.cityId?.name || '',
+        shopAddress: buyerShop.address || '',
+        deliveryGroupId,
+      };
 
       const actor = actorFromReq(req);
 
-      // Find or create the buyer's active order in the current session.
-      let newOrder = await Order.findOne({
+      // Find or create the buyer's live Order in the exact destination cycle.
+      // Historical active-status rows in older sessions are deliberately ignored.
+      let newOrder = await Order.findOne(activeOrderShopFilter(buyerShop._id, {
         buyerTelegramId,
-        orderingSessionId: currentSessionId,
-        status: { $in: ['new', 'in_progress'] },
-      }).session(mongoSession);
+        orderingSessionId: targetSessionId,
+      })).session(mongoSession);
 
       if (!newOrder) {
         newOrder = new Order({
           orderNumber: await getNextOrderNumber(),
           buyerTelegramId,
-          buyerSnapshot: staleOrder.buyerSnapshot,
-          orderingSessionId: currentSessionId,
+          shopId: buyerShop._id,
+          buyerSnapshot: currentBuyerSnapshot,
+          orderingSessionId: targetSessionId,
           status: 'new',
           items: activeItems.map((i) => ({
             productId: i.productId,
@@ -1318,9 +1460,21 @@ router.post('/:id/stale/restore-to-cart', telegramAuth, adminOnly, asyncHandler(
             cancelled: false,
           })),
           totalPrice: roundMoney(activeItems.reduce((s, i) => s + Number(i.price || 0) * Number(i.quantity || 0), 0)),
-          history: [{ ...actor, action: 'created', meta: { restoredFromOrderId: String(staleOrder._id) } }],
+          history: [{
+            ...actor,
+            action: 'created',
+            meta: {
+              restoredFromOrderId: String(staleOrder._id),
+              routedToNextSession: destination.routedToNextSession,
+              routeReason: destination.routeReason,
+            },
+          }],
         });
       } else {
+        // Re-sync CURRENT ownership presentation from the authoritative Shop.
+        newOrder.shopId = buyerShop._id;
+        newOrder.buyerSnapshot = currentBuyerSnapshot;
+        newOrder.orderingSessionId = targetSessionId;
         // Merge items into existing order — add missing, sum quantities for existing.
         for (const srcItem of activeItems) {
           const pid = String(srcItem.productId);
@@ -1351,12 +1505,20 @@ router.post('/:id/stale/restore-to-cart', telegramAuth, adminOnly, asyncHandler(
 
       const restoredPositions = newOrder.items.filter((i) => !i.cancelled && !i.skipped && !i.voided).length;
 
-      // Update cartState to reflect position count (orderItems remains empty — no cart).
-      await User.updateOne(
-        { _id: buyer._id },
-        { $set: { 'cartState.lastOrderPositions': restoredPositions, 'cartState.orderItems': {}, 'cartState.orderItemIds': [], 'cartState.updatedAt': new Date() } },
-        { session: mongoSession },
-      );
+      // Update cartState through an assignment-aware write fence. A concurrent
+      // seller move must abort/retry this transaction rather than letting a restore
+      // commit against a stale User.shopId.
+      await updateSellerStateForExpectedAssignment({
+        telegramId: buyerTelegramId,
+        shopId: buyerShop._id,
+        session: mongoSession,
+        set: {
+          'cartState.lastOrderPositions': restoredPositions,
+          'cartState.orderItems': {},
+          'cartState.orderItemIds': [],
+          'cartState.updatedAt': new Date(),
+        },
+      });
 
       await detachOrderFromPendingTasks(staleOrder._id, mongoSession);
 
@@ -1365,9 +1527,27 @@ router.post('/:id/stale/restore-to-cart', telegramAuth, adminOnly, asyncHandler(
       staleOrder.history.push({
         ...actor,
         action: 'stale_order_restored_to_cart',
-        meta: { restoredPositions, voidedCount, deliveryGroupId, fromSessionId: staleOrder.orderingSessionId || '', newOrderId: String(newOrder._id) },
+        meta: {
+          restoredPositions,
+          voidedCount,
+          deliveryGroupId,
+          fromSessionId: staleOrder.orderingSessionId || '',
+          newOrderId: String(newOrder._id),
+          toSessionId: targetSessionId,
+          routedToNextSession: destination.routedToNextSession,
+          routeReason: destination.routeReason,
+        },
       });
       await staleOrder.save({ session: mongoSession });
+
+      // The old row is terminal now; exactly one non-frozen Order may remain and
+      // it must match the buyer's CURRENT assignment + delivery group.
+      await assertSellerAssignmentOrderInvariant({
+        sellerTelegramId: buyerTelegramId,
+        currentShopId: String(buyerShop._id),
+        session: mongoSession,
+        now: new Date(),
+      });
 
       await User.updateOne(
         { _id: buyer._id },
@@ -1401,7 +1581,9 @@ router.post('/:id/stale/restore-to-cart', telegramAuth, adminOnly, asyncHandler(
         // scenario "Оновлена" exists to surface.
         restoredOrderId: String(newOrder._id),
         restoredOrderNumber: newOrder.orderNumber || null,
-        currentSessionId,
+        currentSessionId: targetSessionId,
+        routedToNextSession: destination.routedToNextSession,
+        routeReason: destination.routeReason,
         actorSnapshot: actor,
       };
     });
@@ -1432,7 +1614,7 @@ router.post('/:id/stale/restore-to-cart', telegramAuth, adminOnly, asyncHandler(
   } catch (emitErr) {
   }
 
-  res.json({ message: 'Замовлення відновлено в поточній сесії', ...result });
+  res.json({ message: 'Замовлення відновлено в актуальній сесії', ...result });
 }));
 
 // POST /:id/stale/expire — admin-only action.
@@ -1592,11 +1774,17 @@ router.post('/upsert-item', telegramAuth, requireOrderingWindowOpen, asyncHandle
           history: [{ ...actor, action: 'created' }],
         });
         await order.save({ session: mongoSession });
-        await User.updateOne(
-          { telegramId: user.telegramId },
-          { $set: { 'cartState.lastOrderPositions': 1, 'cartState.orderItems': {}, 'cartState.orderItemIds': [], 'cartState.updatedAt': new Date() } },
-          { session: mongoSession },
-        );
+        await updateSellerStateForExpectedAssignment({
+          telegramId: user.telegramId,
+          shopId: user.shopId,
+          session: mongoSession,
+          set: {
+            'cartState.lastOrderPositions': 1,
+            'cartState.orderItems': {},
+            'cartState.orderItemIds': [],
+            'cartState.updatedAt': new Date(),
+          },
+        });
         result = { ok: true, productId, newQty, action: 'created', orderId: String(order._id) };
         return;
       }
@@ -1667,11 +1855,17 @@ router.post('/upsert-item', telegramAuth, requireOrderingWindowOpen, asyncHandle
       if (closed !== 'deleted') await order.save({ session: mongoSession });
 
       const activePositions = order.items.filter((i) => !i.cancelled && !i.skipped && !i.voided).length;
-      await User.updateOne(
-        { telegramId: user.telegramId },
-        { $set: { 'cartState.lastOrderPositions': activePositions, 'cartState.orderItems': {}, 'cartState.orderItemIds': [], 'cartState.updatedAt': new Date() } },
-        { session: mongoSession },
-      );
+      await updateSellerStateForExpectedAssignment({
+        telegramId: user.telegramId,
+        shopId: user.shopId,
+        session: mongoSession,
+        set: {
+          'cartState.lastOrderPositions': activePositions,
+          'cartState.orderItems': {},
+          'cartState.orderItemIds': [],
+          'cartState.updatedAt': new Date(),
+        },
+      });
 
       result = { ok: true, productId, newQty, action: newQty === 0 ? 'removed' : (activeItem ? 'updated' : 'added'), orderId: String(order._id) };
       });
@@ -1725,11 +1919,10 @@ router.post('/set-item-qty', telegramAuth, requireOrderingWindowOpen, asyncHandl
   const session = await mongoose.connection.startSession();
   try {
     await session.withTransaction(async () => {
-      const order = await Order.findOne({
+      const order = await Order.findOne(activeOrderShopFilter(user.shopId, {
         buyerTelegramId: user.telegramId,
         orderingSessionId: currentSessionId,
-        status: { $in: ['new', 'in_progress'] },
-      }).session(session);
+      })).session(session);
       if (!order) throw appError('order_not_found');
 
       const item = order.items.find((i) => String(i.productId) === productId && !i.cancelled && !i.skipped && !i.voided);
@@ -1751,6 +1944,19 @@ router.post('/set-item-qty', telegramAuth, requireOrderingWindowOpen, asyncHandl
       });
 
       await order.save({ session });
+
+      // Assignment-aware write fence: if the seller moved while this request was
+      // in flight, touching User in the same transaction creates a write conflict
+      // (or no match on retry) and prevents an edit from committing to the old Shop.
+      await updateSellerStateForExpectedAssignment({
+        telegramId: user.telegramId,
+        shopId: user.shopId,
+        session,
+        set: {
+          'cartState.lastOrderPositions': order.items.filter((i) => !i.cancelled && !i.skipped && !i.voided).length,
+          'cartState.updatedAt': new Date(),
+        },
+      });
     });
   } finally {
     session.endSession();
@@ -1778,16 +1984,22 @@ router.post('/remove-item', telegramAuth, requireOrderingWindowOpen, asyncHandle
   const session = await mongoose.connection.startSession();
   try {
     await session.withTransaction(async () => {
-      const order = await Order.findOne({
+      const order = await Order.findOne(activeOrderShopFilter(user.shopId, {
         buyerTelegramId: user.telegramId,
         orderingSessionId: currentSessionId,
-        status: { $in: ['new', 'in_progress'] },
-      }).session(session);
+      })).session(session);
       if (!order) throw appError('order_not_found');
 
       const itemIndex = order.items.findIndex((i) => String(i.productId) === productId && !i.cancelled && !i.skipped && !i.voided);
       if (itemIndex < 0) {
-        // Already gone — idempotent success, nothing to write.
+        // Already gone — idempotent success, but still fence CURRENT assignment so
+        // a stale tab cannot report success against a Shop the seller has left.
+        await updateSellerStateForExpectedAssignment({
+          telegramId: user.telegramId,
+          shopId: user.shopId,
+          session,
+          set: { 'cartState.updatedAt': new Date() },
+        });
         return;
       }
 
@@ -1814,6 +2026,16 @@ router.post('/remove-item', telegramAuth, requireOrderingWindowOpen, asyncHandle
       const closed = await closeOrderIfNoLiveItems(order, actor, session);
 
       if (closed !== 'deleted') await order.save({ session });
+
+      await updateSellerStateForExpectedAssignment({
+        telegramId: user.telegramId,
+        shopId: user.shopId,
+        session,
+        set: {
+          'cartState.lastOrderPositions': order.items.filter((i) => !i.cancelled && !i.skipped && !i.voided).length,
+          'cartState.updatedAt': new Date(),
+        },
+      });
     });
   } finally {
     session.endSession();

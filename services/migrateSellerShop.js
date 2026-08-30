@@ -6,18 +6,19 @@
 
 const Shop = require('../models/Shop');
 const User = require('../models/User');
-const Order = require('../models/Order');
 const DeliveryGroup = require('../models/DeliveryGroup');
 const PickingTask = require('../models/PickingTask');
-const OrderingSession = require('../models/OrderingSession');
-const { getOrCreateSessionId, getOrCreateNextSessionId } = require('../utils/getOrCreateSession');
+const { findCurrentSessionId } = require('../utils/getOrCreateSession');
 const { appError } = require('../utils/errors');
 const { invalidateShop } = require('../utils/modelCache');
 const { logShopTransition } = require('./shopAudit');
-const { activeOrderShopFilter } = require('../utils/orderShopFilter');
-const { getOrderOwnershipState } = require('../utils/orderOwnership');
 const { assertOperationalShop, assertAssignableShopRole } = require('../utils/shopOperationalState');
 const { ORDER_STATUS } = require('../utils/orderStatus');
+const { resolveAssignmentDestination } = require('./orderAssignmentRouting');
+const {
+  resolveSellerAssignmentOrder,
+  assertSellerAssignmentOrderInvariant,
+} = require('./sellerOrderAssignment');
 
 async function ensureOrderNotInPickingPipeline(orderId, session) {
   const exists = await PickingTask.exists({
@@ -78,62 +79,39 @@ async function migrateSellerShop({
     ? String(newShopFull.deliveryGroupId)
     : '';
 
-  // Resolve session ids and warehouse zone for both shops.
-  // CRITICAL: read Shop + DeliveryGroup with the session, NOT from cache.
-  // A stale cache here would compute the wrong oldSessionId and orphan the
-  // active order in the previous group. Hot cache is fine for high-frequency
-  // reads (buyerSnapshot, /me, bot) but not for the one-shot migration path.
+  // Resolve authoritative topology for the old Shop inside this transaction.
+  // Source Order discovery below is NOT derived from a session bucket; the old
+  // DeliveryGroup is read only for topology/audit and for the explicit exact-
+  // session conflict-repair precondition. Never use cached topology here.
   const oldShopFull = oldShopId
     ? await Shop.findById(oldShopId).populate('cityId', 'name').session(session).lean()
     : null;
 
-  let oldSessionId = null;
+  // Source Order discovery is intentionally SESSION-AGNOSTIC. CURRENT/NEXT is
+  // destination routing only; using the old Shop's CURRENT session as a lookup key
+  // made an Order legitimately routed to NEXT invisible on the seller's next move.
+  // The only session-specific source precondition left here is the explicit
+  // conflict-repair flow, which pins an exact CURRENT session chosen by staff.
+  let oldGroup = null;
   if (oldShopFull?.deliveryGroupId) {
-    const oldGroup = await DeliveryGroup.findById(oldShopFull.deliveryGroupId).session(session).lean();
-    if (oldGroup) {
-      oldSessionId = await getOrCreateSessionId(String(oldGroup._id), oldGroup.orderingSchedule);
+    oldGroup = await DeliveryGroup.findById(oldShopFull.deliveryGroupId).session(session).lean();
+  }
+  if (expectedOrderingSessionId) {
+    if (!oldGroup) throw appError('ordering_session_changed');
+    const currentOldSessionId = await findCurrentSessionId(
+      String(oldGroup._id),
+      oldGroup.orderingSchedule,
+      { session },
+    );
+    if (String(currentOldSessionId || '') !== String(expectedOrderingSessionId)) {
+      throw appError('ordering_session_changed');
     }
   }
 
-  // The migration moves ONLY the order from the old shop's CURRENT ordering
-  // session (oldSessionId). Orders from EARLIER sessions are intentionally left
-  // in place — see the lookup below.
-
-  let newSessionId = null;
   let targetSessionId = null;
   let routedToNextSession = false;
-  if (newDeliveryGroupId) {
-    const newGroup = await DeliveryGroup.findById(newDeliveryGroupId).session(session).lean();
-    if (newGroup) {
-      newSessionId = await getOrCreateSessionId(String(newGroup._id), newGroup.orderingSchedule);
-      targetSessionId = newSessionId;
-
-      // If the destination group's CURRENT session is already being picked, an
-      // order added now would never get a PickingTask: once pickingStatus leaves
-      // 'pending', start-session stops building the plan entirely (routes/picking.js
-      // returns `alreadyStarted` before the confirm branch), and lateOrderReconcile
-      // can only ride an item along on a still-OPEN (pending) task. So park the
-      // incoming order in the NEXT session — it is collected next cycle instead of
-      // being stranded.
-      //
-      // The state is read straight off the session. The previous heuristic ("a task
-      // references one of this session's orders") silently returned false for an
-      // EMPTY session — it short-circuits on `currentSessionOrderIds.length > 0`. A
-      // session the warehouse started with zero orders goes `confirmed` and then
-      // immediately `completed` (picking_confirmed taskCount:0 → picking_completed
-      // reason:'empty'), and an order moved into it died whole: every item `skipped`,
-      // order `cancelled`. That is exactly how order #3 was lost on 06.08.2026.
-      const targetSessionDoc = newSessionId
-        ? await OrderingSession.findById(newSessionId, 'pickingStatus').session(session).lean()
-        : null;
-      const currentSessionInPicking = !!targetSessionDoc && targetSessionDoc.pickingStatus !== 'pending';
-
-      if (currentSessionInPicking) {
-        targetSessionId = await getOrCreateNextSessionId(String(newGroup._id), newGroup.orderingSchedule);
-        routedToNextSession = true;
-      }
-    }
-  }
+  let routeReason = 'no_order_move';
+  const ownershipNow = new Date();
 
   // 1. Migrate active order FIRST so a downstream write failure aborts the whole tx
   let movedOrder = null;
@@ -144,103 +122,64 @@ async function migrateSellerShop({
   let prevGroupId = oldShopFull?.deliveryGroupId ? String(oldShopFull.deliveryGroupId) : null;
 
   if (oldShopId !== newShopId) {
-    let activeOrder = null;
+    const resolution = await resolveSellerAssignmentOrder({
+      seller: existingUser,
+      session,
+      now: ownershipNow,
+      expectedOrderingSessionId,
+      allowFrozenOverride: allowFrozenOrderTransfer,
+    });
 
-    if (oldShopId) {
-      const legacyOrderQuery = activeOrderShopFilter(existingUser.shopId, {
-        buyerTelegramId: existingUser.telegramId,
-      });
-
-      // Move ONLY the seller's order from the CURRENT ordering session of the old
-      // shop. A stale order from an EARLIER session is deliberately NOT moved:
-      // silently yanking it into the new shop's session (the removed fallback)
-      // dropped it into a picking run it never belonged to and re-sessioned it
-      // behind the operator's back. Stale orders surface separately via picking
-      // start-session's `staleWarnings` for explicit manual handling.
-      if (expectedOrderingSessionId
-        && String(oldSessionId || '') !== String(expectedOrderingSessionId)) {
-        throw appError('ordering_session_changed');
-      }
-      const sourceSessionId = expectedOrderingSessionId || oldSessionId;
-      if (sourceSessionId) {
-        activeOrder = await Order.findOne({
-          ...legacyOrderQuery,
-          orderingSessionId: String(sourceSessionId),
-        }).session(session);
-      }
-    } else {
-      // Seller can be temporarily unassigned. Parked Orders retain their
-      // original shop/group/session ownership and are identified explicitly by
-      // status — never by destructive null ownership fields.
-      activeOrder = await Order.findOne({
-        buyerTelegramId: existingUser.telegramId,
-        status: ORDER_STATUS.NEW_UNASSIGN,
-      }).sort({ updatedAt: -1, createdAt: -1 }).session(session);
-
-      // Compatibility for rows parked by pre-new_unassign builds. Do not create
-      // new shape-based parked rows, but allow an existing one to be recovered
-      // through the canonical assignment command instead of stranding it forever.
-      if (!activeOrder) {
-        activeOrder = await Order.findOne({
-          buyerTelegramId: existingUser.telegramId,
-          status: { $in: [ORDER_STATUS.NEW, ORDER_STATUS.IN_PROGRESS] },
-          $or: [
-            { shopId: null },
-            { 'buyerSnapshot.shopId': null },
-            { 'buyerSnapshot.shopId': { $exists: false } },
-          ],
-        }).sort({ updatedAt: -1, createdAt: -1 }).session(session);
-      }
-    }
+    const activeOrder = resolution.transferOrder;
+    shopOwnedOrder = resolution.stayedOrder;
 
     if (activeOrder) {
-      const ownership = await getOrderOwnershipState(activeOrder, { session });
+      const ownership = resolution.transferOwnership;
+      const destination = await resolveAssignmentDestination({
+        shop: newShopFull,
+        session,
+      });
+      targetSessionId = destination.targetSessionId;
+      routedToNextSession = destination.routedToNextSession;
+      routeReason = destination.routeReason;
 
-      // Once ordering closes, the seller is only the author. The Order belongs
-      // to the shop/session snapshot and MUST NOT follow an ordinary User.shopId
-      // change. Conflict repair is the only explicit opt-out: staff is then
-      // deliberately repairing Order ownership before picking, not merely moving
-      // a user profile.
-      if (ownership.frozen && !allowFrozenOrderTransfer) {
-        shopOwnedOrder = activeOrder;
-      } else {
-        await ensureOrderNotInPickingPipeline(activeOrder._id, session);
+      await ensureOrderNotInPickingPipeline(activeOrder._id, session);
 
-        activeOrder.shopId = newShopFull._id;
-        if (!activeOrder.buyerSnapshot) activeOrder.buyerSnapshot = {};
-        activeOrder.buyerSnapshot.shopId = newShopId;
-        activeOrder.buyerSnapshot.shopName = newShopName;
-        activeOrder.buyerSnapshot.shopCity = newShopCity;
-        activeOrder.buyerSnapshot.shopAddress = newShopAddress;
-        activeOrder.buyerSnapshot.deliveryGroupId = newDeliveryGroupId;
-        if (targetSessionId) activeOrder.orderingSessionId = targetSessionId;
-        const restoredFromUnassign = activeOrder.status === ORDER_STATUS.NEW_UNASSIGN;
-        if (restoredFromUnassign) activeOrder.status = ORDER_STATUS.NEW;
-        activeOrder.markModified('buyerSnapshot');
-        activeOrder.history.push({
-          by: String(actor.telegramId),
-          byName: [actor.firstName, actor.lastName].filter(Boolean).join(' '),
-          byRole: actor.role,
-          action: 'shop_reassigned',
-          meta: {
-            from: { shopName: oldShopFull?.name || '', deliveryGroupId: oldShopFull?.deliveryGroupId || '' },
-            to:   { shopName: newShopName, shopCity: newShopCity, deliveryGroupId: newDeliveryGroupId },
-            reason,
-            routedToNextSession,
-            restoredFromUnassign,
-            status: restoredFromUnassign ? ORDER_STATUS.NEW : activeOrder.status,
-            ownershipRepair: Boolean(ownership.frozen && allowFrozenOrderTransfer),
-          },
-        });
-        await activeOrder.save({ session });
-        movedOrder = activeOrder;
+      activeOrder.shopId = newShopFull._id;
+      if (!activeOrder.buyerSnapshot) activeOrder.buyerSnapshot = {};
+      activeOrder.buyerSnapshot.shopId = newShopId;
+      activeOrder.buyerSnapshot.shopName = newShopName;
+      activeOrder.buyerSnapshot.shopCity = newShopCity;
+      activeOrder.buyerSnapshot.shopAddress = newShopAddress;
+      activeOrder.buyerSnapshot.deliveryGroupId = newDeliveryGroupId;
+      activeOrder.orderingSessionId = targetSessionId;
+      const restoredFromUnassign = activeOrder.status === ORDER_STATUS.NEW_UNASSIGN;
+      if (restoredFromUnassign) activeOrder.status = ORDER_STATUS.NEW;
+      activeOrder.markModified('buyerSnapshot');
+      activeOrder.history.push({
+        by: String(actor.telegramId),
+        byName: [actor.firstName, actor.lastName].filter(Boolean).join(' '),
+        byRole: actor.role,
+        action: 'shop_reassigned',
+        meta: {
+          from: { shopName: oldShopFull?.name || '', deliveryGroupId: oldShopFull?.deliveryGroupId || '' },
+          to:   { shopName: newShopName, shopCity: newShopCity, deliveryGroupId: newDeliveryGroupId },
+          reason,
+          routedToNextSession,
+          routeReason,
+          restoredFromUnassign,
+          status: restoredFromUnassign ? ORDER_STATUS.NEW : activeOrder.status,
+          ownershipRepair: Boolean(ownership?.frozen && allowFrozenOrderTransfer),
+        },
+      });
+      await activeOrder.save({ session });
+      movedOrder = activeOrder;
 
-        await PickingTask.updateMany(
-          { 'items.orderId': activeOrder._id, status: { $in: ['pending', 'locked'] } },
-          { $set: { 'items.$[elem].shopName': newShopName } },
-          { arrayFilters: [{ 'elem.orderId': activeOrder._id }], session },
-        );
-      }
+      await PickingTask.updateMany(
+        { 'items.orderId': activeOrder._id, status: { $in: ['pending', 'locked'] } },
+        { $set: { 'items.$[elem].shopName': newShopName } },
+        { arrayFilters: [{ 'elem.orderId': activeOrder._id }], session },
+      );
     }
   }
 
@@ -262,6 +201,16 @@ async function migrateSellerShop({
     { $set: userUpdate },
     { new: true, session },
   );
+
+  // Transactional fail-closed guard: a mutable Order may never silently remain
+  // on a different CURRENT Shop after User.shopId changes. Frozen/history Orders
+  // are intentionally ignored by this invariant and may keep their old Shop.
+  await assertSellerAssignmentOrderInvariant({
+    sellerTelegramId: existingUser.telegramId,
+    currentShopId: newShopId,
+    session,
+    now: ownershipNow,
+  });
 
   // 3. Push history entry
   if (pushHistory && oldShopId !== newShopId) {
@@ -341,6 +290,7 @@ async function migrateSellerShop({
     orderId: movedOrder ? String(movedOrder._id) : (shopOwnedOrder ? String(shopOwnedOrder._id) : ''),
     orderShopBefore: (movedOrder || shopOwnedOrder) ? oldShopId : '',
     orderShopAfter: movedOrder ? newShopId : (shopOwnedOrder ? oldShopId : ''),
+    note: movedOrder ? `route=${routeReason}` : '',
   });
 
   // IMPORTANT: cache invalidation is intentionally NOT done here.
