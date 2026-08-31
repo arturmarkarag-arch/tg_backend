@@ -2,7 +2,6 @@ const express = require('express');
 const mongoose = require('mongoose');
 const { appError, asyncHandler } = require('../utils/errors');
 const DeliveryGroup = require('../models/DeliveryGroup');
-const User = require('../models/User');
 const Order = require('../models/Order');
 const Shop = require('../models/Shop');
 const PickingTask = require('../models/PickingTask');
@@ -29,7 +28,6 @@ const { getIO } = require('../socket');
 const cache = require('../utils/cache');
 const { invalidateDeliveryGroup } = require('../utils/modelCache');
 const { buildSellerOrderingStatusReadModel } = require('../services/readModels/sellerOrderingStatusReadModel');
-const { buildShopTransferPayload } = require('../services/sellerTransferNotice');
 const { buildDeliveryGroupSummaryReadModel, buildDeliveryGroupListReadModel } = require('../services/readModels/deliveryGroupCatalogReadModel');
 const { buildDeliveryGroupShopStatusReadModel } = require('../services/readModels/deliveryGroupShopStatusReadModel');
 const { buildCurrentSessionShopProductsReadModel } = require('../services/readModels/currentSessionShopProductsReadModel');
@@ -51,45 +49,6 @@ function addDaysToOpenDate(openDate, days) {
 router.get('/ordering-status', telegramAuth, asyncHandler(async (req, res) => {
   const payload = await buildSellerOrderingStatusReadModel(req.telegramUser);
   res.json(payload);
-}));
-
-
-/**
- * POST /api/delivery-groups/transfer-note/:noteId/acknowledge
- *
- * Acknowledgement is CURRENT per-user state, not browser state. The note id is
- * part of the write predicate, so a delayed click from an old device cannot
- * clear a newer transfer that replaced it in the meantime. Repeated calls are
- * intentionally idempotent.
- */
-router.post('/transfer-note/:noteId/acknowledge', telegramAuth, asyncHandler(async (req, res) => {
-  const noteId = String(req.params.noteId || '').trim();
-  if (!noteId || noteId.length > 128) throw appError('validation_failed', { field: 'transferNoteId' });
-
-  const telegramId = String(req.telegramUser.telegramId);
-  const result = await User.updateOne(
-    {
-      telegramId,
-      'shopTransferNotice.id': noteId,
-    },
-    { $set: { shopTransferNotice: null } },
-  );
-
-  // Return the CURRENT truth as well. If another transfer replaced this note
-  // while the click was in flight, the client immediately receives that newer
-  // banner instead of briefly hiding it. If another device already acknowledged
-  // it, this naturally returns no active notice.
-  const freshUser = await User.findOne({ telegramId })
-    .select('shopId shopTransferNotice')
-    .lean();
-  const activeTransfer = buildShopTransferPayload(freshUser);
-
-  res.json({
-    ok: true,
-    acknowledged: result.modifiedCount > 0,
-    note: activeTransfer.note || null,
-    transferNoteId: activeTransfer.transferNoteId || null,
-  });
 }));
 
 

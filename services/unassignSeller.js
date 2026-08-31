@@ -93,9 +93,7 @@ async function unassignSellerAndPark({
   // Знімаємо тільки магазин — група/зона з нього ж і виводяться.
   await User.updateOne(
     { telegramId: seller.telegramId },
-    // Unassignment invalidates any previous transfer banner in the very same
-    // transaction. Historical User.history remains untouched.
-    { $set: { shopId: null, shopTransferNotice: null } },
+    { $set: { shopId: null } },
     { session },
   );
 

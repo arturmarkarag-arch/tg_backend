@@ -19,10 +19,9 @@ function assertAssignmentOwnedFieldsAbsent(userPatch) {
   if (!userPatch || typeof userPatch !== 'object') return;
   if (
     Object.prototype.hasOwnProperty.call(userPatch, 'shopId')
-    || Object.prototype.hasOwnProperty.call(userPatch, 'shopTransferNotice')
   ) {
     throw appError('validation_failed', {
-      field: Object.prototype.hasOwnProperty.call(userPatch, 'shopId') ? 'shopId' : 'shopTransferNotice',
+      field: 'shopId',
       details: 'assignment_owned_field',
     });
   }
@@ -136,11 +135,7 @@ async function publishShopAssignmentTransition(input = {}) {
     // Every committed CURRENT seller assignment change must reach the seller's
     // open app, even when old/new Shops belong to the SAME DeliveryGroup. The
     // client already owns one canonical handler for this event: it re-fetches
-    // the profile, which changes shopId and therefore refreshes ordering-status
-    // (including the current transfer notice). Previously only transfer-request
-    // approval / explicit repair emitted this event, so ordinary admin UI moves
-    // could create the notice correctly in Mongo but leave an already-open
-    // seller tab unaware of it indefinitely.
+    // the profile, which changes shopId and refreshes ordering status.
     if (result.assignmentChanged && result.sellerTelegramId) {
       io.emit('user_shop_changed', { telegramId: result.sellerTelegramId });
     }

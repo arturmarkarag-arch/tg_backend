@@ -23,7 +23,6 @@ const { findCurrentSessionId } = require('../../utils/getOrCreateSession');
 const { normalizeDeliveryGroup } = require('../../utils/deliveryGroupHelpers');
 const { PHASE_VOCAB } = require('../../utils/sessionVocab');
 const { computeSessionPhase } = require('../sessionPresentation');
-const { buildShopTransferPayload } = require('../sellerTransferNotice');
 
 function summarizeSellerOrders(orders = []) {
   const summary = {
@@ -234,22 +233,15 @@ async function buildSellerClosedDashboard({ user, shop, group, sessionId, catalo
   };
 }
 
-function buildTransferPayload(user) {
-  return buildShopTransferPayload(user);
-}
-
 async function buildSellerOrderingStatusReadModel(user) {
-  const transferPayload = buildTransferPayload(user);
-
   if (user.role === 'warehouse' || (user.role === 'admin' && !user.shopId)) {
-    return { isOpen: true, ...transferPayload };
+    return { isOpen: true };
   }
   if (!user.shopId) {
     return {
       isOpen: false,
       reason: 'no_shop',
       message: 'Вас не призначено до жодного магазину. Зверніться до адміністратора.',
-      ...transferPayload,
     };
   }
 
@@ -259,7 +251,6 @@ async function buildSellerOrderingStatusReadModel(user) {
       isOpen: false,
       reason: 'shop_inactive',
       message: 'Ваш магазин неактивний. Зверніться до адміністратора.',
-      ...transferPayload,
     };
   }
   if (!shop || !shop.deliveryGroupId) {
@@ -267,7 +258,6 @@ async function buildSellerOrderingStatusReadModel(user) {
       isOpen: false,
       reason: 'shop_no_group',
       message: 'Ваш магазин не прив\'язано до групи доставки. Зверніться до адміністратора.',
-      ...transferPayload,
     };
   }
 
@@ -277,7 +267,6 @@ async function buildSellerOrderingStatusReadModel(user) {
       isOpen: false,
       reason: 'group_missing',
       message: 'Групу доставки не знайдено. Зверніться до адміністратора.',
-      ...transferPayload,
     };
   }
 
@@ -329,13 +318,11 @@ async function buildSellerOrderingStatusReadModel(user) {
     orderingSessionId: sessionId ? String(sessionId) : '',
     catalogReviewedAt,
     closedDashboard,
-    ...transferPayload,
   };
 }
 
 module.exports = {
   buildSellerOrderingStatusReadModel,
   buildSellerClosedDashboard,
-  buildTransferPayload,
   summarizeSellerOrders,
 };
