@@ -133,6 +133,18 @@ async function publishShopAssignmentTransition(input = {}) {
       io.emit('delivery_groups_updated');
     }
 
+    // Every committed CURRENT seller assignment change must reach the seller's
+    // open app, even when old/new Shops belong to the SAME DeliveryGroup. The
+    // client already owns one canonical handler for this event: it re-fetches
+    // the profile, which changes shopId and therefore refreshes ordering-status
+    // (including the current transfer notice). Previously only transfer-request
+    // approval / explicit repair emitted this event, so ordinary admin UI moves
+    // could create the notice correctly in Mongo but leave an already-open
+    // seller tab unaware of it indefinitely.
+    if (result.assignmentChanged && result.sellerTelegramId) {
+      io.emit('user_shop_changed', { telegramId: result.sellerTelegramId });
+    }
+
     if (result.orderChanged && result.sellerTelegramId) {
       io.emit('user_order_updated', { buyerTelegramId: result.sellerTelegramId });
     }
