@@ -14,6 +14,20 @@ function str(value) {
   return value == null ? '' : String(value);
 }
 
+
+function assertAssignmentOwnedFieldsAbsent(userPatch) {
+  if (!userPatch || typeof userPatch !== 'object') return;
+  if (
+    Object.prototype.hasOwnProperty.call(userPatch, 'shopId')
+    || Object.prototype.hasOwnProperty.call(userPatch, 'shopTransferNotice')
+  ) {
+    throw appError('validation_failed', {
+      field: Object.prototype.hasOwnProperty.call(userPatch, 'shopId') ? 'shopId' : 'shopTransferNotice',
+      details: 'assignment_owned_field',
+    });
+  }
+}
+
 async function resolveShopGroupId(shopId, session = null) {
   if (!shopId) return null;
   const q = Shop.findById(shopId, 'deliveryGroupId').lean();
@@ -144,6 +158,7 @@ async function assignUserToShopCommand({
   allowFrozenOrderTransfer = false,
   expectedOrderingSessionId = null,
 }) {
+  assertAssignmentOwnedFieldsAbsent(userPatch);
   const tid = str(telegramId).trim();
   const targetId = str(shopId).trim();
   if (!tid) throw appError('user_not_found');
@@ -203,6 +218,7 @@ async function unassignUserFromShopCommand({
   allowFrozenOrderPark = false,
   orderingSessionId = null,
 }) {
+  assertAssignmentOwnedFieldsAbsent(userPatch);
   const tid = str(telegramId).trim();
   if (!tid) throw appError('user_not_found');
 

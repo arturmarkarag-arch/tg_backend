@@ -9,6 +9,18 @@ const UserHistoryEntrySchema = new mongoose.Schema({
   meta: { type: mongoose.Schema.Types.Mixed, default: {} },
 }, { _id: false });
 
+// CURRENT seller-facing acknowledgement state for the latest manager-driven
+// Shop transition. User.history remains audit-only; it must never be used as
+// the source of an active UI banner. Presence = pending acknowledgement.
+const ShopTransferNoticeSchema = new mongoose.Schema({
+  id: { type: String, required: true },
+  fromShopId: { type: mongoose.Schema.Types.ObjectId, ref: 'Shop', required: true },
+  fromShopName: { type: String, default: '' },
+  toShopId: { type: mongoose.Schema.Types.ObjectId, ref: 'Shop', required: true },
+  toShopName: { type: String, default: '' },
+  createdAt: { type: Date, default: Date.now },
+}, { _id: false });
+
 const UserSchema = new mongoose.Schema(
   {
     telegramId: { type: String, required: true, unique: true },
@@ -75,6 +87,7 @@ const UserSchema = new mongoose.Schema(
     isOnline: { type: Boolean, default: false },
     lastActive: { type: Date, default: Date.now },
     history: { type: [UserHistoryEntrySchema], default: [] },
+    shopTransferNotice: { type: ShopTransferNoticeSchema, default: null },
   },
   { timestamps: true }
 );

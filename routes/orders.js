@@ -62,6 +62,7 @@ const { assertSellerAssignmentOrderInvariant } = require('../services/sellerOrde
 const { getOrderOwnershipState } = require('../utils/orderOwnership');
 const { assertOperationalShop } = require('../utils/shopOperationalState');
 const { logShopTransition } = require('../services/shopAudit');
+const { buildShopTransferNoticeForAssignment } = require('../services/sellerTransferNotice');
 
 const router = express.Router();
 const staffOnly = requireTelegramRoles(['admin', 'warehouse']);
@@ -1227,8 +1228,9 @@ router.patch('/:id/snapshot', staffOnly, async (req, res) => {
           : null;
         const userSourceShopId = currentUser?.shopId ? String(currentUser.shopId) : null;
         let userSourceGroupId = null;
+        let userSourceShop = null;
         if (userSourceShopId) {
-          const userSourceShop = await Shop.findById(userSourceShopId, 'deliveryGroupId').session(session).lean();
+          userSourceShop = await Shop.findById(userSourceShopId, 'name deliveryGroupId').session(session).lean();
           userSourceGroupId = userSourceShop?.deliveryGroupId ? String(userSourceShop.deliveryGroupId) : null;
         }
 
@@ -1277,6 +1279,20 @@ router.patch('/:id/snapshot', staffOnly, async (req, res) => {
             'cartState.updatedAt': new Date(),
             'cartState.reservedForGroupId': null,
           };
+
+          // Explicit staff ownership repair is one of the very few sanctioned
+          // User.shopId writers outside migrateSellerShop(). Keep the same
+          // transfer-notice lifecycle here so a stale banner cannot survive an
+          // administrative repair. Same-shop repairs intentionally leave the
+          // pending notice untouched.
+          const noticeMutation = buildShopTransferNoticeForAssignment({
+            oldShop: userSourceShop,
+            newShop: targetShop,
+            actor: actorFromReq(req),
+          });
+          if (noticeMutation.shouldWrite) {
+            userUpdate.shopTransferNotice = noticeMutation.notice;
+          }
           const userWrite = await User.updateOne(
             { _id: currentUser._id },
             { $set: userUpdate },

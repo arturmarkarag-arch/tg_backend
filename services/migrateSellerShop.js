@@ -19,6 +19,7 @@ const {
   resolveSellerAssignmentOrder,
   assertSellerAssignmentOrderInvariant,
 } = require('./sellerOrderAssignment');
+const { buildShopTransferNoticeForAssignment } = require('./sellerTransferNotice');
 
 async function ensureOrderNotInPickingPipeline(orderId, session) {
   const exists = await PickingTask.exists({
@@ -188,6 +189,18 @@ async function migrateSellerShop({
   const userUpdate = {
     shopId: newShopFull._id,
   };
+
+  // The transfer banner is CURRENT state owned by the same assignment
+  // transaction. Every real transition supersedes/clears the previous notice;
+  // same-shop no-ops leave a still-pending notice untouched.
+  const noticeMutation = buildShopTransferNoticeForAssignment({
+    oldShop: oldShopFull,
+    newShop: newShopFull,
+    actor,
+  });
+  if (noticeMutation.shouldWrite) {
+    userUpdate.shopTransferNotice = noticeMutation.notice;
+  }
   if (resetCartNavigation) {
     userUpdate['cartState.lastViewedProductId'] = '';
     userUpdate['cartState.lastViewedOrderNumber'] = 0;
@@ -219,9 +232,9 @@ async function migrateSellerShop({
       {
         // Bounded timeline: keep only the most recent 20 entries. This is the
         // ONLY writer of User.history, and the user doc is loaded on EVERY
-        // authed request (telegramAuth.findOne) — plus /ordering-status reads
-        // this array to surface the "вас переміщено" note — so it must never
-        // grow without limit. $slice trims from the front on each push.
+        // authed request (telegramAuth.findOne), so it must never grow without
+        // limit. It is audit-only; seller-facing transfer state lives in
+        // User.shopTransferNotice. $slice trims from the front on each push.
         $push: {
           history: {
             $each: [{

@@ -23,6 +23,7 @@ const { findCurrentSessionId } = require('../../utils/getOrCreateSession');
 const { normalizeDeliveryGroup } = require('../../utils/deliveryGroupHelpers');
 const { PHASE_VOCAB } = require('../../utils/sessionVocab');
 const { computeSessionPhase } = require('../sessionPresentation');
+const { buildShopTransferPayload } = require('../sellerTransferNotice');
 
 function summarizeSellerOrders(orders = []) {
   const summary = {
@@ -234,19 +235,7 @@ async function buildSellerClosedDashboard({ user, shop, group, sessionId, catalo
 }
 
 function buildTransferPayload(user) {
-  const transferEvent = Array.isArray(user?.history)
-    ? [...user.history].reverse().find((entry) => (
-      entry.action === 'shop_changed'
-      && entry.meta?.fromShop
-      && entry.meta?.toShop
-      && ['admin', 'warehouse'].includes(entry.byRole)
-    ))
-    : null;
-  if (!transferEvent) return {};
-  return {
-    note: `Вас переміщено з магазину "${transferEvent.meta.fromShop}" на магазин "${transferEvent.meta.toShop}", ви робите замовлення на інший магазин. Якщо ви нічого не знаєте про це, зверніться до вашого менеджера або в групу в телеграмі!`,
-    transferNoteId: `shop_changed:${transferEvent.at ? new Date(transferEvent.at).toISOString() : 'unknown'}`,
-  };
+  return buildShopTransferPayload(user);
 }
 
 async function buildSellerOrderingStatusReadModel(user) {

@@ -118,6 +118,7 @@ async function softRemoveUser({ telegramId, actor = null, groupChatId = '' }) {
               // unassignSellerAndPark already clears this for seller/admin; set it
               // here too so every role has zero operational ownership after removal.
               shopId: null,
+              shopTransferNotice: null,
               shopNumber: '',
             },
             $push: {
