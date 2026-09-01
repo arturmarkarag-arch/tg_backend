@@ -384,19 +384,86 @@ router.delete('/telegram-support-admins/:username', telegramAuth, requireTelegra
 // One dedicated destination, DB-only. It is intentionally independent from the
 // bot-authorized groups and «Група ціна на товар» lists.
 router.get('/telegram-new-products-group', telegramAuth, requireTelegramRole('admin'), asyncHandler(async (req, res) => {
-  const { getNewProductsGroupId } = require('../services/receiptNewProductTelegram');
-  res.json({ groupId: await getNewProductsGroupId() });
+  const { getNewProductsGroupId, inspectNewProductsGroup } = require('../services/receiptNewProductTelegram');
+  const { getTelegramMessageCleanupHealth } = require('../services/telegramMessageCleanup');
+  const groupId = await getNewProductsGroupId();
+  const [health, cleanup] = await Promise.all([
+    inspectNewProductsGroup(groupId),
+    getTelegramMessageCleanupHealth(),
+  ]);
+  res.json({ groupId, health, cleanup });
 }));
 
 router.post('/telegram-new-products-group', telegramAuth, requireTelegramRole('admin'), asyncHandler(async (req, res) => {
   const { setNewProductsGroupId } = require('../services/receiptNewProductTelegram');
   try {
-    const groupId = await setNewProductsGroupId(req.body?.groupId);
-    res.json({ groupId });
+    const result = await setNewProductsGroupId(req.body?.groupId, { actorId: String(req.telegramUser?.telegramId || '') });
+    res.json(result);
   } catch (err) {
     if (err?.message === 'telegram_new_products_group_invalid') throw appError('telegram_new_products_group_invalid');
+    if (err?.message === 'telegram_new_products_group_unavailable') {
+      throw appError('telegram_new_products_group_unavailable', { health: err.health });
+    }
     throw err;
   }
+}));
+
+router.post('/telegram-new-products-cleanups/:cleanupId/resolve', telegramAuth, requireTelegramRole('admin'), asyncHandler(async (req, res) => {
+  const { resolveTelegramMessageCleanup } = require('../services/telegramMessageCleanup');
+  if (!mongoose.Types.ObjectId.isValid(String(req.params.cleanupId || ''))) throw appError('validation_failed', { field: 'cleanupId' });
+  const row = await resolveTelegramMessageCleanup(req.params.cleanupId, {
+    actorId: String(req.telegramUser?.telegramId || ''),
+    note: String(req.body?.note || ''),
+  });
+  if (!row) throw appError('telegram_cleanup_not_found');
+  res.json(row);
+}));
+
+router.post('/telegram-new-products-cleanups/:cleanupId/retry', telegramAuth, requireTelegramRole('admin'), asyncHandler(async (req, res) => {
+  const { retryTelegramMessageCleanup } = require('../services/telegramMessageCleanup');
+  if (!mongoose.Types.ObjectId.isValid(String(req.params.cleanupId || ''))) throw appError('validation_failed', { field: 'cleanupId' });
+  const row = await retryTelegramMessageCleanup(req.params.cleanupId, { actorId: String(req.telegramUser?.telegramId || '') });
+  if (!row) throw appError('telegram_cleanup_not_retryable');
+  res.json(row);
+}));
+
+router.post('/telegram-new-products-bindings/:bindingId/resolve-absent', telegramAuth, requireTelegramRole('admin'), asyncHandler(async (req, res) => {
+  const { resolveAmbiguousTelegramBinding } = require('../services/telegramMessageCleanup');
+  if (!mongoose.Types.ObjectId.isValid(String(req.params.bindingId || ''))) throw appError('validation_failed', { field: 'bindingId' });
+  const row = await resolveAmbiguousTelegramBinding(req.params.bindingId, {
+    actorId: String(req.telegramUser?.telegramId || ''),
+    note: String(req.body?.note || 'Перевірено адміністратором: посту немає'),
+  });
+  if (!row) throw appError('telegram_new_products_unknown_binding_not_found');
+  res.json(row);
+}));
+
+router.post('/telegram-new-products-bindings/:bindingId/identify', telegramAuth, requireTelegramRole('admin'), asyncHandler(async (req, res) => {
+  const { identifyAmbiguousTelegramBinding } = require('../services/telegramMessageCleanup');
+  if (!mongoose.Types.ObjectId.isValid(String(req.params.bindingId || ''))) throw appError('validation_failed', { field: 'bindingId' });
+  try {
+    const result = await identifyAmbiguousTelegramBinding(req.params.bindingId, {
+      actorId: String(req.telegramUser?.telegramId || ''),
+      chatId: String(req.body?.chatId || ''),
+      messageId: req.body?.messageId,
+    });
+    if (!result) throw appError('telegram_new_products_unknown_binding_not_found');
+    res.json(result);
+  } catch (error) {
+    if (error?.message === 'telegram_new_products_message_reference_invalid') throw appError('telegram_new_products_message_reference_invalid');
+    if (error?.code === 'EBOTUNAVAILABLE') throw appError('telegram_bot_unavailable');
+    throw error;
+  }
+}));
+
+router.get('/telegram-new-products-history', telegramAuth, requireTelegramRole('admin'), asyncHandler(async (req, res) => {
+  const TelegramPublicationEvent = require('../models/TelegramPublicationEvent');
+  const limit = Math.min(500, Math.max(1, Number(req.query?.limit) || 100));
+  const events = await TelegramPublicationEvent.find({ destinationKey: 'new_products' })
+    .sort({ createdAt: -1 })
+    .limit(limit)
+    .lean();
+  res.json({ events });
 }));
 
 // ── Price groups (Telegram «Група ціна на товар») ─────────────────────────────

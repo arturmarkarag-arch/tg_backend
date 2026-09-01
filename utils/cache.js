@@ -12,7 +12,7 @@
  * Values are JSON-serialised, so only plain data (objects, arrays, primitives).
  */
 
-const { redis, pubClient, subClient, isEnabled } = require('./redis');
+const { redis, pubClient, subClient, isEnabled, isReady } = require('./redis');
 
 const L1_TTL_MS  = 60 * 1000;          // 60 s in-process — refreshed from Redis frequently
 const L2_TTL_SEC = 10 * 60;            // 10 min in Redis
@@ -63,7 +63,7 @@ async function get(key) {
   if (entry) local.delete(key);
 
   // L2 (Redis)
-  if (isEnabled()) {
+  if (isReady()) {
     try {
       const raw = await redis.get(nsKey(key));
       if (raw != null) {
@@ -81,7 +81,7 @@ async function set(key, value, ttlSec = L2_TTL_SEC) {
   const localTtl = isEnabled() ? L1_TTL_MS : FALLBACK_TTL_MS;
   local.set(key, { value, expiresAt: Date.now() + localTtl });
 
-  if (isEnabled()) {
+  if (isReady()) {
     try {
       await redis.set(nsKey(key), JSON.stringify(value), 'EX', ttlSec);
     } catch (err) {
@@ -91,7 +91,7 @@ async function set(key, value, ttlSec = L2_TTL_SEC) {
 
 async function invalidate(key) {
   local.delete(key);
-  if (isEnabled()) {
+  if (isReady()) {
     try {
       await redis.del(nsKey(key));
       await pubClient.publish(CHANNEL, key);
@@ -102,7 +102,7 @@ async function invalidate(key) {
 
 async function invalidateAll() {
   local.clear();
-  if (isEnabled()) {
+  if (isReady()) {
     try {
       // Use SCAN instead of KEYS to avoid blocking Redis on large datasets
       let cursor = 0;

@@ -59,9 +59,14 @@ const {
   rollbackItemArtifacts,
   hasOpenSupplementWave,
 } = require('../services/receiptSync');
+const {
+  withReceiptTelegramPublicationLock,
+  publicationStateMapForItems,
+} = require('../services/receiptNewProductTelegram');
+const { enqueueReceiptNewProductCleanup } = require('../services/telegramMessageCleanup');
 
 const staffOnly = requireTelegramRoles(['admin', 'warehouse']);
-const RECEIPT_GALLERY_FIELDS = '_id receiptId photoUrl originalPhotoUrl totalQty destination routingVersion routing price qtyPerPackage status createdBy editRevision routingRevision supplementBatchVersion supplementPublishRequestedAt telegramNewProduct.status telegramNewProduct.appliedHash telegramNewProduct.desiredHash telegramNewProduct.lastDecision telegramNewProduct.lastDecisionHash telegramNewProduct.lastDecisionAt telegramNewProduct.sentAt telegramNewProduct.editedAt telegramNewProduct.requestedAt telegramNewProduct.lastError telegramNewProduct.possibleDuplicate';
+const RECEIPT_GALLERY_FIELDS = '_id receiptId photoUrl originalPhotoUrl photoMeta totalQty destination routingVersion routing price qtyPerPackage status createdBy editRevision routingRevision supplementBatchVersion supplementPublishRequestedAt telegramNewProduct.status telegramNewProduct.appliedHash telegramNewProduct.desiredHash telegramNewProduct.lastDecision telegramNewProduct.lastDecisionHash telegramNewProduct.lastDecisionAt telegramNewProduct.sentAt telegramNewProduct.editedAt telegramNewProduct.missingAt telegramNewProduct.requestedAt telegramNewProduct.lastError telegramNewProduct.possibleDuplicate';
 
 async function supplementGroupNamesByWaveForOffers(offers = []) {
   const waveIds = [...new Set(offers
@@ -335,6 +340,7 @@ router.get('/items-gallery', staffOnly, asyncHandler(async (req, res) => {
     offersByItemId.set(itemId, [...(offersByItemId.get(itemId) || []), offer]);
   }
   const receiptById = new Map(receipts.map((receipt) => [String(receipt._id), receipt]));
+  const telegramStateByItemId = await publicationStateMapForItems(rows);
   const items = rows.map((row) => {
     const receipt = receiptById.get(String(row.receiptId || ''));
     const routing = normalizeReceiptItemRouting(row, receipt);
@@ -359,7 +365,7 @@ router.get('/items-gallery', staffOnly, asyncHandler(async (req, res) => {
       receiptTargetDeliveryGroupId: receipt?.targetDeliveryGroupId || null,
       supplementState,
       supplementGroupName: supplementGroupNameByWaveId.get(String(displaySupplementOffer?.waveId || '')) || '',
-      telegramNewProduct: {
+      telegramNewProduct: telegramStateByItemId.get(String(row._id)) || {
         ...(row.telegramNewProduct || {}),
         status: String(row.telegramNewProduct?.status || '') === 'expired'
           ? (Number(row.telegramNewProduct?.messageId) > 0 ? 'sent' : 'not_sent')
@@ -1091,6 +1097,7 @@ router.get('/:id/items', staffOnly, asyncHandler(async (req, res) => {
     }
   }
 
+  const telegramStateByItemId = await publicationStateMapForItems(items);
   const enrichedItems = items.map((item) => {
     const productId = item.createdProductId;
     const product = productId ? productMap[String(productId)] : null;
@@ -1117,7 +1124,7 @@ router.get('/:id/items', staffOnly, asyncHandler(async (req, res) => {
       productCurrentQty: product?.quantity ?? null,
       supplementState,
       supplementGroupName: supplementGroupNameByWaveId.get(String(displaySupplementOffer?.waveId || '')) || '',
-      telegramNewProduct: {
+      telegramNewProduct: telegramStateByItemId.get(String(item._id)) || {
         ...(item.telegramNewProduct || {}),
         status: String(item.telegramNewProduct?.status || '') === 'expired'
           ? (Number(item.telegramNewProduct?.messageId) > 0 ? 'sent' : 'not_sent')
@@ -1454,6 +1461,51 @@ router.get('/:id/items/:itemId/telegram-new-product', staffOnly, asyncHandler(as
   res.json(state);
 }));
 
+router.post('/:id/items/:itemId/telegram-new-product/verify', staffOnly, asyncHandler(async (req, res) => {
+  const { verifyPublication } = require('../services/receiptNewProductTelegram');
+  try {
+    const state = await verifyPublication({
+      receiptId: req.params.id,
+      itemId: req.params.itemId,
+      actorId: String(req.telegramUser?.telegramId || ''),
+    });
+    if (!state) throw appError('receipt_item_not_found');
+    res.json(state);
+  } catch (err) {
+    if (String(err?.message || '') === 'telegram_bot_unavailable') throw appError('telegram_bot_unavailable');
+    throw err;
+  }
+}));
+
+router.post('/:id/items/:itemId/telegram-new-product/attach', staffOnly, asyncHandler(async (req, res) => {
+  const item = await ReceiptItem.findOne({ _id: req.params.itemId, receiptId: req.params.id }).lean();
+  if (!item) throw appError('receipt_item_not_found');
+  assertCanConfirmItem(req.user, item);
+  const { attachExistingUnknownMessage } = require('../services/receiptNewProductTelegram');
+  try {
+    const state = await attachExistingUnknownMessage({
+      receiptId: req.params.id,
+      itemId: req.params.itemId,
+      chatId: String(req.body?.chatId || ''),
+      messageId: req.body?.messageId,
+      actorId: String(req.telegramUser?.telegramId || ''),
+    });
+    if (!state) throw appError('receipt_item_not_found');
+    res.json(state);
+  } catch (err) {
+    const code = String(err?.message || '');
+    if (['telegram_new_products_unknown_binding_not_found', 'telegram_new_products_message_reference_invalid', 'telegram_bot_unavailable', 'receipt_item_not_confirmed_yet'].includes(code)) throw appError(code);
+    throw err;
+  }
+}));
+
+router.get('/:id/items/:itemId/telegram-new-product/history', staffOnly, asyncHandler(async (req, res) => {
+  const { getPublicationHistory } = require('../services/receiptNewProductTelegram');
+  const history = await getPublicationHistory(req.params.id, req.params.itemId, { limit: req.query?.limit });
+  if (!history) throw appError('receipt_item_not_found');
+  res.json(history);
+}));
+
 router.post('/:id/items/:itemId/telegram-new-product', staffOnly, asyncHandler(async (req, res) => {
   const item = await ReceiptItem.findOne({ _id: req.params.itemId, receiptId: req.params.id }).lean();
   if (!item) throw appError('receipt_item_not_found');
@@ -1474,9 +1526,12 @@ router.post('/:id/items/:itemId/telegram-new-product', staffOnly, asyncHandler(a
   } catch (err) {
     const code = String(err?.message || '');
     if (code === 'telegram_new_products_group_not_configured') throw appError(code);
+    if (code === 'telegram_new_products_destination_unhealthy') throw appError(code);
     if (code === 'telegram_new_products_original_photo_missing') throw appError(code);
     if (code === 'telegram_new_products_decision_invalid') throw appError(code);
     if (code === 'telegram_new_products_delivery_unknown') throw appError(code);
+    if (code === 'telegram_new_products_cleanup_pending') throw appError(code);
+    if (code === 'receipt_item_not_confirmed_yet') throw appError(code);
     throw err;
   }
 }));
@@ -1493,8 +1548,9 @@ router.delete('/:id/items/:itemId', staffOnly, asyncHandler(async (req, res) => 
   try {
     let deletedItem = null;
     let removedArtifacts = null;
+    let telegramCleanup = null;
 
-    await session.withTransaction(async () => {
+    await withReceiptTelegramPublicationLock(req.params.itemId, () => session.withTransaction(async () => {
       removedArtifacts = null; // withTransaction може перезапустити колбек
       const receipt = await Receipt.findById(req.params.id, '_id status').session(session);
       if (!receipt) throw appError('receipt_not_found');
@@ -1518,9 +1574,15 @@ router.delete('/:id/items/:itemId', staffOnly, asyncHandler(async (req, res) => 
         removedArtifacts = await rollbackItemArtifacts(item, { session });
       }
 
+      telegramCleanup = await enqueueReceiptNewProductCleanup(
+        item,
+        'receipt_item_deleted',
+        { session, actorId: String(req.telegramUser?.telegramId || '') },
+      );
+
       await item.deleteOne({ session });
       deletedItem = item;
-    });
+    }));
 
     // Аудит-лог видалення позиції — обов'язковий слід для розслідувань
     // (раніше DELETE не писав у ReceiptItemLog взагалі).
@@ -1535,7 +1597,11 @@ router.delete('/:id/items/:itemId', staffOnly, asyncHandler(async (req, res) => 
         { field: 'price', label: FIELD_LABELS.price, from: deletedItem.price, to: null },
       ],
       // Що саме зникло разом з рядком — інакше «куди подівся товар» не відновити.
-      meta: removedArtifacts || {},
+      meta: {
+        ...(removedArtifacts || {}),
+        telegramCleanupQueued: Number(telegramCleanup?.queued || 0) > 0,
+        telegramCleanupManualRequired: Number(telegramCleanup?.manualRequired || 0),
+      },
     }).catch((e) => {});
 
     const io = getIO();
@@ -1544,7 +1610,16 @@ router.delete('/:id/items/:itemId', staffOnly, asyncHandler(async (req, res) => 
       if (removedArtifacts) io.emit('incoming_updated');
     }
 
-    res.json({ message: 'Позицію видалено' });
+    res.json({
+      message: 'Позицію видалено',
+      telegramCleanup: telegramCleanup
+        ? {
+            status: Number(telegramCleanup.manualRequired || 0) > 0 ? 'manual_required' : (Number(telegramCleanup.queued || 0) > 0 ? 'queued' : 'not_needed'),
+            queued: Number(telegramCleanup.queued || 0),
+            manualRequired: Number(telegramCleanup.manualRequired || 0),
+          }
+        : { status: 'not_needed', queued: 0, manualRequired: 0 },
+    });
   } finally {
     session.endSession();
   }
@@ -2255,7 +2330,8 @@ router.post('/:id/items/:itemId/unconfirm', staffOnly, asyncHandler(async (req, 
     let updatedItem = null;
     let didUnconfirm = false;
     let removedArtifacts = null;
-    await session.withTransaction(async () => {
+    let telegramCleanup = null;
+    await withReceiptTelegramPublicationLock(req.params.itemId, () => session.withTransaction(async () => {
       didUnconfirm = false; // reset per attempt (withTransaction may re-run this)
       removedArtifacts = null;
       const receipt = await Receipt.findById(req.params.id, '_id status').session(session);
@@ -2272,6 +2348,12 @@ router.post('/:id/items/:itemId/unconfirm', staffOnly, asyncHandler(async (req, 
           removedArtifacts = await rollbackItemArtifacts(item, { session });
         }
 
+        telegramCleanup = await enqueueReceiptNewProductCleanup(
+          item,
+          'receipt_item_unconfirmed',
+          { session, actorId: String(req.telegramUser?.telegramId || '') },
+        );
+
         item.status = 'draft';
         // Re-confirming must never silently reopen/re-notify a previously
         // published supplement. Once confirmation is removed, the item returns
@@ -2284,7 +2366,7 @@ router.post('/:id/items/:itemId/unconfirm', staffOnly, asyncHandler(async (req, 
       }
 
       updatedItem = item.toObject();
-    });
+    }));
 
     // Audit log AFTER commit — see the confirm handler note (avoid per-retry / phantom rows).
     if (didUnconfirm && updatedItem) {
@@ -2310,7 +2392,16 @@ router.post('/:id/items/:itemId/unconfirm', staffOnly, asyncHandler(async (req, 
       }
     }
 
-    res.json(updatedItem);
+    res.json({
+      ...updatedItem,
+      telegramCleanup: telegramCleanup
+        ? {
+            status: Number(telegramCleanup.manualRequired || 0) > 0 ? 'manual_required' : (Number(telegramCleanup.queued || 0) > 0 ? 'queued' : 'not_needed'),
+            queued: Number(telegramCleanup.queued || 0),
+            manualRequired: Number(telegramCleanup.manualRequired || 0),
+          }
+        : { status: 'not_needed', queued: 0, manualRequired: 0 },
+    });
   } finally {
     session.endSession();
   }

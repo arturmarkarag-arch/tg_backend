@@ -29,6 +29,11 @@ function makeClient(label) {
   if (!REDIS_URL) return null;
   const client = new Redis(REDIS_URL, {
     maxRetriesPerRequest: null, // never give up on transient hiccups
+    // Redis is an accelerator/coordination dependency. A dead endpoint must
+    // never leave an HTTP request pending forever (the previous behaviour made
+    // delivery-group reads and receipt confirmation hang indefinitely).
+    commandTimeout: 1000,
+    connectTimeout: 5000,
     enableReadyCheck: true,
     lazyConnect: false,
     retryStrategy: (times) => Math.min(times * 200, 2000),
@@ -51,4 +56,8 @@ function isEnabled() {
   return Boolean(redis);
 }
 
-module.exports = { redis, pubClient, subClient, isEnabled };
+function isReady(client = redis) {
+  return Boolean(client && client.status === 'ready');
+}
+
+module.exports = { redis, pubClient, subClient, isEnabled, isReady };

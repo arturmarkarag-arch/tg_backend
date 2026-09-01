@@ -24,7 +24,7 @@
  */
 
 const crypto = require('crypto');
-const { redis, isEnabled } = require('./redis');
+const { redis, isReady } = require('./redis');
 const { appError } = require('./errors');
 
 const DEFAULT_TTL_MS  = 15_000; // how long the lock can be held before auto-expiry
@@ -81,7 +81,7 @@ async function withLock(key, fn, opts = {}) {
   const ttlMs  = opts.ttlMs  ?? DEFAULT_TTL_MS;
   const waitMs = opts.waitMs ?? DEFAULT_WAIT_MS;
 
-  if (!isEnabled()) {
+  if (!isReady()) {
     const release = await acquireLocal(key);
     try {
       return await fn();

@@ -48,6 +48,14 @@ async function logBotInteraction(telegramId, type, action, label = '', context =
 
 async function handleMyChatMemberUpdate(update) {
   try {
+    // Destination membership is a separate domain from private-user bot status.
+    // Handle it first so channel kicks/permission changes are never discarded by
+    // the User lookup below.
+    try {
+      const { handleNewProductsMyChatMember } = require('./services/receiptNewProductTelegram');
+      await handleNewProductsMyChatMember(update);
+    } catch (_) {}
+
     const payload = update?.my_chat_member || update || {};
     const chatId = String(payload.chat?.id || payload.chat_id || payload.from?.id || '');
     const newStatus = payload.new_chat_member?.status || payload.new_chat_member_status;
@@ -611,7 +619,8 @@ async function initBot(token) {
 
   try {
     // Manual mode — updates arrive via the Express webhook route, not getUpdates.
-    bot = new TelegramBot(token);
+    const { TELEGRAM_REQUEST_TIMEOUT_MS } = require('./utils/telegramTransportPolicy');
+    bot = new TelegramBot(token, { request: { timeout: TELEGRAM_REQUEST_TIMEOUT_MS } });
     status.connected = true;
     status.mode = 'webhook';
     status.startedAt = new Date().toISOString();

@@ -17,7 +17,7 @@ const TelegramNewProductSchema = new mongoose.Schema(
   {
     status: {
       type: String,
-      enum: ['not_sent', 'queued', 'sending', 'retry_wait', 'sent', 'failed', 'unknown', 'expired'],
+      enum: ['not_sent', 'queued', 'sending', 'retry_wait', 'sent', 'failed', 'unknown', 'missing', 'expired'],
       default: 'not_sent',
     },
     chatId: { type: String, default: '' },
@@ -37,6 +37,7 @@ const TelegramNewProductSchema = new mongoose.Schema(
     requestedBy: { type: String, default: '' },
     sentAt: { type: Date, default: null },
     editedAt: { type: Date, default: null },
+    missingAt: { type: Date, default: null },
     attempts: { type: Number, default: 0 },
     nextAttemptAt: { type: Date, default: null },
     leaseUntil: { type: Date, default: null },
@@ -183,9 +184,10 @@ const ReceiptItemSchema = new mongoose.Schema(
     createdShopProductId: { type: mongoose.Schema.Types.ObjectId, ref: 'ShopProduct', default: null },
 
 
-    // Durable publication state for the dedicated Telegram «Нові Товари» group.
-    // One receipt item owns at most one live Telegram post; subsequent accepted
-    // changes converge by editing messageId instead of creating duplicates.
+    // LEGACY migration snapshot only. Runtime Telegram lifecycle state moved to
+    // TelegramPublication + TelegramPublicationBinding + TelegramPublicationEvent.
+    // Keep the embedded document so historical rows can be migrated safely; new
+    // code must not use it as the source of truth.
     telegramNewProduct: { type: TelegramNewProductSchema, default: () => ({}) },
   },
   { timestamps: true }
@@ -196,13 +198,5 @@ ReceiptItemSchema.index(
   { receiptId: 1, intakeClientItemId: 1 },
   { unique: true, partialFilterExpression: { intakeClientItemId: { $type: 'string' } } },
 );
-
-// The Telegram scheduler checks due publication work every few seconds.
-// Keep that operational scan bounded as receipt history grows.
-ReceiptItemSchema.index({
-  'telegramNewProduct.status': 1,
-  'telegramNewProduct.nextAttemptAt': 1,
-  'telegramNewProduct.leaseUntil': 1,
-});
 
 module.exports = mongoose.model('ReceiptItem', ReceiptItemSchema);

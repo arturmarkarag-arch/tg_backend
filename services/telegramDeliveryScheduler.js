@@ -3,6 +3,7 @@
 const { runAsSchedulerLeader } = require('./schedulerLeader');
 const { drainDueDeliveries } = require('./telegramDeliveryLedger');
 const { drainDueReceiptNewProductPublications } = require('./receiptNewProductTelegram');
+const { drainDueTelegramMessageCleanups } = require('./telegramMessageCleanup');
 
 const TICK_MS = 5 * 1000;
 let timer = null;
@@ -13,8 +14,9 @@ async function runTelegramDeliveryTick() {
     'telegram-delivery',
     async () => {
       const notifications = await drainDueDeliveries({ limit: 100 });
+      const cleanups = await drainDueTelegramMessageCleanups({ limit: 20 });
       const newProducts = await drainDueReceiptNewProductPublications({ limit: 20 });
-      return { notifications, newProducts };
+      return { notifications, cleanups, newProducts };
     },
     { ttlMs: 10 * 60 * 1000 },
   );

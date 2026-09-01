@@ -4,6 +4,7 @@ const mongoose = require('mongoose');
 const TelegramNotificationEvent = require('../models/TelegramNotificationEvent');
 const TelegramNotificationDelivery = require('../models/TelegramNotificationDelivery');
 const { withLock } = require('../utils/lock');
+const { TELEGRAM_DELIVERY_LANE_TTL_MS, telegramBatchBudgetExceeded } = require('../utils/telegramTransportPolicy');
 const { classifyTelegramSendError, retryDelayMs } = require('../utils/telegramDeliveryPolicy');
 
 const DELIVERY_LEASE_MS = 90 * 1000;
@@ -402,12 +403,13 @@ async function drainDueDeliveries({ eventKey = null, limit = 100, now = new Date
   // This distributed lock is therefore a defence-in-depth invariant against a
   // future call-site accidentally creating a second sender beside the scheduler.
   return withLock('telegram:delivery:send-lane', async () => {
+    const startedAtMs = Date.now();
     let processed = 0;
     let sent = 0;
     let sentPrivate = 0;
     let sentGroups = 0;
     let failedOrDeferred = 0;
-    while (processed < limit) {
+    while (processed < limit && !telegramBatchBudgetExceeded(startedAtMs)) {
       const delivery = await claimDueDelivery(new Date(), eventKey);
       if (!delivery) break;
       const result = await sendClaimedDelivery(delivery, new Date());
@@ -421,8 +423,8 @@ async function drainDueDeliveries({ eventKey = null, limit = 100, now = new Date
       }
       if (delivery.channel === 'private') await sleep(PRIVATE_GAP_MS);
     }
-    return { processed, sent, sentPrivate, sentGroups, failedOrDeferred };
-  }, { ttlMs: 10 * 60 * 1000, waitMs: 1_000 });
+    return { processed, sent, sentPrivate, sentGroups, failedOrDeferred, budgetExhausted: telegramBatchBudgetExceeded(startedAtMs) };
+  }, { ttlMs: TELEGRAM_DELIVERY_LANE_TTL_MS, waitMs: 1_000 });
 }
 
 async function getEventWithDeliveries(eventKey) {

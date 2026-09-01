@@ -207,13 +207,21 @@ async function startServer() {
     await syncCritical({
       key: 'telegram_delivery_ledger',
       title: 'Не створилися критичні індекси журналу Telegram-доставки',
-      whatBroke: 'Не підтверджено правило: одна системна подія має лише один delivery-row на конкретного адресата.',
+      whatBroke: 'Не підтверджено унікальність Telegram delivery або cleanup-outbox записів.',
       howToFix: [
-        'Перевірте db.telegramnotificationevents.getIndexes() і db.telegramnotificationdeliveries.getIndexes().',
-        'Мають існувати UNIQUE eventKey та UNIQUE eventKey+channel+recipientId.',
+        'Перевірте індекси TelegramNotificationEvent/Delivery, TelegramDestination, TelegramPublication, TelegramPublicationBinding, TelegramPublicationEvent і TelegramMessageCleanup.',
+        'Мають існувати UNIQUE notification eventKey, UNIQUE delivery key, UNIQUE destination key, UNIQUE publication sourceType+sourceId, UNIQUE publicationId+generation binding та UNIQUE cleanup dedupeKey.',
         'Виправте дублікати журналу та перезапустіть сервер.',
       ],
-      models: [require('./models/TelegramNotificationEvent'), require('./models/TelegramNotificationDelivery')],
+      models: [
+        require('./models/TelegramNotificationEvent'),
+        require('./models/TelegramNotificationDelivery'),
+        require('./models/TelegramDestination'),
+        require('./models/TelegramPublication'),
+        require('./models/TelegramPublicationBinding'),
+        require('./models/TelegramPublicationEvent'),
+        require('./models/TelegramMessageCleanup'),
+      ],
     });
 
     await syncCritical({
@@ -243,6 +251,13 @@ async function startServer() {
       await require('./models/CatalogReview').syncIndexes();
     } catch (err) {
     }
+
+    // One-time/lazy-compatible migration from ReceiptItem.telegramNewProduct
+    // and the legacy AppSetting into the dedicated Telegram publication ledger.
+    // Old embedded fields stay untouched as historical fallback, but are no longer
+    // the runtime source of truth.
+    const telegramPublicationMigration = await require('./services/receiptNewProductTelegram').migrateLegacyTelegramNewProducts();
+    console.log(`[telegram-new-products] legacy publications migrated=${telegramPublicationMigration.migrated} issueCountersRepaired=${telegramPublicationMigration.issueCountersRepaired || 0}`);
 
     // Prefer key stored in DB (via admin settings), fall back to env
     const keyFromDb = await AppSetting.findOne({ key: 'openai.apiKey' }).lean();

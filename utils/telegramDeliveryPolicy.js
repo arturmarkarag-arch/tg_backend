@@ -38,12 +38,43 @@ function retryAfterSecondsOf(error) {
   return Number.isFinite(n) && n > 0 ? Math.ceil(n) : null;
 }
 
+function migrateToChatIdOf(error) {
+  const raw = error?.response?.body?.parameters?.migrate_to_chat_id;
+  return raw === null || raw === undefined || raw === '' ? '' : String(raw);
+}
+
+function semanticKind(statusCode, lower) {
+  const symbolic = String(lower || '').replace(/^bad request:\s*/i, '').trim();
+  if (lower.includes('message to edit not found')
+      || lower.includes('message to delete not found')
+      || lower === 'bad request: message not found'
+      || symbolic === 'message_id_invalid') return 'message_not_found';
+  if (lower.includes('message is not modified') || symbolic === 'message_not_modified') return 'message_not_modified';
+  if (lower.includes("message can't be deleted") || lower.includes('message cannot be deleted')
+      || symbolic === 'message_delete_forbidden') return 'message_cannot_delete';
+  if (lower.includes("message can't be edited") || lower.includes('message cannot be edited')
+      || symbolic === 'message_edit_time_expired') return 'message_cannot_edit';
+  if (lower.includes('chat not found') || symbolic === 'chat_id_invalid') return 'chat_not_found';
+  if (lower.includes('failed to get http url content')
+      || lower.includes('wrong type of the web page content')
+      || lower.includes('wrong file identifier/http url specified')
+      || symbolic.includes('wrong_file_identifier')
+      || symbolic.includes('file_id_invalid')) return 'photo_source_unavailable';
+  if (statusCode === 429) return 'rate_limited';
+  if (statusCode === 401) return 'unauthorized';
+  if (statusCode === 403) return 'forbidden';
+  if (statusCode !== null && statusCode >= 500) return 'server_error';
+  return 'unknown';
+}
+
 function classifyTelegramSendError(error) {
   const statusCode = statusCodeOf(error);
   const libraryCode = String(error?.code || '').trim();
   const description = descriptionOf(error);
   const lower = description.toLowerCase();
+  const kind = semanticKind(statusCode, lower);
 
+  const botUnavailable = libraryCode === 'EBOTUNAVAILABLE';
   const botBlocked = (statusCode === 403 || statusCode === 400) && (
     lower.includes('bot was blocked')
     || lower.includes('user is deactivated')
@@ -61,7 +92,7 @@ function classifyTelegramSendError(error) {
     || statusCode === 403
     || statusCode === 404
   );
-  const retryable = rateLimited || serverError || networkError;
+  const retryable = rateLimited || serverError || networkError || botUnavailable;
 
   // A timeout/reset/5xx may happen after Telegram accepted the request but before
   // our process received the response. Bot API has no client idempotency key, so
@@ -69,6 +100,7 @@ function classifyTelegramSendError(error) {
   const ambiguous = networkError || serverError;
 
   return {
+    kind: botUnavailable ? 'bot_unavailable' : (networkError ? 'network_error' : kind),
     statusCode,
     libraryCode,
     description,
@@ -80,6 +112,7 @@ function classifyTelegramSendError(error) {
     permanent,
     ambiguous,
     botBlocked,
+    migrateToChatId: migrateToChatIdOf(error),
   };
 }
 
@@ -97,4 +130,6 @@ module.exports = {
   statusCodeOf,
   descriptionOf,
   retryAfterSecondsOf,
+  migrateToChatIdOf,
+  semanticKind,
 };
