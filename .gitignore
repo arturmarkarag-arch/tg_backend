@@ -1,6 +1,68 @@
-﻿node_modules/
+# Dependencies
+node_modules/
+
+# Build and test output
+dist/
+build/
+coverage/
+.nyc_output/
+.vitest/
+test-reports/
+
+# Tool caches
+.cache/
+.eslintcache
+*.tsbuildinfo
+
+# Local environment files (keep safe templates tracked)
 .env
 .env.*
+!.env.example
+!.env.sample
 arturmarkarag-db-user.env
-.DS_Store
+*.local
+
+# Logs and process files
+logs/
+*.log
 npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+*.pid
+*.pid.lock
+
+# Local databases, dumps, secrets and certificates
+*.db
+*.sqlite
+*.sqlite3
+*.bson
+*.key
+*.pem
+*.p12
+*.pfx
+
+# Editor and OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+Desktop.ini
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.bak
+*.zip
+*.tgz
+*.tar.gz
+*.7z
+*.rar
+*~
