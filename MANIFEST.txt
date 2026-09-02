@@ -1,0 +1,4 @@
+Base: server-20260901-telegram-ledger-final-gate.zip
+Changed files:
+routes/v1/telegram.js
+docs/changes/2026-09-02-shop-switch-session-toast-fix.md

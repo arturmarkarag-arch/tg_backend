@@ -21,6 +21,7 @@ const { getSupportAdmins, toPublicSupportAdmins } = require('../../utils/telegra
 const { assignUserToShopCommand, publishShopAssignmentTransition } = require('../../services/shopAssignmentCommand');
 const { getShop, getDeliveryGroup } = require('../../utils/modelCache');
 const { isRemovedUser } = require('../../utils/userAccountState');
+const { buildSellerOrderingStatusReadModel } = require('../../services/readModels/sellerOrderingStatusReadModel');
 const { getTelegramUsernameMap } = require('../../utils/telegramUsername');
 
 const router = express.Router();
@@ -309,6 +310,7 @@ router.patch('/me/shop', asyncHandler(async (req, res) => {
   // Same shop — short-circuit, just return current state
   if (user.shopId && String(user.shopId) === String(shop._id)) {
     const fresh = await User.findById(user._id).lean();
+    const orderingStatus = await buildSellerOrderingStatusReadModel(fresh);
     return res.json({
       shopId: String(shop._id),
       shopName: shop.name || '',
@@ -316,6 +318,8 @@ router.patch('/me/shop', asyncHandler(async (req, res) => {
       deliveryGroupId: shop.deliveryGroupId ? String(shop.deliveryGroupId) : null,
       warehouseZone: await resolveZoneForShop(shop),
       cartState: normalizeCartState(fresh?.cartState ?? null),
+      orderingSessionId: String(orderingStatus?.orderingSessionId || ''),
+      orderingStatus,
     });
   }
 
@@ -330,6 +334,11 @@ router.patch('/me/shop', asyncHandler(async (req, res) => {
   });
 
   const updatedUser = migrationResult?.updatedUser;
+  // Return the target shop's ordering context in the SAME response as the
+  // assignment change. The Mini App must never spend a render with shop B but
+  // the orderingSessionId/status of shop A: that transient mismatch used to be
+  // misclassified as a brand-new ordering session when an admin switched shops.
+  const orderingStatus = await buildSellerOrderingStatusReadModel(updatedUser);
   res.json({
     shopId: String(shop._id),
     shopName: shop.name || '',
@@ -337,6 +346,8 @@ router.patch('/me/shop', asyncHandler(async (req, res) => {
     deliveryGroupId: shop.deliveryGroupId ? String(shop.deliveryGroupId) : null,
     warehouseZone: await resolveZoneForShop(shop),
     cartState: normalizeCartState(updatedUser?.cartState ?? null),
+    orderingSessionId: String(orderingStatus?.orderingSessionId || ''),
+    orderingStatus,
     ...(migrationResult?.movedOrder ? { orderMoved: true } : {}),
   });
 }));
