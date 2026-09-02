@@ -323,15 +323,24 @@ router.patch('/me/shop', asyncHandler(async (req, res) => {
     });
   }
 
-  const migrationResult = await assignUserToShopCommand({
-    telegramId: user.telegramId,
-    shopId: String(shop._id),
-    actor: user,
-    reason: 'seller_changed_shop',
-    resetCartNavigation: true,
-    pushHistory: false,
-    updateLastSeller: false,
-  });
+  let migrationResult;
+  try {
+    migrationResult = await assignUserToShopCommand({
+      telegramId: user.telegramId,
+      shopId: String(shop._id),
+      actor: user,
+      reason: 'seller_changed_shop',
+      resetCartNavigation: true,
+      pushHistory: false,
+      updateLastSeller: false,
+    });
+  } catch (err) {
+    // Never leak a raw Mongo duplicate-key from a profile-level shop change.
+    // Known session/order races are translated inside the command; this is the
+    // final fail-closed backstop for any other unique conflict in the tx.
+    if (err?.code === 11000) throw appError('shop_switch_conflict');
+    throw err;
+  }
 
   const updatedUser = migrationResult?.updatedUser;
   // Return the target shop's ordering context in the SAME response as the

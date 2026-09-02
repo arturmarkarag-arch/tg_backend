@@ -26,9 +26,12 @@ describe('seller assignment ownership architecture 2026-08-30', () => {
     const migration = read('services/migrateSellerShop.js');
 
     expect(routing).toContain("currentSession.pickingStatus === 'pending'");
+    expect(routing).toContain('isOrderingOpen(group.orderingSchedule, now).isOpen');
+    expect(routing).toContain("routeReason: orderingOpen ? 'current_picking_started' : 'current_ordering_closed'");
     expect(routing).toContain('getOrCreateNextSessionId(');
     expect(routing).not.toMatch(/currentSession\.closeAt/);
     expect(migration).toContain('resolveAssignmentDestination({');
+    expect(migration).toContain('now: ownershipNow');
   });
 
   it('fails closed for duplicate/mismatched mutable ownership and validates post-write state', () => {
@@ -49,7 +52,7 @@ describe('seller assignment ownership architecture 2026-08-30', () => {
     expect(ownership).toContain("reason: 'picking_pipeline'");
     expect(ownership).toContain("reason: 'session_not_found'");
     expect(ownership).toContain("reason: 'picking_started'");
-    expect(ownership).toContain("reason: 'ordering_closed'");
+    expect(ownership).toContain("'ordering_closed'");
   });
 
   it('uses the same ownership resolver for unassign/park and preserves explicit parked state', () => {

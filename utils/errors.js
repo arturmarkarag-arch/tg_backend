@@ -83,6 +83,8 @@ const ERRORS = {
   ordering_session_not_found:{ status: 404, message: 'Сесію замовлень не знайдено' },
   ordering_session_changed:  { status: 409, message: 'Сесія замовлень змінилася. Оновіть екран і повторіть дію.' },
   seller_assignment_changed: { status: 409, message: 'Ваше призначення до магазину змінилося. Оновіть дані та повторіть дію.' },
+  shop_switch_order_conflict: { status: 409, message: 'Не вдалося змінити магазин: для цього продавця вже існує активне замовлення в цільовій сесії. Дані не змінено.' },
+  shop_switch_conflict: { status: 409, message: 'Не вдалося змінити магазин через одночасну зміну даних. Актуальний стан відновлено — повторіть дію.' },
   seller_order_assignment_invariant: { status: 409, message: ({ kind } = {}) =>
                                 `Стан продавця та його активного замовлення суперечливий${kind ? ` (${kind})` : ''}. Дані не змінено — потрібна перевірка або явне виправлення замовлення.` },
 

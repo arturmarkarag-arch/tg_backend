@@ -4,6 +4,7 @@ const DeliveryGroup = require('../models/DeliveryGroup');
 const OrderingSession = require('../models/OrderingSession');
 const { appError } = require('../utils/errors');
 const { getOrCreateSessionId, getOrCreateNextSessionId } = require('../utils/getOrCreateSession');
+const { isOrderingOpen } = require('../utils/orderingSchedule');
 
 /**
  * Resolve WHERE a mutable Order should go after an assignment/repair change.
@@ -12,16 +13,15 @@ const { getOrCreateSessionId, getOrCreateNextSessionId } = require('../utils/get
  * destination-routing decision only; it never determines whether the seller's
  * source Order "exists" for migration.
  *
- * Destination acceptance is also deliberately NOT the same thing as source
- * ownership freeze. `closeAt` freezes ownership of Orders already placed in a
- * session, but a CURRENT session whose pickingStatus is still `pending` has not
- * built/frozen its warehouse plan yet and remains the existing assignment target.
- * Once picking leaves `pending`, an incoming Order must go to NEXT or it would be
- * stranded outside the already-built picking plan.
+ * Destination acceptance is stricter than source ownership discovery. CURRENT
+ * accepts a transferred Order only while ordering is open AND picking is still
+ * pending. Once the target window closes, route to NEXT so the transfer cannot
+ * create an immediately-frozen Order in a shop the seller is about to leave.
  */
 async function resolveAssignmentDestination({
   shop,
   session = null,
+  now = new Date(),
 } = {}) {
   const deliveryGroupId = shop?.deliveryGroupId ? String(shop.deliveryGroupId) : '';
   if (!deliveryGroupId) {
@@ -56,7 +56,8 @@ async function resolveAssignmentDestination({
   const currentSession = await currentQuery.lean();
   if (!currentSession) throw appError('ordering_session_not_found');
 
-  if (currentSession.pickingStatus === 'pending') {
+  const orderingOpen = isOrderingOpen(group.orderingSchedule, now).isOpen;
+  if (orderingOpen && currentSession.pickingStatus === 'pending') {
     return {
       deliveryGroupId,
       currentSessionId,
@@ -78,7 +79,7 @@ async function resolveAssignmentDestination({
     currentSessionId,
     targetSessionId,
     routedToNextSession: true,
-    routeReason: 'current_picking_started',
+    routeReason: orderingOpen ? 'current_picking_started' : 'current_ordering_closed',
   };
 }
 

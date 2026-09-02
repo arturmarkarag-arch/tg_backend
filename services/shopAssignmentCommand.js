@@ -14,6 +14,19 @@ function str(value) {
   return value == null ? '' : String(value);
 }
 
+function duplicateKeyMatches(err, fields = []) {
+  if (!err || err.code !== 11000) return false;
+  const pattern = err.keyPattern && typeof err.keyPattern === 'object' ? err.keyPattern : {};
+  if (fields.length && fields.every((field) => Object.prototype.hasOwnProperty.call(pattern, field))) return true;
+  const message = String(err.message || '');
+  return fields.length > 0 && fields.every((field) => message.includes(field));
+}
+
+function isAssignmentRetryableDuplicate(err) {
+  return duplicateKeyMatches(err, ['groupId', 'openDate'])
+    || duplicateKeyMatches(err, ['buyerTelegramId', 'shopId', 'orderingSessionId']);
+}
+
 
 function assertAssignmentOwnedFieldsAbsent(userPatch) {
   if (!userPatch || typeof userPatch !== 'object') return;
@@ -172,40 +185,62 @@ async function assignUserToShopCommand({
   if (!targetId) throw appError('shop_not_found');
 
   const result = await withLock(`user:${tid}:shop`, async () => {
-    const session = await mongoose.connection.startSession();
-    try {
-      let out;
-      await session.withTransaction(async () => {
-        if (userPatch && Object.keys(userPatch).length > 0) {
-          await User.updateOne({ telegramId: tid }, { $set: userPatch }, { session });
-        }
+    // A destination OrderingSession or active Order can be created by another
+    // worker between our reads and writes. Mongo reports that race as E11000.
+    // Retry the WHOLE transaction while the user-assignment lock is still held;
+    // retrying inside an already-aborted transaction is invalid. The second pass
+    // re-reads every source/destination document and either succeeds or produces
+    // an explicit assignment invariant instead of leaking generic duplicate_key.
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const session = await mongoose.connection.startSession();
+      try {
+        let out;
+        await session.withTransaction(async () => {
+          if (userPatch && Object.keys(userPatch).length > 0) {
+            await User.updateOne({ telegramId: tid }, { $set: userPatch }, { session });
+          }
 
-        const freshUser = await User.findOne({ telegramId: tid }).session(session).lean();
-        if (!freshUser) throw appError('user_not_found');
+          const freshUser = await User.findOne({ telegramId: tid }).session(session).lean();
+          if (!freshUser) throw appError('user_not_found');
 
-        const targetShop = await Shop.findById(targetId)
-          .populate('cityId', 'name')
-          .session(session)
-          .lean();
-        if (!targetShop) throw appError('shop_not_found');
+          const targetShop = await Shop.findById(targetId)
+            .populate('cityId', 'name')
+            .session(session)
+            .lean();
+          if (!targetShop) throw appError('shop_not_found');
 
-        out = await migrateSellerShop({
-          session,
-          existingUser: freshUser,
-          newShopFull: targetShop,
-          actor,
-          reason,
-          resetCartNavigation,
-          pushHistory,
-          updateLastSeller,
-          allowFrozenOrderTransfer,
-          expectedOrderingSessionId,
+          out = await migrateSellerShop({
+            session,
+            existingUser: freshUser,
+            newShopFull: targetShop,
+            actor,
+            reason,
+            resetCartNavigation,
+            pushHistory,
+            updateLastSeller,
+            allowFrozenOrderTransfer,
+            expectedOrderingSessionId,
+          });
         });
-      });
-      return out;
-    } finally {
-      await session.endSession();
+        return out;
+      } catch (err) {
+        if (attempt === 0 && isAssignmentRetryableDuplicate(err)) {
+          // Yield once so the winner of the competing unique insert can commit.
+          await new Promise((resolve) => setTimeout(resolve, 25));
+          continue;
+        }
+        if (duplicateKeyMatches(err, ['buyerTelegramId', 'shopId', 'orderingSessionId'])) {
+          throw appError('shop_switch_order_conflict');
+        }
+        if (duplicateKeyMatches(err, ['groupId', 'openDate'])) {
+          throw appError('ordering_session_changed');
+        }
+        throw err;
+      } finally {
+        await session.endSession();
+      }
     }
+    throw appError('conflict_retry');
   });
 
   return publishShopAssignmentTransition(result);

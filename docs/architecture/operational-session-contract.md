@@ -117,11 +117,12 @@ Canonical rules:
 - after an assignment write, the same invariant is checked again inside the transaction.
 
 Only after the source Order has been resolved does destination routing answer a separate
-question: which session of the target Shop can accept it. The CURRENT session is
-used while `pickingStatus === 'pending'`; once picking has started, assignment routes the
-mutable Order to NEXT. `closeAt` is a source-ownership rule, not a destination-routing rule.
-The session chosen for the destination must never
-determine whether the source Order is visible to migration.
+question: which session of the target Shop can accept it. The CURRENT session is used only
+while the target ordering window is open and `pickingStatus === 'pending'`. Once ordering
+closes or picking starts, assignment routes the mutable Order to NEXT. This prevents an
+ordinary profile move from creating an immediately-frozen Order in a closed target cycle.
+The session chosen for the destination must never determine whether the source Order is
+visible to migration.
 
 Explicit staff ownership repair is a separate intent from ordinary profile assignment. It may
 repair a closed, pre-picking Order when the operator deliberately selects it, but it must share

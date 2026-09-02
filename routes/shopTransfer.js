@@ -122,23 +122,32 @@ router.post('/', telegramAuth, requireTelegramRole('seller'), asyncHandler(async
 
   const conflictSnapshot = await buildConflictSnapshot(toShopId, seller.shopId);
 
-  const request = await ShopTransferRequest.create({
-    sellerTelegramId: seller.telegramId,
-    sellerName: [seller.firstName, seller.lastName].filter(Boolean).join(' '),
-    isAssignment,
-    fromShopId: seller.shopId || null,
-    fromShopName: fromShop?.name || '',
-    fromDeliveryGroupId: fromShop?.deliveryGroupId || '',
-    toShopId: toShopId || null,
-    toShopName: toShop?.name || '',
-    toDeliveryGroupId: toShop?.deliveryGroupId || '',
-    conflictSnapshot,
-    profileUpdate: {
-      firstName:   firstName   ? String(firstName).trim()  : '',
-      lastName:    lastName    ? String(lastName).trim()   : '',
-      phoneNumber: normalizePhone(phoneNumber),
-    },
-  });
+  let request;
+  try {
+    request = await ShopTransferRequest.create({
+      sellerTelegramId: seller.telegramId,
+      sellerName: [seller.firstName, seller.lastName].filter(Boolean).join(' '),
+      isAssignment,
+      fromShopId: seller.shopId || null,
+      fromShopName: fromShop?.name || '',
+      fromDeliveryGroupId: fromShop?.deliveryGroupId || '',
+      toShopId: toShopId || null,
+      toShopName: toShop?.name || '',
+      toDeliveryGroupId: toShop?.deliveryGroupId || '',
+      conflictSnapshot,
+      profileUpdate: {
+        firstName:   firstName   ? String(firstName).trim()  : '',
+        lastName:    lastName    ? String(lastName).trim()   : '',
+        phoneNumber: normalizePhone(phoneNumber),
+      },
+    });
+  } catch (err) {
+    // The pre-check above is UX only; two tabs can still race it. Translate the
+    // partial unique-index backstop into the same business error instead of the
+    // meaningless global "Запис з такими даними вже існує" message.
+    if (err?.code === 11000) throw appError('transfer_already_pending');
+    throw err;
+  }
 
   res.status(201).json(request);
 }));

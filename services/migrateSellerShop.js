@@ -138,6 +138,7 @@ async function migrateSellerShop({
       const destination = await resolveAssignmentDestination({
         shop: newShopFull,
         session,
+        now: ownershipNow,
       });
       targetSessionId = destination.targetSessionId;
       routedToNextSession = destination.routedToNextSession;

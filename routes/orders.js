@@ -586,11 +586,11 @@ router.get('/current-items', sellerOnly, asyncHandler(async (req, res) => {
   const currentSessionId = await findCurrentSessionId(String(group._id), group.orderingSchedule);
   if (!currentSessionId) return res.json({ orderIds: [], items: [] });
 
-  const orders = await Order.find({
+  const orders = await Order.find(activeOrderShopFilter(user.shopId, {
     buyerTelegramId: String(user.telegramId),
     orderingSessionId: currentSessionId,
     status: { $in: ['new', 'in_progress'] },
-  })
+  }))
     .select('_id createdAt updatedAt items')
     .populate('items.productId', ORDER_ITEM_PRODUCT_FIELDS)
     .sort({ createdAt: 1 })
@@ -1186,8 +1186,8 @@ router.patch('/:id/snapshot', staffOnly, async (req, res) => {
         assertOperationalShop(targetShop, appError);
 
         // WHERE is a separate decision from WHICH Order is being repaired.
-        // CURRENT is the target while picking is pending; once the warehouse
-        // plan has started, the same repair is routed to NEXT.
+        // CURRENT accepts the repair only while ordering is open and picking is
+        // pending; after either boundary the same repair is routed to NEXT.
         const destination = await resolveAssignmentDestination({
           shop: targetShop,
           session,
@@ -1419,9 +1419,8 @@ router.post('/:id/stale/restore-to-cart', telegramAuth, adminOnly, asyncHandler(
       const deliveryGroupId = buyerShop.deliveryGroupId ? String(buyerShop.deliveryGroupId) : '';
       if (!deliveryGroupId) throw appError('no_delivery_group');
 
-      // Destination routing is shared with seller assignment/repair. If CURRENT
-      // picking already started, restoring into CURRENT would strand the Order
-      // outside the built plan, so route it to NEXT instead.
+      // Destination routing is shared with seller assignment/repair. A closed
+      // ordering window or started picking routes the restore to NEXT.
       const destination = await resolveAssignmentDestination({
         shop: buyerShop,
         session: mongoSession,

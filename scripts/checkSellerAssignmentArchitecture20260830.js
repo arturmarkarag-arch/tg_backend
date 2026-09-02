@@ -287,6 +287,7 @@ async function runOwnershipBehavior() {
 async function runDestinationBehavior() {
   let group = { _id: 'group-B', orderingSchedule: { startDay: 1 } };
   let currentSession = { _id: 'current-B', pickingStatus: 'pending', openDate: '2026-08-31' };
+  let orderingOpen = true;
   let currentId = 'current-B';
   let nextId = 'next-B';
   const helperCalls = [];
@@ -313,6 +314,9 @@ async function runDestinationBehavior() {
     '../models/OrderingSession': OrderingSession,
     '../utils/errors': { appError },
     '../utils/getOrCreateSession': sessionApi,
+    '../utils/orderingSchedule': {
+      isOrderingOpen() { return { isOpen: orderingOpen }; },
+    },
   });
 
   const mongoSession = { id: 'tx' };
@@ -320,6 +324,11 @@ async function runDestinationBehavior() {
   check('destination router keeps CURRENT when pickingStatus is pending', target.targetSessionId === 'current-B' && !target.routedToNextSession);
   check('destination CURRENT materialization receives caller Mongo session', helperCalls.some((c) => c[0] === 'current' && c[2] === mongoSession));
 
+  orderingOpen = false;
+  target = await mod.resolveAssignmentDestination({ shop: { deliveryGroupId: 'group-B' }, session: mongoSession });
+  check('destination router sends incoming mutable Order to NEXT after ordering closes', target.targetSessionId === 'next-B' && target.routedToNextSession && target.routeReason === 'current_ordering_closed');
+
+  orderingOpen = true;
   currentSession = { _id: 'current-B', pickingStatus: 'in_progress', openDate: '2026-08-31' };
   target = await mod.resolveAssignmentDestination({ shop: { deliveryGroupId: 'group-B' }, session: mongoSession });
   check('destination router sends incoming mutable Order to NEXT after picking starts', target.targetSessionId === 'next-B' && target.routedToNextSession);
@@ -351,7 +360,7 @@ function runSourceContracts() {
   check('CURRENT/NEXT destination routing is a separate service', migration.includes('resolveAssignmentDestination({') && routing.includes('destination-routing decision only'));
   check('unassign uses same canonical ownership resolver', unassign.includes('resolveSellerAssignmentOrder({'));
   check('assignment and unassignment both run post-write invariant', migration.includes('assertSellerAssignmentOrderInvariant({') && unassign.includes('assertSellerAssignmentOrderInvariant({'));
-  check('destination decision is pickingStatus-based and does not use closeAt', routing.includes("currentSession.pickingStatus === 'pending'") && !/currentSession\.closeAt|\{[^}]*closeAt[^}]*\}\s*=\s*currentSession/.test(routing));
+  check('destination decision requires an open ordering window plus pending picking', routing.includes('isOrderingOpen(group.orderingSchedule, now).isOpen') && routing.includes("orderingOpen && currentSession.pickingStatus === 'pending'") && !/currentSession\.closeAt|\{[^}]*closeAt[^}]*\}\s*=\s*currentSession/.test(routing));
 
   check('manual Order snapshot repair uses shared destination router', orderRoutes.includes("router.patch('/:id/snapshot'") && orderRoutes.includes('resolveAssignmentDestination({'));
   check('manual snapshot conflict is scoped to exact destination session', /activeOrderShopFilter\(targetShop\._id,[\s\S]{0,500}orderingSessionId:\s*newSessionId/.test(orderRoutes));
