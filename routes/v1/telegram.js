@@ -106,6 +106,8 @@ async function resolveOrderingSessionContext(user, userShop = null) {
   }
 
   const sessionOpenAt = getOrderingWindowOpenAt(group.orderingSchedule).toISOString();
+  // Read-only lookup: a cycle whose session document is not materialised yet
+  // answers '' (never null), so every caller keeps a plain-string contract.
   const orderingSessionId = await findCurrentSessionId(
     String(resolvedGroupId),
     group.orderingSchedule,
@@ -114,24 +116,18 @@ async function resolveOrderingSessionContext(user, userShop = null) {
   return {
     resolvedGroupId,
     sessionOpenAt,
-    orderingSessionId,
+    orderingSessionId: orderingSessionId ? String(orderingSessionId) : '',
   };
 }
 
-// shopId → shop → deliveryGroupId → group.name. Єдиний шлях: без магазину зони
-// немає (поле в профілі лишається у відповіді, просто порожнє).
-async function resolveWarehouseZone(user) {
-  if (!user?.shopId) return '';
-  const shop = await Shop.findById(user.shopId).lean();
-  if (!shop?.deliveryGroupId) return '';
-  const group = await DeliveryGroup.findById(shop.deliveryGroupId).lean();
-  return group?.name || '';
-}
-
-// Те саме для магазину, який уже прочитано (PATCH /me/shop), — без зайвого читання.
-async function resolveZoneForShop(shop) {
-  if (!shop?.deliveryGroupId) return '';
-  const group = await DeliveryGroup.findById(shop.deliveryGroupId).lean();
+// Назва групи доставки для профілю. Клієнт більше не тягне заради одного напису
+// весь operational-список /delivery-groups (isOpen/phase/pickingStatus + Order-
+// lookup на кожну групу) — назва приходить прямо в payload профілю.
+// Читання йде через кешований modelCache.getDeliveryGroup: там, де groupId уже
+// розвʼязаний (buildUserProfile), це нуль додаткових запитів у Mongo.
+async function resolveDeliveryGroupName(groupId) {
+  if (!groupId) return '';
+  const group = await getDeliveryGroup(groupId);
   return group?.name || '';
 }
 
@@ -173,7 +169,6 @@ async function buildUserProfile(user) {
   let catalogState = normalizeCartState(user.cartState);
 
   const navigationSessionChanged =
-    user.role === 'seller' &&
     currentOrderingSessionId &&
     String(catalogState.navigationSessionId || '') !== currentOrderingSessionId;
 
@@ -240,14 +235,10 @@ async function buildUserProfile(user) {
     shopNumber: user.shopNumber,
     shopCity: userShop?.cityId?.name || '',
     deliveryGroupId: resolvedGroupId,
-    warehouseZone: await resolveWarehouseZone(user),
+    deliveryGroupName: await resolveDeliveryGroupName(resolvedGroupId),
     sessionOpenAt,
     lastAppOpenedAt: appOpenedAt,
-    miniAppState: normalizeMiniAppState(user.miniAppState || {
-      lastViewedProductId: '',
-      currentIndex: 0,
-      updatedAt: null,
-    }),
+    miniAppState: normalizeMiniAppState(user.miniAppState || { updatedAt: null }),
   };
 }
 
@@ -316,7 +307,7 @@ router.patch('/me/shop', asyncHandler(async (req, res) => {
       shopName: shop.name || '',
       shopCity: shop.cityId?.name || '',
       deliveryGroupId: shop.deliveryGroupId ? String(shop.deliveryGroupId) : null,
-      warehouseZone: await resolveZoneForShop(shop),
+      deliveryGroupName: await resolveDeliveryGroupName(shop.deliveryGroupId),
       cartState: normalizeCartState(fresh?.cartState ?? null),
       orderingSessionId: String(orderingStatus?.orderingSessionId || ''),
       orderingStatus,
@@ -353,7 +344,7 @@ router.patch('/me/shop', asyncHandler(async (req, res) => {
     shopName: shop.name || '',
     shopCity: shop.cityId?.name || '',
     deliveryGroupId: shop.deliveryGroupId ? String(shop.deliveryGroupId) : null,
-    warehouseZone: await resolveZoneForShop(shop),
+    deliveryGroupName: await resolveDeliveryGroupName(shop.deliveryGroupId),
     cartState: normalizeCartState(updatedUser?.cartState ?? null),
     orderingSessionId: String(orderingStatus?.orderingSessionId || ''),
     orderingStatus,
@@ -445,7 +436,6 @@ router.post('/mini-app/state', asyncHandler(async (req, res) => {
     currentPage,
     productId,
     orderNumber,
-    viewMode,
     orderingSessionId,
   } = req.body || {};
   const telegramId = req.telegramId;
@@ -457,8 +447,6 @@ router.post('/mini-app/state', asyncHandler(async (req, res) => {
     throw appError('me_state_invalid_index', { field: 'currentPage' });
   }
 
-  const validViewMode = viewMode === 'grid' ? 'grid' : 'carousel';
-
   const user = await User.findOne({ telegramId }).lean();
   if (!user) {
     const pendingRequest = await RegistrationRequest.findOne({
@@ -469,19 +457,22 @@ router.post('/mini-app/state', asyncHandler(async (req, res) => {
     throw appError('user_not_found');
   }
 
+  // Session identity is role-agnostic: an admin assigned to a shop browses and
+  // orders through the very same catalogue as a seller, so the navigation fence
+  // must cover them too. resolveOrderingSessionContext already answers only for
+  // roles that can order and stays read-only — it never materialises a session.
   let currentOrderingSessionId = '';
-  if (user.role === 'seller') {
-    try {
-      const sessionContext = await resolveOrderingSessionContext(user);
-      currentOrderingSessionId = sessionContext.orderingSessionId;
-    } catch (error) {
-    }
+  try {
+    const sessionContext = await resolveOrderingSessionContext(user);
+    currentOrderingSessionId = sessionContext.orderingSessionId;
+  } catch (error) {
   }
 
   // A tab opened in the previous ordering session must never overwrite the
   // navigation state of the new session. The client session id is mandatory for
-  // sellers; old/stale tabs receive 409 and must reload/reset to the first item.
-  if (user.role === 'seller' && currentOrderingSessionId) {
+  // every ordering role; old/stale tabs receive 409 and must reload/reset to the
+  // first item.
+  if (currentOrderingSessionId) {
     const clientOrderingSessionId = String(orderingSessionId || '');
     if (clientOrderingSessionId !== currentOrderingSessionId) {
       let latestUser = user;
@@ -526,7 +517,9 @@ router.post('/mini-app/state', asyncHandler(async (req, res) => {
 
   const now = new Date();
   const statePatch = {
-    'miniAppState.viewMode': validViewMode,
+    // miniAppState keeps ONE live field: updatedAt. It is the "seller last
+    // browsed the catalogue" marker read by /users (window activity),
+    // groupMemberSync and sellersLastSeen. The cursor itself lives in cartState.
     'miniAppState.updatedAt': now,
     // Navigation-only contract: never mutate legacy cart item snapshots here.
     'cartState.lastViewedProductId': String(productId || ''),
@@ -538,7 +531,7 @@ router.post('/mini-app/state', asyncHandler(async (req, res) => {
     'cartState.updatedAt': now,
   };
 
-  if (user.role === 'seller' && currentOrderingSessionId) {
+  if (currentOrderingSessionId) {
     statePatch['cartState.navigationSessionId'] = currentOrderingSessionId;
   }
 
@@ -571,8 +564,8 @@ router.post('/mini-app/reset-state', asyncHandler(async (req, res) => {
     { telegramId },
     {
       $set: {
-        'miniAppState.currentIndex': 0,
-        'miniAppState.lastViewedProductId': '',
+        // miniAppState has no cursor to reset any more — only the activity mark.
+        // The real cursor is cleared in the cartState patch below.
         'miniAppState.updatedAt': new Date(),
       },
     },

@@ -83,10 +83,7 @@ async function resolveAndCreateUser({
     // historical Google link, but clear stale runtime/account flags.
     existing.botBlocked = false;
     existing.isOnline = false;
-    existing.miniAppState = {
-      lastViewedProductId: '', currentIndex: 0, currentPage: 0,
-      viewMode: 'carousel', updatedAt: null,
-    };
+    existing.miniAppState = { updatedAt: null };
     existing.cartState = {
       orderItems: {}, orderItemIds: [], lastOrderPositions: 0,
       navigationSessionId: '', lastViewedProductId: '',

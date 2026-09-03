@@ -54,11 +54,13 @@ const UserSchema = new mongoose.Schema(
     // bootstrapped (Telegram Mini App or browser session). Older accounts may be
     // null until their first open after this field was introduced.
     lastAppOpenedAt: { type: Date, default: null },
+    // NOT a cursor. The authoritative catalogue cursor lives in cartState
+    // (lastViewedProductId / currentIndex / currentPage / navigationSessionId).
+    // What survives here is one activity marker — "the seller was browsing the
+    // catalogue at this moment" — read by /users (window activity),
+    // groupMemberSync and sellersLastSeen. The old duplicate cursor fields were
+    // written and reset but never read back, so they are gone.
     miniAppState: {
-      lastViewedProductId: { type: String, default: '' },
-      currentIndex: { type: Number, default: 0 },
-      currentPage: { type: Number, default: 0 },
-      viewMode: { type: String, enum: ['carousel', 'grid'], default: 'carousel' },
       updatedAt: { type: Date, default: null },
     },
     cartState: {

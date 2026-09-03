@@ -63,7 +63,6 @@ async function main() {
   console.log(`   ${pad(await count('users', { 'cartState.currentPage': { $gt: 0 } }))}  з cartState.currentPage > 0`);
   console.log(`   ${pad(await count('users', { 'cartState.navigationSessionId': { $nin: ['', null] } }))}  з непорожнім cartState.navigationSessionId`);
   console.log(`   ${pad(await count('users', { 'cartState.orderItemIds.0': { $exists: true } }))}  з непорожнім кошиком`);
-  console.log(`   ${pad(await count('users', { 'miniAppState.lastViewedProductId': { $nin: ['', null] } }))}  з непорожнім miniAppState.lastViewedProductId`);
   console.log(`   ${pad(await count('users', { 'history.0': { $exists: true } }))}  з непорожньою history`);
 
   // Хто саме тримає стан — щоб було видно, чи це один акаунт, який просто

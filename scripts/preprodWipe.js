@@ -96,10 +96,6 @@ const CART_DEFAULT = {
   updatedAt: null,
 };
 const MINIAPP_DEFAULT = {
-  lastViewedProductId: '',
-  currentIndex: 0,
-  currentPage: 0,
-  viewMode: 'carousel',
   updatedAt: null,
 };
 
