@@ -11,6 +11,7 @@ const PickingHistoryEntrySchema = new mongoose.Schema({
 
 const PickingItemSchema = new mongoose.Schema({
   lineKey: { type: String, required: true },
+  sourceOrderId: { type: String, default: '' },
   orderProductId: { type: String, default: '' },
   productId: { type: String, default: '' },
   variantId: { type: String, default: '' },
@@ -36,6 +37,9 @@ const PickingItemSchema = new mongoose.Schema({
 
 const BaseLinkerPickingOrderSchema = new mongoose.Schema({
   orderId: { type: String, required: true, unique: true },
+  groupKey: { type: String, default: '' },
+  externalOrderId: { type: String, default: '' },
+  memberOrderIds: { type: [String], default: [] },
   orderFingerprint: { type: String, default: '' },
   status: {
     type: String,
@@ -82,5 +86,7 @@ const BaseLinkerPickingOrderSchema = new mongoose.Schema({
 
 BaseLinkerPickingOrderSchema.index({ status: 1, updatedAt: -1 });
 BaseLinkerPickingOrderSchema.index({ ownerTelegramId: 1, status: 1 });
+BaseLinkerPickingOrderSchema.index({ groupKey: 1 });
+BaseLinkerPickingOrderSchema.index({ memberOrderIds: 1 });
 
 module.exports = mongoose.model('BaseLinkerPickingOrder', BaseLinkerPickingOrderSchema);

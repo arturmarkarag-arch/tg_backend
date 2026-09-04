@@ -5,6 +5,8 @@ const {
   progressFor,
   packingReadiness,
   deriveWorkingStatus,
+  baseLinkerFulfilmentGroupKey,
+  mergeOrderGroup,
 } = require('../services/baseLinkerPicking');
 const { t } = require('../utils/errors');
 
@@ -134,4 +136,26 @@ describe('BaseLinker local picking workflow', () => {
       upstreamMessage: 'Test message',
     })).toContain('Test message');
   });
+  it('groups split BaseLinker records only when source + external order identity match', () => {
+    const a = { order_id: 101, order_source: 'shop', order_source_id: 5, external_order_id: 'ABC', products: [{ order_product_id: 1, quantity: 1 }] };
+    const b = { order_id: 102, order_source: 'shop', order_source_id: 5, external_order_id: 'ABC', products: [{ order_product_id: 2, quantity: 2 }] };
+    const c = { order_id: 103, order_source: 'shop', order_source_id: 6, external_order_id: 'ABC', products: [{ order_product_id: 3, quantity: 1 }] };
+    expect(baseLinkerFulfilmentGroupKey(a)).toBe(baseLinkerFulfilmentGroupKey(b));
+    expect(baseLinkerFulfilmentGroupKey(a)).not.toBe(baseLinkerFulfilmentGroupKey(c));
+
+    const merged = mergeOrderGroup([a, b], 101);
+    expect(merged._member_order_ids).toEqual(['101', '102']);
+    expect(merged.products).toHaveLength(2);
+    expect(merged.products[1]._source_order_id).toBe('102');
+    expect(buildSourceItems(merged).map((item) => item.lineKey)).toEqual(['op:1', 'bl:102:op:2']);
+  });
+
+  it('claim route sends all BaseLinker member order ids to the server-side group validator', () => {
+    const router = read('routes/baseLinker.js');
+    expect(router).toContain('memberOrderIds: Array.isArray(req.body?.memberOrderIds)');
+    expect(read('models/BaseLinkerPickingOrder.js')).toContain('memberOrderIds');
+    expect(read('services/baseLinkerPicking.js')).toContain('fetchExactOrderGroup');
+    expect(read('services/baseLinkerPicking.js')).toContain('baselinker_picking_group_mismatch');
+  });
+
 });

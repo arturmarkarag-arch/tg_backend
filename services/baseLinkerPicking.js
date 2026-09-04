@@ -33,6 +33,56 @@ function qty(value) {
   return Number.isFinite(n) && n >= 0 ? n : 0;
 }
 
+
+function groupToken(value) {
+  return text(value).trim();
+}
+
+function baseLinkerFulfilmentGroupKey(order) {
+  const source = groupToken(order?.order_source).toLowerCase();
+  const sourceId = groupToken(order?.order_source_id);
+  const external = groupToken(order?.external_order_id);
+  if (external) return `external:${source}:${sourceId}:${external}`;
+  const shopOrder = groupToken(order?.shop_order_id);
+  if (shopOrder) return `shop:${source}:${sourceId}:${shopOrder}`;
+  return `order:${groupToken(order?.order_id)}`;
+}
+
+function mergeOrderGroup(orders, preferredOrderId) {
+  const list = Array.isArray(orders) ? orders.filter(Boolean) : [];
+  if (!list.length) throw appError('baselinker_picking_group_empty');
+  const preferred = list.find((order) => String(order?.order_id) === String(preferredOrderId)) || list[0];
+  const memberOrderIds = list.map((order) => String(order.order_id));
+  const keys = new Set(list.map(baseLinkerFulfilmentGroupKey));
+  if (keys.size !== 1) throw appError('baselinker_picking_group_mismatch');
+  return {
+    ...preferred,
+    order_id: preferred.order_id,
+    confirmed: list.every((order) => Boolean(order?.confirmed)),
+    products: list.flatMap((order) => (Array.isArray(order?.products) ? order.products : []).map((product) => ({
+      ...product,
+      _source_order_id: String(order.order_id),
+    }))),
+    _member_order_ids: memberOrderIds,
+    _group_key: keys.values().next().value,
+  };
+}
+
+async function fetchExactOrderGroup(orderIds, preferredOrderId) {
+  const ids = [...new Set((orderIds || []).map((id) => String(id || '').trim()).filter(Boolean))];
+  if (!ids.length) throw appError('baselinker_picking_group_empty');
+  if (ids.length > 20) throw appError('baselinker_picking_group_too_large', { count: ids.length });
+  const orders = await Promise.all(ids.map((id) => fetchExactOrder(id)));
+  const mergedOrder = mergeOrderGroup(orders, preferredOrderId || ids[0]);
+  return {
+    orders,
+    mergedOrder,
+    memberOrderIds: orders.map((order) => String(order.order_id)),
+    groupKey: baseLinkerFulfilmentGroupKey(mergedOrder),
+    externalOrderId: groupToken(mergedOrder?.external_order_id || mergedOrder?.shop_order_id),
+  };
+}
+
 function sourceLineBaseKey(product) {
   const orderProductId = text(product?.order_product_id).trim();
   if (orderProductId) return `op:${orderProductId}`;
@@ -51,12 +101,16 @@ function buildSourceItems(order) {
   const products = Array.isArray(order?.products) ? order.products : [];
   const seen = new Map();
   return products.map((product) => {
-    const base = sourceLineBaseKey(product);
+    const sourceOrderId = text(product?._source_order_id).trim();
+    const primaryOrderId = text(order?.order_id).trim();
+    const rawBase = sourceLineBaseKey(product);
+    const base = sourceOrderId && sourceOrderId !== primaryOrderId ? `bl:${sourceOrderId}:${rawBase}` : rawBase;
     const occurrence = (seen.get(base) || 0) + 1;
     seen.set(base, occurrence);
     const lineKey = occurrence === 1 ? base : `${base}#${occurrence}`;
     const sourceSnapshot = {
       lineKey,
+      sourceOrderId,
       orderProductId: text(product?.order_product_id),
       productId: text(product?.product_id),
       variantId: text(product?.variant_id),
@@ -157,9 +211,12 @@ function emitPickingUpdate(doc) {
   try {
     const io = getIO();
     if (!io) return;
+    const state = publicState(doc);
+    const orderIds = [...new Set([String(doc.orderId), ...((doc.memberOrderIds || []).map(String))])];
     io.to('baselinker_staff').emit('baselinker_picking_updated', {
       orderId: String(doc.orderId),
-      state: publicState(doc),
+      orderIds,
+      state,
     });
   } catch (_) { /* best-effort realtime only */ }
 }
@@ -277,8 +334,21 @@ function assertOwner(doc, actor) {
 async function getPickingStates(orderIds = []) {
   const ids = [...new Set((orderIds || []).map((id) => String(id || '').trim()).filter(Boolean))];
   if (!ids.length) return {};
-  const docs = await BaseLinkerPickingOrder.find({ orderId: { $in: ids } }).lean();
-  return Object.fromEntries(docs.map((doc) => [String(doc.orderId), publicState(doc)]));
+  const docs = await BaseLinkerPickingOrder.find({
+    $or: [
+      { orderId: { $in: ids } },
+      { memberOrderIds: { $in: ids } },
+    ],
+  }).lean();
+  const requested = new Set(ids);
+  const result = {};
+  for (const doc of docs) {
+    const state = publicState(doc);
+    for (const id of [...new Set([String(doc.orderId), ...((doc.memberOrderIds || []).map(String))])]) {
+      if (requested.has(id)) result[id] = state;
+    }
+  }
+  return result;
 }
 
 async function getMyActivePicking(user) {
@@ -291,26 +361,40 @@ async function getMyActivePicking(user) {
   return publicState(doc);
 }
 
-async function claimPickingOrder({ orderId, user, force = false }) {
+async function claimPickingOrder({ orderId, memberOrderIds = [], user, force = false }) {
   const actor = actorOf(user);
-  const order = await fetchExactOrder(orderId);
-  const id = String(order.order_id);
+  const requestedIds = [...new Set([String(orderId), ...(memberOrderIds || []).map(String)].filter(Boolean))];
+  const group = await fetchExactOrderGroup(requestedIds, orderId);
+  const requestedId = String(orderId);
+  const groupLock = `baselinker-group:${sha(group.groupKey).slice(0, 24)}`;
 
-  return withLock(`baselinker-worker:${actor.by}`, () => withLock(`baselinker-picking:${id}`, async () => {
+  return withLock(`baselinker-worker:${actor.by}`, () => withLock(groupLock, async () => {
+    const candidates = await BaseLinkerPickingOrder.find({
+      $or: [
+        { orderId: { $in: group.memberOrderIds } },
+        { groupKey: group.groupKey },
+        { memberOrderIds: { $in: group.memberOrderIds } },
+      ],
+    }).sort({ updatedAt: -1 });
+
+    if (candidates.length > 1) {
+      throw appError('baselinker_picking_group_conflict', { orderIds: group.memberOrderIds.join(', ') });
+    }
+
+    let doc = candidates[0] || null;
+    if (!doc) {
+      doc = new BaseLinkerPickingOrder({ orderId: requestedId, status: 'in_progress', revision: 1 });
+    }
+    if (TERMINAL_STATUSES.includes(doc.status)) throw appError('baselinker_picking_terminal');
+
     const activeOther = await BaseLinkerPickingOrder.findOne({
       ownerTelegramId: actor.by,
-      orderId: { $ne: id },
+      _id: { $ne: doc._id },
       status: { $in: WORKING_STATUSES },
     }).lean();
     if (activeOther) {
       throw appError('baselinker_worker_has_active_order', { orderId: activeOther.orderId });
     }
-
-    let doc = await BaseLinkerPickingOrder.findOne({ orderId: id });
-    if (!doc) {
-      doc = new BaseLinkerPickingOrder({ orderId: id, status: 'in_progress', revision: 1 });
-    }
-    if (TERMINAL_STATUSES.includes(doc.status)) throw appError('baselinker_picking_terminal');
 
     const now = new Date();
     const ownerOther = doc.ownerTelegramId && String(doc.ownerTelegramId) !== actor.by;
@@ -331,7 +415,10 @@ async function claimPickingOrder({ orderId, user, force = false }) {
       });
     }
 
-    const sync = syncDocWithOrder(doc, order, actor);
+    doc.groupKey = group.groupKey;
+    doc.externalOrderId = group.externalOrderId;
+    doc.memberOrderIds = group.memberOrderIds;
+    const sync = syncDocWithOrder(doc, group.mergedOrder, actor);
     const wasDifferentOwner = String(doc.ownerTelegramId || '') !== actor.by;
     doc.ownerTelegramId = actor.by;
     doc.ownerName = actor.byName;
@@ -339,11 +426,14 @@ async function claimPickingOrder({ orderId, user, force = false }) {
     doc.lastActivityAt = now;
     doc.status = deriveWorkingStatus(doc.items, true);
     doc.revision = Number(doc.revision || 0) + 1;
-    appendHistory(doc, wasDifferentOwner ? 'order_claimed' : 'order_reopened_by_owner', actor, sync.changed ? { upstreamSync: sync.summary } : {});
+    appendHistory(doc, wasDifferentOwner ? 'order_claimed' : 'order_reopened_by_owner', actor, {
+      memberOrderIds: group.memberOrderIds,
+      ...(sync.changed ? { upstreamSync: sync.summary } : {}),
+    });
     await doc.save();
     emitPickingUpdate(doc);
-    return { state: publicState(doc), order, syncChanged: sync.changed === true };
-  }, { ttlMs: 25_000, waitMs: 8_000 }), { ttlMs: 25_000, waitMs: 8_000 });
+    return { state: publicState(doc), orders: group.orders, syncChanged: sync.changed === true };
+  }, { ttlMs: 30_000, waitMs: 10_000 }), { ttlMs: 30_000, waitMs: 10_000 });
 }
 
 async function heartbeatPickingOrder({ orderId, user }) {
@@ -400,6 +490,7 @@ async function updatePickingItem({ orderId, lineKey, user, expectedRevision, sta
     doc.revision = Number(doc.revision || 0) + 1;
     appendHistory(doc, 'item_updated', actor, {
       lineKey: item.lineKey,
+      sourceOrderId: item.sourceOrderId || '',
       itemName: item.name,
       state: item.state,
       pickedQty: item.pickedQty,
@@ -442,16 +533,21 @@ async function releasePickingOrder({ orderId, user, expectedRevision, force = fa
 
 async function markPickingOrderPacked({ orderId, user, expectedRevision, allowIssues = false }) {
   const actor = actorOf(user);
-  const order = await fetchExactOrder(orderId);
-  const id = String(order.order_id);
+  const id = String(orderId);
+  const before = await BaseLinkerPickingOrder.findOne({ orderId: id }).lean();
+  if (!before) throw appError('baselinker_picking_not_started');
+  const group = await fetchExactOrderGroup(
+    (before.memberOrderIds && before.memberOrderIds.length) ? before.memberOrderIds : [id],
+    id,
+  );
 
-  return withLock(`baselinker-picking:${id}`, async () => {
+  return withLock(`baselinker-group:${sha(group.groupKey).slice(0, 24)}`, async () => {
     const doc = await BaseLinkerPickingOrder.findOne({ orderId: id });
     if (!doc) throw appError('baselinker_picking_not_started');
     assertOwner(doc, actor);
     assertRevision(doc, expectedRevision);
 
-    const sync = syncDocWithOrder(doc, order, actor);
+    const sync = syncDocWithOrder(doc, group.mergedOrder, actor);
     if (sync.changed) {
       doc.lastActivityAt = new Date();
       doc.revision = Number(doc.revision || 0) + 1;
@@ -507,6 +603,7 @@ async function markPickingOrderPacked({ orderId, user, expectedRevision, allowIs
       issues: readiness.hasIssues
         ? (doc.items || []).filter((item) => ISSUE_STATES.has(String(item?.state || ''))).map((item) => ({
           lineKey: item.lineKey,
+          sourceOrderId: item.sourceOrderId || '',
           itemName: item.name,
           state: item.state,
           requestedQty: item.requestedQty,
@@ -517,8 +614,8 @@ async function markPickingOrderPacked({ orderId, user, expectedRevision, allowIs
     });
     await doc.save();
     emitPickingUpdate(doc);
-    return { state: publicState(doc), order };
-  }, { ttlMs: 25_000, waitMs: 8_000 });
+    return { state: publicState(doc), orders: group.orders };
+  }, { ttlMs: 30_000, waitMs: 10_000 });
 }
 
 async function markPickingOrderSent({ orderId, user, expectedRevision }) {
@@ -581,6 +678,8 @@ async function reopenPickingOrder({ orderId, user, expectedRevision }) {
 module.exports = {
   CLAIM_STALE_MS,
   buildSourceItems,
+  baseLinkerFulfilmentGroupKey,
+  mergeOrderGroup,
   progressFor,
   packingReadiness,
   deriveWorkingStatus,

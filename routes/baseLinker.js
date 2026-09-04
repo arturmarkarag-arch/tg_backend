@@ -128,6 +128,7 @@ router.get('/picking/orders/:orderId', asyncHandler(async (req, res) => {
 router.post('/picking/orders/:orderId/claim', asyncHandler(async (req, res) => {
   const result = await claimPickingOrder({
     orderId: req.params.orderId,
+    memberOrderIds: Array.isArray(req.body?.memberOrderIds) ? req.body.memberOrderIds : [],
     user: req.telegramUser,
     force: req.body?.force === true,
   });

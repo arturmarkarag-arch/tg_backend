@@ -138,6 +138,10 @@ const ERRORS = {
   baselinker_order_not_returned: { status: 404, message: ({ orderId, upstreamMethod } = {}) =>
                                 `BaseLinker успішно відповів${upstreamMethod ? ` на ${upstreamMethod}` : ''}, але не повернув замовлення${orderId ? ` #${orderId}` : ''}. Воно могло бути видалене або недоступне для цього API-токена. Оновіть список і повторіть.` },
   baselinker_order_has_no_products: { status: 409, message: 'У замовленні BaseLinker немає товарних позицій для збирання.' },
+  baselinker_picking_group_empty: { status: 400, message: 'Не передано жодного BaseLinker order_id для спільного комплектування.' },
+  baselinker_picking_group_too_large: { status: 400, message: ({ count } = {}) => `Занадто багато частин одного замовлення для однієї операції${count ? ` (${count})` : ''}. Оновіть список і повторіть.` },
+  baselinker_picking_group_mismatch: { status: 409, message: 'Ці BaseLinker order_id не належать до одного зовнішнього замовлення. Система не буде склеювати їх автоматично.' },
+  baselinker_picking_group_conflict: { status: 409, message: ({ orderIds } = {}) => `Для цього зовнішнього замовлення вже існує кілька окремих локальних станів комплектування${orderIds ? ` (${orderIds})` : ''}. Потрібне одноразове обʼєднання адміністратором, щоб не втратити відмітки.` },
   baselinker_worker_has_active_order: { status: 409, message: ({ orderId } = {}) =>
                                 `У вас уже є активне замовлення${orderId ? ` #${orderId}` : ''}. Завершіть або відкладіть його перед наступним.` },
   baselinker_picking_taken: { status: 409, message: ({ ownerName } = {}) =>
