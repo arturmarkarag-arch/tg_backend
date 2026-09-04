@@ -221,6 +221,9 @@ async function buildUserProfile(user) {
   return {
     telegramId: user.telegramId,
     role: user.role,
+    permissions: {
+      baseLinkerPicking: user?.permissions?.baseLinkerPicking === true,
+    },
     firstName: user.firstName,
     lastName: user.lastName,
     phoneNumber: user.phoneNumber || '',

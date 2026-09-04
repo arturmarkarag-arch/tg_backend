@@ -37,6 +37,12 @@ const UserSchema = new mongoose.Schema(
     // їх так само, як раніше.
     shopId: { type: mongoose.Schema.Types.ObjectId, ref: 'Shop', default: null },
     botBlocked: { type: Boolean, default: false },
+    // Optional cross-role capabilities assigned only by an admin. BaseLinker
+    // picking is deliberately NOT a primary role: the same person may still be
+    // a warehouse worker/seller while also being allowed to fulfil online orders.
+    permissions: {
+      baseLinkerPicking: { type: Boolean, default: false },
+    },
     // Soft-removal state. `removed` closes ALL application access but keeps the
     // row as historical information. Missing field on legacy rows is treated as
     // active for backwards compatibility; successful self-registration can

@@ -22,7 +22,11 @@ describe('V48.14 ordering/picking time authority contract', () => {
 
   it('authenticated app profile resolution also reads an existing session instead of creating one', () => {
     const telegram = read('routes/v1/telegram.js');
-    const block = sliceBetweenOrThrow(telegram, 'async function resolveOrderingSessionContext', '\n// shopId', { label: 'resolveOrderingSessionContext' });
+    // End anchor is the NEXT declaration, not the comment that used to follow it:
+    // a contract must not break because a comment above an unrelated helper got
+    // reworded. The assertions below are untouched and still run over the whole
+    // resolveOrderingSessionContext body.
+    const block = sliceBetweenOrThrow(telegram, 'async function resolveOrderingSessionContext', '\nasync function resolveDeliveryGroupName', { label: 'resolveOrderingSessionContext' });
     expect(block).toContain('findCurrentSessionId(');
     expect(block).not.toContain('getOrCreateSessionId(');
   });

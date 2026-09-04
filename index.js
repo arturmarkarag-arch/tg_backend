@@ -55,8 +55,10 @@ async function shutdown(signal, code = 0) {
 
 // Uncaught exception завершує процес; unhandled rejection журналюється.
 process.on('unhandledRejection', (reason) => {
+  console.error('[unhandledRejection]', reason?.stack || reason);
 });
 process.on('uncaughtException', (err) => {
+  console.error('[uncaughtException]', err?.stack || err);
   shutdown('uncaughtException', 1);
 });
 process.on('SIGTERM', () => shutdown('SIGTERM'));
@@ -295,6 +297,7 @@ async function startServer() {
       console.log(`Server listening on port ${PORT}`);
     });
   } catch (error) {
+    console.error('[startup]', error?.stack || error);
     process.exit(1);
   }
 }

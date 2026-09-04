@@ -44,6 +44,12 @@ async function sanitizeUserPayload(payload, existing = null) {
   if (payload.botBlocked !== undefined && payload.botBlocked !== null) {
     data.botBlocked = Boolean(payload.botBlocked === 'false' ? false : payload.botBlocked);
   }
+  if (payload.baseLinkerPicking !== undefined && payload.baseLinkerPicking !== null) {
+    data.permissions = {
+      ...(existing?.permissions?.toObject ? existing.permissions.toObject() : (existing?.permissions || {})),
+      baseLinkerPicking: Boolean(payload.baseLinkerPicking === 'false' ? false : payload.baseLinkerPicking),
+    };
+  }
 
   // Seller-specific fields. Група доставки НЕ пишеться в User — вона живе на
   // магазині (Shop.deliveryGroupId), тож призначення магазину саме по собі й

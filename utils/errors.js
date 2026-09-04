@@ -110,6 +110,56 @@ const ERRORS = {
   block_move_invalid_fields:{ status: 400, message: 'Невалідні параметри переносу: productId, fromBlock, toBlock, toIndex' },
   block_concurrent_modification: { status: 409, message: 'Блок змінюється кількома користувачами одночасно. Спробуйте ще раз.' },
 
+  // ── BaseLinker ──────────────────────────────────────────────────────────────
+  baselinker_not_configured: { status: 503, message: 'BaseLinker не налаштовано. Додайте BASELINKER_API_TOKEN у середовище сервера.' },
+  baselinker_timeout:        { status: 504, message: ({ upstreamMethod } = {}) =>
+                                `BaseLinker не відповів вчасно${upstreamMethod ? ` на ${upstreamMethod}` : ''}. Повторіть запит.` },
+  baselinker_network_error:  { status: 502, message: ({ upstreamMethod, upstreamMessage } = {}) =>
+                                `Не вдалося з’єднатися з BaseLinker${upstreamMethod ? ` під час ${upstreamMethod}` : ''}${upstreamMessage ? `: ${upstreamMessage}` : '.'}` },
+  baselinker_unavailable:    { status: 502, message: 'BaseLinker API зараз недоступний.' },
+  baselinker_http_error:     { status: 502, message: ({ upstreamMethod, upstreamStatus, upstreamCode, upstreamMessage } = {}) => {
+                                const where = upstreamMethod ? ` під час ${upstreamMethod}` : '';
+                                const details = `${upstreamCode ? ` (${upstreamCode})` : ''}${upstreamMessage ? `: ${upstreamMessage}` : ''}`;
+                                if (Number(upstreamStatus) === 401) return `BaseLinker відхилив API-токен${where} (HTTP 401). Перевірте BASELINKER_API_TOKEN.${details}`;
+                                if (Number(upstreamStatus) === 403) return `BaseLinker заборонив цю read-only операцію${where} (HTTP 403). Перевірте права API-токена.${details}`;
+                                if (Number(upstreamStatus) === 429) return `BaseLinker тимчасово відхилив запит через ліміт API${where} (HTTP 429). Зачекайте трохи й повторіть.${details}`;
+                                return `BaseLinker повернув HTTP ${upstreamStatus || 'помилку'}${where}${details}.`;
+                              } },
+  baselinker_invalid_response: { status: 502, message: ({ upstreamMethod } = {}) =>
+                                `BaseLinker повернув некоректну відповідь${upstreamMethod ? ` на ${upstreamMethod}` : ''}. Дані не змінено; повторіть запит.` },
+  baselinker_api_error:      { status: 502, message: ({ upstreamMethod, upstreamCode, upstreamMessage } = {}) =>
+                                `BaseLinker відхилив ${upstreamMethod || 'API-запит'}${upstreamCode ? ` (${upstreamCode})` : ''}${upstreamMessage ? `: ${upstreamMessage}` : '.'}` },
+  baselinker_cursor_invalid: { status: 502, message: 'BaseLinker повернув сторінку замовлень без безпечного курсора. Завантаження зупинено, щоб не дублювати запити.' },
+  baselinker_order_id_invalid: { status: 400, message: 'Некоректний BaseLinker order_id.' },
+  baselinker_package_id_invalid: { status: 400, message: 'Некоректний BaseLinker package_id.' },
+  baselinker_courier_code_invalid: { status: 400, message: 'Не вказано коректний код курʼєра для накладної.' },
+  baselinker_label_invalid: { status: 502, message: 'BaseLinker повернув порожню або некоректну накладну.' },
+  baselinker_label_too_large: { status: 502, message: 'Накладна BaseLinker перевищує безпечний ліміт розміру.' },
+  baselinker_order_not_returned: { status: 404, message: ({ orderId, upstreamMethod } = {}) =>
+                                `BaseLinker успішно відповів${upstreamMethod ? ` на ${upstreamMethod}` : ''}, але не повернув замовлення${orderId ? ` #${orderId}` : ''}. Воно могло бути видалене або недоступне для цього API-токена. Оновіть список і повторіть.` },
+  baselinker_order_has_no_products: { status: 409, message: 'У замовленні BaseLinker немає товарних позицій для збирання.' },
+  baselinker_worker_has_active_order: { status: 409, message: ({ orderId } = {}) =>
+                                `У вас уже є активне замовлення${orderId ? ` #${orderId}` : ''}. Завершіть або відкладіть його перед наступним.` },
+  baselinker_picking_taken: { status: 409, message: ({ ownerName } = {}) =>
+                                ownerName ? `Це замовлення зараз збирає ${ownerName}.` : 'Це замовлення зараз збирає інший працівник.' },
+  baselinker_picking_not_started: { status: 409, message: 'Спочатку візьміть це замовлення в роботу.' },
+  baselinker_picking_not_owner: { status: 409, message: ({ ownerName } = {}) =>
+                                ownerName ? `Замовлення зараз закріплено за ${ownerName}.` : 'Ви більше не є виконавцем цього замовлення. Оновіть екран.' },
+  baselinker_picking_terminal: { status: 409, message: 'Це замовлення вже запаковано або відправлено. Для виправлення адміністратор має повернути його в роботу.' },
+  baselinker_picking_revision_required: { status: 400, message: 'Не передано актуальну версію стану комплектування.' },
+  baselinker_picking_stale: { status: 409, message: ({ currentRevision } = {}) =>
+                                `Стан замовлення вже змінив інший працівник${currentRevision ? ` (версія ${currentRevision})` : ''}. Оновіть картку і повторіть.` },
+  baselinker_picking_item_not_found: { status: 404, message: 'Позицію комплектування не знайдено. Можливо, склад замовлення змінився.' },
+  baselinker_picking_item_state_invalid: { status: 400, message: 'Некоректний стан позиції комплектування.' },
+  baselinker_picking_quantity_invalid: { status: 400, message: ({ requestedQty } = {}) =>
+                                `Некоректна знайдена кількість${requestedQty != null ? `. Потрібно максимум ${requestedQty}.` : '.'}` },
+  baselinker_picking_items_unhandled: { status: 409, message: ({ pendingLines } = {}) =>
+                                `Ще не опрацьовано ${Number(pendingLines) || 0} позицій. Для кожної позиції відмітьте «зібрано» або зафіксуйте проблему.` },
+  baselinker_picking_issue_confirmation_required: { status: 409, message: ({ problemLines, missingQty } = {}) =>
+                                `У замовленні залишилось ${Number(problemLines) || 0} проблемних позицій${Number(missingQty) > 0 ? ` і не вистачає ${Number(missingQty)} шт.` : '.'} Підтвердіть окремою дією пакування з проблемою.` },
+  baselinker_order_changed: { status: 409, message: 'Замовлення змінилося в BaseLinker під час роботи. Змінені позиції скинуто на перевірку — перегляньте їх ще раз.' },
+  baselinker_picking_not_packed: { status: 409, message: 'Спочатку підтвердьте, що замовлення запаковано.' },
+
   // ── Orders ─────────────────────────────────────────────────────────────────
   order_not_found:          { status: 404, message: 'Замовлення не знайдено' },
   order_not_active:         { status: 409, message: ({ status } = {}) =>

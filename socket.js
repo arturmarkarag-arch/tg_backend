@@ -6,6 +6,7 @@ const { isRemovedUser } = require('./utils/userAccountState');
 const { validateTelegramInitData } = require('./utils/validateTelegramInitData');
 const { verifySession } = require('./utils/jwt');
 const { pubClient, subClient, isEnabled: redisEnabled } = require('./utils/redis');
+const { hasBaseLinkerPickingAccess } = require('./utils/baseLinkerAccess');
 const { createAdapter } = require('@socket.io/redis-adapter');
 
 let io = null;
@@ -123,6 +124,7 @@ function initSocket(httpServer) {
     socket.telegramId = telegramId;
     socket.userRole = dbUser.role;
     socket.shopId = dbUser.shopId ? String(dbUser.shopId) : '';
+    socket.baseLinkerPickingAccess = hasBaseLinkerPickingAccess(dbUser);
     next();
   });
 
@@ -136,6 +138,7 @@ function initSocket(httpServer) {
     // still receive the minimal public catalogue_updated signal, but never the
     // product field patch used by admin TanStack caches.
     if (['admin', 'warehouse'].includes(socket.userRole)) socket.join('staff');
+    if (socket.baseLinkerPickingAccess) socket.join('baselinker_staff');
 
     const isWarehouseStaff = () => ['admin', 'warehouse'].includes(socket.userRole);
 
