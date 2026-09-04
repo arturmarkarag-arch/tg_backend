@@ -675,6 +675,149 @@ async function reopenPickingOrder({ orderId, user, expectedRevision }) {
   }, { ttlMs: 15_000, waitMs: 6_000 });
 }
 
+
+async function fetchOptionalExactOrder(orderId) {
+  const id = Number(orderId);
+  if (!Number.isSafeInteger(id) || id <= 0) return null;
+  const result = await fetchBaseLinkerOrders({
+    orderId: id,
+    includeUnconfirmed: true,
+    maxPages: 1,
+  });
+  return (result.orders || []).find((candidate) => String(candidate?.order_id) === String(id)) || null;
+}
+
+async function reconcilePickingFromUpstreamChanges({ orders = [], removedOrderIds = [] } = {}) {
+  const changedOrders = Array.isArray(orders) ? orders.filter(Boolean) : [];
+  const changedById = new Map(changedOrders.map((order) => [String(order?.order_id || ''), order]).filter(([id]) => id));
+  const removed = new Set((removedOrderIds || []).map((id) => String(id || '')).filter(Boolean));
+  const affectedIds = [...new Set([...changedById.keys(), ...removed])];
+  const changedGroupKeys = [...new Set(changedOrders.map(baseLinkerFulfilmentGroupKey).filter(Boolean))];
+  if (!affectedIds.length && !changedGroupKeys.length) return { reconciled: 0, changed: 0, released: 0 };
+
+  const ors = [];
+  if (affectedIds.length) {
+    ors.push({ orderId: { $in: affectedIds } });
+    ors.push({ memberOrderIds: { $in: affectedIds } });
+  }
+  if (changedGroupKeys.length) ors.push({ groupKey: { $in: changedGroupKeys } });
+
+  const docs = await BaseLinkerPickingOrder.find({
+    status: { $in: [...WORKING_STATUSES, 'paused'] },
+    $or: ors,
+  }).lean();
+
+  const systemActor = { by: 'system:baselinker-journal', byName: 'BaseLinker', byRole: 'system' };
+  let reconciled = 0;
+  let changed = 0;
+  let released = 0;
+
+  for (const snapshot of docs) {
+    const localOrderId = String(snapshot.orderId || '');
+    if (!localOrderId) continue;
+
+    await withLock(`baselinker-picking:${localOrderId}`, async () => {
+      const doc = await BaseLinkerPickingOrder.findOne({ orderId: localOrderId });
+      if (!doc || TERMINAL_STATUSES.includes(doc.status)) return;
+
+      const currentIds = [...new Set([
+        String(doc.orderId || ''),
+        ...((doc.memberOrderIds || []).map((id) => String(id || ''))),
+      ].filter(Boolean))];
+
+      // If BaseLinker created a new split/copy member with the same logical
+      // external identity, add it to the local group immediately.
+      const groupKeysForDoc = new Set([String(doc.groupKey || '')].filter(Boolean));
+      for (const id of currentIds) {
+        const changedOrder = changedById.get(id);
+        if (changedOrder) groupKeysForDoc.add(baseLinkerFulfilmentGroupKey(changedOrder));
+      }
+      const relatedChangedOrders = changedOrders.filter((order) => {
+        const id = String(order?.order_id || '');
+        const key = baseLinkerFulfilmentGroupKey(order);
+        return currentIds.includes(id) || groupKeysForDoc.has(key);
+      });
+
+      const candidateIds = new Set(currentIds.filter((id) => !removed.has(id)));
+      for (const order of relatedChangedOrders) candidateIds.add(String(order.order_id));
+
+      const availableById = new Map();
+      for (const order of relatedChangedOrders) availableById.set(String(order.order_id), order);
+
+      // Re-read untouched members so syncDocWithOrder sees the complete grouped
+      // order rather than only the line that generated this journal event.
+      for (const id of candidateIds) {
+        if (availableById.has(id)) continue;
+        const fresh = await fetchOptionalExactOrder(id);
+        if (fresh) availableById.set(id, fresh);
+        else removed.add(id);
+      }
+
+      const availableOrders = [...availableById.values()];
+      if (!availableOrders.length) {
+        const hadOwner = Boolean(doc.ownerTelegramId);
+        doc.ownerTelegramId = '';
+        doc.ownerName = '';
+        doc.claimedAt = null;
+        doc.status = 'paused';
+        doc.memberOrderIds = [];
+        doc.lastUpstreamChangeAt = new Date();
+        doc.lastUpstreamChangeSummary = { added: 0, removed: (doc.items || []).length, changed: 0 };
+        doc.revision = Number(doc.revision || 0) + 1;
+        appendHistory(doc, 'upstream_order_removed', systemActor, {
+          removedOrderIds: currentIds,
+          releasedOwner: hadOwner,
+        });
+        await doc.save();
+        emitPickingUpdate(doc);
+        reconciled += 1;
+        changed += 1;
+        if (hadOwner) released += 1;
+        return;
+      }
+
+      // Prefer the group identity of an explicitly changed current member. If an
+      // order edit changed the external grouping key, stale former members are
+      // dropped instead of being silently mixed with the new logical order.
+      const changedCurrent = relatedChangedOrders.find((order) => currentIds.includes(String(order.order_id)));
+      const targetGroupKey = changedCurrent
+        ? baseLinkerFulfilmentGroupKey(changedCurrent)
+        : (doc.groupKey || baseLinkerFulfilmentGroupKey(availableOrders[0]));
+      const sameGroupOrders = availableOrders.filter((order) => baseLinkerFulfilmentGroupKey(order) === targetGroupKey);
+      if (!sameGroupOrders.length) return;
+
+      const beforeMemberIds = [...new Set((doc.memberOrderIds || []).map(String))].sort();
+      const nextMemberIds = sameGroupOrders.map((order) => String(order.order_id));
+      const afterMemberIds = [...new Set(nextMemberIds)].sort();
+      const membersChanged = JSON.stringify(beforeMemberIds) !== JSON.stringify(afterMemberIds);
+
+      const merged = mergeOrderGroup(sameGroupOrders, localOrderId);
+      const sync = syncDocWithOrder(doc, merged, systemActor);
+      doc.groupKey = targetGroupKey;
+      doc.externalOrderId = groupToken(merged?.external_order_id || merged?.shop_order_id);
+      doc.memberOrderIds = afterMemberIds;
+
+      if (membersChanged && !sync.changed) {
+        doc.lastUpstreamChangeAt = new Date();
+        appendHistory(doc, 'upstream_group_members_changed', systemActor, {
+          beforeMemberOrderIds: beforeMemberIds,
+          afterMemberOrderIds: afterMemberIds,
+        });
+      }
+
+      if (sync.changed || membersChanged) {
+        doc.revision = Number(doc.revision || 0) + 1;
+        await doc.save();
+        emitPickingUpdate(doc);
+        changed += 1;
+      }
+      reconciled += 1;
+    }, { ttlMs: 20_000, waitMs: 5_000 });
+  }
+
+  return { reconciled, changed, released };
+}
+
 module.exports = {
   CLAIM_STALE_MS,
   buildSourceItems,
@@ -693,4 +836,5 @@ module.exports = {
   markPickingOrderSent,
   reopenPickingOrder,
   publicState,
+  reconcilePickingFromUpstreamChanges,
 };
