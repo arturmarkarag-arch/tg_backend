@@ -24,6 +24,7 @@ const productFeedbackRouter = require('./routes/productFeedback');
 const navBadgesRouter = require('./routes/navBadges');
 const supplementRouter = require('./routes/supplement');
 const baseLinkerRouter = require('./routes/baseLinker');
+const baseLinkerPrintAgentRouter = require('./routes/baseLinkerPrintAgent');
 const { getPublicMaintenanceState, maintenanceReadOnlyMiddleware } = require('./services/maintenanceState');
 
 // The warehouse test harness (destructive: cleanup/seed/reset of real
@@ -88,6 +89,8 @@ const publicApiPaths = [
   /^\/api\/shop-products\/barcode\/.+$/,
   /^\/api\/health$/,
   /^\/api\/maintenance$/,
+  // Local Windows Print Agent authenticates with its own long random token.
+  /^\/api\/print-agent(?:\/.*)?$/,
 
 ];
 
@@ -176,6 +179,7 @@ app.use('/api/product-feedback', productFeedbackRouter);
 app.use('/api/nav-badges', navBadgesRouter);
 app.use('/api/supplement', supplementRouter);
 app.use('/api/baselinker', baseLinkerRouter);
+app.use('/api/print-agent', baseLinkerPrintAgentRouter);
 app.use('/api/v1/telegram', telegramV1Router);
 app.use('/api/v1/auth', authV1Router);
 if (ENABLE_TEST_API) {

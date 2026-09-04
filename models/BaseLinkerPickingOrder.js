@@ -1,3 +1,4 @@
+const { PERSISTED_ORDER_STATUSES, PERSISTED_ITEM_STATES } = require('../domain/baseLinkerPickingState');
 const mongoose = require('mongoose');
 
 const PickingHistoryEntrySchema = new mongoose.Schema({
@@ -24,7 +25,7 @@ const PickingItemSchema = new mongoose.Schema({
 
   state: {
     type: String,
-    enum: ['pending', 'picked', 'shortage', 'not_found', 'damaged', 'other'],
+    enum: PERSISTED_ITEM_STATES,
     default: 'pending',
   },
   pickedQty: { type: Number, default: 0 },
@@ -43,7 +44,7 @@ const BaseLinkerPickingOrderSchema = new mongoose.Schema({
   orderFingerprint: { type: String, default: '' },
   status: {
     type: String,
-    enum: ['in_progress', 'paused', 'problem', 'ready_to_pack', 'ready_to_pack_with_issue', 'packed', 'sent'],
+    enum: PERSISTED_ORDER_STATUSES,
     default: 'in_progress',
   },
   revision: { type: Number, default: 1 },

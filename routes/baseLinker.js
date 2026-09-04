@@ -3,6 +3,7 @@ const { requireTelegramRole } = require('../middleware/telegramAuth');
 const { requireBaseLinkerPickingAccess } = require('../utils/baseLinkerAccess');
 const { asyncHandler, appError } = require('../utils/errors');
 const { isBaseLinkerConfigured } = require('../services/baseLinkerClient');
+const { getPrintAgentStatus, queuePrintJob } = require('../services/baseLinkerPrint');
 const { fetchBaseLinkerOrders, fetchBaseLinkerOrderMeta } = require('../services/baseLinkerOrders');
 const { fetchBaseLinkerProductCatalog } = require('../services/baseLinkerProducts');
 const {
@@ -109,6 +110,22 @@ router.get('/packages/:packageId/label', asyncHandler(async (req, res) => {
     'X-BaseLinker-Label-Extension': safeExtension,
   });
   res.send(label.buffer);
+}));
+
+
+router.get('/print-agent/status', asyncHandler(async (req, res) => {
+  res.json(await getPrintAgentStatus());
+}));
+
+router.post('/packages/:packageId/print', asyncHandler(async (req, res) => {
+  if (!isBaseLinkerConfigured()) throw appError('baselinker_not_configured');
+  const job = await queuePrintJob({
+    orderId: req.body?.orderId,
+    packageId: req.params.packageId,
+    courierCode: req.body?.courierCode,
+    user: req.telegramUser,
+  });
+  res.status(202).json({ job });
 }));
 
 

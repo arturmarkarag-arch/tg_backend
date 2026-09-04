@@ -5,11 +5,17 @@ const { withLock } = require('../utils/lock');
 const { appError } = require('../utils/errors');
 const { getIO } = require('../socket');
 
+const {
+  WORKING_STATUSES,
+  TERMINAL_STATUSES,
+  ISSUE_STATES,
+  WRITABLE_ITEM_STATES,
+  progressFor,
+  packingReadiness,
+  deriveWorkingStatus,
+} = require('../domain/baseLinkerPickingState');
+
 const CLAIM_STALE_MS = Math.max(2 * 60 * 1000, Number(process.env.BASELINKER_PICKING_CLAIM_STALE_MS) || (10 * 60 * 1000));
-const WORKING_STATUSES = ['in_progress', 'problem', 'ready_to_pack', 'ready_to_pack_with_issue'];
-const TERMINAL_STATUSES = ['packed', 'sent'];
-const ISSUE_STATES = new Set(['shortage', 'not_found', 'damaged', 'other']);
-const ITEM_STATES = new Set(['pending', 'picked', ...ISSUE_STATES]);
 const MAX_HISTORY = 200;
 
 function actorOf(user) {
@@ -145,49 +151,6 @@ function appendHistory(doc, action, actor, meta = {}) {
     meta,
   });
   if (doc.history.length > MAX_HISTORY) doc.history = doc.history.slice(-MAX_HISTORY);
-}
-
-function hasIssues(items = []) {
-  return items.some((item) => ISSUE_STATES.has(String(item?.state || '')));
-}
-
-function allPicked(items = []) {
-  return items.length > 0 && items.every((item) => (
-    item?.state === 'picked' && Number(item?.pickedQty || 0) >= Number(item?.requestedQty || 0)
-  ));
-}
-
-function allHandled(items = []) {
-  return items.length > 0 && items.every((item) => String(item?.state || 'pending') !== 'pending');
-}
-
-function progressFor(items = []) {
-  const totalLines = items.length;
-  const pickedLines = items.filter((item) => item?.state === 'picked').length;
-  const handledLines = items.filter((item) => String(item?.state || 'pending') !== 'pending').length;
-  const problemLines = items.filter((item) => ISSUE_STATES.has(String(item?.state || ''))).length;
-  const totalQty = items.reduce((sum, item) => sum + Number(item?.requestedQty || 0), 0);
-  const pickedQty = items.reduce((sum, item) => sum + Math.min(Number(item?.requestedQty || 0), Number(item?.pickedQty || 0)), 0);
-  const missingQty = Math.max(0, totalQty - pickedQty);
-  return { totalLines, handledLines, pickedLines, problemLines, totalQty, pickedQty, missingQty };
-}
-
-function packingReadiness(items = []) {
-  const progress = progressFor(items);
-  return {
-    ...progress,
-    allHandled: allHandled(items),
-    allPicked: allPicked(items),
-    hasIssues: hasIssues(items),
-    pendingLines: Math.max(0, progress.totalLines - progress.handledLines),
-  };
-}
-
-function deriveWorkingStatus(items, hasOwner) {
-  if (allPicked(items)) return hasOwner ? 'ready_to_pack' : 'paused';
-  if (hasIssues(items) && allHandled(items)) return hasOwner ? 'ready_to_pack_with_issue' : 'problem';
-  if (hasIssues(items)) return 'problem';
-  return hasOwner ? 'in_progress' : 'paused';
 }
 
 function publicState(doc) {
@@ -464,7 +427,7 @@ async function updatePickingItem({ orderId, lineKey, user, expectedRevision, sta
     const item = (doc.items || []).find((candidate) => String(candidate.lineKey) === String(lineKey));
     if (!item) throw appError('baselinker_picking_item_not_found');
     const nextState = String(state || '').trim();
-    if (!ITEM_STATES.has(nextState)) throw appError('baselinker_picking_item_state_invalid');
+    if (!WRITABLE_ITEM_STATES.has(nextState)) throw appError('baselinker_picking_item_state_invalid');
 
     const requested = Number(item.requestedQty || 0);
     let nextPickedQty = Number(pickedQty);

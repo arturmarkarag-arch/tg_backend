@@ -158,4 +158,25 @@ describe('BaseLinker local picking workflow', () => {
     expect(read('services/baseLinkerPicking.js')).toContain('baselinker_picking_group_mismatch');
   });
 
+
+  it('centralizes picking statuses and preserves completion when ownership is released', () => {
+    const domain = read('domain/baseLinkerPickingState.js');
+    const model = read('models/BaseLinkerPickingOrder.js');
+    const picking = read('services/baseLinkerPicking.js');
+    expect(domain).toContain('function deriveWorkingStatus');
+    expect(domain).toContain("if (allPicked(items)) return ORDER_STATUS.READY");
+    expect(domain).toContain("return ORDER_STATUS.READY_WITH_ISSUE");
+    expect(model).toContain('PERSISTED_ORDER_STATUSES');
+    expect(model).toContain('PERSISTED_ITEM_STATES');
+    expect(picking).toContain("require('../domain/baseLinkerPickingState')");
+  });
+
+  it('does not allow removed damaged/other reasons to be written by current clients', () => {
+    const domain = read('domain/baseLinkerPickingState.js');
+    const picking = read('services/baseLinkerPicking.js');
+    expect(domain).toContain("const CURRENT_ISSUE_STATES = Object.freeze(['shortage', 'not_found'])");
+    expect(domain).toContain("const LEGACY_ISSUE_STATES = Object.freeze(['damaged', 'other'])");
+    expect(picking).toContain('WRITABLE_ITEM_STATES.has(nextState)');
+  });
+
 });

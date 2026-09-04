@@ -239,6 +239,15 @@ async function startServer() {
       models: [require('./models/User')],
     });
 
+    // BaseLinker Print Agent queue/status indexes are operational but not
+    // boot-critical: a transient index problem must not take the whole ERP down.
+    try {
+      await require('./models/BaseLinkerPrintAgent').syncIndexes();
+      await require('./models/BaseLinkerPrintJob').syncIndexes();
+    } catch (err) {
+      console.error('[baselinker-print-agent] index sync failed', err?.stack || err);
+    }
+
     // Некритичні TTL-індекси токенів.
     try {
       await require('./models/GoogleLinkToken').syncIndexes();

@@ -163,6 +163,13 @@ const ERRORS = {
                                 `У замовленні залишилось ${Number(problemLines) || 0} проблемних позицій${Number(missingQty) > 0 ? ` і не вистачає ${Number(missingQty)} шт.` : '.'} Підтвердіть окремою дією пакування з проблемою.` },
   baselinker_order_changed: { status: 409, message: 'Замовлення змінилося в BaseLinker під час роботи. Змінені позиції скинуто на перевірку — перегляньте їх ще раз.' },
   baselinker_picking_not_packed: { status: 409, message: 'Спочатку підтвердьте, що замовлення запаковано.' },
+  baselinker_print_agent_not_configured: { status: 503, message: 'Віддалений друк не налаштовано. Додайте BASELINKER_PRINT_AGENT_TOKEN на backend і підключіть Print Agent.' },
+  baselinker_print_agent_offline: { status: 503, message: 'Print Agent зараз не в мережі. Перевірте ПК складу та програму друку.' },
+  baselinker_print_agent_id_invalid: { status: 400, message: 'Некоректний Print Agent ID.' },
+  baselinker_print_printer_invalid: { status: 400, message: 'Print Agent не передав коректну назву принтера.' },
+  baselinker_print_job_not_found: { status: 404, message: 'Завдання друку не знайдено.' },
+  baselinker_print_job_not_claimed: { status: 409, message: 'Завдання друку вже не належить цьому Print Agent або завершене.' },
+  baselinker_print_job_expired: { status: 409, message: 'Завдання друку прострочене. Натисніть «Накладна» ще раз.' },
 
   // ── Orders ─────────────────────────────────────────────────────────────────
   order_not_found:          { status: 404, message: 'Замовлення не знайдено' },
