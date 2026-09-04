@@ -12,7 +12,7 @@ const UserHistoryEntrySchema = new mongoose.Schema({
 const UserSchema = new mongoose.Schema(
   {
     telegramId: { type: String, required: true, unique: true },
-    role: { type: String, enum: ['seller', 'warehouse', 'admin'], default: 'seller' },
+    role: { type: String, enum: ['seller', 'warehouse', 'baselinker', 'admin'], default: 'seller' },
     firstName: { type: String, default: '' },
     lastName: { type: String, default: '' },
     phoneNumber: { type: String, default: '' },
@@ -37,9 +37,9 @@ const UserSchema = new mongoose.Schema(
     // їх так само, як раніше.
     shopId: { type: mongoose.Schema.Types.ObjectId, ref: 'Shop', default: null },
     botBlocked: { type: Boolean, default: false },
-    // Optional cross-role capabilities assigned only by an admin. BaseLinker
-    // picking is deliberately NOT a primary role: the same person may still be
-    // a warehouse worker/seller while also being allowed to fulfil online orders.
+    // Legacy capability container kept only so existing documents deserialize
+    // cleanly during rollout. BaseLinker access is now a PRIMARY `baselinker`
+    // role; this flag no longer grants any runtime access.
     permissions: {
       baseLinkerPicking: { type: Boolean, default: false },
     },

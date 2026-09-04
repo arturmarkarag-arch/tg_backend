@@ -34,7 +34,6 @@ function createHarness(user) {
   const socket = {
     handshake: { auth: {
       initData: new URLSearchParams({ user: JSON.stringify({ id: 123 }) }).toString(),
-      permissions: { baseLinkerPicking: true },
     } },
     join: vi.fn(), on: vi.fn(),
   };
@@ -46,8 +45,7 @@ describe('authenticated socket connection access', () => {
     ['admin', {}, true],
     ['warehouse', {}, false],
     ['seller', {}, false],
-    ['warehouse', { baseLinkerPicking: true }, true],
-    ['seller', { baseLinkerPicking: true }, true],
+    ['baselinker', {}, true],
   ])('connects %s with %j without crashing and enforces the database permission', async (role, permissions, allowed) => {
     const harness = createHarness({ role, permissions });
     await harness.middleware();

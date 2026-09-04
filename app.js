@@ -100,6 +100,17 @@ function requireAuthForApi(req, res, next) {
 
 app.use(requireAuthForApi);
 
+// Dedicated BaseLinker workers are intentionally isolated from every other
+// authenticated application domain. Public pre-auth endpoints stay public, but
+// once telegramAuth resolved this role the only operational API namespace it may
+// use is /api/baselinker. This is the server-side boundary behind the one-page UI.
+app.use((req, res, next) => {
+  if (req.telegramUser?.role !== 'baselinker') return next();
+  if (/^\/api\/baselinker(?:\/|$)/.test(req.path)) return next();
+  const { appError } = require('./utils/errors');
+  return next(appError('auth_role_required', { allowed: ['admin', 'baselinker'] }));
+});
+
 app.get('/api/health', (req, res) => {
   const maintenance = getPublicMaintenanceState();
   res.json({

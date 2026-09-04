@@ -82,7 +82,7 @@ async function handleMyChatMemberUpdate(update) {
 
       if (wasBlocked) {
         const name = [user.firstName, user.lastName].filter(Boolean).join(' ') || chatId;
-        const roleLabels = { seller: 'Продавець', warehouse: 'Склад', admin: 'Адмін' };
+        const roleLabels = { seller: 'Продавець', warehouse: 'Склад', baselinker: 'BaseLinker', admin: 'Адмін' };
         const roleLabel = roleLabels[user.role] || user.role || 'Невідома роль';
         const lines = [`✅ Користувач розблокував бота.`, `${roleLabel}: ${name}`, `telegramId: ${chatId}`];
         await sendAdminNotification(lines.join('\n'));
@@ -157,6 +157,9 @@ const roleCommands = {
   warehouse: [
     '/miniapp - Відкрити склад',
   ],
+  baselinker: [
+    '/miniapp - Відкрити BaseLinker',
+  ],
   admin: [
     //'/help - Показати доступні команди',
     //'/profile - Мій профіль',
@@ -171,7 +174,7 @@ function buildRoleHelp(role) {
 
 async function sendRegistrationApprovedMessage(chatId, role) {
   await setRoleCommands(chatId, role);
-  const roleLabel = role === 'seller' ? 'продавець' : role === 'warehouse' ? 'склад' : role;
+  const roleLabel = role === 'seller' ? 'продавець' : role === 'warehouse' ? 'склад' : role === 'baselinker' ? 'BaseLinker' : role;
   const message = `✅ Ваша заявка на реєстрацію схвалена. Ви тепер зареєстровані як ${roleLabel}.\n\n${buildRoleHelp(role)}`;
   return sendMessageWithRetry(chatId, message);
 }
@@ -182,6 +185,9 @@ const roleBotCommands = {
   ],
   warehouse: [
     { command: '/miniapp', description: 'Відкрити склад' },
+  ],
+  baselinker: [
+    { command: '/miniapp', description: 'Відкрити BaseLinker' },
   ],
   admin: [
     { command: '/miniapp', description: 'Відкрити Адмінку' },
@@ -483,7 +489,7 @@ async function handleBotBlocked(telegramId) {
     }
 
     const name = [blockedUser?.firstName, blockedUser?.lastName].filter(Boolean).join(' ') || telegramId;
-    const roleLabels = { seller: 'Продавець', warehouse: 'Склад', admin: 'Адмін' };
+    const roleLabels = { seller: 'Продавець', warehouse: 'Склад', baselinker: 'BaseLinker', admin: 'Адмін' };
     const roleLabel = roleLabels[blockedUser?.role] || blockedUser?.role || 'Невідома роль';
 
     // shopName/shopCity are no longer on User — look up via shopId (cached)
@@ -787,7 +793,11 @@ async function initBot(token) {
         }
 
         const miniAppUrl = getMiniAppUrl(user.role);
-        const buttonText = user.role === 'warehouse' ? 'Відкрити склад' : 'Відкрити товари';
+        const buttonText = user.role === 'warehouse'
+          ? 'Відкрити склад'
+          : user.role === 'baselinker'
+            ? 'Відкрити BaseLinker'
+            : 'Відкрити товари';
 
         if (WEB_APP_URL.startsWith('https://')) {
           await bot.sendMessage(chatId, 'Відкрийте Mini App:', {
@@ -826,7 +836,11 @@ async function initBot(token) {
       }
 
       const miniAppUrl = getMiniAppUrl(user.role);
-      const buttonText = user.role === 'warehouse' ? 'Відкрити склад' : 'Відкрити товари';
+      const buttonText = user.role === 'warehouse'
+          ? 'Відкрити склад'
+          : user.role === 'baselinker'
+            ? 'Відкрити BaseLinker'
+            : 'Відкрити товари';
       if (WEB_APP_URL.startsWith('https://')) {
         await bot.sendMessage(chatId, 'Натисніть кнопку нижче, щоб відкрити додаток:', {
           reply_markup: {

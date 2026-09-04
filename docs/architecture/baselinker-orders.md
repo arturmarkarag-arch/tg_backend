@@ -13,7 +13,7 @@ The BaseLinker token exists only in server env as `BASELINKER_API_TOKEN`. Upstre
 
 ## Access
 
-Admins always have access. A non-admin receives the separate capability `User.permissions.baseLinkerPicking=true`, granted only from the admin Users screen.
+Admins always have access. Warehouse operators use the dedicated primary role `baselinker`, assigned only from the admin Users screen. That role is isolated to the BaseLinker module and does not inherit seller/warehouse application access.
 
 This is intentionally a capability rather than a replacement primary role: a warehouse worker can keep the existing `warehouse` role and additionally collect BaseLinker orders. Removing/adding this capability does not grant generic admin access.
 

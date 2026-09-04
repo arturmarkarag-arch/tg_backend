@@ -24,9 +24,9 @@ const {
 
 const router = express.Router();
 
-// BaseLinker is available to admins and to users explicitly granted the
-// BaseLinker picking capability by an admin. The boundary is server-side;
-// hiding a navigation item in React is never treated as authorization.
+// BaseLinker is available only to admins and the dedicated `baselinker` role.
+// The boundary is server-side; hiding a navigation item in React is never
+// treated as authorization.
 router.use(requireBaseLinkerPickingAccess);
 
 router.get('/status', (req, res) => {

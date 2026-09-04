@@ -43,10 +43,11 @@ describe('BaseLinker local picking workflow', () => {
     expect(router).toContain("router.post('/picking/orders/:orderId/reopen', requireTelegramRole('admin')");
   });
 
-  it('authorizes admins or explicitly granted BaseLinker picking capability server-side', () => {
+  it('authorizes only admins or the dedicated baselinker role server-side', () => {
     const access = read('utils/baseLinkerAccess.js');
-    expect(access).toContain("user?.role === 'admin'");
-    expect(access).toContain('user?.permissions?.baseLinkerPicking === true');
+    expect(access).toContain("user.role === 'admin'");
+    expect(access).toContain("user.role === 'baselinker'");
+    expect(access).not.toContain('permissions?.baseLinkerPicking');
   });
 
   it('persists BaseLinker socket capability during auth instead of leaking dbUser outside its scope', () => {

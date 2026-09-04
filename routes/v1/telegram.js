@@ -222,7 +222,9 @@ async function buildUserProfile(user) {
     telegramId: user.telegramId,
     role: user.role,
     permissions: {
-      baseLinkerPicking: user?.permissions?.baseLinkerPicking === true,
+      // Legacy field retained in the payload for old clients during rollout.
+      // Runtime authorization is role-based now; never advertise this bit.
+      baseLinkerPicking: false,
     },
     firstName: user.firstName,
     lastName: user.lastName,

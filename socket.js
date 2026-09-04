@@ -115,7 +115,7 @@ function initSocket(httpServer) {
     if (dbUser.botBlocked) {
       return next(new Error('Forbidden: Account blocked'));
     }
-    if (!['admin', 'warehouse', 'seller'].includes(dbUser.role)) {
+    if (!['admin', 'warehouse', 'seller', 'baselinker'].includes(dbUser.role)) {
       return next(new Error('Forbidden: Insufficient role'));
     }
     if (!socket.userName) {
