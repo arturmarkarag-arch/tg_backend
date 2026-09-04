@@ -5,6 +5,7 @@ const { asyncHandler, appError } = require('../utils/errors');
 const { isBaseLinkerConfigured } = require('../services/baseLinkerClient');
 const { getPrintAgentStatus, queuePrintJob } = require('../services/baseLinkerPrint');
 const { fetchBaseLinkerOrders, fetchBaseLinkerOrderMeta } = require('../services/baseLinkerOrders');
+const { getCachedOrderPage, refreshBaseLinkerOrderCache } = require('../services/baseLinkerOrderCache');
 const { fetchBaseLinkerProductCatalog } = require('../services/baseLinkerProducts');
 const {
   fetchBaseLinkerOrderPackages,
@@ -43,25 +44,40 @@ router.get('/meta', asyncHandler(async (req, res) => {
 router.get('/orders', asyncHandler(async (req, res) => {
   if (!isBaseLinkerConfigured()) throw appError('baselinker_not_configured');
 
-  const result = await fetchBaseLinkerOrders({
-    dateConfirmedFrom: req.query.dateConfirmedFrom,
-    statusId: req.query.statusId,
-    orderId: req.query.orderId,
-    includeUnconfirmed: req.query.includeUnconfirmed === '1' || req.query.includeUnconfirmed === 'true',
-    maxPages: req.query.maxPages,
-  });
+  const exactOrderId = String(req.query.orderId || '').trim();
+  let result;
+
+  if (exactOrderId) {
+    // Exact reads stay live. Claim/pack/reconciliation depend on current
+    // BaseLinker truth and must never be satisfied only from the UI cache.
+    result = await fetchBaseLinkerOrders({
+      orderId: exactOrderId,
+      includeUnconfirmed: req.query.includeUnconfirmed === '1' || req.query.includeUnconfirmed === 'true',
+      maxPages: 1,
+    });
+    await refreshBaseLinkerOrderCache({ orders: result.orders || [] });
+  } else {
+    // The work queue is server-paginated from a dedicated BaseLinker snapshot
+    // cache. The browser receives only the requested 10/20/50 logical orders;
+    // it no longer downloads/scans the whole account on every page render.
+    result = await getCachedOrderPage({
+      statusId: req.query.statusId,
+      workflowFilter: req.query.workflowFilter,
+      search: req.query.search,
+      page: req.query.page,
+      pageSize: req.query.pageSize,
+    });
+  }
 
   // getOrders intentionally contains the order-line snapshot, not full catalog
-  // media/details. Resolve current product catalog data separately and keep the
-  // raw order payload untouched. Product enrichment is best-effort: a catalog
-  // problem must never hide otherwise valid orders from the operator.
+  // media/details. Resolve current product catalog data only for this page.
   let catalog = {
     productCatalog: {},
     productCatalogStats: { requested: 0, resolved: 0, unresolved: 0, warnings: 0 },
     productCatalogWarnings: [],
   };
   try {
-    catalog = await fetchBaseLinkerProductCatalog(result.orders);
+    catalog = await fetchBaseLinkerProductCatalog(result.orders || []);
   } catch (error) {
     catalog.productCatalogWarnings = [{
       scope: 'catalog',
@@ -79,7 +95,6 @@ router.get('/orders', asyncHandler(async (req, res) => {
     fetchedAt: new Date().toISOString(),
   });
 }));
-
 
 router.get('/orders/:orderId/packages', asyncHandler(async (req, res) => {
   if (!isBaseLinkerConfigured()) throw appError('baselinker_not_configured');

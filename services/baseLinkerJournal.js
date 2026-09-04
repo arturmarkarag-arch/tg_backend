@@ -4,6 +4,7 @@ const AppSetting = require('../models/AppSetting');
 const { callBaseLinker, isBaseLinkerConfigured } = require('./baseLinkerClient');
 const { fetchBaseLinkerOrders } = require('./baseLinkerOrders');
 const { fetchBaseLinkerProductCatalog } = require('./baseLinkerProducts');
+const { refreshBaseLinkerOrderCache } = require('./baseLinkerOrderCache');
 const { getPickingStates, reconcilePickingFromUpstreamChanges } = require('./baseLinkerPicking');
 const { runAsSchedulerLeader } = require('./schedulerLeader');
 const { getIO } = require('../socket');
@@ -244,6 +245,12 @@ async function runBaseLinkerJournalTick() {
     if (!window.selected.length || !window.cutoffLogId) return { changed: 0, lastLogId: state.lastLogId };
 
     const { upserts, removedOrderIds } = await refreshChangedOrders(window.orderIds);
+
+    // Persist the fresh upstream snapshots before notifying browsers. The UI
+    // paginates from this dedicated cache, so one journal event only updates the
+    // affected rows instead of forcing every browser to rescan thousands of
+    // BaseLinker orders.
+    await refreshBaseLinkerOrderCache({ orders: upserts, removedOrderIds });
 
     // Keep an already-open picking task consistent with the fresh BaseLinker
     // snapshot before we push it to workers. This preserves unchanged ticks,
