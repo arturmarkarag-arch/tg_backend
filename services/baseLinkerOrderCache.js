@@ -181,19 +181,25 @@ async function refreshBaseLinkerOrderCache({ orders = [], removedOrderIds = [] }
 
 function displayStageExpression() {
   return {
-    $switch: {
-      branches: [
-        {
-          case: {
-            $in: ['$localStatus', ['paused', 'problem', 'ready_to_pack_with_issue']],
-          },
-          then: 'deferred',
+    $cond: [
+      { $in: ['$localWorkflowStage', ['processing', 'deferred', 'packed', 'sent']] },
+      '$localWorkflowStage',
+      {
+        $switch: {
+          branches: [
+            {
+              case: {
+                $in: ['$localStatus', ['paused', 'problem', 'ready_to_pack_with_issue']],
+              },
+              then: 'deferred',
+            },
+            { case: { $eq: ['$localStatus', 'packed'] }, then: 'packed' },
+            { case: { $eq: ['$localStatus', 'sent'] }, then: 'sent' },
+          ],
+          default: 'processing',
         },
-        { case: { $eq: ['$localStatus', 'packed'] }, then: 'packed' },
-        { case: { $eq: ['$localStatus', 'sent'] }, then: 'sent' },
-      ],
-      default: 'processing',
-    },
+      },
+    ],
   };
 }
 
@@ -255,7 +261,7 @@ async function getCachedOrderPage({ statusId, workflowFilter = 'processing', sea
               },
             },
           },
-          { $project: { _id: 1, status: 1, orderId: 1, groupKey: 1, memberOrderIds: 1 } },
+          { $project: { _id: 1, status: 1, workflowStage: 1, orderId: 1, groupKey: 1, memberOrderIds: 1 } },
         ],
         as: 'pickingDocs',
       },
@@ -267,6 +273,13 @@ async function getCachedOrderPage({ statusId, workflowFilter = 'processing', sea
             { $eq: [{ $size: '$pickingDocs' }, 1] },
             { $ifNull: [{ $arrayElemAt: ['$pickingDocs.status', 0] }, 'new'] },
             'new',
+          ],
+        },
+        localWorkflowStage: {
+          $cond: [
+            { $eq: [{ $size: '$pickingDocs' }, 1] },
+            { $ifNull: [{ $arrayElemAt: ['$pickingDocs.workflowStage', 0] }, ''] },
+            '',
           ],
         },
       },

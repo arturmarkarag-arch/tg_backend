@@ -56,7 +56,7 @@ No `createPackage`, status mutation, deletion or other BaseLinker write exists i
 
 Collection: `BaseLinkerPickingOrder`, unique by BaseLinker `order_id`.
 
-Order states:
+Detailed picking states:
 
 - no document -> `new`
 - `in_progress`
@@ -66,6 +66,15 @@ Order states:
 - `paused`
 - `packed`
 - `sent`
+
+The operator shelf is persisted separately as `workflowStage`:
+
+- `processing`
+- `deferred`
+- `packed`
+- `sent`
+
+`workflowStage`, detailed `status`, and `ownerTelegramId` are independent dimensions. Claim/takeover changes ownership only and must not move an order between shelves. In particular, a Deferred order remains Deferred while a worker resumes and finishes checking it; it leaves that shelf only on an explicit workflow transition such as packing/sending. A newly recorded problem still routes a Processing order to Deferred. Legacy documents without `workflowStage` are read through the old status mapping and become explicit on their next mutation, so no data migration is required.
 
 Item states:
 
@@ -86,7 +95,7 @@ A claim has `lastActivityAt`; the client sends a local heartbeat every minute. T
 
 Another worker may take over only after the claim is stale. Admin may explicitly force takeover. There is no silent automatic takeover.
 
-**Відкласти** releases ownership but keeps every item mark and issue. A later worker continues from the persisted state.
+**Відкласти** releases ownership but keeps every item mark and issue and explicitly places the order on the `deferred` shelf. A later worker continues from the persisted state. Claiming it again does not move it back to `processing`.
 
 ### Concurrent editing
 

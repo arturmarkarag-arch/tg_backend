@@ -35,8 +35,11 @@ describe('BaseLinker server-side pagination contract', () => {
     expect(journal).toMatch(/refreshBaseLinkerOrderCache\(\{ orders: upserts, removedOrderIds \}\)/);
   });
 
-  it('puts paused and unresolved-problem orders into Deferred before pagination/counting', () => {
+  it('uses persisted operational shelf before pagination/counting with legacy status fallback', () => {
     const cache = read('services/baseLinkerOrderCache.js');
+    expect(cache).toContain('localWorkflowStage');
+    expect(cache).toContain("['processing', 'deferred', 'packed', 'sent']");
+    expect(cache).toContain("'$localWorkflowStage'");
     expect(cache).toContain("['paused', 'problem', 'ready_to_pack_with_issue']");
     expect(cache).toContain("then: 'deferred'");
   });

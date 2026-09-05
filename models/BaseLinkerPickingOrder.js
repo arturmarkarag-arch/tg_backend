@@ -1,4 +1,8 @@
-const { PERSISTED_ORDER_STATUSES, PERSISTED_ITEM_STATES } = require('../domain/baseLinkerPickingState');
+const {
+  PERSISTED_ORDER_STATUSES,
+  PERSISTED_WORKFLOW_STAGES,
+  PERSISTED_ITEM_STATES,
+} = require('../domain/baseLinkerPickingState');
 const mongoose = require('mongoose');
 
 const PickingHistoryEntrySchema = new mongoose.Schema({
@@ -38,6 +42,10 @@ const PickingItemSchema = new mongoose.Schema({
 
 const BaseLinkerPickingOrderSchema = new mongoose.Schema({
   orderId: { type: String, required: true, unique: true },
+  // Deterministic logical-order claim identity. Missing on legacy rows until the
+  // next claim, so deploying the unique sparse index does not require a risky
+  // rewrite of historical documents.
+  claimKey: { type: String, default: undefined },
   groupKey: { type: String, default: '' },
   externalOrderId: { type: String, default: '' },
   memberOrderIds: { type: [String], default: [] },
@@ -46,6 +54,14 @@ const BaseLinkerPickingOrderSchema = new mongoose.Schema({
     type: String,
     enum: PERSISTED_ORDER_STATUSES,
     default: 'in_progress',
+  },
+  // Operational shelf is deliberately independent from detailed picking
+  // status and ownership. Claiming a deferred order must not move it back to
+  // Processing merely because somebody started working on it again.
+  workflowStage: {
+    type: String,
+    enum: PERSISTED_WORKFLOW_STAGES,
+    default: undefined,
   },
   revision: { type: Number, default: 1 },
 
@@ -86,8 +102,13 @@ const BaseLinkerPickingOrderSchema = new mongoose.Schema({
 }, { timestamps: true });
 
 BaseLinkerPickingOrderSchema.index({ status: 1, updatedAt: -1 });
+BaseLinkerPickingOrderSchema.index({ workflowStage: 1, updatedAt: -1 });
 BaseLinkerPickingOrderSchema.index({ ownerTelegramId: 1, status: 1 });
 BaseLinkerPickingOrderSchema.index({ groupKey: 1 });
+// Hard DB backstop for two workers/processes claiming the same logical order.
+// `sparse` keeps old documents without claimKey deploy-safe; claim writes the
+// deterministic key before/while ownership is acquired.
+BaseLinkerPickingOrderSchema.index({ claimKey: 1 }, { unique: true, sparse: true });
 BaseLinkerPickingOrderSchema.index({ memberOrderIds: 1 });
 
 module.exports = mongoose.model('BaseLinkerPickingOrder', BaseLinkerPickingOrderSchema);

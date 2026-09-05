@@ -8,6 +8,15 @@ const ORDER_STATUS = Object.freeze({
   SENT: 'sent',
 });
 
+const WORKFLOW_STAGE = Object.freeze({
+  PROCESSING: 'processing',
+  DEFERRED: 'deferred',
+  PACKED: 'packed',
+  SENT: 'sent',
+});
+
+const PERSISTED_WORKFLOW_STAGES = Object.freeze(Object.values(WORKFLOW_STAGE));
+
 const PERSISTED_ORDER_STATUSES = Object.freeze(Object.values(ORDER_STATUS));
 const WORKING_STATUSES = Object.freeze([
   ORDER_STATUS.IN_PROGRESS,
@@ -68,9 +77,38 @@ function deriveWorkingStatus(items = [], hasOwner = false) {
   return hasOwner ? ORDER_STATUS.IN_PROGRESS : ORDER_STATUS.PAUSED;
 }
 
+function legacyWorkflowStageForStatus(status) {
+  const value = String(status || '');
+  if (value === ORDER_STATUS.SENT) return WORKFLOW_STAGE.SENT;
+  if (value === ORDER_STATUS.PACKED) return WORKFLOW_STAGE.PACKED;
+  if ([ORDER_STATUS.PAUSED, ORDER_STATUS.PROBLEM, ORDER_STATUS.READY_WITH_ISSUE].includes(value)) {
+    return WORKFLOW_STAGE.DEFERRED;
+  }
+  return WORKFLOW_STAGE.PROCESSING;
+}
+
+function workflowStageFor(state = {}) {
+  const explicit = String(state?.workflowStage || '');
+  if (PERSISTED_WORKFLOW_STAGES.includes(explicit)) return explicit;
+  return legacyWorkflowStageForStatus(state?.status);
+}
+
+function workflowStageAfterWorkingStatus(previousStage, status) {
+  const current = PERSISTED_WORKFLOW_STAGES.includes(String(previousStage || ''))
+    ? String(previousStage)
+    : legacyWorkflowStageForStatus(status);
+  if ([ORDER_STATUS.PROBLEM, ORDER_STATUS.READY_WITH_ISSUE].includes(String(status || ''))) {
+    return WORKFLOW_STAGE.DEFERRED;
+  }
+  if (current === WORKFLOW_STAGE.DEFERRED) return WORKFLOW_STAGE.DEFERRED;
+  return WORKFLOW_STAGE.PROCESSING;
+}
+
 module.exports = {
   ORDER_STATUS,
+  WORKFLOW_STAGE,
   PERSISTED_ORDER_STATUSES,
+  PERSISTED_WORKFLOW_STAGES,
   WORKING_STATUSES,
   TERMINAL_STATUSES,
   CURRENT_ISSUE_STATES,
@@ -84,4 +122,7 @@ module.exports = {
   progressFor,
   packingReadiness,
   deriveWorkingStatus,
+  legacyWorkflowStageForStatus,
+  workflowStageFor,
+  workflowStageAfterWorkingStatus,
 };

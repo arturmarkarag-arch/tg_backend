@@ -171,6 +171,20 @@ describe('BaseLinker local picking workflow', () => {
     expect(picking).toContain("require('../domain/baseLinkerPickingState')");
   });
 
+  it('separates operational shelf from ownership so claiming Deferred cannot make the card disappear', () => {
+    const domain = read('domain/baseLinkerPickingState.js');
+    const model = read('models/BaseLinkerPickingOrder.js');
+    const picking = read('services/baseLinkerPicking.js');
+    expect(domain).toContain('WORKFLOW_STAGE');
+    expect(domain).toContain('function workflowStageFor');
+    expect(model).toContain('workflowStage');
+    expect(picking).toContain('const preservedWorkflowStage = workflowStageFor(doc)');
+    expect(picking).toContain('draft.workflowStage = preservedWorkflowStage');
+    expect(picking).toContain('doc.workflowStage = WORKFLOW_STAGE.DEFERRED');
+    expect(picking).toContain('doc.workflowStage = WORKFLOW_STAGE.PACKED');
+    expect(picking).toContain('workflowStage: workflowStageFor(plain)');
+  });
+
   it('does not allow removed damaged/other reasons to be written by current clients', () => {
     const domain = read('domain/baseLinkerPickingState.js');
     const picking = read('services/baseLinkerPicking.js');

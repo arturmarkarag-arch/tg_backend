@@ -1,17 +1,19 @@
-BaseLinker compact worker payload — manual server patch
-Date: 2026-09-05
+BaseLinker claim race guard — server manual patch — 2026-09-05
 
-Apply on top of the latest BaseLinker real-server-pagination + problems-to-deferred server patches.
+Purpose
+- Prevent two BaseLinker workers from successfully taking the same logical order at the same time.
 
-What changed:
-- /api/baselinker/orders now exposes a small worker DTO instead of raw BaseLinker order objects.
-- Cached order rows are stored compactly on future refreshes; old rows are projected compactly at read time immediately.
-- Customer/contact/invoice/payment/commission/transaction/address data is not returned by the worker list endpoint.
-- Product catalog entries contain state + the first image only; full descriptions, prices, stock, dimensions, tags, media and product blobs are not kept in the BaseLinker product cache response.
-- getOrders no longer requests optional custom fields / commissions / connect / discount expansions.
-- getInventoryProductsData no longer requests channel media expansion.
-- Picking public/socket state no longer returns Mongo history, fingerprints, packed/sent audit blobs or per-item actor metadata.
-- Journal socket order/catalog patches use the same compact DTO.
-- Critical claim/pack reconciliation still re-reads current BaseLinker truth server-side and is unchanged.
+What changed
+- MongoDB is now the final authority for claim ownership; Redis/process locks remain only contention reducers.
+- Added deterministic `claimKey` with a unique sparse index as a DB backstop for logical grouped orders. The first claim explicitly waits for that Mongo index, so correctness does not depend on background autoIndex timing.
+- First claim is one atomic insert. Concurrent loser hits E11000, reloads the winner, and receives the normal 409 taken response.
+- Existing-order claim is one compare-and-swap `findOneAndUpdate` guarded by exact revision + claimable owner/stale/admin predicate.
+- Ownership, upstream sync, items, history, status and revision are committed together by that CAS.
+- Legacy rows get `claimKey` lazily on their next claim; no bulk migration is required.
 
-No client files are required for this patch: existing client shape is preserved for the fields it actually uses (including catalog.images as a one-item array).
+No BaseLinker mutation was added. Upstream remains read-only.
+
+Files
+- models/BaseLinkerPickingOrder.js
+- services/baseLinkerPicking.js
+- tests/baseLinkerClaimRace.contract.test.js

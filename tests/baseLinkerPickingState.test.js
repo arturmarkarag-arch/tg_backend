@@ -1,9 +1,12 @@
 const {
   ORDER_STATUS,
+  WORKFLOW_STAGE,
   WRITABLE_ITEM_STATES,
   ISSUE_STATES,
   deriveWorkingStatus,
   packingReadiness,
+  workflowStageFor,
+  workflowStageAfterWorkingStatus,
 } = require('../domain/baseLinkerPickingState');
 
 const picked = (requestedQty = 2) => ({ state: 'picked', requestedQty, pickedQty: requestedQty });
@@ -40,5 +43,15 @@ describe('BaseLinker picking state machine', () => {
       allHandled: true,
       hasIssues: true,
     });
+  });
+
+  it('keeps operational shelf independent from detailed picking status/ownership', () => {
+    expect(workflowStageFor({ status: ORDER_STATUS.PAUSED })).toBe(WORKFLOW_STAGE.DEFERRED);
+    expect(workflowStageFor({ status: ORDER_STATUS.IN_PROGRESS, workflowStage: WORKFLOW_STAGE.DEFERRED }))
+      .toBe(WORKFLOW_STAGE.DEFERRED);
+    expect(workflowStageAfterWorkingStatus(WORKFLOW_STAGE.DEFERRED, ORDER_STATUS.READY))
+      .toBe(WORKFLOW_STAGE.DEFERRED);
+    expect(workflowStageAfterWorkingStatus(WORKFLOW_STAGE.PROCESSING, ORDER_STATUS.PROBLEM))
+      .toBe(WORKFLOW_STAGE.DEFERRED);
   });
 });

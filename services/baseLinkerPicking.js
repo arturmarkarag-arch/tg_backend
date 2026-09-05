@@ -14,6 +14,9 @@ const {
   progressFor,
   packingReadiness,
   deriveWorkingStatus,
+  WORKFLOW_STAGE,
+  workflowStageFor,
+  workflowStageAfterWorkingStatus,
 } = require('../domain/baseLinkerPickingState');
 
 const CLAIM_STALE_MS = Math.max(2 * 60 * 1000, Number(process.env.BASELINKER_PICKING_CLAIM_STALE_MS) || (10 * 60 * 1000));
@@ -178,6 +181,7 @@ function publicState(doc) {
     groupKey: String(plain.groupKey || ''),
     memberOrderIds: (Array.isArray(plain.memberOrderIds) ? plain.memberOrderIds : []).map(String),
     status: String(plain.status || 'new'),
+    workflowStage: workflowStageFor(plain),
     revision: Number(plain.revision || 0),
     ownerTelegramId: String(plain.ownerTelegramId || ''),
     ownerName: String(plain.ownerName || ''),
@@ -296,7 +300,9 @@ function syncDocWithOrder(doc, order, actor) {
   doc.lastUpstreamChangeAt = new Date();
   doc.lastUpstreamChangeSummary = summary;
   if (!TERMINAL_STATUSES.includes(doc.status)) {
+    const previousWorkflowStage = workflowStageFor(doc);
     doc.status = deriveWorkingStatus(doc.items, Boolean(doc.ownerTelegramId));
+    doc.workflowStage = workflowStageAfterWorkingStatus(previousWorkflowStage, doc.status);
   }
   appendHistory(doc, 'upstream_order_changed', actor, summary);
   return { changed: true, summary };
@@ -347,35 +353,179 @@ async function getMyActivePicking(user) {
   return publicState(doc);
 }
 
+function claimKeyForGroup(groupKey) {
+  return `group:${sha(groupKey)}`;
+}
+
+function isDuplicateKeyError(error) {
+  return Number(error?.code) === 11000;
+}
+
+let claimIndexReadyPromise = null;
+
+async function ensureClaimIndexReady() {
+  if (!claimIndexReadyPromise) {
+    // Do not trust background/autoIndex timing for a concurrency invariant.
+    // The first claim waits until Mongo has the unique claimKey index.
+    claimIndexReadyPromise = BaseLinkerPickingOrder.collection
+      .createIndex({ claimKey: 1 }, { unique: true, sparse: true })
+      .catch((error) => {
+        claimIndexReadyPromise = null;
+        throw error;
+      });
+  }
+  return claimIndexReadyPromise;
+}
+
+async function findClaimCandidates(group) {
+  return BaseLinkerPickingOrder.find({
+    $or: [
+      { orderId: { $in: group.memberOrderIds } },
+      { groupKey: group.groupKey },
+      { memberOrderIds: { $in: group.memberOrderIds } },
+      { claimKey: claimKeyForGroup(group.groupKey) },
+    ],
+  }).sort({ updatedAt: -1 });
+}
+
+function assertSingleClaimCandidate(candidates, group) {
+  if (candidates.length > 1) {
+    throw appError('baselinker_picking_group_conflict', { orderIds: group.memberOrderIds.join(', ') });
+  }
+  return candidates[0] || null;
+}
+
+function claimAvailabilityFilter(actor, now, adminForce) {
+  if (adminForce) return {};
+  const staleBefore = new Date(now.getTime() - CLAIM_STALE_MS);
+  return {
+    $or: [
+      { ownerTelegramId: actor.by },
+      { ownerTelegramId: '' },
+      { ownerTelegramId: { $exists: false } },
+      {
+        ownerTelegramId: { $nin: ['', actor.by] },
+        lastActivityAt: { $lte: staleBefore },
+      },
+    ],
+  };
+}
+
+function claimConflictFromDoc(doc) {
+  if (!doc) return appError('baselinker_picking_stale');
+  if (TERMINAL_STATUSES.includes(doc.status)) return appError('baselinker_picking_terminal');
+  const lastActivityMs = doc.lastActivityAt ? new Date(doc.lastActivityAt).getTime() : 0;
+  return appError('baselinker_picking_taken', {
+    ownerName: doc.ownerName || '',
+    takeoverAvailableAt: lastActivityMs ? new Date(lastActivityMs + CLAIM_STALE_MS).toISOString() : null,
+  });
+}
+
+function buildNewClaimedDoc({ requestedId, group, actor, now, claimKey }) {
+  const doc = new BaseLinkerPickingOrder({
+    orderId: requestedId,
+    claimKey,
+    groupKey: group.groupKey,
+    externalOrderId: group.externalOrderId,
+    memberOrderIds: group.memberOrderIds,
+    status: 'in_progress',
+    workflowStage: WORKFLOW_STAGE.PROCESSING,
+    revision: 1,
+  });
+  const sync = syncDocWithOrder(doc, group.mergedOrder, actor);
+  doc.ownerTelegramId = actor.by;
+  doc.ownerName = actor.byName;
+  doc.claimedAt = now;
+  doc.lastActivityAt = now;
+  doc.status = deriveWorkingStatus(doc.items, true);
+  // Preserve the historical contract: the first successful claim advances the
+  // initial revision once, so new claimed rows start at revision 2.
+  doc.revision = Number(doc.revision || 0) + 1;
+  appendHistory(doc, 'order_claimed', actor, {
+    memberOrderIds: group.memberOrderIds,
+    ...(sync.changed ? { upstreamSync: sync.summary } : {}),
+  });
+  return { doc, sync };
+}
+
+function buildExistingClaimUpdate({ doc, group, actor, now, adminForce, claimKey }) {
+  // Work on an isolated in-memory copy. Nothing is persisted until the final
+  // findOneAndUpdate CAS succeeds against the exact revision + owner predicate.
+  const draft = new BaseLinkerPickingOrder(doc.toObject());
+  const previousOwnerTelegramId = String(doc.ownerTelegramId || '');
+  const previousOwnerName = String(doc.ownerName || '');
+  const wasDifferentOwner = previousOwnerTelegramId !== actor.by;
+  const ownerOther = Boolean(previousOwnerTelegramId) && wasDifferentOwner;
+  const preservedWorkflowStage = workflowStageFor(doc);
+
+  if (ownerOther) {
+    appendHistory(draft, 'claim_taken_over', actor, {
+      previousOwnerTelegramId,
+      previousOwnerName,
+      reason: adminForce ? 'admin_force' : 'stale_claim',
+    });
+  }
+
+  draft.claimKey = claimKey;
+  draft.groupKey = group.groupKey;
+  draft.externalOrderId = group.externalOrderId;
+  draft.memberOrderIds = group.memberOrderIds;
+  const sync = syncDocWithOrder(draft, group.mergedOrder, actor);
+  draft.ownerTelegramId = actor.by;
+  draft.ownerName = actor.byName;
+  if (wasDifferentOwner || !draft.claimedAt) draft.claimedAt = now;
+  draft.lastActivityAt = now;
+  draft.status = deriveWorkingStatus(draft.items, true);
+  // Claim is ownership only. It must never move a card between operational
+  // shelves. In particular, Deferred stays Deferred while somebody resumes it.
+  draft.workflowStage = preservedWorkflowStage;
+  appendHistory(draft, wasDifferentOwner ? 'order_claimed' : 'order_reopened_by_owner', actor, {
+    memberOrderIds: group.memberOrderIds,
+    ...(sync.changed ? { upstreamSync: sync.summary } : {}),
+  });
+
+  const plain = draft.toObject();
+  return {
+    sync,
+    set: {
+      claimKey,
+      groupKey: group.groupKey,
+      externalOrderId: group.externalOrderId,
+      memberOrderIds: group.memberOrderIds,
+      orderFingerprint: plain.orderFingerprint || '',
+      ownerTelegramId: actor.by,
+      ownerName: actor.byName,
+      claimedAt: plain.claimedAt || now,
+      lastActivityAt: now,
+      status: plain.status,
+      workflowStage: plain.workflowStage,
+      items: plain.items || [],
+      lastUpstreamChangeAt: plain.lastUpstreamChangeAt || null,
+      lastUpstreamChangeSummary: plain.lastUpstreamChangeSummary || { added: 0, removed: 0, changed: 0 },
+      history: (plain.history || []).slice(-MAX_HISTORY),
+    },
+  };
+}
+
 async function claimPickingOrder({ orderId, memberOrderIds = [], user, force = false }) {
   const actor = actorOf(user);
   const requestedIds = [...new Set([String(orderId), ...(memberOrderIds || []).map(String)].filter(Boolean))];
   const group = await fetchExactOrderGroup(requestedIds, orderId);
   const requestedId = String(orderId);
+  const claimKey = claimKeyForGroup(group.groupKey);
   const groupLock = `baselinker-group:${sha(group.groupKey).slice(0, 24)}`;
 
+  await ensureClaimIndexReady();
+
+  // Redis/process locks remain useful for reducing contention, but MongoDB is
+  // now the final authority. Correctness no longer depends on both requests
+  // landing in the same Node process or on the Redis lock surviving its TTL.
   return withLock(`baselinker-worker:${actor.by}`, () => withLock(groupLock, async () => {
-    const candidates = await BaseLinkerPickingOrder.find({
-      $or: [
-        { orderId: { $in: group.memberOrderIds } },
-        { groupKey: group.groupKey },
-        { memberOrderIds: { $in: group.memberOrderIds } },
-      ],
-    }).sort({ updatedAt: -1 });
-
-    if (candidates.length > 1) {
-      throw appError('baselinker_picking_group_conflict', { orderIds: group.memberOrderIds.join(', ') });
-    }
-
-    let doc = candidates[0] || null;
-    if (!doc) {
-      doc = new BaseLinkerPickingOrder({ orderId: requestedId, status: 'in_progress', revision: 1 });
-    }
-    if (TERMINAL_STATUSES.includes(doc.status)) throw appError('baselinker_picking_terminal');
+    let candidate = assertSingleClaimCandidate(await findClaimCandidates(group), group);
 
     const activeOther = await BaseLinkerPickingOrder.findOne({
       ownerTelegramId: actor.by,
-      _id: { $ne: doc._id },
+      ...(candidate?._id ? { _id: { $ne: candidate._id } } : {}),
       status: { $in: WORKING_STATUSES },
     }).lean();
     if (activeOther) {
@@ -383,42 +533,102 @@ async function claimPickingOrder({ orderId, memberOrderIds = [], user, force = f
     }
 
     const now = new Date();
-    const ownerOther = doc.ownerTelegramId && String(doc.ownerTelegramId) !== actor.by;
-    if (ownerOther) {
-      const lastActivityMs = doc.lastActivityAt ? new Date(doc.lastActivityAt).getTime() : 0;
-      const stale = lastActivityMs > 0 && (Date.now() - lastActivityMs) >= CLAIM_STALE_MS;
-      const adminForce = user?.role === 'admin' && force === true;
-      if (!stale && !adminForce) {
-        throw appError('baselinker_picking_taken', {
-          ownerName: doc.ownerName || '',
-          takeoverAvailableAt: lastActivityMs ? new Date(lastActivityMs + CLAIM_STALE_MS).toISOString() : null,
-        });
+    const adminForce = user?.role === 'admin' && force === true;
+
+    // First ever claim: one atomic insert owns the logical order. If two
+    // workers race here, unique(orderId) and unique(sparse claimKey) guarantee
+    // exactly one insert. The loser reloads and goes through the CAS path below.
+    if (!candidate) {
+      const created = buildNewClaimedDoc({ requestedId, group, actor, now, claimKey });
+      try {
+        await created.doc.save();
+        emitPickingUpdate(created.doc);
+        return {
+          state: publicState(created.doc),
+          orders: compactOrders(group.orders),
+          syncChanged: created.sync.changed === true,
+        };
+      } catch (error) {
+        if (!isDuplicateKeyError(error)) throw error;
+        candidate = assertSingleClaimCandidate(await findClaimCandidates(group), group);
+        if (!candidate) throw error;
       }
-      appendHistory(doc, 'claim_taken_over', actor, {
-        previousOwnerTelegramId: doc.ownerTelegramId,
-        previousOwnerName: doc.ownerName || '',
-        reason: adminForce ? 'admin_force' : 'stale_claim',
-      });
     }
 
-    doc.groupKey = group.groupKey;
-    doc.externalOrderId = group.externalOrderId;
-    doc.memberOrderIds = group.memberOrderIds;
-    const sync = syncDocWithOrder(doc, group.mergedOrder, actor);
-    const wasDifferentOwner = String(doc.ownerTelegramId || '') !== actor.by;
-    doc.ownerTelegramId = actor.by;
-    doc.ownerName = actor.byName;
-    if (wasDifferentOwner || !doc.claimedAt) doc.claimedAt = now;
-    doc.lastActivityAt = now;
-    doc.status = deriveWorkingStatus(doc.items, true);
-    doc.revision = Number(doc.revision || 0) + 1;
-    appendHistory(doc, wasDifferentOwner ? 'order_claimed' : 'order_reopened_by_owner', actor, {
-      memberOrderIds: group.memberOrderIds,
-      ...(sync.changed ? { upstreamSync: sync.summary } : {}),
-    });
-    await doc.save();
-    emitPickingUpdate(doc);
-    return { state: publicState(doc), orders: compactOrders(group.orders), syncChanged: sync.changed === true };
+    // Existing state: ownership + upstream sync + revision advance happen in
+    // ONE Mongo compare-and-swap. Two workers may both read the old document,
+    // but only the first write can match its revision/owner predicate.
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      if (TERMINAL_STATUSES.includes(candidate.status)) throw appError('baselinker_picking_terminal');
+
+      const update = buildExistingClaimUpdate({
+        doc: candidate,
+        group,
+        actor,
+        now: new Date(),
+        adminForce,
+        claimKey,
+      });
+      const availability = claimAvailabilityFilter(actor, new Date(), adminForce);
+      let claimed = null;
+      try {
+        claimed = await BaseLinkerPickingOrder.findOneAndUpdate(
+          {
+            _id: candidate._id,
+            revision: Number(candidate.revision || 0),
+            status: { $nin: TERMINAL_STATUSES },
+            ...availability,
+          },
+          {
+            $set: update.set,
+            $inc: { revision: 1 },
+          },
+          { new: true, runValidators: true },
+        );
+      } catch (error) {
+        // A concurrent process may have materialised the same logical claimKey
+        // between our read and CAS. Treat that exactly like a lost claim race,
+        // never as HTTP 500.
+        if (!isDuplicateKeyError(error)) throw error;
+      }
+
+      if (claimed) {
+        emitPickingUpdate(claimed);
+        return {
+          state: publicState(claimed),
+          orders: compactOrders(group.orders),
+          syncChanged: update.sync.changed === true,
+        };
+      }
+
+      const latest = await BaseLinkerPickingOrder.findOne({
+        $or: [
+          { _id: candidate._id },
+          { claimKey },
+          { groupKey: group.groupKey },
+          { orderId: { $in: group.memberOrderIds } },
+          { memberOrderIds: { $in: group.memberOrderIds } },
+        ],
+      }).sort({ updatedAt: -1 });
+
+      if (!latest) throw appError('baselinker_picking_stale');
+      const latestOwner = String(latest.ownerTelegramId || '');
+      const latestActivityMs = latest.lastActivityAt ? new Date(latest.lastActivityAt).getTime() : 0;
+      const latestIsStale = latestOwner && latestOwner !== actor.by && latestActivityMs > 0
+        && (Date.now() - latestActivityMs) >= CLAIM_STALE_MS;
+
+      if (latestOwner && latestOwner !== actor.by && !adminForce && !latestIsStale) {
+        throw claimConflictFromDoc(latest);
+      }
+      if (TERMINAL_STATUSES.includes(latest.status)) throw appError('baselinker_picking_terminal');
+
+      // Same worker / stale takeover can legitimately lose a CAS to a concurrent
+      // revision update. Retry from the current row instead of overwriting it.
+      candidate = latest;
+    }
+
+    const latest = await BaseLinkerPickingOrder.findOne({ claimKey }).lean();
+    throw claimConflictFromDoc(latest);
   }, { ttlMs: 30_000, waitMs: 10_000 }), { ttlMs: 30_000, waitMs: 10_000 });
 }
 
@@ -471,7 +681,9 @@ async function updatePickingItem({ orderId, lineKey, user, expectedRevision, sta
     item.updatedByName = actor.byName;
     item.updatedAt = new Date();
 
+    const previousWorkflowStage = workflowStageFor(doc);
     doc.status = deriveWorkingStatus(doc.items, true);
+    doc.workflowStage = workflowStageAfterWorkingStatus(previousWorkflowStage, doc.status);
     doc.lastActivityAt = new Date();
     doc.revision = Number(doc.revision || 0) + 1;
     appendHistory(doc, 'item_updated', actor, {
@@ -509,6 +721,7 @@ async function releasePickingOrder({ orderId, user, expectedRevision, force = fa
     doc.claimedAt = null;
     doc.lastActivityAt = new Date();
     doc.status = deriveWorkingStatus(doc.items, false);
+    doc.workflowStage = WORKFLOW_STAGE.DEFERRED;
     doc.revision = Number(doc.revision || 0) + 1;
     appendHistory(doc, 'order_released', actor, { previousOwnerTelegramId, previousOwnerName, force: !owns });
     await doc.save();
@@ -565,6 +778,7 @@ async function markPickingOrderPacked({ orderId, user, expectedRevision, allowIs
         : 'with_issue';
 
     doc.status = 'packed';
+    doc.workflowStage = WORKFLOW_STAGE.PACKED;
     doc.packingMode = packingMode;
     doc.packedSummary = {
       requestedQty: readiness.totalQty,
@@ -620,6 +834,7 @@ async function markPickingOrderSent({ orderId, user, expectedRevision }) {
     }
     const now = new Date();
     doc.status = 'sent';
+    doc.workflowStage = WORKFLOW_STAGE.SENT;
     doc.sentAt = now;
     doc.sentBy = actor.by;
     doc.sentByName = actor.byName;
@@ -641,6 +856,7 @@ async function reopenPickingOrder({ orderId, user, expectedRevision }) {
     if (!doc) throw appError('baselinker_picking_not_started');
     assertRevision(doc, expectedRevision);
     doc.status = deriveWorkingStatus(doc.items, false);
+    doc.workflowStage = workflowStageAfterWorkingStatus(WORKFLOW_STAGE.PROCESSING, doc.status);
     doc.ownerTelegramId = '';
     doc.ownerName = '';
     doc.claimedAt = null;
@@ -746,6 +962,7 @@ async function reconcilePickingFromUpstreamChanges({ orders = [], removedOrderId
         doc.ownerName = '';
         doc.claimedAt = null;
         doc.status = 'paused';
+        doc.workflowStage = WORKFLOW_STAGE.DEFERRED;
         doc.memberOrderIds = [];
         doc.lastUpstreamChangeAt = new Date();
         doc.lastUpstreamChangeSummary = { added: 0, removed: (doc.items || []).length, changed: 0 };
