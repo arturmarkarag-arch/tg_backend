@@ -14,6 +14,7 @@ const BaseLinkerOrderCacheSchema = new mongoose.Schema({
   orderIdNumeric: { type: Number, default: 0 },
   orderStatusId: { type: Number, default: null, index: true },
   sortAt: { type: Number, default: 0, index: true },
+  statusChangedAt: { type: Number, default: 0, index: true },
   searchText: { type: String, default: '' },
   // Full parsed BaseLinker order snapshot. HTTP/UI projections are derived later.
   order: { type: mongoose.Schema.Types.Mixed, required: true },

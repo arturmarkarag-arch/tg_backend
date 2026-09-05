@@ -26,6 +26,10 @@ const CACHE_STATE_KEY = 'baselinker.orderCache.v2';
 // still bounded to ONE BaseLinker status, never the whole account.
 const CACHE_BOOTSTRAP_MAX_PAGES = Math.min(90, Math.max(1, Number(process.env.BASELINKER_QUEUE_MAX_PAGES) || 90));
 const CACHE_REFRESH_MS = 5 * 60_000;
+// Full queue scans can tell us that a previously known order disappeared from
+// Intake/Sent, but only an exact getOrders(order_id) may tell us WHERE it went.
+// Bound the recovery batch so a degraded journal cannot create an API storm.
+const FALLBACK_EXACT_REFRESH_LIMIT = Math.min(30, Math.max(1, Number(process.env.BASELINKER_FALLBACK_EXACT_REFRESH_LIMIT) || 20));
 const PAGE_SIZE_VALUES = new Set([10, 20, 50]);
 const SENT_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 let indexPromise = null;
@@ -70,6 +74,7 @@ function cacheRowForOrder(order, syncToken = '', accountScope = getBaseLinkerAcc
     orderIdNumeric: Number(order?.order_id || 0) || 0,
     orderStatusId: Number.isInteger(Number(order?.order_status_id)) ? Number(order.order_status_id) : null,
     sortAt: Number(order?.date_confirmed || order?.date_add || 0) || 0,
+    statusChangedAt: Number(order?.date_in_status || 0) || 0,
     searchText: orderSearchText(order),
     order,
     snapshotHash: baseLinkerOrderSnapshotHash(order),
@@ -166,6 +171,8 @@ async function cacheState(scope = null) {
     scopeKey: value.scopeKey || null,
     lastFullSyncAt: value.lastFullSyncAt || null,
     orderCount: Number(value.orderCount || 0),
+    fallbackCheckedOrderCount: Number(value.fallbackCheckedOrderCount || 0),
+    fallbackPendingOrderCount: Number(value.fallbackPendingOrderCount || 0),
   };
 }
 
@@ -195,13 +202,15 @@ async function scanConfiguredScopes(scope) {
 
   const sent = await fetchBaseLinkerOrders({
     statusId: scope.sentStatusId,
-    dateConfirmedFrom: scope.sentDateConfirmedFrom,
-    includeUnconfirmed: false,
+    // BaseLinker has no date_in_status filter. To make the 30-day Sent shelf
+    // correct even for an old order moved to Sent today, scan this exact status
+    // and apply the documented date_in_status field locally.
+    includeUnconfirmed: true,
     maxPages: CACHE_BOOTSTRAP_MAX_PAGES,
   });
   if (sent.truncated) {
     throw appError('baselinker_order_cache_bootstrap_truncated', {
-      scope: 'sent_30_days',
+      scope: 'sent_status',
       maxOrders: CACHE_BOOTSTRAP_MAX_PAGES * 100,
     });
   }
@@ -212,30 +221,118 @@ async function scanConfiguredScopes(scope) {
   return [...byId.values()];
 }
 
-async function bootstrapCacheUnlocked() {
+async function recoverDisappearedKnownOrders(scope, scannedOrders, { enabled = false } = {}) {
+  if (!enabled) return { orders: [], removedOrderIds: [], pendingOrderCount: 0, checkedOrderCount: 0 };
+
+  const scannedIds = new Set((scannedOrders || []).map((order) => String(order?.order_id || '')).filter(Boolean));
+  // Only rows that PREVIOUSLY belonged to one of the two scanned upstream
+  // statuses can legitimately be called "disappeared". Cancelled/Other rows
+  // retained for audit are not polled forever.
+  const previousRows = await BaseLinkerOrderCache.find({
+    accountScope: scope.accountScope,
+    orderStatusId: { $in: [scope.intakeStatusId, scope.sentStatusId] },
+  }).select('orderId orderStatusId').lean();
+  const disappeared = previousRows
+    .filter((row) => !scannedIds.has(String(row?.orderId || '')))
+    .map((row) => ({ orderId: String(row.orderId), previousStatusId: Number(row.orderStatusId) }))
+    .filter((row) => row.orderId);
+
+  const selected = disappeared.slice(0, FALLBACK_EXACT_REFRESH_LIMIT);
+  const recovered = [];
+  const removedOrderIds = [];
+  for (const row of selected) {
+    const exact = await fetchBaseLinkerOrders({ orderId: row.orderId, includeUnconfirmed: true, maxPages: 1 });
+    const order = (exact.orders || []).find((candidate) => String(candidate?.order_id) === row.orderId);
+    if (order) recovered.push({ order, previousStatusId: row.previousStatusId });
+    else removedOrderIds.push(row.orderId);
+  }
+
+  return {
+    orders: recovered,
+    removedOrderIds,
+    checkedOrderCount: selected.length,
+    pendingOrderCount: Math.max(0, disappeared.length - selected.length),
+  };
+}
+
+async function bootstrapCacheUnlocked(previousState = null) {
   const scope = await getQueueScope();
   if (!scope.configured) throw appError('baselinker_queue_not_configured');
   await ensureIndexes();
   const syncToken = `${Date.now()}-${crypto.randomBytes(8).toString('hex')}`;
-  const orders = await scanConfiguredScopes(scope);
+  const scannedOrders = await scanConfiguredScopes(scope);
 
   if ((await getQueueScope()).scopeKey !== scope.scopeKey) throw appError('baselinker_queue_warming');
-  // Reconcile only present orders. Leaving the intake queue is not deletion and
-  // must not erase saved warehouse work.
-  const { reconcilePickingFromUpstreamChanges, ensurePickingIndexesReady } = require('./baseLinkerPicking');
-  await ensurePickingIndexesReady();
-  await reconcilePickingFromUpstreamChanges({ orders });
-  await upsertCachedOrders(orders, { syncToken, source: 'full_sync' });
 
-  const retainedIds = [...await retainedPickingOrderIds()];
+  // A status-filtered scan can only say that an order LEFT Intake/Sent. It
+  // cannot tell whether it became Cancelled, Sent, another status, or was
+  // removed. Recover that fact with exact order_id reads. This is the fallback
+  // path when getJournalList is disabled/silent; cache membership is never
+  // treated as upstream truth.
+  const recovery = await recoverDisappearedKnownOrders(scope, scannedOrders, {
+    enabled: previousState?.initialized === true && previousState?.scopeKey === scope.scopeKey,
+  });
+  const exactRecoveredOrders = recovery.orders.map((entry) => entry.order);
+  const allObservedOrders = [...scannedOrders, ...exactRecoveredOrders];
+
+  const {
+    reconcilePickingFromUpstreamChanges,
+    markPickingOrdersUpstreamUpdated,
+    ensurePickingIndexesReady,
+  } = require('./baseLinkerPicking');
+  await ensurePickingIndexesReady();
+  await reconcilePickingFromUpstreamChanges({
+    orders: allObservedOrders,
+    removedOrderIds: recovery.removedOrderIds,
+  });
+
+  if (recovery.orders.length || recovery.removedOrderIds.length) {
+    const journalTypesByOrderId = {};
+    for (const { order, previousStatusId } of recovery.orders) {
+      const id = String(order?.order_id || '');
+      if (id && Number(order?.order_status_id) !== previousStatusId) journalTypesByOrderId[id] = [18];
+    }
+    for (const id of recovery.removedOrderIds) journalTypesByOrderId[String(id)] = [4];
+    await markPickingOrdersUpstreamUpdated({
+      orderIds: [
+        ...recovery.orders.map(({ order }) => String(order?.order_id || '')).filter(Boolean),
+        ...recovery.removedOrderIds,
+      ],
+      journalTypesByOrderId,
+      orders: exactRecoveredOrders,
+      knownCachedOrderIds: [
+        ...recovery.orders.map(({ order }) => String(order?.order_id || '')).filter(Boolean),
+        ...recovery.removedOrderIds,
+      ],
+    });
+  }
+
+  const retainedIdsSet = await retainedPickingOrderIds();
+  // Scanned queue rows are current by definition. Exact recovered rows are
+  // cached only when they are still in queue scope OR local audit/review state
+  // explicitly retains them.
+  const cacheableRecovered = exactRecoveredOrders.filter((order) => (
+    orderInQueueScope(order, scope) || retainedIdsSet.has(String(order?.order_id || ''))
+  ));
+  await upsertCachedOrders([...scannedOrders, ...cacheableRecovered], { syncToken, source: 'full_sync' });
+
+  const retainedIds = [...retainedIdsSet];
   const sweep = { accountScope: scope.accountScope, syncToken: { $ne: syncToken } };
   if (retainedIds.length) sweep.orderId = { $nin: retainedIds };
   await BaseLinkerOrderCache.deleteMany(sweep);
 
   const orderCount = await BaseLinkerOrderCache.countDocuments({ accountScope: scope.accountScope });
   const lastFullSyncAt = new Date().toISOString();
-  await saveCacheState({ initialized: true, scopeKey: scope.scopeKey, lastFullSyncAt, orderCount }, scope.accountScope);
-  return { initialized: true, lastFullSyncAt, orderCount };
+  const state = {
+    initialized: true,
+    scopeKey: scope.scopeKey,
+    lastFullSyncAt,
+    orderCount,
+    fallbackCheckedOrderCount: recovery.checkedOrderCount,
+    fallbackPendingOrderCount: recovery.pendingOrderCount,
+  };
+  await saveCacheState(state, scope.accountScope);
+  return state;
 }
 
 async function ensureBaseLinkerOrderCacheReady(scope = null) {
@@ -250,16 +347,17 @@ async function ensureBaseLinkerOrderCacheReady(scope = null) {
 }
 
 // Scheduler only: HTTP reads never trigger or wait for an upstream scan.
-async function syncBaseLinkerOrderCache({ force = false } = {}) {
+async function syncBaseLinkerOrderCache({ force = false, maxAgeMs = CACHE_REFRESH_MS } = {}) {
   const scope = await getQueueScope();
   if (!scope.configured) return { skipped: true, reason: 'queue_not_configured' };
   return withLock(scopedLockKey('baselinker-order-cache-sync', scope.accountScope), async () => {
     const current = await cacheState(scope);
-    if (!force && current.initialized && Date.now() - Date.parse(current.lastFullSyncAt) < CACHE_REFRESH_MS) {
+    const safeMaxAgeMs = Math.min(CACHE_REFRESH_MS, Math.max(30_000, Number(maxAgeMs) || CACHE_REFRESH_MS));
+    if (!force && current.initialized && Date.now() - Date.parse(current.lastFullSyncAt) < safeMaxAgeMs) {
       const count = await BaseLinkerOrderCache.countDocuments({ accountScope: scope.accountScope });
       if (count > 0 || current.orderCount === 0) return { skipped: true, reason: 'fresh' };
     }
-    return bootstrapCacheUnlocked();
+    return bootstrapCacheUnlocked(current);
   }, { ttlMs: 15 * 60_000, waitMs: 0 });
 }
 
@@ -333,7 +431,7 @@ async function getCachedOrderPage({ workflowFilter = 'processing', packedBy = ''
   const pickingCollection = BaseLinkerPickingOrder.collection.name;
   const skip = (safePage - 1) * safePageSize;
   const localSentCutoff = new Date(Date.now() - SENT_RETENTION_MS);
-  const upstreamSentCutoffSeconds = scope.sentDateConfirmedFrom;
+  const upstreamSentCutoffSeconds = scope.sentDateInStatusFrom;
 
   const pageMatch = safeWorkflow === 'updated'
     ? { updatedEligible: true }
@@ -347,22 +445,24 @@ async function getCachedOrderPage({ workflowFilter = 'processing', packedBy = ''
     { $match: match },
     { $sort: { sortAt: -1, orderIdNumeric: -1 } },
     {
-      $group: {
+      // accountScope + orderId is unique at the storage layer. Never collapse,
+      // group or merge order rows in the read path; derive display flags from
+      // the one exact cached BaseLinker order instead.
+      $project: {
         _id: '$orderId',
-        sortAt: { $first: '$sortAt' },
-        orderIdNumeric: { $first: '$orderIdNumeric' },
-        intakeEligible: { $max: { $cond: [{ $eq: ['$orderStatusId', scope.intakeStatusId] }, 1, 0] } },
-        upstreamSent: { $max: { $cond: [{ $eq: ['$orderStatusId', scope.sentStatusId] }, 1, 0] } },
+        sortAt: 1,
+        orderIdNumeric: 1,
+        statusChangedAt: 1,
+        intakeEligible: { $cond: [{ $eq: ['$orderStatusId', scope.intakeStatusId] }, 1, 0] },
+        upstreamSent: { $cond: [{ $eq: ['$orderStatusId', scope.sentStatusId] }, 1, 0] },
         upstreamSentRecent: {
-          $max: {
-            $cond: [
-              { $and: [{ $eq: ['$orderStatusId', scope.sentStatusId] }, { $gte: ['$sortAt', upstreamSentCutoffSeconds] }] },
-              1,
-              0,
-            ],
-          },
+          $cond: [
+            { $and: [{ $eq: ['$orderStatusId', scope.sentStatusId] }, { $gte: ['$statusChangedAt', upstreamSentCutoffSeconds] }] },
+            1,
+            0,
+          ],
         },
-        upstreamCancelled: { $max: { $cond: [{ $eq: ['$orderStatusId', scope.cancelledStatusId] }, 1, 0] } },
+        upstreamCancelled: { $cond: [{ $eq: ['$orderStatusId', scope.cancelledStatusId] }, 1, 0] },
       },
     },
     {
@@ -395,6 +495,7 @@ async function getCachedOrderPage({ workflowFilter = 'processing', packedBy = ''
         localPackedAt: { $ifNull: [{ $arrayElemAt: ['$pickingDocs.packedAt', 0] }, null] },
         localSentAt: { $ifNull: [{ $arrayElemAt: ['$pickingDocs.sentAt', 0] }, { $arrayElemAt: ['$pickingDocs.updatedAt', 0] }] },
         localUpstreamReviewRequired: { $eq: [{ $arrayElemAt: ['$pickingDocs.upstreamReviewRequired', 0] }, true] },
+        localUpstreamDisposition: { $ifNull: [{ $arrayElemAt: ['$pickingDocs.upstreamDisposition', 0] }, ''] },
       },
     },
     { $addFields: { localDisplayStage: localDisplayStageExpression() } },
@@ -420,6 +521,11 @@ async function getCachedOrderPage({ workflowFilter = 'processing', packedBy = ''
         normalEligible: {
           $switch: {
             branches: [
+              // Exact reconciliation can establish a non-actionable state even
+              // when the retained cache row is an older Intake snapshot (e.g.
+              // BaseLinker stopped returning the order). Never let that stale
+              // cache status put the card back into Processing after review.
+              { case: { $in: ['$localUpstreamDisposition', ['cancelled', 'other', 'missing', 'unverified']] }, then: false },
               // Cancellation is visible only in Updated until the operator
               // presses "Прийнято". It must never fall back into Processing.
               { case: { $eq: ['$upstreamCancelled', 1] }, then: false },
@@ -539,6 +645,7 @@ async function getCachedOrderPage({ workflowFilter = 'processing', packedBy = ''
 module.exports = {
   CACHE_STATE_KEY,
   CACHE_BOOTSTRAP_MAX_PAGES,
+  FALLBACK_EXACT_REFRESH_LIMIT,
   cacheState,
   syncBaseLinkerOrderCache,
   orderSearchText,

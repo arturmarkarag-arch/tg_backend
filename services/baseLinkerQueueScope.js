@@ -25,7 +25,7 @@ function queueScopeFromSettings(value = {}, now = Date.now(), accountScope = get
   const cancelledStatusId = positiveStatusId(value.cancelledStatusId);
   const distinct = new Set([intakeStatusId, sentStatusId, cancelledStatusId].filter(Boolean)).size === 3;
   const configured = Boolean(intakeStatusId && sentStatusId && cancelledStatusId && distinct);
-  const sentDateConfirmedFrom = Math.floor(now / 1000) - SENT_LOOKBACK_DAYS * 86400;
+  const sentDateInStatusFrom = Math.floor(now / 1000) - SENT_LOOKBACK_DAYS * 86400;
 
   return {
     accountScope,
@@ -37,7 +37,7 @@ function queueScopeFromSettings(value = {}, now = Date.now(), accountScope = get
     cancelledStatusId,
     cancelledStatusName: String(value.cancelledStatusName || ''),
     sentLookbackDays: SENT_LOOKBACK_DAYS,
-    sentDateConfirmedFrom,
+    sentDateInStatusFrom,
     scopeKey: configured
       ? `${accountScope}|${intakeStatusId}:all|${sentStatusId}:${SENT_LOOKBACK_DAYS}|${cancelledStatusId}:${value.revision || 'settings-v2'}`
       : null,
@@ -62,8 +62,7 @@ function orderInIntakeScope(order, scope) {
 function orderInSentScope(order, scope) {
   return scope.configured
     && Number(order?.order_status_id) === scope.sentStatusId
-    && orderIsConfirmed(order)
-    && Number(order?.date_confirmed) >= scope.sentDateConfirmedFrom;
+    && Number(order?.date_in_status) >= scope.sentDateInStatusFrom;
 }
 
 function orderInQueueScope(order, scope) {

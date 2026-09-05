@@ -44,14 +44,15 @@ function cacheHarness(value = {}) {
   let state = value;
   const fetch = vi.fn(async () => ({ orders: [], truncated: false }));
   const reconcile = vi.fn(async () => ({}));
+  const markUpdated = vi.fn(async () => ({}));
   const model = {
-    collection: { name: 'baselinkerordercache' },
+    collection: { name: 'baselinkerordercache', updateMany: vi.fn(async () => ({})) },
     syncIndexes: vi.fn(async () => {}),
     countDocuments: vi.fn(async () => 0),
     bulkWrite: vi.fn(async () => ({})),
     deleteMany: vi.fn(async () => ({ deletedCount: 1 })),
     aggregate: vi.fn(() => ({ allowDiskUse: async () => [{ page: [], counts: [], updatedCount: [] }] })),
-    find: vi.fn(() => ({ lean: async () => [] })),
+    find: vi.fn(() => ({ select: () => ({ lean: async () => [] }), lean: async () => [] })),
   };
   const pickingModel = {
     collection: { name: 'baselinkerpickingorders' },
@@ -68,10 +69,11 @@ function cacheHarness(value = {}) {
     './baseLinkerPicking': {
       ensurePickingIndexesReady: vi.fn(async () => {}),
       reconcilePickingFromUpstreamChanges: reconcile,
+      markPickingOrdersUpstreamUpdated: markUpdated,
     },
     '../utils/lock': { withLock: async (_, work) => work() },
   });
-  return { service, fetch, reconcile, model, pickingModel, state: () => state };
+  return { service, fetch, reconcile, markUpdated, model, pickingModel, state: () => state };
 }
 
 function journalMocks({ stateRef, callApi, sync = async () => ({ skipped: true }) }) {
@@ -108,11 +110,11 @@ describe('scoped BaseLinker queue', () => {
     expect(h.fetch).not.toHaveBeenCalled();
   });
 
-  it('scans ALL intake orders with no date filter and Sent only with the fixed 30-day cutoff', async () => {
+  it('scans exact Intake and Sent statuses without date heuristics, then applies Sent retention by date_in_status', async () => {
     const h = cacheHarness();
     const scope = getQueueScope();
     const intake = { order_id: 1, order_status_id: 99, confirmed: true, date_confirmed: 1 };
-    const sentRecent = { order_id: 2, order_status_id: 100, confirmed: true, date_confirmed: scope.sentDateConfirmedFrom + 60 };
+    const sentRecent = { order_id: 2, order_status_id: 100, confirmed: true, date_in_status: scope.sentDateInStatusFrom + 60 };
     h.fetch.mockImplementation(async ({ statusId }) => ({
       orders: statusId === 99 ? [intake] : statusId === 100 ? [sentRecent] : [],
       truncated: false,
@@ -128,10 +130,10 @@ describe('scoped BaseLinker queue', () => {
     expect(h.fetch.mock.calls[0][0]).not.toHaveProperty('dateConfirmedFrom');
     expect(h.fetch).toHaveBeenNthCalledWith(2, expect.objectContaining({
       statusId: 100,
-      includeUnconfirmed: false,
-      dateConfirmedFrom: scope.sentDateConfirmedFrom,
+      includeUnconfirmed: true,
     }));
-    expect(h.reconcile).toHaveBeenCalledWith({ orders: [intake, sentRecent] });
+    expect(h.fetch.mock.calls[1][0]).not.toHaveProperty('dateConfirmedFrom');
+    expect(h.reconcile).toHaveBeenCalledWith({ orders: [intake, sentRecent], removedOrderIds: [] });
     expect(h.model.bulkWrite.mock.calls[0][0]).toHaveLength(2);
   });
 
@@ -143,15 +145,41 @@ describe('scoped BaseLinker queue', () => {
     expect(scannedStatuses).not.toContain(101);
   });
 
+  it('exact-rereads a known order that disappears from Intake/Sent and observes Cancelled', async () => {
+    const scope = getQueueScope();
+    const h = cacheHarness({ initialized: true, scopeKey: scope.scopeKey, lastFullSyncAt: '2000-01-01T00:00:00.000Z', orderCount: 1 });
+    h.model.find.mockImplementation((filter) => ({
+      select: () => ({
+        lean: async () => filter?.orderStatusId?.$in ? [{ orderId: '123', orderStatusId: 99 }] : [],
+      }),
+      lean: async () => [],
+    }));
+    const cancelled = { order_id: 123, order_status_id: 101, confirmed: true, date_in_status: Math.floor(Date.now() / 1000) };
+    h.fetch.mockImplementation(async (args) => {
+      if (args.orderId === '123') return { orders: [cancelled], truncated: false };
+      return { orders: [], truncated: false };
+    });
+
+    await h.service.syncBaseLinkerOrderCache({ force: true });
+
+    expect(h.fetch).toHaveBeenCalledWith(expect.objectContaining({ orderId: '123', includeUnconfirmed: true, maxPages: 1 }));
+    expect(h.reconcile).toHaveBeenCalledWith({ orders: [cancelled], removedOrderIds: [] });
+    expect(h.markUpdated).toHaveBeenCalledWith(expect.objectContaining({
+      orderIds: ['123'],
+      knownCachedOrderIds: ['123'],
+      journalTypesByOrderId: { 123: [18] },
+    }));
+  });
+
   it('intake ignores age, while Sent excludes orders older than the 30-day cutoff', () => {
     const scope = getQueueScope();
     const ancientIntake = { order_status_id: 99, date_confirmed: 1, confirmed: true };
     expect(orderInIntakeScope(ancientIntake, scope)).toBe(true);
     expect(orderInQueueScope(ancientIntake, scope)).toBe(true);
 
-    const sentAtBoundary = { order_status_id: 100, date_confirmed: scope.sentDateConfirmedFrom, confirmed: true };
+    const sentAtBoundary = { order_status_id: 100, date_in_status: scope.sentDateInStatusFrom, confirmed: true };
     expect(orderInSentScope(sentAtBoundary, scope)).toBe(true);
-    expect(orderInSentScope({ ...sentAtBoundary, date_confirmed: scope.sentDateConfirmedFrom - 1 }, scope)).toBe(false);
+    expect(orderInSentScope({ ...sentAtBoundary, date_in_status: scope.sentDateInStatusFrom - 1 }, scope)).toBe(false);
     expect(orderInQueueScope({ ...sentAtBoundary, order_status_id: 101 }, scope)).toBe(false);
     expect(orderInQueueScope({ ...ancientIntake, confirmed: false }, scope)).toBe(true);
   });

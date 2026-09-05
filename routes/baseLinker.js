@@ -5,8 +5,13 @@ const { asyncHandler, appError } = require('../utils/errors');
 const { isBaseLinkerConfigured } = require('../services/baseLinkerClient');
 const { getPrintAgentStatus, queuePrintJob } = require('../services/baseLinkerPrint');
 const { fetchBaseLinkerOrders, fetchBaseLinkerOrderMeta } = require('../services/baseLinkerOrders');
-const { getCachedOrderPage, cacheState } = require('../services/baseLinkerOrderCache');
-const { loadJournalState } = require('../services/baseLinkerJournal');
+const { getCachedOrderPage, cacheState, syncBaseLinkerOrderCache } = require('../services/baseLinkerOrderCache');
+const {
+  loadJournalState,
+  TICK_MS,
+  DEGRADED_RECONCILE_MS,
+  isBaseLinkerJournalSchedulerStarted,
+} = require('../services/baseLinkerJournal');
 const { getQueueScope } = require('../services/baseLinkerQueueScope');
 const { getBaseLinkerAccountScope, getBaseLinkerAccountBinding } = require('../services/baseLinkerAccount');
 const { fetchBaseLinkerProductCatalog } = require('../services/baseLinkerProducts');
@@ -55,11 +60,25 @@ router.get('/status', asyncHandler(async (req, res) => {
     sentLookbackDays: scope.sentLookbackDays,
     cacheInitialized: cache.initialized,
     lastFullSyncAt: cache.lastFullSyncAt,
+    fallbackCheckedOrderCount: cache.fallbackCheckedOrderCount,
+    fallbackPendingOrderCount: cache.fallbackPendingOrderCount,
     journalInitialized: journal.initialized,
+    journalSchedulerStarted: isBaseLinkerJournalSchedulerStarted(),
+    journalPossiblyDisabled: journal.possiblyDisabled === true,
+    journalLastLogId: journal.lastLogId,
+    journalLastChangeAt: journal.lastChangeAt,
+    journalPollMs: TICK_MS,
+    degradedReconcileMs: DEGRADED_RECONCILE_MS,
     lastJournalSuccessAt: journal.lastSuccessAt,
     lastError: journal.lastError,
     nextRetryAt: journal.nextRetryAt,
   });
+}));
+
+router.post('/sync', asyncHandler(async (req, res) => {
+  if (!isBaseLinkerConfigured()) throw appError('baselinker_not_configured');
+  const result = await syncBaseLinkerOrderCache({ force: true });
+  res.json({ ...result, accountScope: getBaseLinkerAccountScope(), syncedAt: new Date().toISOString() });
 }));
 
 router.get('/meta', asyncHandler(async (req, res) => {
@@ -84,7 +103,7 @@ router.get('/orders', asyncHandler(async (req, res) => {
     });
   } else {
     // The work queue is server-paginated from a dedicated BaseLinker snapshot
-    // cache. The browser receives only the requested 10/20/50 logical orders;
+    // cache. The browser receives only the requested 10/20/50 exact order rows;
     // it no longer downloads/scans the whole account on every page render.
     result = await getCachedOrderPage({
       statusId: req.query.statusId,

@@ -33,6 +33,7 @@ function compactOrder(order = {}) {
   setIfDefined(out, 'order_status_id', order.order_status_id);
   if (order.confirmed !== undefined && order.confirmed !== null) out.confirmed = Boolean(order.confirmed);
   setIfDefined(out, 'date_confirmed', order.date_confirmed);
+  setIfDefined(out, 'date_in_status', order.date_in_status);
   setIfDefined(out, 'date_add', order.date_add);
   // getOrders already exposes a lightweight shipment hint. Keep it in the
   // worker payload so the client does not render a misleading TTN action (or

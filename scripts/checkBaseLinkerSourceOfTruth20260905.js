@@ -28,6 +28,7 @@ const shipmentsSrc = read('services/baseLinkerShipments.js');
 const snapshotSrc = read('services/baseLinkerOrderSnapshots.js');
 const accountSrc = read('services/baseLinkerAccount.js');
 const printSrc = read('services/baseLinkerPrint.js');
+const scopePluginSrc = read('models/plugins/baseLinkerAccountScope.js');
 
 check('three distinct queue status ids are required', () => {
   assert(scopeSrc.includes('intakeStatusId'));
@@ -40,9 +41,13 @@ check('Intake has no date boundary', () => {
   assert(block.includes('statusId: scope.intakeStatusId'));
   assert(!block.includes('dateConfirmedFrom'));
 });
-check('Sent is fixed to 30 days', () => {
+check('Sent is fixed to 30 days by upstream date_in_status, not confirmation date', () => {
   assert(scopeSrc.includes('const SENT_LOOKBACK_DAYS = 30'));
-  assert(cacheSrc.includes('dateConfirmedFrom: scope.sentDateConfirmedFrom'));
+  assert(scopeSrc.includes('sentDateInStatusFrom'));
+  assert(scopeSrc.includes('Number(order?.date_in_status) >= scope.sentDateInStatusFrom'));
+  const sentBlock = cacheSrc.slice(cacheSrc.indexOf('const sent = await fetchBaseLinkerOrders'), cacheSrc.indexOf('const byId = new Map'));
+  assert(sentBlock.includes('statusId: scope.sentStatusId'));
+  assert(!sentBlock.includes('dateConfirmedFrom'));
 });
 check('Cancelled is not mass-scanned', () => {
   const scan = cacheSrc.slice(cacheSrc.indexOf('async function scanConfiguredScopes'), cacheSrc.indexOf('async function bootstrapCacheUnlocked'));
@@ -60,10 +65,26 @@ check('journal remembers prior cache membership before cancellation refresh', ()
   assert(journalSrc.includes('getKnownCachedOrderIds(window.orderIds)'));
   assert(journalSrc.includes('knownCachedOrderIds'));
 });
-check('known cancelled order can be materialised into Updated before claim', () => {
-  assert(pickingSrc.includes("classifyUpstreamOrder(order, scope) !== 'cancelled'"));
-  assert(pickingSrc.includes("upstreamDisposition: 'cancelled'"));
-  assert(pickingSrc.includes("appendHistory(doc, 'upstream_cancelled_before_claim'"));
+check('silent journal fallback exact-rereads known orders that disappear from scanned statuses', () => {
+  assert(cacheSrc.includes('async function recoverDisappearedKnownOrders'));
+  assert(cacheSrc.includes("orderStatusId: { $in: [scope.intakeStatusId, scope.sentStatusId] }"));
+  assert(cacheSrc.includes('fetchBaseLinkerOrders({ orderId: row.orderId, includeUnconfirmed: true, maxPages: 1 })'));
+  assert(cacheSrc.includes('fallbackPendingOrderCount'));
+  assert(cacheSrc.includes('removedOrderIds: recovery.removedOrderIds'));
+});
+check('journal degraded health is explicit instead of silently claiming live sync', () => {
+  assert(journalSrc.includes('possiblyDisabled'));
+  for (const token of ['journalSchedulerStarted', 'journalPossiblyDisabled', 'journalLastLogId', 'journalLastChangeAt', 'journalPollMs', 'degradedReconcileMs', 'fallbackPendingOrderCount']) assert(routeSrc.includes(token), token);
+  assert(journalSrc.includes('DEGRADED_RECONCILE_MS'));
+  assert(journalSrc.includes('isBaseLinkerJournalSchedulerStarted'));
+  assert(journalSrc.includes('state.possiblyDisabled === true ? DEGRADED_RECONCILE_MS : undefined'));
+});
+check('known non-actionable order is materialised into Updated before claim', () => {
+  assert(pickingSrc.includes("const disposition = order ? classifyUpstreamOrder(order, scope) : 'missing'"));
+  assert(pickingSrc.includes("if (['intake', 'sent'].includes(disposition)) continue"));
+  assert(pickingSrc.includes("upstreamDisposition: disposition"));
+  assert(pickingSrc.includes("upstream_cancelled_before_claim"));
+  assert(pickingSrc.includes("upstream_non_actionable_before_claim"));
 });
 check('cancelled/sent upstream states block warehouse mutations', () => {
   assert(pickingSrc.includes("if (disposition === 'cancelled') throw appError('baselinker_order_cancelled')"));
@@ -99,6 +120,25 @@ check('exact accountScope + orderId is the only picking identity', () => {
   for (const token of ['memberOrderIds', 'claimKey', 'groupKey']) assert(!modelSrc.includes(token), token);
   for (const token of ['mergeOrderGroup', 'fetchExactOrderGroup', 'claimKeyForGroup']) assert(!pickingSrc.includes(token), token);
 });
+check('Mongoose BaseLinker models fail closed to current accountScope', () => {
+  assert(modelSrc.includes('plugin(baseLinkerAccountScopePlugin)'));
+  assert(scopePluginSrc.includes("this.where({ accountScope: getBaseLinkerAccountScope() })"));
+  assert(scopePluginSrc.includes("schema.pre('aggregate'"));
+});
+check('interactive picking mutations cannot trust a stale local status indefinitely', () => {
+  assert(pickingSrc.includes('UPSTREAM_VERIFICATION_TTL_MS'));
+  assert(pickingSrc.includes('async function verifyTrackedPickingOrderUpstream'));
+  assert(pickingSrc.includes('await verifyTrackedPickingOrderUpstream(current, actor, { force: true })'));
+  assert(pickingSrc.includes('await verifyTrackedPickingOrderUpstream(doc, actor, { clientMutationId })'));
+  assert(modelSrc.includes('lastUpstreamVerifiedAt'));
+});
+check('order-page read path never groups or merges order rows', () => {
+  const start = cacheSrc.indexOf('const pipeline = [');
+  const lookup = cacheSrc.indexOf('$lookup:', start);
+  const identityPart = cacheSrc.slice(start, lookup);
+  assert(!identityPart.includes('$group'));
+  assert(identityPart.includes("_id: '$orderId'"));
+});
 check('API token structure is never treated as stable account identity', () => {
   assert(accountSrc.includes("source: 'token_fingerprint'"));
   assert(accountSrc.includes('API tokens are credentials, not account identity'));
@@ -125,6 +165,10 @@ check('operator-facing errors exist for upstream terminal states', () => {
 });
 check('/status exposes all three upstream statuses and Sent retention', () => {
   for (const token of ['intakeStatusId', 'sentStatusId', 'cancelledStatusId', 'sentLookbackDays']) assert(routeSrc.includes(token));
+});
+check('manual refresh is a real upstream reconciliation, not a cache-only GET', () => {
+  assert(routeSrc.includes("router.post('/sync'"));
+  assert(routeSrc.includes('syncBaseLinkerOrderCache({ force: true })'));
 });
 check('Packed shelf can be filtered by actual packing actor before pagination', () => {
   assert(routeSrc.includes('packedBy: req.query.packedBy'));
@@ -158,7 +202,8 @@ const scope = loadScope();
 const now = Date.now();
 const cfg = scope.queueScopeFromSettings({ intakeStatusId: 99, sentStatusId: 100, cancelledStatusId: 101, revision: 'gate' }, now);
 check('behavior: ancient Intake order is still in scope', () => assert.equal(scope.orderInIntakeScope({ order_status_id: 99, confirmed: true, date_confirmed: 1 }, cfg), true));
-check('behavior: Sent older than 30 days is out of scope', () => assert.equal(scope.orderInSentScope({ order_status_id: 100, confirmed: true, date_confirmed: cfg.sentDateConfirmedFrom - 1 }, cfg), false));
+check('behavior: Sent older than 30 days in its current status is out of scope', () => assert.equal(scope.orderInSentScope({ order_status_id: 100, confirmed: true, date_in_status: cfg.sentDateInStatusFrom - 1 }, cfg), false));
+check('behavior: old confirmation does not hide an order moved to Sent today', () => assert.equal(scope.orderInSentScope({ order_status_id: 100, confirmed: true, date_confirmed: 1, date_in_status: cfg.sentDateInStatusFrom + 60 }, cfg), true));
 check('behavior: current Cancelled status classifies terminal', () => assert.equal(scope.classifyUpstreamOrder({ order_status_id: 101 }, cfg), 'cancelled'));
 
 

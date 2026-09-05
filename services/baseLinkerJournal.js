@@ -15,6 +15,7 @@ const JOURNAL_STATE_KEY = 'baselinker.journal.v1';
 const TICK_MS = Math.min(60_000, Math.max(5_000, Number(process.env.BASELINKER_JOURNAL_POLL_MS) || 15_000));
 const MAX_CHANGED_ORDERS_PER_TICK = Math.min(20, Math.max(1, Number(process.env.BASELINKER_JOURNAL_MAX_ORDERS_PER_TICK) || 6));
 const BOOTSTRAP_PAGES_PER_TICK = Math.min(20, Math.max(1, Number(process.env.BASELINKER_JOURNAL_BOOTSTRAP_PAGES_PER_TICK) || 6));
+const DEGRADED_RECONCILE_MS = Math.min(5 * 60_000, Math.max(30_000, Number(process.env.BASELINKER_DEGRADED_RECONCILE_MS) || 60_000));
 
 // Events that can change anything visible/operational on the worker screen.
 // Invoice/receipt/package/payment/status changes are included because an order
@@ -214,7 +215,9 @@ async function runBaseLinkerJournalTick() {
     try {
       // Periodic scoped reconciliation also recovers when journal is disabled
       // or its three-day history no longer covers our saved cursor.
-      const synced = await syncBaseLinkerOrderCache();
+      const synced = await syncBaseLinkerOrderCache({
+        maxAgeMs: state.possiblyDisabled === true ? DEGRADED_RECONCILE_MS : undefined,
+      });
       if (!synced.skipped) emitOrdersChanged({ resync: true, reason: 'queue_sync', fetchedAt: new Date().toISOString() });
       if (!state.initialized) return await bootstrapJournal(healthy);
 
@@ -313,11 +316,16 @@ function stopBaseLinkerJournalScheduler() {
   timer = null;
 }
 
+function isBaseLinkerJournalSchedulerStarted() {
+  return Boolean(timer);
+}
+
 module.exports = {
   JOURNAL_STATE_KEY,
   JOURNAL_LOG_TYPES,
   TICK_MS,
   MAX_CHANGED_ORDERS_PER_TICK,
+  DEGRADED_RECONCILE_MS,
   logIdOf,
   normalizeJournalLogs,
   affectedOrderIdsForLog,
@@ -327,4 +335,5 @@ module.exports = {
   runBaseLinkerJournalTick,
   startBaseLinkerJournalScheduler,
   stopBaseLinkerJournalScheduler,
+  isBaseLinkerJournalSchedulerStarted,
 };

@@ -61,7 +61,7 @@ describe('BaseLinker queue settings storage', () => {
       cancelledStatusName: 'Anulowane',
       sentLookbackDays: 30,
     });
-    expect(saved.sentDateConfirmedFrom).toBeGreaterThan(0);
+    expect(saved.sentDateInStatusFrom).toBeGreaterThan(0);
     expect(h.api).toHaveBeenCalledWith('getOrderStatusList', {});
     expect(h.value()).toMatchObject({ intakeStatusId: 99, sentStatusId: 100, cancelledStatusId: 101 });
   });

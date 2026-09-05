@@ -7,9 +7,9 @@ BaseLinker is an external live order source. Its orders are **not** inserted int
 The integration is split into two authorities:
 
 - **BaseLinker** is authoritative for the order, customer, product snapshot, current catalog data, courier packages and labels.
-- **Our MongoDB** is authoritative only for our own fulfilment progress: who is collecting an order, which lines were found, shortages/problems, packed/sent-local markers and audit history.
+- **Our MongoDB** is authoritative only for our own fulfilment progress: who is collecting an order, which lines were found, shortages/problems, packed markers and audit history. A local `sent` state is valid only after the configured BaseLinker Sent status has been confirmed by an exact upstream reread.
 
-The BaseLinker token exists only in server env as `BASELINKER_API_TOKEN`. Upstream access remains read-only: only BaseLinker `get...` methods are used. Local POST/PATCH endpoints below mutate our MongoDB only; they never mutate BaseLinker.
+The BaseLinker token exists only on the server as `BASELINKER_API_TOKEN`. Order reads remain source-of-truth reads from BaseLinker. The one intentional order write is the operator action **Відправив**: the server calls `setOrderStatus` for that exact `order_id`, then performs exact `getOrders(order_id)` verification before persisting local Sent. No other order-field/status mutation is allowed by this module.
 
 ## Account isolation
 
@@ -25,12 +25,7 @@ explicit binding. Keep that value unchanged when regenerating the API token for
 the same BaseLinker account, and change it when intentionally switching to a
 different account.
 
-Without the explicit key, the server derives an opaque hashed scope from the
-owner component of BaseLinker's standard numeric token format. This preserves
-the account namespace across normal token regeneration. If an unknown token
-format is encountered, the full token is fingerprinted instead: rotation then
-starts a new isolated namespace rather than risking a cross-account merge.
-Neither the token nor its numeric components are persisted as the scope.
+Without the explicit key, the server fingerprints the **entire** token into an opaque scope. API tokens are credentials, not a documented account identity, so no substring/prefix is interpreted as an account ID. Token rotation without `BASELINKER_ACCOUNT_KEY` therefore starts a new isolated namespace rather than risking a cross-account merge. The secret token itself is never persisted as the scope.
 
 Legacy documents that have no `accountScope` are retained in MongoDB but are
 invisible to all live account-scoped reads. They must never be assigned to a
@@ -51,7 +46,7 @@ The server enforces the capability through `requireBaseLinkerPickingAccess`; hid
 Administrators select three distinct BaseLinker statuses in **Settings → System → BaseLinker work queue**:
 
 - **Intake / ready to pack** — the only upstream status scanned without a date limit. Every order currently in this explicitly selected status is eligible, including `confirmed=false` rows whose `date_confirmed` is still empty.
-- **Sent / Wysłano** — a read-only history shelf limited to the last 30 days. BaseLinker `getOrders` is called with this `status_id` plus a 30-day `date_confirmed_from` boundary so old sent history is not downloaded forever.
+- **Sent / Wysłano** — an upstream status and a 30-day history shelf based on BaseLinker's `date_in_status`, not the unrelated confirmation date. A manual BaseLinker transition to this status is materialised locally as Sent; the local **Відправив** action writes exactly this configured status upstream and verifies it before local persistence.
 - **Cancelled / Anulowane** — never mass-scanned historically. It is used as a terminal signal when journal/exact refresh shows that an order already known to our queue moved to the selected cancelled status.
 
 The old single `statusId` setting is treated only as a migration fallback for Intake. The queue is not considered configured until Sent and Cancelled are also selected, and all three IDs must be different. The API token remains server-side.
@@ -61,17 +56,21 @@ Admin-only routes: `GET/POST /admin/baselinker-settings` and `GET /admin/baselin
 The scheduled full reconciliation scans only two upstream subsets:
 
 1. all Intake orders, including unconfirmed rows, paged with BaseLinker's `id_from` cursor and no date boundary;
-2. confirmed Sent orders with the fixed 30-day `date_confirmed_from` boundary.
+2. all orders in the exact Sent status, paged by `id_from`; the server then keeps only rows whose BaseLinker `date_in_status` is inside the 30-day history window. BaseLinker has no `date_in_status` request filter, so using `date_confirmed_from` here would incorrectly hide old orders moved to Sent recently.
 
 Cancelled is intentionally not a third historical scan. Journal events refresh exact `order_id`s. Before an exact refresh is published, the server remembers whether that order was already present in our cache. If such a known order is now Cancelled, it is materialised as an **Updated** attention record even when nobody had claimed it yet. The card is read-only until an operator acknowledges it with **Прийнято**.
 
+The periodic full reconciliation is also a **status-loss detector**, not merely a cache refresh. If an order that was previously known in Intake/Sent disappears from both status-filtered scans, the server performs exact `getOrders(order_id)` reads for a bounded batch of those disappeared IDs. That exact result decides whether the order is now Cancelled, Sent, another status, or missing/deleted. The stale cached status is never allowed to decide. Remaining recovery work is persisted as a health counter and retried on later reconciliation passes.
+
 `GET /orders` reads MongoDB only and never starts an upstream scan. It returns `baselinker_queue_not_configured` until all three statuses are selected and `baselinker_queue_warming` until a complete scoped snapshot exists. A truncated BaseLinker scan is rejected before sweep/publication.
 
-The journal is the incremental path. For every BaseLinker event that can change something visible or operational on an order (products, payment, order data/status, delivery, package/label state, invoice, receipt, merge/split/copy), the server fetches only the affected `order_id` through exact `getOrders(order_id)`, reconciles the current snapshot, and marks already locally tracked work as **Updated**. Blacklist-only events are ignored. This avoids rescanning the whole queue after every journal tick.
+The journal is the incremental path. It is polled in the background (15 seconds by default). For every BaseLinker event that can change something visible or operational on an order (products, payment, order data/status, delivery, package/label state, invoice, receipt, merge/split/copy), the server fetches only the affected `order_id` through exact `getOrders(order_id)`, reconciles the current snapshot, and marks already locally tracked work as **Updated**. Event type `18` is a status transition; its `object_id` is the BaseLinker status ID. Blacklist-only events are ignored.
 
-BaseLinker remains source of truth. The integration uses only read methods; no warehouse action changes a BaseLinker order/status. Local progress and acknowledgement live only in `BaseLinkerPickingOrder`.
+BaseLinker documents that `getJournalList` can return an empty list when the method is not enabled for the account. An empty bootstrap therefore sets a visible `journalPossiblyDisabled` health state and the system continues with periodic reconciliation instead of pretending near-live sync is healthy. While journal health is degraded, the reconciliation cadence tightens to `BASELINKER_DEGRADED_RECONCILE_MS` (60 seconds by default, bounded to at least 30 seconds); a healthy journal keeps the slower five-minute safety sweep. The fallback still uses exact `order_id` reads for orders that disappear from known queue statuses.
 
-`/status` exposes the three configured status IDs/names, fixed `sentLookbackDays=30`, cache/journal readiness, timestamps and last sync error. Errors persist across ticks/restarts with bounded retry backoff.
+BaseLinker remains source of truth. Local progress and acknowledgement live only in `BaseLinkerPickingOrder`; local order content/status never overrides an exact upstream result.
+
+`/status` exposes the three configured status IDs/names, fixed `sentLookbackDays=30`, cache/journal readiness, whether the journal scheduler is actually started in this process, journal cursor/poll/last-change health, degraded reconciliation cadence, fallback reconciliation backlog and last sync error. Errors persist across ticks/restarts with bounded retry backoff.
 
 Upstream reference: [getOrders](https://api.baselinker.com/index.php?method=getOrders), [getJournalList](https://api.baselinker.com/index.php?method=getJournalList).
 
@@ -91,7 +90,7 @@ Shipment reads are lazy so the order list does not generate N+1 traffic:
 - `getLabel(courier_code, package_id)` runs only after **ТТН** is clicked.
 - one order is modeled as `0..N` packages; `delivery_package_nr` in `getOrders` is only a snapshot/fallback hint.
 
-No `createPackage`, status mutation, deletion or other BaseLinker write exists in this module.
+No `createPackage`, package deletion or shipment mutation exists in this module. The only upstream order mutation is the separately guarded `setOrderStatus` used by **Відправив**.
 
 ## Local fulfilment state
 
@@ -132,7 +131,9 @@ Each line stores requested quantity, locally picked quantity, optional issue not
 
 A worker may own at most one active BaseLinker order at once. Claiming an order performs an exact `getOrders(order_id)` read first and synchronizes line composition before ownership is granted.
 
-A claim has `lastActivityAt`; the client sends a local heartbeat every minute. The default stale timeout is ten minutes (`BASELINKER_PICKING_CLAIM_STALE_MS` can override it, minimum two minutes).
+Tracked work also has `lastUpstreamVerifiedAt`. Interactive warehouse mutations refuse known non-Intake states and periodically reverify the exact `order_id` (15-second freshness window by default); heartbeat performs a forced exact check. This prevents a silent journal/cache lag from allowing continued picking after BaseLinker has already cancelled/sent/moved the order.
+
+A claim has `lastActivityAt`; the client sends a heartbeat every minute. The default stale timeout is ten minutes (`BASELINKER_PICKING_CLAIM_STALE_MS` can override it, minimum two minutes).
 
 Another worker may take over only after the claim is stale. Admin may explicitly force takeover. There is no silent automatic takeover.
 
@@ -174,9 +175,11 @@ A packed order stores the local packed summary/audit only. Historical schema val
 
 ### Send
 
-`sent` means **our local physical handoff confirmation only**. With the current read-only BaseLinker key it does not change BaseLinker status or courier data. Courier TTN/label continues to be read from BaseLinker.
+`sent` is **upstream-verified**, not an independent local truth. **Відправив** performs `setOrderStatus(exact order_id, configured sentStatusId)` and then exact `getOrders(order_id)`. Local `sent` is persisted only if BaseLinker now returns that exact Sent status. If the write response is ambiguous or verification still shows another status, local Sent is not committed.
 
-Admin may reopen `packed`/`sent` local state for correction; the action is audited.
+A manual status change to Sent in BaseLinker is also reconciled into local Sent. If BaseLinker later moves the order back to Intake, local Sent is reverted to the appropriate packed/working state instead of surviving as stale truth. Courier TTN/label remains read from BaseLinker.
+
+Admin reopen is still audited, but upstream status remains authoritative and blocked states cannot be locally forced into actionable Intake.
 
 ## Operator UI
 

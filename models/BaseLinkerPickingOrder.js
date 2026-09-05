@@ -88,6 +88,7 @@ const BaseLinkerPickingOrderSchema = new mongoose.Schema({
   sentByName: { type: String, default: '' },
 
   lastUpstreamChangeAt: { type: Date, default: null },
+  lastUpstreamVerifiedAt: { type: Date, default: null, index: true },
   lastUpstreamStatusId: { type: Number, default: null },
   upstreamDisposition: {
     type: String,
