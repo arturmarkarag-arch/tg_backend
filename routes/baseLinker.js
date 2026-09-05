@@ -5,13 +5,16 @@ const { asyncHandler, appError } = require('../utils/errors');
 const { isBaseLinkerConfigured } = require('../services/baseLinkerClient');
 const { getPrintAgentStatus, queuePrintJob } = require('../services/baseLinkerPrint');
 const { fetchBaseLinkerOrders, fetchBaseLinkerOrderMeta } = require('../services/baseLinkerOrders');
-const { getCachedOrderPage, refreshBaseLinkerOrderCache } = require('../services/baseLinkerOrderCache');
+const { getCachedOrderPage, cacheState } = require('../services/baseLinkerOrderCache');
+const { loadJournalState } = require('../services/baseLinkerJournal');
+const { getQueueScope } = require('../services/baseLinkerQueueScope');
+const { getBaseLinkerAccountScope, getBaseLinkerAccountBinding } = require('../services/baseLinkerAccount');
 const { fetchBaseLinkerProductCatalog } = require('../services/baseLinkerProducts');
 const { compactOrders, compactProductCatalog } = require('../services/baseLinkerPublicDto');
 const {
   fetchBaseLinkerOrderPackages,
-  fetchBaseLinkerPackageDetails,
-  fetchBaseLinkerLabel,
+  fetchVerifiedBaseLinkerOrderPackage,
+  fetchVerifiedBaseLinkerOrderLabel,
 } = require('../services/baseLinkerShipments');
 const {
   getPickingStates,
@@ -23,6 +26,7 @@ const {
   markPickingOrderPacked,
   markPickingOrderSent,
   reopenPickingOrder,
+  acknowledgeUpstreamReview,
 } = require('../services/baseLinkerPicking');
 
 const router = express.Router();
@@ -32,9 +36,31 @@ const router = express.Router();
 // treated as authorization.
 router.use(requireBaseLinkerPickingAccess);
 
-router.get('/status', (req, res) => {
-  res.json({ configured: isBaseLinkerConfigured() });
-});
+router.get('/status', asyncHandler(async (req, res) => {
+  const [cache, journal] = await Promise.all([cacheState(), loadJournalState()]);
+  const scope = await getQueueScope();
+  const binding = getBaseLinkerAccountBinding();
+  res.json({
+    configured: isBaseLinkerConfigured(),
+    accountScope: scope.accountScope,
+    accountIdentitySource: binding.source,
+    accountIdentityStable: binding.stable === true,
+    queueConfigured: scope.configured,
+    intakeStatusId: scope.intakeStatusId,
+    intakeStatusName: scope.intakeStatusName,
+    sentStatusId: scope.sentStatusId,
+    sentStatusName: scope.sentStatusName,
+    cancelledStatusId: scope.cancelledStatusId,
+    cancelledStatusName: scope.cancelledStatusName,
+    sentLookbackDays: scope.sentLookbackDays,
+    cacheInitialized: cache.initialized,
+    lastFullSyncAt: cache.lastFullSyncAt,
+    journalInitialized: journal.initialized,
+    lastJournalSuccessAt: journal.lastSuccessAt,
+    lastError: journal.lastError,
+    nextRetryAt: journal.nextRetryAt,
+  });
+}));
 
 router.get('/meta', asyncHandler(async (req, res) => {
   if (!isBaseLinkerConfigured()) throw appError('baselinker_not_configured');
@@ -56,7 +82,6 @@ router.get('/orders', asyncHandler(async (req, res) => {
       includeUnconfirmed: req.query.includeUnconfirmed === '1' || req.query.includeUnconfirmed === 'true',
       maxPages: 1,
     });
-    await refreshBaseLinkerOrderCache({ orders: result.orders || [] });
   } else {
     // The work queue is server-paginated from a dedicated BaseLinker snapshot
     // cache. The browser receives only the requested 10/20/50 logical orders;
@@ -64,6 +89,7 @@ router.get('/orders', asyncHandler(async (req, res) => {
     result = await getCachedOrderPage({
       statusId: req.query.statusId,
       workflowFilter: req.query.workflowFilter,
+      packedBy: req.query.packedBy,
       search: req.query.search,
       page: req.query.page,
       pageSize: req.query.pageSize,
@@ -91,6 +117,7 @@ router.get('/orders', asyncHandler(async (req, res) => {
 
   res.json({
     ...result,
+    accountScope: getBaseLinkerAccountScope(),
     orders: compactOrders(result.orders || []),
     productCatalog: compactProductCatalog(catalog.productCatalog || {}),
     productCatalogStats: catalog.productCatalogStats,
@@ -105,15 +132,20 @@ router.get('/orders/:orderId/packages', asyncHandler(async (req, res) => {
   res.json({ ...result, fetchedAt: new Date().toISOString() });
 }));
 
-router.get('/packages/:packageId/details', asyncHandler(async (req, res) => {
+router.get('/orders/:orderId/packages/:packageId/details', asyncHandler(async (req, res) => {
   if (!isBaseLinkerConfigured()) throw appError('baselinker_not_configured');
-  const result = await fetchBaseLinkerPackageDetails(req.params.packageId);
-  res.json({ ...result, fetchedAt: new Date().toISOString() });
+  const result = await fetchVerifiedBaseLinkerOrderPackage({
+    orderId: req.params.orderId,
+    packageId: req.params.packageId,
+    courierCode: req.query.courierCode,
+  });
+  res.json({ ...result, accountScope: getBaseLinkerAccountScope(), fetchedAt: new Date().toISOString() });
 }));
 
-router.get('/packages/:packageId/label', asyncHandler(async (req, res) => {
+router.get('/orders/:orderId/packages/:packageId/label', asyncHandler(async (req, res) => {
   if (!isBaseLinkerConfigured()) throw appError('baselinker_not_configured');
-  const label = await fetchBaseLinkerLabel({
+  const label = await fetchVerifiedBaseLinkerOrderLabel({
+    orderId: req.params.orderId,
     packageId: req.params.packageId,
     courierCode: req.query.courierCode,
   });
@@ -135,10 +167,10 @@ router.get('/print-agent/status', asyncHandler(async (req, res) => {
   res.json(await getPrintAgentStatus());
 }));
 
-router.post('/packages/:packageId/print', asyncHandler(async (req, res) => {
+router.post('/orders/:orderId/packages/:packageId/print', asyncHandler(async (req, res) => {
   if (!isBaseLinkerConfigured()) throw appError('baselinker_not_configured');
   const job = await queuePrintJob({
-    orderId: req.body?.orderId,
+    orderId: req.params.orderId,
     packageId: req.params.packageId,
     courierCode: req.body?.courierCode,
     user: req.telegramUser,
@@ -147,10 +179,15 @@ router.post('/packages/:packageId/print', asyncHandler(async (req, res) => {
 }));
 
 
-// ── Local fulfilment workflow ───────────────────────────────────────────────
-// These endpoints mutate ONLY our MongoDB picking state. BaseLinker itself is
-// still accessed through read-only `get...` methods; no upstream create/set/
-// delete method exists in this router.
+
+function clientMutationIdFromRequest(req) {
+  return String(req.body?.clientMutationId || '').trim().slice(0, 160);
+}
+
+// ── Fulfilment workflow ─────────────────────────────────────────────────────
+// Picking/problem/packing state is a local 1:1 overlay on exact BaseLinker
+// order_id. The sole upstream mutation is "Sent": exact setOrderStatus followed
+// by exact getOrders verification before local Sent can be persisted.
 router.get('/picking/my-active', asyncHandler(async (req, res) => {
   res.json({ state: await getMyActivePicking(req.telegramUser) });
 }));
@@ -161,13 +198,14 @@ router.get('/picking/orders/:orderId', asyncHandler(async (req, res) => {
 }));
 
 router.post('/picking/orders/:orderId/claim', asyncHandler(async (req, res) => {
+  const clientMutationId = clientMutationIdFromRequest(req);
   const result = await claimPickingOrder({
     orderId: req.params.orderId,
-    memberOrderIds: Array.isArray(req.body?.memberOrderIds) ? req.body.memberOrderIds : [],
     user: req.telegramUser,
     force: req.body?.force === true,
+    clientMutationId,
   });
-  res.json(result);
+  res.json({ ...result, ...(clientMutationId ? { clientMutationId } : {}) });
 }));
 
 router.post('/picking/orders/:orderId/heartbeat', asyncHandler(async (req, res) => {
@@ -178,6 +216,7 @@ router.post('/picking/orders/:orderId/heartbeat', asyncHandler(async (req, res) 
 }));
 
 router.patch('/picking/orders/:orderId/items/:lineKey', asyncHandler(async (req, res) => {
+  const clientMutationId = clientMutationIdFromRequest(req);
   const state = await updatePickingItem({
     orderId: req.params.orderId,
     lineKey: req.params.lineKey,
@@ -186,45 +225,65 @@ router.patch('/picking/orders/:orderId/items/:lineKey', asyncHandler(async (req,
     state: req.body?.state,
     pickedQty: req.body?.pickedQty,
     issueNote: req.body?.issueNote,
+    clientMutationId,
   });
-  res.json({ state });
+  res.json({ state, ...(clientMutationId ? { clientMutationId } : {}) });
 }));
 
 router.post('/picking/orders/:orderId/release', asyncHandler(async (req, res) => {
+  const clientMutationId = clientMutationIdFromRequest(req);
   const state = await releasePickingOrder({
     orderId: req.params.orderId,
     user: req.telegramUser,
     expectedRevision: req.body?.expectedRevision,
     force: req.body?.force === true,
+    clientMutationId,
   });
-  res.json({ state });
+  res.json({ state, ...(clientMutationId ? { clientMutationId } : {}) });
 }));
 
 router.post('/picking/orders/:orderId/packed', asyncHandler(async (req, res) => {
-  res.json(await markPickingOrderPacked({
+  const clientMutationId = clientMutationIdFromRequest(req);
+  const result = await markPickingOrderPacked({
     orderId: req.params.orderId,
     user: req.telegramUser,
     expectedRevision: req.body?.expectedRevision,
-    allowIssues: req.body?.allowIssues === true,
-  }));
+    clientMutationId,
+  });
+  res.json({ ...result, ...(clientMutationId ? { clientMutationId } : {}) });
 }));
 
 router.post('/picking/orders/:orderId/sent', asyncHandler(async (req, res) => {
-  const state = await markPickingOrderSent({
+  const clientMutationId = clientMutationIdFromRequest(req);
+  const result = await markPickingOrderSent({
     orderId: req.params.orderId,
     user: req.telegramUser,
     expectedRevision: req.body?.expectedRevision,
+    clientMutationId,
   });
-  res.json({ state });
+  res.json({ ...result, ...(clientMutationId ? { clientMutationId } : {}) });
+}));
+
+router.post('/picking/orders/:orderId/upstream-reviewed', asyncHandler(async (req, res) => {
+  const clientMutationId = clientMutationIdFromRequest(req);
+  const state = await acknowledgeUpstreamReview({
+    orderId: req.params.orderId,
+    user: req.telegramUser,
+    expectedRevision: req.body?.expectedRevision,
+    clientMutationId,
+  });
+  res.json({ state, ...(clientMutationId ? { clientMutationId } : {}) });
 }));
 
 router.post('/picking/orders/:orderId/reopen', requireTelegramRole('admin'), asyncHandler(async (req, res) => {
+  const clientMutationId = clientMutationIdFromRequest(req);
   const state = await reopenPickingOrder({
     orderId: req.params.orderId,
     user: req.telegramUser,
     expectedRevision: req.body?.expectedRevision,
+    clientMutationId,
   });
-  res.json({ state });
+  res.json({ state, ...(clientMutationId ? { clientMutationId } : {}) });
 }));
 
 module.exports = router;

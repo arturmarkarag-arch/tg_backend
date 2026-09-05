@@ -31,8 +31,8 @@ describe('BaseLinker server-side pagination contract', () => {
 
   it('keeps the persistent cache fresh from BaseLinker journal changes', () => {
     const journal = read('services/baseLinkerJournal.js');
-    expect(journal).toContain('refreshBaseLinkerOrderCache');
-    expect(journal).toMatch(/refreshBaseLinkerOrderCache\(\{ orders: upserts, removedOrderIds \}\)/);
+    expect(journal).toContain('syncBaseLinkerOrderCache');
+    expect(journal).toContain('syncBaseLinkerOrderCache({ force: true })');
   });
 
   it('uses persisted operational shelf before pagination/counting with legacy status fallback', () => {

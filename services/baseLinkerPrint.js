@@ -1,7 +1,11 @@
 const crypto = require('crypto');
 const BaseLinkerPrintAgent = require('../models/BaseLinkerPrintAgent');
 const BaseLinkerPrintJob = require('../models/BaseLinkerPrintJob');
-const { fetchBaseLinkerLabel } = require('./baseLinkerShipments');
+const {
+  fetchVerifiedBaseLinkerOrderPackage,
+  fetchVerifiedBaseLinkerOrderLabel,
+} = require('./baseLinkerShipments');
+const { getBaseLinkerAccountScope } = require('./baseLinkerAccount');
 const { getIO } = require('../socket');
 const { appError } = require('../utils/errors');
 
@@ -120,6 +124,7 @@ function emitJob(job) {
     const io = getIO();
     if (!io || !job?.requestedByTelegramId) return;
     io.to(`user_${job.requestedByTelegramId}`).emit('baselinker_print_job_updated', {
+      accountScope: getBaseLinkerAccountScope(),
       jobId: job.jobId,
       status: job.status,
       printerName: job.printerName || '',
@@ -135,14 +140,25 @@ function emitJob(job) {
 }
 
 async function queuePrintJob({ orderId, packageId, courierCode, user }) {
+  const order = positiveInt(orderId, 'baselinker_order_id_invalid');
   const id = positiveInt(packageId, 'baselinker_package_id_invalid');
-  const code = courierCodeOf(courierCode);
+  const requestedCode = courierCodeOf(courierCode);
   const actor = actorOf(user);
   if (!actor.telegramId) throw appError('auth_required');
+
+  // Queue only an authoritative order/package pair. Browser state is not proof
+  // that a package belongs to this order.
+  const binding = await fetchVerifiedBaseLinkerOrderPackage({
+    orderId: order,
+    packageId: id,
+    courierCode: requestedCode,
+  });
+  const code = binding.courierCode;
 
   const agent = await chooseOnlineAgent();
   const dedupeCutoff = new Date(Date.now() - DEDUPE_MS);
   const existing = await BaseLinkerPrintJob.findOne({
+    orderId: String(order),
     packageId: id,
     targetAgentId: agent.agentId,
     status: { $in: ['pending', 'claimed', 'printing'] },
@@ -161,7 +177,7 @@ async function queuePrintJob({ orderId, packageId, courierCode, user }) {
   const now = new Date();
   const job = await BaseLinkerPrintJob.create({
     jobId: crypto.randomUUID(),
-    orderId: text(orderId).slice(0, 64),
+    orderId: String(order),
     packageId: id,
     courierCode: code,
     requestedByTelegramId: actor.telegramId,
@@ -258,7 +274,13 @@ async function getPrintJobPayload({ jobId, agentId }) {
   emitJob(job.toObject());
 
   try {
-    const label = await fetchBaseLinkerLabel({ packageId: job.packageId, courierCode: job.courierCode });
+    // Re-verify immediately before obtaining the physical label. A job can
+    // sit in the queue while upstream shipment data changes.
+    const label = await fetchVerifiedBaseLinkerOrderLabel({
+      orderId: job.orderId,
+      packageId: job.packageId,
+      courierCode: job.courierCode,
+    });
     job.labelExtension = label.extension;
     job.leaseUntil = new Date(Date.now() + JOB_LEASE_MS);
     await job.save();

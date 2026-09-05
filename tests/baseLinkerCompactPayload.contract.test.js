@@ -17,6 +17,8 @@ describe('BaseLinker compact worker payload', () => {
       confirmed: true,
       date_confirmed: 100,
       date_add: 90,
+      delivery_package_module: 'inpost',
+      delivery_package_nr: '620100045678901234',
       phone: '+48123456789',
       email: 'buyer@example.com',
       delivery_fullname: 'Buyer Name',
@@ -52,6 +54,8 @@ describe('BaseLinker compact worker payload', () => {
       confirmed: true,
       date_confirmed: 100,
       date_add: 90,
+      delivery_package_module: 'inpost',
+      delivery_package_nr: '620100045678901234',
       products: [{
         storage: 'db',
         storage_id: 26108,
@@ -91,8 +95,6 @@ describe('BaseLinker compact worker payload', () => {
   it('keeps public picking state operational and drops history/fingerprints/audit metadata', () => {
     const state = publicState({
       orderId: '156189781',
-      groupKey: 'external:a:b:c',
-      memberOrderIds: ['156189781'],
       status: 'problem',
       revision: 10,
       ownerTelegramId: '123',

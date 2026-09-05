@@ -1,5 +1,6 @@
 const { callBaseLinker } = require('./baseLinkerClient');
 const { appError } = require('../utils/errors');
+const { getBaseLinkerAccountScope } = require('./baseLinkerAccount');
 
 // Worker fulfilment does not need commissions, connect payloads, discounts or
 // arbitrary extra fields. BaseLinker defaults those optional expansions to off,
@@ -56,7 +57,15 @@ async function fetchBaseLinkerOrders(options = {}, callApi = callBaseLinker) {
     : 20;
 
   const baseParams = buildOrdersParameters(options);
-
+  if (options.orderId !== undefined && (!Number.isSafeInteger(Number(options.orderId)) || Number(options.orderId) <= 0)) {
+    throw appError('baselinker_order_id_invalid');
+  }
+  // A status-only scan is valid for the intake queue: BaseLinker applies the
+  // status filter upstream and the first page can start without a date cursor.
+  // Subsequent full pages advance through date_confirmed_from.
+  if (baseParams.order_id === undefined && !(baseParams.status_id > 0)) {
+    throw appError('baselinker_queue_not_configured');
+  }
   // Exact order lookup is one request; cursor pagination is irrelevant.
   if (baseParams.order_id !== undefined) {
     const payload = await callApi('getOrders', baseParams);
@@ -69,7 +78,11 @@ async function fetchBaseLinkerOrders(options = {}, callApi = callBaseLinker) {
   }
 
   const unconfirmedMode = baseParams.get_unconfirmed_orders === true;
-  let cursor = unconfirmedMode ? null : (baseParams.date_confirmed_from ?? null);
+  // A status-only scan (our intake queue) uses id_from so it can start at the
+  // beginning of that status without inventing a date window. Date-bounded
+  // scans (Sent = 30 days) keep BaseLinker's documented date cursor.
+  const idCursorMode = unconfirmedMode || baseParams.date_confirmed_from === undefined;
+  let cursor = idCursorMode ? null : (baseParams.date_confirmed_from ?? null);
   const byId = new Map();
   let pageCount = 0;
   let truncated = false;
@@ -78,7 +91,7 @@ async function fetchBaseLinkerOrders(options = {}, callApi = callBaseLinker) {
 
   for (; pageCount < maxPages; pageCount += 1) {
     const params = { ...baseParams };
-    if (unconfirmedMode) {
+    if (idCursorMode) {
       if (cursor !== null) params.id_from = cursor;
     } else if (cursor !== null) {
       params.date_confirmed_from = cursor;
@@ -98,7 +111,7 @@ async function fetchBaseLinkerOrders(options = {}, callApi = callBaseLinker) {
       break;
     }
 
-    if (unconfirmedMode) {
+    if (idCursorMode) {
       const lastOrderId = Number(batch[batch.length - 1]?.order_id || 0);
       if (!Number.isInteger(lastOrderId) || lastOrderId <= 0) throw appError('baselinker_cursor_invalid');
       const advanced = lastOrderId + 1;
@@ -133,14 +146,15 @@ async function fetchBaseLinkerOrders(options = {}, callApi = callBaseLinker) {
   return { orders, pageCount: Math.min(pageCount + (truncated ? 0 : 1), maxPages), truncated, nextDateConfirmedFrom, nextIdFrom };
 }
 
-let metaCache = null;
-let metaCacheExpiresAt = 0;
-let metaInFlight = null;
+const metaCache = new Map();
+const metaInFlight = new Map();
 
 async function fetchBaseLinkerOrderMeta(callApi = callBaseLinker) {
   const now = Date.now();
-  if (callApi === callBaseLinker && metaCache && now < metaCacheExpiresAt) return metaCache;
-  if (callApi === callBaseLinker && metaInFlight) return metaInFlight;
+  const accountScope = getBaseLinkerAccountScope();
+  const cached = metaCache.get(accountScope);
+  if (callApi === callBaseLinker && cached && now < cached.expiresAt) return cached.value;
+  if (callApi === callBaseLinker && metaInFlight.has(accountScope)) return metaInFlight.get(accountScope);
 
   const load = async () => {
     const [statusesPayload, sourcesPayload] = await Promise.all([
@@ -156,18 +170,18 @@ async function fetchBaseLinkerOrderMeta(callApi = callBaseLinker) {
     };
 
     if (callApi === callBaseLinker) {
-      metaCache = result;
-      metaCacheExpiresAt = Date.now() + (5 * 60 * 1000);
+      metaCache.set(accountScope, { value: result, expiresAt: Date.now() + (5 * 60 * 1000) });
     }
     return result;
   };
 
   if (callApi !== callBaseLinker) return load();
-  metaInFlight = load();
+  const inFlight = load();
+  metaInFlight.set(accountScope, inFlight);
   try {
-    return await metaInFlight;
+    return await inFlight;
   } finally {
-    metaInFlight = null;
+    if (metaInFlight.get(accountScope) === inFlight) metaInFlight.delete(accountScope);
   }
 }
 

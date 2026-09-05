@@ -34,6 +34,12 @@ function compactOrder(order = {}) {
   if (order.confirmed !== undefined && order.confirmed !== null) out.confirmed = Boolean(order.confirmed);
   setIfDefined(out, 'date_confirmed', order.date_confirmed);
   setIfDefined(out, 'date_add', order.date_add);
+  // getOrders already exposes a lightweight shipment hint. Keep it in the
+  // worker payload so the client does not render a misleading TTN action (or
+  // create one getOrderPackages request per visible card) when no shipment
+  // number has been assigned yet.
+  setIfDefined(out, 'delivery_package_module', order.delivery_package_module);
+  setIfDefined(out, 'delivery_package_nr', order.delivery_package_nr);
   out.products = (Array.isArray(order.products) ? order.products : []).map(compactOrderProduct);
   return out;
 }

@@ -1,0 +1,25 @@
+'use strict';
+
+const mongoose = require('mongoose');
+const baseLinkerAccountScopePlugin = require('./plugins/baseLinkerAccountScope');
+const { getBaseLinkerAccountScope } = require('../services/baseLinkerAccount');
+
+// Content-addressed immutable audit snapshots of the exact parsed order rows
+// returned by BaseLinker. Business/picking state never overwrites these rows.
+const BaseLinkerOrderSnapshotSchema = new mongoose.Schema({
+  accountScope: { type: String, required: true, default: getBaseLinkerAccountScope, index: true, maxlength: 80 },
+  orderId: { type: String, required: true, index: true },
+  snapshotHash: { type: String, required: true, maxlength: 64 },
+  source: { type: String, default: 'unknown', maxlength: 64 },
+  observedAt: { type: Date, default: Date.now, index: true },
+  order: { type: mongoose.Schema.Types.Mixed, required: true },
+}, { timestamps: false });
+
+BaseLinkerOrderSnapshotSchema.index(
+  { accountScope: 1, orderId: 1, snapshotHash: 1 },
+  { unique: true },
+);
+BaseLinkerOrderSnapshotSchema.index({ accountScope: 1, orderId: 1, observedAt: -1 });
+BaseLinkerOrderSnapshotSchema.plugin(baseLinkerAccountScopePlugin);
+
+module.exports = mongoose.model('BaseLinkerOrderSnapshot', BaseLinkerOrderSnapshotSchema);

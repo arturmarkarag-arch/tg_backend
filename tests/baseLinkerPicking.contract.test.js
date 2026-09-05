@@ -5,8 +5,6 @@ const {
   progressFor,
   packingReadiness,
   deriveWorkingStatus,
-  baseLinkerFulfilmentGroupKey,
-  mergeOrderGroup,
 } = require('../services/baseLinkerPicking');
 const { t } = require('../utils/errors');
 
@@ -31,12 +29,18 @@ describe('BaseLinker local picking workflow', () => {
     expect(items[0].requestedQty).toBe(2);
   });
 
-  it('keeps all upstream BaseLinker methods read-only while local Mongo workflow may mutate', () => {
+  it('allows exactly one BaseLinker write path: exact order_id status transition to Sent', () => {
     const picking = read('services/baseLinkerPicking.js');
+    const commands = read('services/baseLinkerOrderCommands.js');
     const router = read('routes/baseLinker.js');
-    expect(picking).toContain('fetchBaseLinkerOrders');
-    expect(`${picking}\n${router}`).not.toMatch(/callBaseLinker\(['\"](?:create|set|delete|add|remove)/i);
-    expect(router).toContain('mutate ONLY our MongoDB picking state');
+    expect(picking).toContain('setBaseLinkerOrderStatus');
+    expect(commands).toContain("callBaseLinker('setOrderStatus'");
+    expect(commands).toContain('order_id: id');
+    expect(commands).toContain('status_id: status');
+    expect(router).toContain('sole upstream mutation is "Sent"');
+    expect(`${picking}
+${commands}
+${router}`).not.toMatch(/callBaseLinker\(['"](?:addOrder|deleteOrder|setOrderFields|setOrderPayment)/i);
   });
 
   it('requires a revision for item/release/pack/sent corrections and keeps admin-only reopen', () => {
@@ -101,13 +105,13 @@ describe('BaseLinker local picking workflow', () => {
     expect(deriveWorkingStatus(items, true)).toBe('problem');
   });
 
-  it('requires an explicit allowIssues acknowledgement to pack a handled problem order', () => {
+  it('never allows packing while any problem remains unresolved', () => {
     const router = read('routes/baseLinker.js');
     const picking = read('services/baseLinkerPicking.js');
-    expect(router).toContain('allowIssues: req.body?.allowIssues === true');
-    expect(picking).toContain("appError('baselinker_picking_issue_confirmation_required'");
+    expect(router).not.toContain('allowIssues');
+    expect(picking).not.toContain('allowIssues');
     expect(picking).toContain("appError('baselinker_picking_items_unhandled'");
-    expect(picking).toContain("'order_packed_with_issues'");
+    expect(picking).toContain("appError('baselinker_picking_has_unresolved_issues'");
     expect(picking).toContain('packedSummary');
   });
 
@@ -136,28 +140,45 @@ describe('BaseLinker local picking workflow', () => {
       upstreamMessage: 'Test message',
     })).toContain('Test message');
   });
-  it('groups split BaseLinker records only when source + external order identity match', () => {
-    const a = { order_id: 101, order_source: 'shop', order_source_id: 5, external_order_id: 'ABC', products: [{ order_product_id: 1, quantity: 1 }] };
-    const b = { order_id: 102, order_source: 'shop', order_source_id: 5, external_order_id: 'ABC', products: [{ order_product_id: 2, quantity: 2 }] };
-    const c = { order_id: 103, order_source: 'shop', order_source_id: 6, external_order_id: 'ABC', products: [{ order_product_id: 3, quantity: 1 }] };
-    expect(baseLinkerFulfilmentGroupKey(a)).toBe(baseLinkerFulfilmentGroupKey(b));
-    expect(baseLinkerFulfilmentGroupKey(a)).not.toBe(baseLinkerFulfilmentGroupKey(c));
-
-    const merged = mergeOrderGroup([a, b], 101);
-    expect(merged._member_order_ids).toEqual(['101', '102']);
-    expect(merged.products).toHaveLength(2);
-    expect(merged.products[1]._source_order_id).toBe('102');
-    expect(buildSourceItems(merged).map((item) => item.lineKey)).toEqual(['op:1', 'bl:102:op:2']);
-  });
-
-  it('claim route sends all BaseLinker member order ids to the server-side group validator', () => {
+  it('keeps each exact BaseLinker order_id as the only fulfilment boundary', () => {
+    const source = read('services/baseLinkerPicking.js');
+    const model = read('models/BaseLinkerPickingOrder.js');
     const router = read('routes/baseLinker.js');
-    expect(router).toContain('memberOrderIds: Array.isArray(req.body?.memberOrderIds)');
-    expect(read('models/BaseLinkerPickingOrder.js')).toContain('memberOrderIds');
-    expect(read('services/baseLinkerPicking.js')).toContain('fetchExactOrderGroup');
-    expect(read('services/baseLinkerPicking.js')).toContain('baselinker_picking_group_mismatch');
+
+    const first = buildSourceItems({
+      order_id: 101,
+      products: [{ order_product_id: 1, product_id: 10, name: 'A', quantity: 3 }],
+    });
+    const second = buildSourceItems({
+      order_id: 102,
+      products: [{ order_product_id: 2, product_id: 10, name: 'A', quantity: 4 }],
+    });
+    expect(first).toHaveLength(1);
+    expect(second).toHaveLength(1);
+    expect(first[0].sourceOrderId).toBe('101');
+    expect(second[0].sourceOrderId).toBe('102');
+    expect(first[0].requestedQty).toBe(3);
+    expect(second[0].requestedQty).toBe(4);
+
+    expect(model).toContain("BaseLinkerPickingOrderSchema.index({ accountScope: 1, orderId: 1 }, { unique: true })");
+    expect(model).not.toContain('memberOrderIds');
+    expect(model).not.toContain('groupKey');
+    expect(source).not.toContain('mergeOrderGroup');
+    expect(source).not.toContain('fetchExactOrderGroup');
+    expect(source).not.toContain('claimKeyForGroup');
+    expect(router).not.toContain('memberOrderIds');
   });
 
+  it('claim route accepts only the exact BaseLinker order id from the URL', () => {
+    const router = read('routes/baseLinker.js');
+    const picking = read('services/baseLinkerPicking.js');
+    expect(router).toContain('orderId: req.params.orderId');
+    expect(router).not.toContain('memberOrderIds');
+    expect(picking).toContain('async function fetchExactOrder(orderId)');
+    expect(picking).toContain('const order = await fetchExactOrder(requestedId)');
+    expect(picking).toContain('withLock(scopedLockKey(`baselinker-order:${requestedId}`');
+    expect(picking).not.toContain('baselinker_picking_group_mismatch');
+  });
 
   it('centralizes picking statuses and preserves completion when ownership is released', () => {
     const domain = read('domain/baseLinkerPickingState.js');

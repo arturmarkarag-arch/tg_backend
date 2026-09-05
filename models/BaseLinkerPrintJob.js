@@ -1,6 +1,9 @@
 const mongoose = require('mongoose');
+const baseLinkerAccountScopePlugin = require('./plugins/baseLinkerAccountScope');
+const { getBaseLinkerAccountScope } = require('../services/baseLinkerAccount');
 
 const baseLinkerPrintJobSchema = new mongoose.Schema({
+  accountScope: { type: String, required: true, default: getBaseLinkerAccountScope, index: true, maxlength: 80 },
   jobId: { type: String, required: true, trim: true, maxlength: 96 },
   orderId: { type: String, default: '', trim: true, maxlength: 64 },
   packageId: { type: Number, required: true, min: 1 },
@@ -28,8 +31,9 @@ const baseLinkerPrintJobSchema = new mongoose.Schema({
 }, { timestamps: true });
 
 baseLinkerPrintJobSchema.index({ jobId: 1 }, { unique: true });
-baseLinkerPrintJobSchema.index({ targetAgentId: 1, status: 1, createdAt: 1 });
-baseLinkerPrintJobSchema.index({ packageId: 1, status: 1, createdAt: -1 });
+baseLinkerPrintJobSchema.index({ accountScope: 1, targetAgentId: 1, status: 1, createdAt: 1 });
+baseLinkerPrintJobSchema.index({ accountScope: 1, packageId: 1, status: 1, createdAt: -1 });
 baseLinkerPrintJobSchema.index({ createdAt: 1 }, { expireAfterSeconds: 7 * 24 * 60 * 60 });
+baseLinkerPrintJobSchema.plugin(baseLinkerAccountScopePlugin);
 
 module.exports = mongoose.model('BaseLinkerPrintJob', baseLinkerPrintJobSchema);

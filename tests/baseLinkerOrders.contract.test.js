@@ -29,7 +29,7 @@ describe('BaseLinker orders adapter', () => {
       return { status: 'SUCCESS', orders: calls.length === 1 ? first : second };
     };
 
-    const result = await fetchBaseLinkerOrders({ dateConfirmedFrom: 900, maxPages: 5 }, callApi);
+    const result = await fetchBaseLinkerOrders({ statusId: 9, dateConfirmedFrom: 900, maxPages: 5 }, callApi);
 
     expect(calls).toHaveLength(2);
     expect(calls[0].params.date_confirmed_from).toBe(900);
@@ -52,22 +52,24 @@ describe('BaseLinker orders adapter', () => {
       };
     };
 
-    const result = await fetchBaseLinkerOrders({ dateConfirmedFrom: 1, maxPages: 2 }, callApi);
+    const result = await fetchBaseLinkerOrders({ statusId: 9, dateConfirmedFrom: 1, maxPages: 2 }, callApi);
     expect(result.truncated).toBe(true);
     expect(result.nextDateConfirmedFrom).toBeGreaterThan(1);
   });
-  it('uses creation-date + id cursor when unconfirmed orders are requested', async () => {
-    const calls = [];
-    const first = Array.from({ length: 100 }, (_, i) => ({ order_id: i + 10, date_add: 2000 + i, date_confirmed: 0 }));
-    const callApi = async (method, params) => {
-      calls.push({ method, params });
-      return { status: 'SUCCESS', orders: calls.length === 1 ? first : [] };
-    };
-
-    await fetchBaseLinkerOrders({ dateConfirmedFrom: 1500, includeUnconfirmed: true, maxPages: 3 }, callApi);
-    expect(calls[0].params.date_from).toBe(1500);
-    expect(calls[0].params.date_confirmed_from).toBeUndefined();
-    expect(calls[1].params.id_from).toBe(110);
+  it('rejects unfiltered scans before calling upstream', async () => {
+    const callApi = vi.fn();
+    for (const options of [{}, { dateConfirmedFrom: 1500 }, { orderId: 'bad' }]) {
+      await expect(fetchBaseLinkerOrders(options, callApi)).rejects.toBeDefined();
+    }
+    expect(callApi).not.toHaveBeenCalled();
   });
 
+  it('allows the selected intake status to include unconfirmed orders', async () => {
+    const callApi = vi.fn(async () => ({ status: 'SUCCESS', orders: [] }));
+    await fetchBaseLinkerOrders({ statusId: 9, includeUnconfirmed: true }, callApi);
+    expect(callApi).toHaveBeenCalledWith('getOrders', expect.objectContaining({
+      status_id: 9,
+      get_unconfirmed_orders: true,
+    }));
+  });
 });

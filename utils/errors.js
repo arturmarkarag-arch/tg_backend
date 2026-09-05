@@ -21,6 +21,10 @@
 // Each entry: { status, message } where message is either a string or a function(args) → string.
 // IMPORTANT: keep messages in Ukrainian. New error codes go here, not inline.
 const ERRORS = {
+  baselinker_queue_settings_invalid: { status: 400, message: 'Оберіть три різні статуси BaseLinker: вхідні, вислано та анульовано.' },
+  baselinker_queue_status_unknown: { status: 400, message: 'Цього статусу більше немає в BaseLinker. Оновіть список і оберіть інший.' },
+  baselinker_queue_not_configured: { status: 503, message: 'Робоча черга очікує налаштування трьох статусів BaseLinker.' },
+  baselinker_queue_warming: { status: 503, message: 'Робоча черга оновлюється у фоні. Спробуйте знову трохи пізніше.' },
   // ── Generic ────────────────────────────────────────────────────────────────
   internal_error:           { status: 500, message: 'Внутрішня помилка сервера' },
   lock_busy:                { status: 409, message: ({ resource } = {}) => resource
@@ -123,7 +127,7 @@ const ERRORS = {
                                 const where = upstreamMethod ? ` під час ${upstreamMethod}` : '';
                                 const details = `${upstreamCode ? ` (${upstreamCode})` : ''}${upstreamMessage ? `: ${upstreamMessage}` : ''}`;
                                 if (Number(upstreamStatus) === 401) return `BaseLinker відхилив API-токен${where} (HTTP 401). Перевірте BASELINKER_API_TOKEN.${details}`;
-                                if (Number(upstreamStatus) === 403) return `BaseLinker заборонив цю read-only операцію${where} (HTTP 403). Перевірте права API-токена.${details}`;
+                                if (Number(upstreamStatus) === 403) return `BaseLinker заборонив цю API-операцію${where} (HTTP 403). Перевірте права API-токена.${details}`;
                                 if (Number(upstreamStatus) === 429) return `BaseLinker тимчасово відхилив запит через ліміт API${where} (HTTP 429). Зачекайте трохи й повторіть.${details}`;
                                 return `BaseLinker повернув HTTP ${upstreamStatus || 'помилку'}${where}${details}.`;
                               } },
@@ -134,16 +138,15 @@ const ERRORS = {
   baselinker_cursor_invalid: { status: 502, message: 'BaseLinker повернув сторінку замовлень без безпечного курсора. Завантаження зупинено, щоб не дублювати запити.' },
   baselinker_order_id_invalid: { status: 400, message: 'Некоректний BaseLinker order_id.' },
   baselinker_package_id_invalid: { status: 400, message: 'Некоректний BaseLinker package_id.' },
-  baselinker_courier_code_invalid: { status: 400, message: 'Не вказано коректний код курʼєра для накладної.' },
-  baselinker_label_invalid: { status: 502, message: 'BaseLinker повернув порожню або некоректну накладну.' },
-  baselinker_label_too_large: { status: 502, message: 'Накладна BaseLinker перевищує безпечний ліміт розміру.' },
+  baselinker_courier_code_invalid: { status: 400, message: 'Не вказано коректний код курʼєра для ТТН.' },
+  baselinker_package_order_mismatch: { status: 409, message: 'Ця ТТН не належить вказаному BaseLinker order_id. Друк заблоковано.' },
+  baselinker_package_courier_mismatch: { status: 409, message: 'Код курʼєра не відповідає пакуванню цього BaseLinker замовлення. Друк заблоковано.' },
+  baselinker_status_id_invalid: { status: 400, message: 'Некоректний BaseLinker status_id.' },
+  baselinker_label_invalid: { status: 502, message: 'BaseLinker повернув порожню або некоректну ТТН.' },
+  baselinker_label_too_large: { status: 502, message: 'ТТН BaseLinker перевищує безпечний ліміт розміру.' },
   baselinker_order_not_returned: { status: 404, message: ({ orderId, upstreamMethod } = {}) =>
                                 `BaseLinker успішно відповів${upstreamMethod ? ` на ${upstreamMethod}` : ''}, але не повернув замовлення${orderId ? ` #${orderId}` : ''}. Воно могло бути видалене або недоступне для цього API-токена. Оновіть список і повторіть.` },
   baselinker_order_has_no_products: { status: 409, message: 'У замовленні BaseLinker немає товарних позицій для збирання.' },
-  baselinker_picking_group_empty: { status: 400, message: 'Не передано жодного BaseLinker order_id для спільного комплектування.' },
-  baselinker_picking_group_too_large: { status: 400, message: ({ count } = {}) => `Занадто багато частин одного замовлення для однієї операції${count ? ` (${count})` : ''}. Оновіть список і повторіть.` },
-  baselinker_picking_group_mismatch: { status: 409, message: 'Ці BaseLinker order_id не належать до одного зовнішнього замовлення. Система не буде склеювати їх автоматично.' },
-  baselinker_picking_group_conflict: { status: 409, message: ({ orderIds } = {}) => `Для цього зовнішнього замовлення вже існує кілька окремих локальних станів комплектування${orderIds ? ` (${orderIds})` : ''}. Потрібне одноразове обʼєднання адміністратором, щоб не втратити відмітки.` },
   baselinker_worker_has_active_order: { status: 409, message: ({ orderId } = {}) =>
                                 `У вас уже є активне замовлення${orderId ? ` #${orderId}` : ''}. Завершіть або відкладіть його перед наступним.` },
   baselinker_picking_taken: { status: 409, message: ({ ownerName } = {}) =>
@@ -161,9 +164,14 @@ const ERRORS = {
                                 `Некоректна знайдена кількість${requestedQty != null ? `. Потрібно максимум ${requestedQty}.` : '.'}` },
   baselinker_picking_items_unhandled: { status: 409, message: ({ pendingLines } = {}) =>
                                 `Ще не опрацьовано ${Number(pendingLines) || 0} позицій. Для кожної позиції відмітьте «зібрано» або зафіксуйте проблему.` },
-  baselinker_picking_issue_confirmation_required: { status: 409, message: ({ problemLines, missingQty } = {}) =>
-                                `У замовленні залишилось ${Number(problemLines) || 0} проблемних позицій${Number(missingQty) > 0 ? ` і не вистачає ${Number(missingQty)} шт.` : '.'} Підтвердіть окремою дією пакування з проблемою.` },
   baselinker_order_changed: { status: 409, message: 'Замовлення змінилося в BaseLinker під час роботи. Змінені позиції скинуто на перевірку — перегляньте їх ще раз.' },
+  baselinker_order_cancelled: { status: 409, message: 'Замовлення анульовано в BaseLinker. Складські зміни для нього заблоковано.' },
+  baselinker_order_already_sent: { status: 409, message: 'Замовлення вже має вихідний статус BaseLinker. Складські зміни для нього заблоковано.' },
+  baselinker_order_not_actionable: { status: 409, message: 'Замовлення більше не перебуває у налаштованому робочому Intake-статусі BaseLinker. Складські зміни заблоковано до перевірки.' },
+  baselinker_order_status_write_unverified: { status: 502, message: 'BaseLinker не підтвердив зміну точного order_id на налаштований статус «Відправлено». Локальний Sent не записано.' },
+  baselinker_upstream_review_required: { status: 409, message: 'Замовлення оновилось у BaseLinker після початку збирання. Перевірте актуальні дані та підтвердьте перевірку.' },
+  baselinker_picking_has_unresolved_issues: { status: 409, message: 'Замовлення має невирішені проблемні позиції. Його не можна запакувати, доки проблеми не буде закрито.' },
+  baselinker_picking_not_ready_after_upstream_change: { status: 409, message: 'Після оновлення BaseLinker замовлення більше не готове до відправлення. Поверніть його в роботу та перевірте змінені позиції.' },
   baselinker_picking_not_packed: { status: 409, message: 'Спочатку підтвердьте, що замовлення запаковано.' },
   baselinker_print_agent_not_configured: { status: 503, message: 'Віддалений друк не налаштовано. Додайте BASELINKER_PRINT_AGENT_TOKEN на backend і підключіть Print Agent.' },
   baselinker_print_agent_offline: { status: 503, message: 'Print Agent зараз не в мережі. Перевірте ПК складу та програму друку.' },
@@ -171,7 +179,7 @@ const ERRORS = {
   baselinker_print_printer_invalid: { status: 400, message: 'Print Agent не передав коректну назву принтера.' },
   baselinker_print_job_not_found: { status: 404, message: 'Завдання друку не знайдено.' },
   baselinker_print_job_not_claimed: { status: 409, message: 'Завдання друку вже не належить цьому Print Agent або завершене.' },
-  baselinker_print_job_expired: { status: 409, message: 'Завдання друку прострочене. Натисніть «Накладна» ще раз.' },
+  baselinker_print_job_expired: { status: 409, message: 'Завдання друку прострочене. Натисніть «ТТН» ще раз.' },
 
   // ── Orders ─────────────────────────────────────────────────────────────────
   order_not_found:          { status: 404, message: 'Замовлення не знайдено' },

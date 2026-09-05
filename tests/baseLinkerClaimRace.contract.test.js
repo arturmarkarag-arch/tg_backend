@@ -6,16 +6,18 @@ function read(rel) {
 }
 
 describe('BaseLinker picking claim race guard', () => {
-  it('has a DB-unique deterministic logical-order claim key', () => {
+  it('uses accountScope + exact orderId as the durable DB uniqueness boundary', () => {
     const model = read('models/BaseLinkerPickingOrder.js');
-    expect(model).toContain("claimKey: { type: String, default: undefined }");
-    expect(model).toMatch(/index\(\{ claimKey: 1 \}, \{ unique: true, sparse: true \}\)/);
+    expect(model).toContain("BaseLinkerPickingOrderSchema.index({ accountScope: 1, orderId: 1 }, { unique: true })");
+    expect(model).not.toContain('claimKey');
+    expect(model).not.toContain('memberOrderIds');
+    expect(model).not.toContain('groupKey');
     const service = read('services/baseLinkerPicking.js');
-    expect(service).toContain('.createIndex({ claimKey: 1 }, { unique: true, sparse: true })');
+    expect(service).toContain('.syncIndexes()');
     expect(service).toContain('await ensureClaimIndexReady()');
   });
 
-  it('does not rely on read-then-save ownership checks', () => {
+  it('does not rely on read-then-save ownership checks for an existing order', () => {
     const service = read('services/baseLinkerPicking.js');
     expect(service).toContain('claimAvailabilityFilter');
     expect(service).toContain('BaseLinkerPickingOrder.findOneAndUpdate(');
@@ -24,12 +26,14 @@ describe('BaseLinker picking claim race guard', () => {
     expect(service).toContain('status: { $nin: TERMINAL_STATUSES }');
   });
 
-  it('makes first-claim races converge through the unique key and duplicate-key retry', () => {
+  it('makes first-claim races converge through exact orderId uniqueness and duplicate-key retry', () => {
     const service = read('services/baseLinkerPicking.js');
     expect(service).toContain('isDuplicateKeyError');
-    expect(service).toContain('claimKeyForGroup(group.groupKey)');
+    expect(service).toContain('orderId: requestedId');
     expect(service).toMatch(/if \(!isDuplicateKeyError\(error\)\) throw error/);
-    expect(service).toContain('candidate = assertSingleClaimCandidate(await findClaimCandidates(group), group)');
+    expect(service).toContain("candidate = await BaseLinkerPickingOrder.findOne({ orderId: requestedId })");
+    expect(service).not.toContain('claimKeyForGroup');
+    expect(service).not.toContain('findClaimCandidates');
   });
 
   it('allows only unowned, same-owner, stale-owner or explicit admin-force claims', () => {

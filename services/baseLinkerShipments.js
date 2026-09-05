@@ -77,8 +77,55 @@ async function fetchBaseLinkerLabel({ packageId, courierCode: rawCourierCode }, 
   };
 }
 
+
+async function fetchVerifiedBaseLinkerOrderPackage({ orderId, packageId, courierCode: rawCourierCode }, callApi = callBaseLinker) {
+  const order = positiveInt(orderId, 'baselinker_order_id_invalid');
+  const packageNumber = positiveInt(packageId, 'baselinker_package_id_invalid');
+  const { packages } = await fetchBaseLinkerOrderPackages(order, callApi);
+  const packageRow = packages.find((row) => Number(row?.package_id) === packageNumber);
+  if (!packageRow) {
+    throw appError('baselinker_package_order_mismatch', { orderId: order, packageId: packageNumber });
+  }
+
+  const authoritativeCourier = String(packageRow?.courier_code || packageRow?.courier || '').trim();
+  const requestedCourier = rawCourierCode === undefined || rawCourierCode === null || String(rawCourierCode).trim() === ''
+    ? authoritativeCourier
+    : courierCode(rawCourierCode);
+  if (authoritativeCourier && requestedCourier && authoritativeCourier !== requestedCourier) {
+    throw appError('baselinker_package_courier_mismatch', {
+      orderId: order,
+      packageId: packageNumber,
+      expectedCourierCode: authoritativeCourier,
+      receivedCourierCode: requestedCourier,
+    });
+  }
+  if (!requestedCourier) throw appError('baselinker_courier_code_invalid');
+
+  return {
+    orderId: order,
+    packageId: packageNumber,
+    courierCode: authoritativeCourier || requestedCourier,
+    package: packageRow,
+  };
+}
+
+async function fetchVerifiedBaseLinkerOrderLabel({ orderId, packageId, courierCode: rawCourierCode }, callApi = callBaseLinker) {
+  const binding = await fetchVerifiedBaseLinkerOrderPackage({
+    orderId,
+    packageId,
+    courierCode: rawCourierCode,
+  }, callApi);
+  const label = await fetchBaseLinkerLabel({
+    packageId: binding.packageId,
+    courierCode: binding.courierCode,
+  }, callApi);
+  return { ...label, orderId: binding.orderId };
+}
+
 module.exports = {
   fetchBaseLinkerOrderPackages,
   fetchBaseLinkerPackageDetails,
   fetchBaseLinkerLabel,
+  fetchVerifiedBaseLinkerOrderPackage,
+  fetchVerifiedBaseLinkerOrderLabel,
 };

@@ -1,11 +1,9 @@
 const { callBaseLinker } = require('./baseLinkerClient');
+const { getBaseLinkerAccountScope } = require('./baseLinkerAccount');
 
 const PRODUCT_CACHE_TTL_MS = 5 * 60 * 1000;
 const LOOKUP_CHUNK_SIZE = 100;
 const productCache = new Map();
-let inventoriesCache = null;
-let inventoriesCacheExpiresAt = 0;
-let inventoriesInFlight = null;
 
 function cleanId(value) {
   if (value === undefined || value === null) return '';
@@ -64,17 +62,18 @@ function normalizeImageUrls(images) {
 }
 
 function getCached(key) {
-  const cached = productCache.get(key);
+  const scopedKey = `${getBaseLinkerAccountScope()}|${key}`;
+  const cached = productCache.get(scopedKey);
   if (!cached) return null;
   if (cached.expiresAt <= Date.now()) {
-    productCache.delete(key);
+    productCache.delete(scopedKey);
     return null;
   }
   return cached.value;
 }
 
 function setCached(key, value) {
-  productCache.set(key, {
+  productCache.set(`${getBaseLinkerAccountScope()}|${key}`, {
     value,
     expiresAt: Date.now() + PRODUCT_CACHE_TTL_MS,
   });
@@ -91,30 +90,6 @@ function inventoryEntry(product) {
 
 function externalEntry(product) {
   return compactImageEntry('resolved', product?.images);
-}
-
-async function getInventories(callApi) {
-  const now = Date.now();
-  if (callApi === callBaseLinker && inventoriesCache && now < inventoriesCacheExpiresAt) return inventoriesCache;
-  if (callApi === callBaseLinker && inventoriesInFlight) return inventoriesInFlight;
-
-  const load = async () => {
-    const payload = await callApi('getInventories', {});
-    const inventories = Array.isArray(payload?.inventories) ? payload.inventories : [];
-    if (callApi === callBaseLinker) {
-      inventoriesCache = inventories;
-      inventoriesCacheExpiresAt = Date.now() + PRODUCT_CACHE_TTL_MS;
-    }
-    return inventories;
-  };
-
-  if (callApi !== callBaseLinker) return load();
-  inventoriesInFlight = load();
-  try {
-    return await inventoriesInFlight;
-  } finally {
-    inventoriesInFlight = null;
-  }
 }
 
 function collectOrderProductRefs(orders) {
@@ -232,61 +207,6 @@ async function tryDirectInventoryRefs(refs, productCatalog, unresolved, warnings
   }
 }
 
-async function resolveUnmappedInventoryRefs(refs, productCatalog, warnings, callApi) {
-  if (!refs.length) return;
-
-  let inventories;
-  try {
-    inventories = await getInventories(callApi);
-  } catch (error) {
-    warnings.push({ scope: 'inventories', code: error?.code || error?.message || 'inventory_list_failed' });
-    return;
-  }
-
-  const inventoryIds = inventories
-    .map((item) => Number(item?.inventory_id))
-    .filter((id) => Number.isInteger(id) && id > 0);
-  if (!inventoryIds.length) return;
-
-  const wantedIds = Array.from(new Set(refs.map((ref) => ref.productId)));
-  const matchesByProductId = new Map(wantedIds.map((id) => [id, []]));
-
-  for (const inventoryId of inventoryIds) {
-    for (const ids of chunk(wantedIds)) {
-      try {
-        const payload = await callApi('getInventoryProductsData', {
-          inventory_id: inventoryId,
-          products: ids.map((id) => Number.isSafeInteger(Number(id)) ? Number(id) : id),
-          include_channels_media: false,
-        });
-        const products = payload?.products && typeof payload.products === 'object' ? payload.products : {};
-        for (const productId of ids) {
-          const product = products[productId] ?? products[String(productId)];
-          if (product) matchesByProductId.get(String(productId))?.push({ inventoryId, product });
-        }
-      } catch (error) {
-        warnings.push({
-          scope: 'inventory_fallback',
-          inventoryId,
-          code: error?.code || error?.message || 'catalog_lookup_failed',
-        });
-      }
-    }
-  }
-
-  for (const ref of refs) {
-    const matches = matchesByProductId.get(ref.productId) || [];
-    if (matches.length === 1) {
-      const match = matches[0];
-      const entry = inventoryEntry(match.product);
-      productCatalog[ref.key] = entry;
-      setCached(ref.key, entry);
-    } else if (matches.length > 1) {
-      productCatalog[ref.key] = { state: 'ambiguous', images: [] };
-    }
-  }
-}
-
 /**
  * Enriches order lines with product-catalog data without changing the raw
  * getOrders payload. getOrders is the immutable order snapshot (quantity,
@@ -306,7 +226,12 @@ async function fetchBaseLinkerProductCatalog(orders, callApi = callBaseLinker) {
 
   const unresolvedInternal = [];
   await tryDirectInventoryRefs(internalRefs, productCatalog, unresolvedInternal, warnings, callApi);
-  await resolveUnmappedInventoryRefs(unresolvedInternal, productCatalog, warnings, callApi);
+  // Never guess an inventory by scanning all inventories for a product_id.
+  // Without an exact storage_id from the ordered line there is no authoritative
+  // catalog binding, so fail closed and show no enriched image.
+  for (const ref of unresolvedInternal) {
+    productCatalog[ref.key] = { state: 'unresolved_exact_source', images: [] };
+  }
 
   for (const ref of unsupportedRefs) {
     productCatalog[ref.key] = { state: 'unsupported_storage', images: [] };

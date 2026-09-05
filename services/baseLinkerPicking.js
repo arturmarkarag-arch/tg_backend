@@ -4,6 +4,10 @@ const { fetchBaseLinkerOrders } = require('./baseLinkerOrders');
 const { withLock } = require('../utils/lock');
 const { appError } = require('../utils/errors');
 const { compactOrders } = require('./baseLinkerPublicDto');
+const { recordBaseLinkerOrderSnapshots } = require('./baseLinkerOrderSnapshots');
+const { setBaseLinkerOrderStatus } = require('./baseLinkerOrderCommands');
+const { getQueueScope, classifyUpstreamOrder } = require('./baseLinkerQueueScope');
+const { getBaseLinkerAccountScope, scopedLockKey } = require('./baseLinkerAccount');
 const { getIO } = require('../socket');
 
 const {
@@ -44,54 +48,6 @@ function qty(value) {
 }
 
 
-function groupToken(value) {
-  return text(value).trim();
-}
-
-function baseLinkerFulfilmentGroupKey(order) {
-  const source = groupToken(order?.order_source).toLowerCase();
-  const sourceId = groupToken(order?.order_source_id);
-  const external = groupToken(order?.external_order_id);
-  if (external) return `external:${source}:${sourceId}:${external}`;
-  const shopOrder = groupToken(order?.shop_order_id);
-  if (shopOrder) return `shop:${source}:${sourceId}:${shopOrder}`;
-  return `order:${groupToken(order?.order_id)}`;
-}
-
-function mergeOrderGroup(orders, preferredOrderId) {
-  const list = Array.isArray(orders) ? orders.filter(Boolean) : [];
-  if (!list.length) throw appError('baselinker_picking_group_empty');
-  const preferred = list.find((order) => String(order?.order_id) === String(preferredOrderId)) || list[0];
-  const memberOrderIds = list.map((order) => String(order.order_id));
-  const keys = new Set(list.map(baseLinkerFulfilmentGroupKey));
-  if (keys.size !== 1) throw appError('baselinker_picking_group_mismatch');
-  return {
-    ...preferred,
-    order_id: preferred.order_id,
-    confirmed: list.every((order) => Boolean(order?.confirmed)),
-    products: list.flatMap((order) => (Array.isArray(order?.products) ? order.products : []).map((product) => ({
-      ...product,
-      _source_order_id: String(order.order_id),
-    }))),
-    _member_order_ids: memberOrderIds,
-    _group_key: keys.values().next().value,
-  };
-}
-
-async function fetchExactOrderGroup(orderIds, preferredOrderId) {
-  const ids = [...new Set((orderIds || []).map((id) => String(id || '').trim()).filter(Boolean))];
-  if (!ids.length) throw appError('baselinker_picking_group_empty');
-  if (ids.length > 20) throw appError('baselinker_picking_group_too_large', { count: ids.length });
-  const orders = await Promise.all(ids.map((id) => fetchExactOrder(id)));
-  const mergedOrder = mergeOrderGroup(orders, preferredOrderId || ids[0]);
-  return {
-    orders,
-    mergedOrder,
-    memberOrderIds: orders.map((order) => String(order.order_id)),
-    groupKey: baseLinkerFulfilmentGroupKey(mergedOrder),
-    externalOrderId: groupToken(mergedOrder?.external_order_id || mergedOrder?.shop_order_id),
-  };
-}
 
 function sourceLineBaseKey(product) {
   const orderProductId = text(product?.order_product_id).trim();
@@ -111,10 +67,9 @@ function buildSourceItems(order) {
   const products = Array.isArray(order?.products) ? order.products : [];
   const seen = new Map();
   return products.map((product) => {
-    const sourceOrderId = text(product?._source_order_id).trim();
-    const primaryOrderId = text(order?.order_id).trim();
+    const sourceOrderId = text(order?.order_id).trim();
     const rawBase = sourceLineBaseKey(product);
-    const base = sourceOrderId && sourceOrderId !== primaryOrderId ? `bl:${sourceOrderId}:${rawBase}` : rawBase;
+    const base = rawBase;
     const occurrence = (seen.get(base) || 0) + 1;
     seen.set(base, occurrence);
     const lineKey = occurrence === 1 ? base : `${base}#${occurrence}`;
@@ -157,6 +112,27 @@ function appendHistory(doc, action, actor, meta = {}) {
   if (doc.history.length > MAX_HISTORY) doc.history = doc.history.slice(-MAX_HISTORY);
 }
 
+function hasExplicitDeferredAction(doc) {
+  // Deferred is an explicit order-level shelf. History lets a mixed/buggy
+  // deployment distinguish a real worker "Відкласти" from the old bug where
+  // saving one problem line auto-moved the card to Deferred. Admin reopen resets
+  // that explicit decision; a later release sets it again.
+  let explicitlyDeferred = false;
+  for (const entry of Array.isArray(doc?.history) ? doc.history : []) {
+    const action = String(entry?.action || '');
+    if (action === 'order_released') explicitlyDeferred = true;
+    if (action === 'order_reopened_by_admin') explicitlyDeferred = false;
+  }
+  return explicitlyDeferred;
+}
+
+function shouldRepairImplicitAutoDeferred(doc) {
+  if (!doc || !doc.ownerTelegramId) return false;
+  if (workflowStageFor(doc) !== WORKFLOW_STAGE.DEFERRED) return false;
+  if (![ORDER_STATUS.PROBLEM, ORDER_STATUS.READY_WITH_ISSUE].includes(String(doc.status || ''))) return false;
+  return !hasExplicitDeferredAction(doc);
+}
+
 function publicState(doc) {
   if (!doc) return null;
   const plain = typeof doc.toObject === 'function' ? doc.toObject() : { ...doc };
@@ -178,8 +154,6 @@ function publicState(doc) {
   // exposed later through a dedicated diagnostic endpoint if ever needed.
   return {
     orderId: String(plain.orderId || ''),
-    groupKey: String(plain.groupKey || ''),
-    memberOrderIds: (Array.isArray(plain.memberOrderIds) ? plain.memberOrderIds : []).map(String),
     status: String(plain.status || 'new'),
     workflowStage: workflowStageFor(plain),
     revision: Number(plain.revision || 0),
@@ -189,6 +163,12 @@ function publicState(doc) {
     items,
     claimTakeoverAvailableAt: takeoverAt,
     lastUpstreamChangeAt: plain.lastUpstreamChangeAt || null,
+    lastUpstreamStatusId: Number.isSafeInteger(Number(plain.lastUpstreamStatusId)) ? Number(plain.lastUpstreamStatusId) : null,
+    upstreamDisposition: String(plain.upstreamDisposition || ''),
+    upstreamBlocked: ['cancelled', 'sent', 'other', 'missing', 'unverified'].includes(String(plain.upstreamDisposition || '')),
+    upstreamReviewRequired: plain.upstreamReviewRequired === true,
+    upstreamReviewedAt: plain.upstreamReviewedAt || null,
+    lastUpstreamJournalTypes: (Array.isArray(plain.lastUpstreamJournalTypes) ? plain.lastUpstreamJournalTypes : []).map(Number).filter(Number.isFinite),
     lastUpstreamChangeSummary: {
       added: Number(plain.lastUpstreamChangeSummary?.added || 0),
       removed: Number(plain.lastUpstreamChangeSummary?.removed || 0),
@@ -197,16 +177,18 @@ function publicState(doc) {
   };
 }
 
-function emitPickingUpdate(doc) {
+function emitPickingUpdate(doc, clientMutationId = '') {
   try {
     const io = getIO();
     if (!io) return;
     const state = publicState(doc);
-    const orderIds = [...new Set([String(doc.orderId), ...((doc.memberOrderIds || []).map(String))])];
+    const orderIds = [String(doc.orderId)];
     io.to('baselinker_staff').emit('baselinker_picking_updated', {
+      accountScope: getBaseLinkerAccountScope(),
       orderId: String(doc.orderId),
       orderIds,
       state,
+      ...(text(clientMutationId).trim() ? { clientMutationId: text(clientMutationId).trim().slice(0, 160) } : {}),
     });
   } catch (_) { /* best-effort realtime only */ }
 }
@@ -227,10 +209,68 @@ async function fetchExactOrder(orderId) {
   const order = (result.orders || []).find((candidate) => String(candidate?.order_id) === String(id));
   if (!order) throw appError('baselinker_order_not_returned', { orderId: id, upstreamMethod: 'getOrders' });
   if (!Array.isArray(order.products) || order.products.length === 0) throw appError('baselinker_order_has_no_products', { orderId: id });
+  await recordBaseLinkerOrderSnapshots([order], { source: 'exact_order_read' });
   return order;
 }
 
+
+function assertOrderActionable(order, scope) {
+  const disposition = classifyUpstreamOrder(order, scope);
+  const id = String(order?.order_id || '');
+  if (disposition === 'cancelled') throw appError('baselinker_order_cancelled', { orderId: id });
+  if (disposition === 'sent') throw appError('baselinker_order_already_sent', { orderId: id });
+  if (disposition !== 'intake') {
+    throw appError('baselinker_order_not_actionable', {
+      orderId: id,
+      statusId: Number.isSafeInteger(Number(order?.order_status_id)) ? Number(order.order_status_id) : null,
+    });
+  }
+  return disposition;
+}
+
+function applyUpstreamDisposition(doc, order, scope, actor) {
+  const nextDisposition = order ? classifyUpstreamOrder(order, scope) : 'missing';
+  const nextStatusId = order && Number.isSafeInteger(Number(order?.order_status_id))
+    ? Number(order.order_status_id)
+    : null;
+  const previousDisposition = String(doc.upstreamDisposition || '');
+  const previousStatusId = Number.isSafeInteger(Number(doc.lastUpstreamStatusId)) ? Number(doc.lastUpstreamStatusId) : null;
+  const changed = previousDisposition !== nextDisposition || previousStatusId !== nextStatusId;
+  let releasedOwner = false;
+
+  doc.upstreamDisposition = nextDisposition;
+  doc.lastUpstreamStatusId = nextStatusId;
+
+  // Only the configured Intake status is actionable. Any other upstream state
+  // releases warehouse ownership and must be explicitly reviewed.
+  if (nextDisposition !== 'intake' && doc.ownerTelegramId) {
+    const previousOwnerTelegramId = doc.ownerTelegramId || '';
+    const previousOwnerName = doc.ownerName || '';
+    doc.ownerTelegramId = '';
+    doc.ownerName = '';
+    doc.claimedAt = null;
+    releasedOwner = true;
+    appendHistory(doc, 'upstream_non_intake_released_owner', actor, {
+      disposition: nextDisposition,
+      previousOwnerTelegramId,
+      previousOwnerName,
+      statusId: nextStatusId,
+    });
+  }
+
+  if (changed) {
+    appendHistory(doc, 'upstream_status_observed', actor, {
+      fromDisposition: previousDisposition,
+      toDisposition: nextDisposition,
+      fromStatusId: previousStatusId,
+      toStatusId: nextStatusId,
+    });
+  }
+  return { changed, releasedOwner, disposition: nextDisposition };
+}
+
 function syncDocWithOrder(doc, order, actor) {
+  const wasInitialized = Boolean(doc.orderFingerprint);
   const sourceItems = buildSourceItems(order);
   const nextFingerprint = orderFingerprint(sourceItems);
   if (!doc.orderFingerprint) {
@@ -299,6 +339,13 @@ function syncDocWithOrder(doc, order, actor) {
   doc.orderFingerprint = nextFingerprint;
   doc.lastUpstreamChangeAt = new Date();
   doc.lastUpstreamChangeSummary = summary;
+  // Once a local picking document exists, any later BaseLinker line change
+  // needs explicit review. It does not matter whether the worker had already
+  // ticked one item or had only just claimed the order.
+  if (wasInitialized) {
+    doc.upstreamReviewRequired = true;
+    doc.upstreamReviewedAt = null;
+  }
   if (!TERMINAL_STATUSES.includes(doc.status)) {
     const previousWorkflowStage = workflowStageFor(doc);
     doc.status = deriveWorkingStatus(doc.items, Boolean(doc.ownerTelegramId));
@@ -316,7 +363,20 @@ function assertRevision(doc, expectedRevision) {
   }
 }
 
+function assertNotUpstreamBlocked(doc) {
+  const disposition = String(doc?.upstreamDisposition || '');
+  if (disposition === 'cancelled') throw appError('baselinker_order_cancelled');
+  if (disposition === 'sent') throw appError('baselinker_order_already_sent');
+  if (['other', 'missing', 'unverified'].includes(disposition)) {
+    throw appError('baselinker_order_not_actionable', {
+      orderId: String(doc?.orderId || ''),
+      statusId: Number.isSafeInteger(Number(doc?.lastUpstreamStatusId)) ? Number(doc.lastUpstreamStatusId) : null,
+    });
+  }
+}
+
 function assertOwner(doc, actor) {
+  assertNotUpstreamBlocked(doc);
   if (!doc.ownerTelegramId || String(doc.ownerTelegramId) !== String(actor.by)) {
     throw appError('baselinker_picking_not_owner', { ownerName: doc.ownerName || '' });
   }
@@ -327,18 +387,14 @@ async function getPickingStates(orderIds = []) {
   const ids = [...new Set((orderIds || []).map((id) => String(id || '').trim()).filter(Boolean))];
   if (!ids.length) return {};
   const docs = await BaseLinkerPickingOrder.find({
-    $or: [
-      { orderId: { $in: ids } },
-      { memberOrderIds: { $in: ids } },
-    ],
+    orderId: { $in: ids },
   }).lean();
   const requested = new Set(ids);
   const result = {};
   for (const doc of docs) {
     const state = publicState(doc);
-    for (const id of [...new Set([String(doc.orderId), ...((doc.memberOrderIds || []).map(String))])]) {
-      if (requested.has(id)) result[id] = state;
-    }
+    const id = String(doc.orderId);
+    if (requested.has(id)) result[id] = state;
   }
   return result;
 }
@@ -353,46 +409,66 @@ async function getMyActivePicking(user) {
   return publicState(doc);
 }
 
-function claimKeyForGroup(groupKey) {
-  return `group:${sha(groupKey)}`;
-}
-
 function isDuplicateKeyError(error) {
   return Number(error?.code) === 11000;
 }
 
-let claimIndexReadyPromise = null;
+const claimIndexReadyByScope = new Map();
 
 async function ensureClaimIndexReady() {
-  if (!claimIndexReadyPromise) {
-    // Do not trust background/autoIndex timing for a concurrency invariant.
-    // The first claim waits until Mongo has the unique claimKey index.
-    claimIndexReadyPromise = BaseLinkerPickingOrder.collection
-      .createIndex({ claimKey: 1 }, { unique: true, sparse: true })
-      .catch((error) => {
-        claimIndexReadyPromise = null;
-        throw error;
+  const accountScope = getBaseLinkerAccountScope();
+  if (!claimIndexReadyByScope.has(accountScope)) {
+    const promise = (async () => {
+      // Rows produced by the retired local-only Sent contract never proved that
+      // BaseLinker changed status. Invalidate them once and require exact
+      // upstream reconciliation before they can be trusted again.
+      const migratedAt = new Date();
+      await BaseLinkerPickingOrder.collection.updateMany({
+        accountScope,
+        status: 'sent',
+        history: { $elemMatch: { action: 'order_sent_local' } },
+        'history.action': { $ne: 'legacy_local_sent_invalidated' },
+      }, {
+        $set: {
+          status: 'packed',
+          workflowStage: WORKFLOW_STAGE.PACKED,
+          upstreamDisposition: 'unverified',
+          lastUpstreamStatusId: null,
+          upstreamReviewRequired: true,
+          upstreamReviewedAt: null,
+          lastUpstreamChangeAt: migratedAt,
+          sentAt: null,
+          sentBy: '',
+          sentByName: '',
+          lastActivityAt: migratedAt,
+        },
+        $inc: { revision: 1 },
+        $push: {
+          history: {
+            at: migratedAt,
+            action: 'legacy_local_sent_invalidated',
+            by: 'system',
+            byName: 'BaseLinker integrity migration',
+            byRole: 'system',
+            meta: { reason: 'legacy_sent_was_not_upstream_verified' },
+          },
+        },
       });
-  }
-  return claimIndexReadyPromise;
-}
 
-async function findClaimCandidates(group) {
-  return BaseLinkerPickingOrder.find({
-    $or: [
-      { orderId: { $in: group.memberOrderIds } },
-      { groupKey: group.groupKey },
-      { memberOrderIds: { $in: group.memberOrderIds } },
-      { claimKey: claimKeyForGroup(group.groupKey) },
-    ],
-  }).sort({ updatedAt: -1 });
-}
-
-function assertSingleClaimCandidate(candidates, group) {
-  if (candidates.length > 1) {
-    throw appError('baselinker_picking_group_conflict', { orderIds: group.memberOrderIds.join(', ') });
+      // Remove every persisted field from the retired logical/multi-order
+      // abstraction. accountScope + orderId is the only local order identity.
+      await BaseLinkerPickingOrder.collection.updateMany(
+        { accountScope },
+        { $unset: { claimKey: '', groupKey: '', externalOrderId: '', memberOrderIds: '' } },
+      );
+      return BaseLinkerPickingOrder.syncIndexes();
+    })().catch((error) => {
+      claimIndexReadyByScope.delete(accountScope);
+      throw error;
+    });
+    claimIndexReadyByScope.set(accountScope, promise);
   }
-  return candidates[0] || null;
+  return claimIndexReadyByScope.get(accountScope);
 }
 
 function claimAvailabilityFilter(actor, now, adminForce) {
@@ -403,10 +479,7 @@ function claimAvailabilityFilter(actor, now, adminForce) {
       { ownerTelegramId: actor.by },
       { ownerTelegramId: '' },
       { ownerTelegramId: { $exists: false } },
-      {
-        ownerTelegramId: { $nin: ['', actor.by] },
-        lastActivityAt: { $lte: staleBefore },
-      },
+      { ownerTelegramId: { $nin: ['', actor.by] }, lastActivityAt: { $lte: staleBefore } },
     ],
   };
 }
@@ -421,36 +494,30 @@ function claimConflictFromDoc(doc) {
   });
 }
 
-function buildNewClaimedDoc({ requestedId, group, actor, now, claimKey }) {
+function buildNewClaimedDoc({ requestedId, order, scope, actor, now }) {
   const doc = new BaseLinkerPickingOrder({
     orderId: requestedId,
-    claimKey,
-    groupKey: group.groupKey,
-    externalOrderId: group.externalOrderId,
-    memberOrderIds: group.memberOrderIds,
     status: 'in_progress',
     workflowStage: WORKFLOW_STAGE.PROCESSING,
     revision: 1,
+    upstreamDisposition: 'intake',
+    lastUpstreamStatusId: Number(order?.order_status_id) || null,
   });
-  const sync = syncDocWithOrder(doc, group.mergedOrder, actor);
+  const sync = syncDocWithOrder(doc, order, actor);
   doc.ownerTelegramId = actor.by;
   doc.ownerName = actor.byName;
   doc.claimedAt = now;
   doc.lastActivityAt = now;
   doc.status = deriveWorkingStatus(doc.items, true);
-  // Preserve the historical contract: the first successful claim advances the
-  // initial revision once, so new claimed rows start at revision 2.
   doc.revision = Number(doc.revision || 0) + 1;
   appendHistory(doc, 'order_claimed', actor, {
-    memberOrderIds: group.memberOrderIds,
+    orderId: requestedId,
     ...(sync.changed ? { upstreamSync: sync.summary } : {}),
   });
   return { doc, sync };
 }
 
-function buildExistingClaimUpdate({ doc, group, actor, now, adminForce, claimKey }) {
-  // Work on an isolated in-memory copy. Nothing is persisted until the final
-  // findOneAndUpdate CAS succeeds against the exact revision + owner predicate.
+function buildExistingClaimUpdate({ doc, order, scope, actor, now, adminForce }) {
   const draft = new BaseLinkerPickingOrder(doc.toObject());
   const previousOwnerTelegramId = String(doc.ownerTelegramId || '');
   const previousOwnerName = String(doc.ownerName || '');
@@ -466,21 +533,16 @@ function buildExistingClaimUpdate({ doc, group, actor, now, adminForce, claimKey
     });
   }
 
-  draft.claimKey = claimKey;
-  draft.groupKey = group.groupKey;
-  draft.externalOrderId = group.externalOrderId;
-  draft.memberOrderIds = group.memberOrderIds;
-  const sync = syncDocWithOrder(draft, group.mergedOrder, actor);
+  applyUpstreamDisposition(draft, order, scope, actor);
+  const sync = syncDocWithOrder(draft, order, actor);
   draft.ownerTelegramId = actor.by;
   draft.ownerName = actor.byName;
   if (wasDifferentOwner || !draft.claimedAt) draft.claimedAt = now;
   draft.lastActivityAt = now;
   draft.status = deriveWorkingStatus(draft.items, true);
-  // Claim is ownership only. It must never move a card between operational
-  // shelves. In particular, Deferred stays Deferred while somebody resumes it.
   draft.workflowStage = preservedWorkflowStage;
   appendHistory(draft, wasDifferentOwner ? 'order_claimed' : 'order_reopened_by_owner', actor, {
-    memberOrderIds: group.memberOrderIds,
+    orderId: String(order?.order_id || ''),
     ...(sync.changed ? { upstreamSync: sync.summary } : {}),
   });
 
@@ -488,10 +550,6 @@ function buildExistingClaimUpdate({ doc, group, actor, now, adminForce, claimKey
   return {
     sync,
     set: {
-      claimKey,
-      groupKey: group.groupKey,
-      externalOrderId: group.externalOrderId,
-      memberOrderIds: group.memberOrderIds,
       orderFingerprint: plain.orderFingerprint || '',
       ownerTelegramId: actor.by,
       ownerName: actor.byName,
@@ -501,157 +559,172 @@ function buildExistingClaimUpdate({ doc, group, actor, now, adminForce, claimKey
       workflowStage: plain.workflowStage,
       items: plain.items || [],
       lastUpstreamChangeAt: plain.lastUpstreamChangeAt || null,
+      lastUpstreamStatusId: plain.lastUpstreamStatusId ?? null,
+      upstreamDisposition: plain.upstreamDisposition || 'intake',
+      upstreamReviewRequired: plain.upstreamReviewRequired === true,
+      upstreamReviewedAt: plain.upstreamReviewedAt || null,
       lastUpstreamChangeSummary: plain.lastUpstreamChangeSummary || { added: 0, removed: 0, changed: 0 },
       history: (plain.history || []).slice(-MAX_HISTORY),
     },
   };
 }
 
-async function claimPickingOrder({ orderId, memberOrderIds = [], user, force = false }) {
+async function claimPickingOrder({ orderId, user, force = false, clientMutationId = '' }) {
   const actor = actorOf(user);
-  const requestedIds = [...new Set([String(orderId), ...(memberOrderIds || []).map(String)].filter(Boolean))];
-  const group = await fetchExactOrderGroup(requestedIds, orderId);
-  const requestedId = String(orderId);
-  const claimKey = claimKeyForGroup(group.groupKey);
-  const groupLock = `baselinker-group:${sha(group.groupKey).slice(0, 24)}`;
+  const requestedId = String(orderId || '').trim();
+  const order = await fetchExactOrder(requestedId);
+  const scope = await getQueueScope();
+  if (!scope.configured) throw appError('baselinker_queue_not_configured');
+  assertOrderActionable(order, scope);
+  const accountScope = getBaseLinkerAccountScope();
 
   await ensureClaimIndexReady();
 
-  // Redis/process locks remain useful for reducing contention, but MongoDB is
-  // now the final authority. Correctness no longer depends on both requests
-  // landing in the same Node process or on the Redis lock surviving its TTL.
-  return withLock(`baselinker-worker:${actor.by}`, () => withLock(groupLock, async () => {
-    let candidate = assertSingleClaimCandidate(await findClaimCandidates(group), group);
+  // Locks reduce contention; accountScope+orderId unique index + revision CAS
+  // is the durable correctness boundary across processes.
+  return withLock(scopedLockKey(`baselinker-worker:${actor.by}`, accountScope), () => (
+    withLock(scopedLockKey(`baselinker-order:${requestedId}`, accountScope), async () => {
+      let candidate = await BaseLinkerPickingOrder.findOne({ orderId: requestedId });
 
-    const activeOther = await BaseLinkerPickingOrder.findOne({
-      ownerTelegramId: actor.by,
-      ...(candidate?._id ? { _id: { $ne: candidate._id } } : {}),
-      status: { $in: WORKING_STATUSES },
-    }).lean();
-    if (activeOther) {
-      throw appError('baselinker_worker_has_active_order', { orderId: activeOther.orderId });
-    }
+      const activeOther = await BaseLinkerPickingOrder.findOne({
+        ownerTelegramId: actor.by,
+        ...(candidate?._id ? { _id: { $ne: candidate._id } } : {}),
+        status: { $in: WORKING_STATUSES },
+      }).lean();
+      if (activeOther) throw appError('baselinker_worker_has_active_order', { orderId: activeOther.orderId });
 
-    const now = new Date();
-    const adminForce = user?.role === 'admin' && force === true;
+      const now = new Date();
+      const adminForce = user?.role === 'admin' && force === true;
 
-    // First ever claim: one atomic insert owns the logical order. If two
-    // workers race here, unique(orderId) and unique(sparse claimKey) guarantee
-    // exactly one insert. The loser reloads and goes through the CAS path below.
-    if (!candidate) {
-      const created = buildNewClaimedDoc({ requestedId, group, actor, now, claimKey });
-      try {
-        await created.doc.save();
-        emitPickingUpdate(created.doc);
-        return {
-          state: publicState(created.doc),
-          orders: compactOrders(group.orders),
-          syncChanged: created.sync.changed === true,
-        };
-      } catch (error) {
-        if (!isDuplicateKeyError(error)) throw error;
-        candidate = assertSingleClaimCandidate(await findClaimCandidates(group), group);
-        if (!candidate) throw error;
+      if (!candidate) {
+        const created = buildNewClaimedDoc({ requestedId, order, scope, actor, now });
+        try {
+          await created.doc.save();
+          emitPickingUpdate(created.doc, clientMutationId);
+          return {
+            state: publicState(created.doc),
+            orders: compactOrders([order]),
+            syncChanged: created.sync.changed === true,
+          };
+        } catch (error) {
+          if (!isDuplicateKeyError(error)) throw error;
+          candidate = await BaseLinkerPickingOrder.findOne({ orderId: requestedId });
+          if (!candidate) throw error;
+        }
       }
-    }
 
-    // Existing state: ownership + upstream sync + revision advance happen in
-    // ONE Mongo compare-and-swap. Two workers may both read the old document,
-    // but only the first write can match its revision/owner predicate.
-    for (let attempt = 0; attempt < 3; attempt += 1) {
-      if (TERMINAL_STATUSES.includes(candidate.status)) throw appError('baselinker_picking_terminal');
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        if (TERMINAL_STATUSES.includes(candidate.status)) throw appError('baselinker_picking_terminal');
+        assertNotUpstreamBlocked(candidate);
 
-      const update = buildExistingClaimUpdate({
-        doc: candidate,
-        group,
-        actor,
-        now: new Date(),
-        adminForce,
-        claimKey,
-      });
-      const availability = claimAvailabilityFilter(actor, new Date(), adminForce);
-      let claimed = null;
-      try {
-        claimed = await BaseLinkerPickingOrder.findOneAndUpdate(
+        const update = buildExistingClaimUpdate({
+          doc: candidate,
+          order,
+          scope,
+          actor,
+          now: new Date(),
+          adminForce,
+        });
+        const availability = claimAvailabilityFilter(actor, new Date(), adminForce);
+        const claimed = await BaseLinkerPickingOrder.findOneAndUpdate(
           {
             _id: candidate._id,
             revision: Number(candidate.revision || 0),
             status: { $nin: TERMINAL_STATUSES },
             ...availability,
           },
-          {
-            $set: update.set,
-            $inc: { revision: 1 },
-          },
+          { $set: update.set, $inc: { revision: 1 } },
           { new: true, runValidators: true },
         );
-      } catch (error) {
-        // A concurrent process may have materialised the same logical claimKey
-        // between our read and CAS. Treat that exactly like a lost claim race,
-        // never as HTTP 500.
-        if (!isDuplicateKeyError(error)) throw error;
+
+        if (claimed) {
+          emitPickingUpdate(claimed, clientMutationId);
+          return {
+            state: publicState(claimed),
+            orders: compactOrders([order]),
+            syncChanged: update.sync.changed === true,
+          };
+        }
+
+        const latest = await BaseLinkerPickingOrder.findOne({ orderId: requestedId });
+        if (!latest) throw appError('baselinker_picking_stale');
+        const latestOwner = String(latest.ownerTelegramId || '');
+        const latestActivityMs = latest.lastActivityAt ? new Date(latest.lastActivityAt).getTime() : 0;
+        const latestIsStale = latestOwner && latestOwner !== actor.by && latestActivityMs > 0
+          && (Date.now() - latestActivityMs) >= CLAIM_STALE_MS;
+        if (latestOwner && latestOwner !== actor.by && !adminForce && !latestIsStale) {
+          throw claimConflictFromDoc(latest);
+        }
+        if (TERMINAL_STATUSES.includes(latest.status)) throw appError('baselinker_picking_terminal');
+        candidate = latest;
       }
 
-      if (claimed) {
-        emitPickingUpdate(claimed);
-        return {
-          state: publicState(claimed),
-          orders: compactOrders(group.orders),
-          syncChanged: update.sync.changed === true,
-        };
-      }
-
-      const latest = await BaseLinkerPickingOrder.findOne({
-        $or: [
-          { _id: candidate._id },
-          { claimKey },
-          { groupKey: group.groupKey },
-          { orderId: { $in: group.memberOrderIds } },
-          { memberOrderIds: { $in: group.memberOrderIds } },
-        ],
-      }).sort({ updatedAt: -1 });
-
-      if (!latest) throw appError('baselinker_picking_stale');
-      const latestOwner = String(latest.ownerTelegramId || '');
-      const latestActivityMs = latest.lastActivityAt ? new Date(latest.lastActivityAt).getTime() : 0;
-      const latestIsStale = latestOwner && latestOwner !== actor.by && latestActivityMs > 0
-        && (Date.now() - latestActivityMs) >= CLAIM_STALE_MS;
-
-      if (latestOwner && latestOwner !== actor.by && !adminForce && !latestIsStale) {
-        throw claimConflictFromDoc(latest);
-      }
-      if (TERMINAL_STATUSES.includes(latest.status)) throw appError('baselinker_picking_terminal');
-
-      // Same worker / stale takeover can legitimately lose a CAS to a concurrent
-      // revision update. Retry from the current row instead of overwriting it.
-      candidate = latest;
-    }
-
-    const latest = await BaseLinkerPickingOrder.findOne({ claimKey }).lean();
-    throw claimConflictFromDoc(latest);
-  }, { ttlMs: 30_000, waitMs: 10_000 }), { ttlMs: 30_000, waitMs: 10_000 });
+      throw claimConflictFromDoc(await BaseLinkerPickingOrder.findOne({ orderId: requestedId }).lean());
+    }, { ttlMs: 30_000, waitMs: 10_000 })
+  ), { ttlMs: 30_000, waitMs: 10_000 });
 }
 
 async function heartbeatPickingOrder({ orderId, user }) {
   const actor = actorOf(user);
-  const updated = await BaseLinkerPickingOrder.findOneAndUpdate(
+  const id = String(orderId);
+  const current = await BaseLinkerPickingOrder.findOne({
+    orderId: id,
+    ownerTelegramId: actor.by,
+    status: { $in: WORKING_STATUSES },
+  }).lean();
+  if (!current) throw appError('baselinker_picking_not_owner');
+
+  const now = new Date();
+  const repairImplicitDeferred = shouldRepairImplicitAutoDeferred(current);
+  const update = repairImplicitDeferred
+    ? {
+      $set: { lastActivityAt: now, workflowStage: WORKFLOW_STAGE.PROCESSING },
+      $inc: { revision: 1 },
+      $push: {
+        history: {
+          $each: [{
+            at: now,
+            by: actor.by,
+            byName: actor.byName,
+            byRole: actor.byRole,
+            action: 'implicit_problem_autodefer_repaired',
+            meta: {},
+          }],
+          $slice: -MAX_HISTORY,
+        },
+      },
+    }
+    : { $set: { lastActivityAt: now } };
+
+  let updated = await BaseLinkerPickingOrder.findOneAndUpdate(
     {
-      orderId: String(orderId),
+      _id: current._id,
       ownerTelegramId: actor.by,
       status: { $in: WORKING_STATUSES },
+      ...(repairImplicitDeferred ? { revision: Number(current.revision || 0) } : {}),
     },
-    { $set: { lastActivityAt: new Date() } },
+    update,
     { new: true },
   ).lean();
+
+  // A concurrent item save may legitimately win the revision CAS. In that case
+  // heartbeat must not fail ownership; return the current authoritative state.
+  if (!updated && repairImplicitDeferred) {
+    updated = await BaseLinkerPickingOrder.findOne({
+      orderId: id,
+      ownerTelegramId: actor.by,
+      status: { $in: WORKING_STATUSES },
+    }).lean();
+  }
   if (!updated) throw appError('baselinker_picking_not_owner');
   emitPickingUpdate(updated);
   return { ok: true, lastActivityAt: updated.lastActivityAt, state: publicState(updated) };
 }
 
-async function updatePickingItem({ orderId, lineKey, user, expectedRevision, state, pickedQty, issueNote }) {
+async function updatePickingItem({ orderId, lineKey, user, expectedRevision, state, pickedQty, issueNote, clientMutationId = '' }) {
   const actor = actorOf(user);
   const id = String(orderId);
-  return withLock(`baselinker-picking:${id}`, async () => {
+  return withLock(scopedLockKey(`baselinker-picking:${id}`), async () => {
     const doc = await BaseLinkerPickingOrder.findOne({ orderId: id });
     if (!doc) throw appError('baselinker_picking_not_started');
     assertOwner(doc, actor);
@@ -696,17 +769,18 @@ async function updatePickingItem({ orderId, lineKey, user, expectedRevision, sta
       issueNote: item.issueNote,
     });
     await doc.save();
-    emitPickingUpdate(doc);
+    emitPickingUpdate(doc, clientMutationId);
     return publicState(doc);
   }, { ttlMs: 15_000, waitMs: 6_000 });
 }
 
-async function releasePickingOrder({ orderId, user, expectedRevision, force = false }) {
+async function releasePickingOrder({ orderId, user, expectedRevision, force = false, clientMutationId = '' }) {
   const actor = actorOf(user);
   const id = String(orderId);
-  return withLock(`baselinker-picking:${id}`, async () => {
+  return withLock(scopedLockKey(`baselinker-picking:${id}`), async () => {
     const doc = await BaseLinkerPickingOrder.findOne({ orderId: id });
     if (!doc) throw appError('baselinker_picking_not_started');
+    assertNotUpstreamBlocked(doc);
     if (TERMINAL_STATUSES.includes(doc.status)) throw appError('baselinker_picking_terminal');
     const owns = String(doc.ownerTelegramId || '') === actor.by;
     if (!owns && !(user?.role === 'admin' && force === true)) {
@@ -725,34 +799,37 @@ async function releasePickingOrder({ orderId, user, expectedRevision, force = fa
     doc.revision = Number(doc.revision || 0) + 1;
     appendHistory(doc, 'order_released', actor, { previousOwnerTelegramId, previousOwnerName, force: !owns });
     await doc.save();
-    emitPickingUpdate(doc);
+    emitPickingUpdate(doc, clientMutationId);
     return publicState(doc);
   }, { ttlMs: 15_000, waitMs: 6_000 });
 }
 
-async function markPickingOrderPacked({ orderId, user, expectedRevision, allowIssues = false }) {
+async function markPickingOrderPacked({ orderId, user, expectedRevision, clientMutationId = '' }) {
   const actor = actorOf(user);
-  const id = String(orderId);
-  const before = await BaseLinkerPickingOrder.findOne({ orderId: id }).lean();
-  if (!before) throw appError('baselinker_picking_not_started');
-  const group = await fetchExactOrderGroup(
-    (before.memberOrderIds && before.memberOrderIds.length) ? before.memberOrderIds : [id],
-    id,
-  );
+  const id = String(orderId || '').trim();
 
-  return withLock(`baselinker-group:${sha(group.groupKey).slice(0, 24)}`, async () => {
+  return withLock(scopedLockKey(`baselinker-order:${id}`), async () => {
     const doc = await BaseLinkerPickingOrder.findOne({ orderId: id });
     if (!doc) throw appError('baselinker_picking_not_started');
     assertOwner(doc, actor);
     assertRevision(doc, expectedRevision);
 
-    const sync = syncDocWithOrder(doc, group.mergedOrder, actor);
+    const order = await fetchExactOrder(id);
+    const scope = await getQueueScope();
+    assertOrderActionable(order, scope);
+    applyUpstreamDisposition(doc, order, scope, actor);
+
+    const sync = syncDocWithOrder(doc, order, actor);
     if (sync.changed) {
       doc.lastActivityAt = new Date();
       doc.revision = Number(doc.revision || 0) + 1;
       await doc.save();
-      emitPickingUpdate(doc);
+      emitPickingUpdate(doc, clientMutationId);
       throw appError('baselinker_order_changed', { currentRevision: doc.revision, changeSummary: sync.summary });
+    }
+
+    if (doc.upstreamReviewRequired) {
+      throw appError('baselinker_upstream_review_required', { lastUpstreamChangeAt: doc.lastUpstreamChangeAt });
     }
 
     const readiness = packingReadiness(doc.items);
@@ -762,23 +839,26 @@ async function markPickingOrderPacked({ orderId, user, expectedRevision, allowIs
         totalLines: readiness.totalLines,
       });
     }
-
-    if (readiness.hasIssues && allowIssues !== true) {
-      throw appError('baselinker_picking_issue_confirmation_required', {
+    if (readiness.hasIssues) {
+      throw appError('baselinker_picking_has_unresolved_issues', {
+        problemLines: readiness.problemLines,
+        missingQty: readiness.missingQty,
+      });
+    }
+    if (!readiness.allPicked) {
+      throw appError('baselinker_picking_not_ready_after_upstream_change', {
+        pendingLines: readiness.pendingLines,
         problemLines: readiness.problemLines,
         missingQty: readiness.missingQty,
       });
     }
 
     const now = new Date();
-    const packingMode = !readiness.hasIssues
-      ? 'full'
-      : readiness.missingQty > 0
-        ? 'partial'
-        : 'with_issue';
-
+    const packingMode = 'full';
     doc.status = 'packed';
     doc.workflowStage = WORKFLOW_STAGE.PACKED;
+    doc.upstreamDisposition = 'intake';
+    doc.lastUpstreamStatusId = Number(order?.order_status_id) || null;
     doc.packingMode = packingMode;
     doc.packedSummary = {
       requestedQty: readiness.totalQty,
@@ -794,66 +874,130 @@ async function markPickingOrderPacked({ orderId, user, expectedRevision, allowIs
     doc.claimedAt = null;
     doc.lastActivityAt = now;
     doc.revision = Number(doc.revision || 0) + 1;
-    appendHistory(doc, readiness.hasIssues ? 'order_packed_with_issues' : 'order_packed', actor, {
+    appendHistory(doc, 'order_packed', actor, {
+      orderId: id,
       packingMode,
       requestedQty: readiness.totalQty,
       packedQty: readiness.pickedQty,
       missingQty: readiness.missingQty,
       problemLines: readiness.problemLines,
-      issues: readiness.hasIssues
-        ? (doc.items || []).filter((item) => ISSUE_STATES.has(String(item?.state || ''))).map((item) => ({
-          lineKey: item.lineKey,
-          sourceOrderId: item.sourceOrderId || '',
-          itemName: item.name,
-          state: item.state,
-          requestedQty: item.requestedQty,
-          pickedQty: item.pickedQty,
-          issueNote: item.issueNote,
-        }))
-        : [],
     });
     await doc.save();
-    emitPickingUpdate(doc);
-    return { state: publicState(doc), orders: compactOrders(group.orders) };
+    emitPickingUpdate(doc, clientMutationId);
+    return { state: publicState(doc), orders: compactOrders([order]) };
   }, { ttlMs: 30_000, waitMs: 10_000 });
 }
 
-async function markPickingOrderSent({ orderId, user, expectedRevision }) {
+async function markPickingOrderSent({ orderId, user, expectedRevision, clientMutationId = '' }) {
   const actor = actorOf(user);
-  const id = String(orderId);
-  return withLock(`baselinker-picking:${id}`, async () => {
+  const id = String(orderId || '').trim();
+  const scope = await getQueueScope();
+  if (!scope.configured || !Number.isSafeInteger(Number(scope.sentStatusId))) {
+    throw appError('baselinker_queue_not_configured');
+  }
+
+  return withLock(scopedLockKey(`baselinker-order:${id}`), async () => {
     const doc = await BaseLinkerPickingOrder.findOne({ orderId: id });
     if (!doc) throw appError('baselinker_picking_not_started');
-    // Idempotent retry: once the local operation is already marked sent, a
-    // repeated click/network retry must not fail only because the revision has
-    // advanced with that successful write.
-    if (doc.status === 'sent') return publicState(doc);
-    assertRevision(doc, expectedRevision);
-    if (doc.status !== 'packed') {
-      throw appError('baselinker_picking_not_packed');
+
+    let order = await fetchExactOrder(id);
+    let disposition = classifyUpstreamOrder(order, scope);
+
+    // Idempotent recovery: if local Sent already exists, it is valid only while
+    // exact BaseLinker truth still says the configured Sent status.
+    if (doc.status === 'sent') {
+      if (disposition !== 'sent' || Number(order?.order_status_id) !== Number(scope.sentStatusId)) {
+        throw appError('baselinker_order_status_write_unverified', { orderId: id, statusId: scope.sentStatusId });
+      }
+      return { state: publicState(doc), orders: compactOrders([order]) };
     }
+
+    assertRevision(doc, expectedRevision);
+    if (doc.status !== 'packed') throw appError('baselinker_picking_not_packed');
+    if (disposition === 'cancelled') throw appError('baselinker_order_cancelled', { orderId: id });
+    if (!['intake', 'sent'].includes(disposition)) {
+      throw appError('baselinker_order_not_actionable', {
+        orderId: id,
+        statusId: Number.isSafeInteger(Number(order?.order_status_id)) ? Number(order.order_status_id) : null,
+      });
+    }
+
+    applyUpstreamDisposition(doc, order, scope, actor);
+    const sync = syncDocWithOrder(doc, order, actor);
+    if (sync.changed) {
+      doc.lastActivityAt = new Date();
+      doc.revision = Number(doc.revision || 0) + 1;
+      await doc.save();
+      emitPickingUpdate(doc, clientMutationId);
+      throw appError('baselinker_order_changed', { currentRevision: doc.revision, changeSummary: sync.summary });
+    }
+    if (doc.upstreamReviewRequired) throw appError('baselinker_upstream_review_required', { lastUpstreamChangeAt: doc.lastUpstreamChangeAt });
+
+    const readiness = packingReadiness(doc.items);
+    if (!readiness.allHandled || readiness.hasIssues || !readiness.allPicked) {
+      throw appError('baselinker_picking_not_ready_after_upstream_change', {
+        pendingLines: readiness.pendingLines,
+        problemLines: readiness.problemLines,
+        missingQty: readiness.missingQty,
+      });
+    }
+
+    // The only BaseLinker mutation in the picking module. Upstream goes first;
+    // local Sent is never allowed to claim success while BaseLinker says otherwise.
+    if (disposition !== 'sent') {
+      await setBaseLinkerOrderStatus({ orderId: id, statusId: scope.sentStatusId });
+      order = await fetchExactOrder(id);
+      disposition = classifyUpstreamOrder(order, scope);
+    }
+    if (disposition !== 'sent' || Number(order?.order_status_id) !== Number(scope.sentStatusId)) {
+      throw appError('baselinker_order_status_write_unverified', { orderId: id, statusId: scope.sentStatusId });
+    }
+
+    // Reconcile the exact post-write payload too. If product data changed in the
+    // narrow race between the preflight read and setOrderStatus, preserve that
+    // fact and require review instead of silently keeping stale local lines.
+    const postWriteSync = syncDocWithOrder(doc, order, actor);
+
     const now = new Date();
     doc.status = 'sent';
     doc.workflowStage = WORKFLOW_STAGE.SENT;
+    doc.upstreamDisposition = 'sent';
+    doc.lastUpstreamStatusId = Number(scope.sentStatusId);
     doc.sentAt = now;
     doc.sentBy = actor.by;
     doc.sentByName = actor.byName;
+    doc.ownerTelegramId = '';
+    doc.ownerName = '';
+    doc.claimedAt = null;
     doc.lastActivityAt = now;
     doc.revision = Number(doc.revision || 0) + 1;
-    appendHistory(doc, 'order_sent_local', actor, { readOnlyBaseLinker: true });
+    appendHistory(doc, 'order_sent_upstream_verified', actor, {
+      orderId: id,
+      statusId: Number(scope.sentStatusId),
+      postWriteOrderChanged: postWriteSync.changed === true,
+    });
     await doc.save();
-    emitPickingUpdate(doc);
-    return publicState(doc);
-  }, { ttlMs: 15_000, waitMs: 6_000 });
+
+    try {
+      const { refreshBaseLinkerOrderCache } = require('./baseLinkerOrderCache');
+      await refreshBaseLinkerOrderCache({ orders: [order], source: 'sent_transition' });
+    } catch (error) {
+      console.error('[baselinker] sent cache refresh failed', error);
+    }
+
+    emitPickingUpdate(doc, clientMutationId);
+    return { state: publicState(doc), orders: compactOrders([order]) };
+  }, { ttlMs: 30_000, waitMs: 10_000 });
 }
 
-async function reopenPickingOrder({ orderId, user, expectedRevision }) {
+async function reopenPickingOrder({ orderId, user, expectedRevision, clientMutationId = '' }) {
   if (user?.role !== 'admin') throw appError('forbidden');
   const actor = actorOf(user);
   const id = String(orderId);
-  return withLock(`baselinker-picking:${id}`, async () => {
+  return withLock(scopedLockKey(`baselinker-picking:${id}`), async () => {
     const doc = await BaseLinkerPickingOrder.findOne({ orderId: id });
     if (!doc) throw appError('baselinker_picking_not_started');
+    assertNotUpstreamBlocked(doc);
     assertRevision(doc, expectedRevision);
     doc.status = deriveWorkingStatus(doc.items, false);
     doc.workflowStage = workflowStageAfterWorkingStatus(WORKFLOW_STAGE.PROCESSING, doc.status);
@@ -872,7 +1016,7 @@ async function reopenPickingOrder({ orderId, user, expectedRevision }) {
     doc.revision = Number(doc.revision || 0) + 1;
     appendHistory(doc, 'order_reopened_by_admin', actor, {});
     await doc.save();
-    emitPickingUpdate(doc);
+    emitPickingUpdate(doc, clientMutationId);
     return publicState(doc);
   }, { ttlMs: 15_000, waitMs: 6_000 });
 }
@@ -886,30 +1030,125 @@ async function fetchOptionalExactOrder(orderId) {
     includeUnconfirmed: true,
     maxPages: 1,
   });
-  return (result.orders || []).find((candidate) => String(candidate?.order_id) === String(id)) || null;
+  const order = (result.orders || []).find((candidate) => String(candidate?.order_id) === String(id)) || null;
+  if (order) await recordBaseLinkerOrderSnapshots([order], { source: 'optional_exact_order_read' });
+  return order;
+}
+
+async function markPickingOrdersUpstreamUpdated({
+  orderIds = [],
+  journalTypesByOrderId = {},
+  orders = [],
+  knownCachedOrderIds = [],
+} = {}) {
+  const ids = [...new Set((orderIds || []).map((id) => String(id || '')).filter(Boolean))];
+  if (!ids.length) return { marked: 0, materializedCancelled: 0 };
+  const actor = { by: 'system:baselinker-journal', byName: 'BaseLinker', byRole: 'system' };
+  const scope = await getQueueScope();
+  const known = new Set((knownCachedOrderIds || []).map(String));
+  const exactById = new Map((orders || []).map((order) => [String(order?.order_id || ''), order]).filter(([id]) => id));
+
+  let docs = await BaseLinkerPickingOrder.find({ orderId: { $in: ids } });
+
+  // Cancellation is special. An order that was already visible in our intake
+  // queue must not silently disappear just because nobody claimed it yet.
+  // Materialise a minimal local attention row so it can appear in Updated,
+  // blocked, until the operator presses "Прийнято".
+  const coveredIds = new Set(docs.map((doc) => String(doc.orderId || '')).filter(Boolean));
+  let materializedCancelled = 0;
+  for (const id of ids) {
+    const order = exactById.get(id);
+    if (!order || !known.has(id) || coveredIds.has(id) || classifyUpstreamOrder(order, scope) !== 'cancelled') continue;
+    const doc = new BaseLinkerPickingOrder({
+      orderId: id,
+      status: 'in_progress',
+      workflowStage: WORKFLOW_STAGE.PROCESSING,
+      revision: 1,
+      upstreamDisposition: 'cancelled',
+      lastUpstreamStatusId: Number(order?.order_status_id) || null,
+    });
+    syncDocWithOrder(doc, order, actor);
+    doc.upstreamReviewRequired = true;
+    doc.upstreamReviewedAt = null;
+    doc.lastUpstreamChangeAt = new Date();
+    doc.lastUpstreamJournalTypes = [...new Set((journalTypesByOrderId[id] || []).map(Number).filter(Number.isFinite))];
+    appendHistory(doc, 'upstream_cancelled_before_claim', actor, {
+      orderId: id,
+      statusId: doc.lastUpstreamStatusId,
+      journalTypes: doc.lastUpstreamJournalTypes,
+    });
+    try {
+      await doc.save();
+      emitPickingUpdate(doc);
+      docs.push(doc);
+      coveredIds.add(id);
+      materializedCancelled += 1;
+    } catch (error) {
+      if (!isDuplicateKeyError(error)) throw error;
+      const raced = await BaseLinkerPickingOrder.findOne({ orderId: id });
+      if (raced) docs.push(raced);
+    }
+  }
+
+  let marked = 0;
+  const seenDocs = new Set();
+  for (const doc of docs) {
+    const docKey = String(doc?._id || doc?.orderId || '');
+    if (docKey && seenDocs.has(docKey)) continue;
+    if (docKey) seenDocs.add(docKey);
+    const touchedId = String(doc.orderId || '');
+    if (!ids.includes(touchedId)) continue;
+    const types = [...new Set((journalTypesByOrderId[touchedId] || []).map(Number).filter(Number.isFinite))];
+    doc.upstreamReviewRequired = true;
+    doc.upstreamReviewedAt = null;
+    doc.lastUpstreamChangeAt = new Date();
+    doc.lastUpstreamJournalTypes = types;
+    doc.revision = Number(doc.revision || 0) + 1;
+    appendHistory(doc, 'upstream_review_required', actor, { orderIds: [touchedId], journalTypes: types });
+    await doc.save();
+    emitPickingUpdate(doc);
+    marked += 1;
+  }
+  return { marked, materializedCancelled };
+}
+
+async function acknowledgeUpstreamReview({ orderId, user, expectedRevision, clientMutationId = '' }) {
+  const actor = actorOf(user);
+  const id = String(orderId || '');
+  return withLock(scopedLockKey(`baselinker-picking:${id}`), async () => {
+    const doc = await BaseLinkerPickingOrder.findOne({ orderId: id });
+    if (!doc) throw appError('baselinker_picking_not_started');
+    assertRevision(doc, expectedRevision);
+    if (!doc.upstreamReviewRequired) return publicState(doc);
+    doc.upstreamReviewRequired = false;
+    doc.upstreamReviewedAt = new Date();
+    doc.lastActivityAt = new Date();
+    doc.revision = Number(doc.revision || 0) + 1;
+    appendHistory(doc, 'upstream_change_reviewed', actor, {
+      lastUpstreamChangeAt: doc.lastUpstreamChangeAt || null,
+      journalTypes: doc.lastUpstreamJournalTypes || [],
+    });
+    await doc.save();
+    emitPickingUpdate(doc, clientMutationId);
+    return publicState(doc);
+  }, { ttlMs: 15_000, waitMs: 6_000 });
 }
 
 async function reconcilePickingFromUpstreamChanges({ orders = [], removedOrderIds = [] } = {}) {
   const changedOrders = Array.isArray(orders) ? orders.filter(Boolean) : [];
-  const changedById = new Map(changedOrders.map((order) => [String(order?.order_id || ''), order]).filter(([id]) => id));
+  if (changedOrders.length) {
+    await recordBaseLinkerOrderSnapshots(changedOrders, { source: 'picking_reconcile' });
+  }
+  const changedById = new Map(changedOrders
+    .map((order) => [String(order?.order_id || ''), order])
+    .filter(([id]) => id));
   const removed = new Set((removedOrderIds || []).map((id) => String(id || '')).filter(Boolean));
   const affectedIds = [...new Set([...changedById.keys(), ...removed])];
-  const changedGroupKeys = [...new Set(changedOrders.map(baseLinkerFulfilmentGroupKey).filter(Boolean))];
-  if (!affectedIds.length && !changedGroupKeys.length) return { reconciled: 0, changed: 0, released: 0 };
+  if (!affectedIds.length) return { reconciled: 0, changed: 0, released: 0 };
 
-  const ors = [];
-  if (affectedIds.length) {
-    ors.push({ orderId: { $in: affectedIds } });
-    ors.push({ memberOrderIds: { $in: affectedIds } });
-  }
-  if (changedGroupKeys.length) ors.push({ groupKey: { $in: changedGroupKeys } });
-
-  const docs = await BaseLinkerPickingOrder.find({
-    status: { $in: [...WORKING_STATUSES, 'paused'] },
-    $or: ors,
-  }).lean();
-
+  const docs = await BaseLinkerPickingOrder.find({ orderId: { $in: affectedIds } }).lean();
   const systemActor = { by: 'system:baselinker-journal', byName: 'BaseLinker', byRole: 'system' };
+  const scope = await getQueueScope();
   let reconciled = 0;
   let changed = 0;
   let released = 0;
@@ -918,57 +1157,34 @@ async function reconcilePickingFromUpstreamChanges({ orders = [], removedOrderId
     const localOrderId = String(snapshot.orderId || '');
     if (!localOrderId) continue;
 
-    await withLock(`baselinker-picking:${localOrderId}`, async () => {
+    await withLock(scopedLockKey(`baselinker-order:${localOrderId}`), async () => {
       const doc = await BaseLinkerPickingOrder.findOne({ orderId: localOrderId });
-      if (!doc || TERMINAL_STATUSES.includes(doc.status)) return;
+      if (!doc) return;
 
-      const currentIds = [...new Set([
-        String(doc.orderId || ''),
-        ...((doc.memberOrderIds || []).map((id) => String(id || ''))),
-      ].filter(Boolean))];
+      const exactOrder = removed.has(localOrderId)
+        ? null
+        : (changedById.get(localOrderId) || await fetchOptionalExactOrder(localOrderId));
 
-      // If BaseLinker created a new split/copy member with the same logical
-      // external identity, add it to the local group immediately.
-      const groupKeysForDoc = new Set([String(doc.groupKey || '')].filter(Boolean));
-      for (const id of currentIds) {
-        const changedOrder = changedById.get(id);
-        if (changedOrder) groupKeysForDoc.add(baseLinkerFulfilmentGroupKey(changedOrder));
-      }
-      const relatedChangedOrders = changedOrders.filter((order) => {
-        const id = String(order?.order_id || '');
-        const key = baseLinkerFulfilmentGroupKey(order);
-        return currentIds.includes(id) || groupKeysForDoc.has(key);
-      });
-
-      const candidateIds = new Set(currentIds.filter((id) => !removed.has(id)));
-      for (const order of relatedChangedOrders) candidateIds.add(String(order.order_id));
-
-      const availableById = new Map();
-      for (const order of relatedChangedOrders) availableById.set(String(order.order_id), order);
-
-      // Re-read untouched members so syncDocWithOrder sees the complete grouped
-      // order rather than only the line that generated this journal event.
-      for (const id of candidateIds) {
-        if (availableById.has(id)) continue;
-        const fresh = await fetchOptionalExactOrder(id);
-        if (fresh) availableById.set(id, fresh);
-        else removed.add(id);
-      }
-
-      const availableOrders = [...availableById.values()];
-      if (!availableOrders.length) {
+      if (!exactOrder) {
+        const previousDisposition = String(doc.upstreamDisposition || '');
         const hadOwner = Boolean(doc.ownerTelegramId);
         doc.ownerTelegramId = '';
         doc.ownerName = '';
         doc.claimedAt = null;
-        doc.status = 'paused';
-        doc.workflowStage = WORKFLOW_STAGE.DEFERRED;
-        doc.memberOrderIds = [];
+        doc.upstreamDisposition = 'missing';
+        doc.lastUpstreamStatusId = null;
+        doc.upstreamReviewRequired = true;
+        doc.upstreamReviewedAt = null;
         doc.lastUpstreamChangeAt = new Date();
-        doc.lastUpstreamChangeSummary = { added: 0, removed: (doc.items || []).length, changed: 0 };
+        doc.lastUpstreamChangeSummary = { added: 0, removed: 0, changed: 0 };
+        if (!TERMINAL_STATUSES.includes(String(doc.status || ''))) {
+          doc.status = 'paused';
+          doc.workflowStage = WORKFLOW_STAGE.DEFERRED;
+        }
         doc.revision = Number(doc.revision || 0) + 1;
-        appendHistory(doc, 'upstream_order_removed', systemActor, {
-          removedOrderIds: currentIds,
+        appendHistory(doc, 'upstream_order_missing', systemActor, {
+          orderId: localOrderId,
+          previousDisposition,
           releasedOwner: hadOwner,
         });
         await doc.save();
@@ -979,40 +1195,71 @@ async function reconcilePickingFromUpstreamChanges({ orders = [], removedOrderId
         return;
       }
 
-      // Prefer the group identity of an explicitly changed current member. If an
-      // order edit changed the external grouping key, stale former members are
-      // dropped instead of being silently mixed with the new logical order.
-      const changedCurrent = relatedChangedOrders.find((order) => currentIds.includes(String(order.order_id)));
-      const targetGroupKey = changedCurrent
-        ? baseLinkerFulfilmentGroupKey(changedCurrent)
-        : (doc.groupKey || baseLinkerFulfilmentGroupKey(availableOrders[0]));
-      const sameGroupOrders = availableOrders.filter((order) => baseLinkerFulfilmentGroupKey(order) === targetGroupKey);
-      if (!sameGroupOrders.length) return;
+      const previousLocalStatus = String(doc.status || '');
+      const previousWorkflowStage = workflowStageFor(doc);
+      const previousDisposition = String(doc.upstreamDisposition || '');
+      const upstreamState = applyUpstreamDisposition(doc, exactOrder, scope, systemActor);
+      const sync = syncDocWithOrder(doc, exactOrder, systemActor);
+      const disposition = classifyUpstreamOrder(exactOrder, scope);
+      let localTransitionChanged = false;
 
-      const beforeMemberIds = [...new Set((doc.memberOrderIds || []).map(String))].sort();
-      const nextMemberIds = sameGroupOrders.map((order) => String(order.order_id));
-      const afterMemberIds = [...new Set(nextMemberIds)].sort();
-      const membersChanged = JSON.stringify(beforeMemberIds) !== JSON.stringify(afterMemberIds);
-
-      const merged = mergeOrderGroup(sameGroupOrders, localOrderId);
-      const sync = syncDocWithOrder(doc, merged, systemActor);
-      doc.groupKey = targetGroupKey;
-      doc.externalOrderId = groupToken(merged?.external_order_id || merged?.shop_order_id);
-      doc.memberOrderIds = afterMemberIds;
-
-      if (membersChanged && !sync.changed) {
-        doc.lastUpstreamChangeAt = new Date();
-        appendHistory(doc, 'upstream_group_members_changed', systemActor, {
-          beforeMemberOrderIds: beforeMemberIds,
-          afterMemberOrderIds: afterMemberIds,
+      if (disposition === 'sent') {
+        if (doc.status !== 'sent' || workflowStageFor(doc) !== WORKFLOW_STAGE.SENT) {
+          doc.status = 'sent';
+          doc.workflowStage = WORKFLOW_STAGE.SENT;
+          doc.sentAt = doc.sentAt || new Date();
+          doc.sentBy = doc.sentBy || 'system:baselinker';
+          doc.sentByName = doc.sentByName || 'BaseLinker';
+          doc.ownerTelegramId = '';
+          doc.ownerName = '';
+          doc.claimedAt = null;
+          appendHistory(doc, 'upstream_sent_materialized', systemActor, {
+            orderId: localOrderId,
+            statusId: Number(exactOrder?.order_status_id) || null,
+          });
+          localTransitionChanged = true;
+        }
+      } else if (disposition === 'intake' && previousLocalStatus === 'sent') {
+        // BaseLinker is source of truth for upstream status. If an externally
+        // sent order is moved back to Intake, local Sent cannot remain eternal.
+        const readiness = packingReadiness(doc.items);
+        if (doc.packedAt && readiness.allHandled && readiness.allPicked && !readiness.hasIssues) {
+          doc.status = 'packed';
+          doc.workflowStage = WORKFLOW_STAGE.PACKED;
+        } else {
+          doc.status = deriveWorkingStatus(doc.items, Boolean(doc.ownerTelegramId));
+          doc.workflowStage = workflowStageAfterWorkingStatus(
+            previousWorkflowStage === WORKFLOW_STAGE.SENT ? WORKFLOW_STAGE.PROCESSING : previousWorkflowStage,
+            doc.status,
+          );
+        }
+        doc.sentAt = null;
+        doc.sentBy = '';
+        doc.sentByName = '';
+        appendHistory(doc, 'upstream_sent_reverted', systemActor, {
+          orderId: localOrderId,
+          statusId: Number(exactOrder?.order_status_id) || null,
         });
+        localTransitionChanged = true;
+      } else if (disposition !== 'intake' && !TERMINAL_STATUSES.includes(String(doc.status || ''))) {
+        if (workflowStageFor(doc) !== WORKFLOW_STAGE.DEFERRED) {
+          doc.workflowStage = WORKFLOW_STAGE.DEFERRED;
+          localTransitionChanged = true;
+        }
       }
 
-      if (sync.changed || membersChanged) {
+      const dispositionChanged = previousDisposition !== String(doc.upstreamDisposition || '');
+      if (sync.changed || upstreamState.changed || upstreamState.releasedOwner || localTransitionChanged || dispositionChanged) {
+        if (disposition !== 'intake' || sync.changed || dispositionChanged) {
+          doc.upstreamReviewRequired = true;
+          doc.upstreamReviewedAt = null;
+          doc.lastUpstreamChangeAt = new Date();
+        }
         doc.revision = Number(doc.revision || 0) + 1;
         await doc.save();
         emitPickingUpdate(doc);
         changed += 1;
+        if (upstreamState.releasedOwner) released += 1;
       }
       reconciled += 1;
     }, { ttlMs: 20_000, waitMs: 5_000 });
@@ -1022,10 +1269,9 @@ async function reconcilePickingFromUpstreamChanges({ orders = [], removedOrderId
 }
 
 module.exports = {
+  ensurePickingIndexesReady: ensureClaimIndexReady,
   CLAIM_STALE_MS,
   buildSourceItems,
-  baseLinkerFulfilmentGroupKey,
-  mergeOrderGroup,
   progressFor,
   packingReadiness,
   deriveWorkingStatus,
@@ -1039,5 +1285,7 @@ module.exports = {
   markPickingOrderSent,
   reopenPickingOrder,
   publicState,
+  markPickingOrdersUpstreamUpdated,
+  acknowledgeUpstreamReview,
   reconcilePickingFromUpstreamChanges,
 };

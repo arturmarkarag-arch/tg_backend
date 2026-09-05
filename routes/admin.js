@@ -23,6 +23,45 @@ const OPENAI_MODEL_SETTING_KEY = 'openai.defaultModel';
 const ORDERING_SCHEDULE_KEY = 'ordering.schedule';
 const ORDERING_SCHEDULE_DEFAULTS = { openHour: 16, openMinute: 0, closeHour: 7, closeMinute: 30 };
 
+router.get('/baselinker-settings', telegramAuth, requireTelegramRole('admin'), asyncHandler(async (req, res) => {
+  const { getQueueScope } = require('../services/baseLinkerQueueScope');
+  const { isBaseLinkerConfigured } = require('../services/baseLinkerClient');
+  const { getBaseLinkerAccountBinding } = require('../services/baseLinkerAccount');
+  const binding = getBaseLinkerAccountBinding();
+  res.json({
+    ...await getQueueScope(),
+    apiConfigured: isBaseLinkerConfigured(),
+    accountIdentitySource: binding.source,
+    accountIdentityStable: binding.stable === true,
+  });
+}));
+
+router.get('/baselinker-settings/statuses', telegramAuth, requireTelegramRole('admin'), asyncHandler(async (req, res) => {
+  const { getQueueStatusOptions } = require('../services/baseLinkerQueueScope');
+  res.json({ statuses: await getQueueStatusOptions() });
+}));
+
+router.post('/baselinker-settings', telegramAuth, requireTelegramRole('admin'), asyncHandler(async (req, res) => {
+  const { saveQueueSettings } = require('../services/baseLinkerQueueScope');
+  const { isBaseLinkerConfigured } = require('../services/baseLinkerClient');
+  const { getBaseLinkerAccountBinding } = require('../services/baseLinkerAccount');
+  const settings = await saveQueueSettings(req.body);
+  const binding = getBaseLinkerAccountBinding();
+  try {
+    getIO()?.to('baselinker_staff').emit('baselinker_orders_changed', {
+      accountScope: binding.accountScope,
+      resync: true,
+      reason: 'queue_settings_changed',
+    });
+  } catch (_) { /* Settings are durable; socket delivery is best effort. */ }
+  res.json({
+    ...settings,
+    apiConfigured: isBaseLinkerConfigured(),
+    accountIdentitySource: binding.source,
+    accountIdentityStable: binding.stable === true,
+  });
+}));
+
 async function getAppSetting(key, defaultValue = null) {
   const setting = await AppSetting.findOne({ key }).lean();
   return setting?.value ?? defaultValue;

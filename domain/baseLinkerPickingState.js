@@ -97,9 +97,13 @@ function workflowStageAfterWorkingStatus(previousStage, status) {
   const current = PERSISTED_WORKFLOW_STAGES.includes(String(previousStage || ''))
     ? String(previousStage)
     : legacyWorkflowStageForStatus(status);
-  if ([ORDER_STATUS.PROBLEM, ORDER_STATUS.READY_WITH_ISSUE].includes(String(status || ''))) {
-    return WORKFLOW_STAGE.DEFERRED;
-  }
+
+  // Item-level state must never move the whole order between operational
+  // shelves. A shortage/not-found changes the detailed picking status, but a
+  // Processing order stays Processing until the worker explicitly presses
+  // "Відкласти" (releasePickingOrder owns the Deferred transition).
+  // Conversely, a deliberately Deferred order stays Deferred while somebody
+  // resumes/continues working on it.
   if (current === WORKFLOW_STAGE.DEFERRED) return WORKFLOW_STAGE.DEFERRED;
   return WORKFLOW_STAGE.PROCESSING;
 }

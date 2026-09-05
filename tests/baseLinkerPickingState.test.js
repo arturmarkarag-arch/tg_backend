@@ -52,6 +52,10 @@ describe('BaseLinker picking state machine', () => {
     expect(workflowStageAfterWorkingStatus(WORKFLOW_STAGE.DEFERRED, ORDER_STATUS.READY))
       .toBe(WORKFLOW_STAGE.DEFERRED);
     expect(workflowStageAfterWorkingStatus(WORKFLOW_STAGE.PROCESSING, ORDER_STATUS.PROBLEM))
+      .toBe(WORKFLOW_STAGE.PROCESSING);
+    expect(workflowStageAfterWorkingStatus(WORKFLOW_STAGE.PROCESSING, ORDER_STATUS.READY_WITH_ISSUE))
+      .toBe(WORKFLOW_STAGE.PROCESSING);
+    expect(workflowStageAfterWorkingStatus(WORKFLOW_STAGE.DEFERRED, ORDER_STATUS.PROBLEM))
       .toBe(WORKFLOW_STAGE.DEFERRED);
   });
 });

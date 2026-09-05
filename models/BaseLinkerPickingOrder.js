@@ -4,6 +4,8 @@ const {
   PERSISTED_ITEM_STATES,
 } = require('../domain/baseLinkerPickingState');
 const mongoose = require('mongoose');
+const baseLinkerAccountScopePlugin = require('./plugins/baseLinkerAccountScope');
+const { getBaseLinkerAccountScope } = require('../services/baseLinkerAccount');
 
 const PickingHistoryEntrySchema = new mongoose.Schema({
   at: { type: Date, default: Date.now },
@@ -41,14 +43,8 @@ const PickingItemSchema = new mongoose.Schema({
 }, { _id: false });
 
 const BaseLinkerPickingOrderSchema = new mongoose.Schema({
-  orderId: { type: String, required: true, unique: true },
-  // Deterministic logical-order claim identity. Missing on legacy rows until the
-  // next claim, so deploying the unique sparse index does not require a risky
-  // rewrite of historical documents.
-  claimKey: { type: String, default: undefined },
-  groupKey: { type: String, default: '' },
-  externalOrderId: { type: String, default: '' },
-  memberOrderIds: { type: [String], default: [] },
+  accountScope: { type: String, required: true, default: getBaseLinkerAccountScope, index: true, maxlength: 80 },
+  orderId: { type: String, required: true },
   orderFingerprint: { type: String, default: '' },
   status: {
     type: String,
@@ -92,6 +88,16 @@ const BaseLinkerPickingOrderSchema = new mongoose.Schema({
   sentByName: { type: String, default: '' },
 
   lastUpstreamChangeAt: { type: Date, default: null },
+  lastUpstreamStatusId: { type: Number, default: null },
+  upstreamDisposition: {
+    type: String,
+    enum: ['', 'intake', 'sent', 'cancelled', 'other', 'missing', 'unverified'],
+    default: '',
+    index: true,
+  },
+  upstreamReviewRequired: { type: Boolean, default: false, index: true },
+  upstreamReviewedAt: { type: Date, default: null },
+  lastUpstreamJournalTypes: { type: [Number], default: [] },
   lastUpstreamChangeSummary: {
     added: { type: Number, default: 0 },
     removed: { type: Number, default: 0 },
@@ -101,14 +107,13 @@ const BaseLinkerPickingOrderSchema = new mongoose.Schema({
   history: { type: [PickingHistoryEntrySchema], default: [] },
 }, { timestamps: true });
 
-BaseLinkerPickingOrderSchema.index({ status: 1, updatedAt: -1 });
-BaseLinkerPickingOrderSchema.index({ workflowStage: 1, updatedAt: -1 });
-BaseLinkerPickingOrderSchema.index({ ownerTelegramId: 1, status: 1 });
-BaseLinkerPickingOrderSchema.index({ groupKey: 1 });
-// Hard DB backstop for two workers/processes claiming the same logical order.
-// `sparse` keeps old documents without claimKey deploy-safe; claim writes the
-// deterministic key before/while ownership is acquired.
-BaseLinkerPickingOrderSchema.index({ claimKey: 1 }, { unique: true, sparse: true });
-BaseLinkerPickingOrderSchema.index({ memberOrderIds: 1 });
+BaseLinkerPickingOrderSchema.index({ accountScope: 1, orderId: 1 }, { unique: true });
+BaseLinkerPickingOrderSchema.index({ accountScope: 1, status: 1, updatedAt: -1 });
+BaseLinkerPickingOrderSchema.index({ accountScope: 1, workflowStage: 1, updatedAt: -1 });
+BaseLinkerPickingOrderSchema.index({ accountScope: 1, workflowStage: 1, packedBy: 1, packedAt: -1 });
+BaseLinkerPickingOrderSchema.index({ accountScope: 1, ownerTelegramId: 1, status: 1 });
+// The account-scoped unique(orderId) index above is the DB backstop for claim races.
+BaseLinkerPickingOrderSchema.index({ accountScope: 1, upstreamReviewRequired: 1, updatedAt: -1 });
+BaseLinkerPickingOrderSchema.plugin(baseLinkerAccountScopePlugin);
 
 module.exports = mongoose.model('BaseLinkerPickingOrder', BaseLinkerPickingOrderSchema);

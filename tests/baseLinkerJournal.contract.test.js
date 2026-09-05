@@ -14,6 +14,13 @@ function read(rel) {
 }
 
 describe('BaseLinker getJournalList realtime adapter', () => {
+  it('uses positive bootstrap position for missing or invalid cursors', async () => {
+    for (const cursor of [undefined, 0, -1, 'bad']) {
+      const callApi = vi.fn(async () => ({ logs: [] }));
+      await fetchJournal(cursor, callApi);
+      expect(callApi).toHaveBeenCalledWith('getJournalList', expect.objectContaining({ last_log_id: 1 }));
+    }
+  });
   it('accepts both documented id and sample log_id cursor fields', () => {
     expect(logIdOf({ id: 10 })).toBe(10);
     expect(logIdOf({ log_id: 11 })).toBe(11);
