@@ -26,13 +26,9 @@ const ORDERING_SCHEDULE_DEFAULTS = { openHour: 16, openMinute: 0, closeHour: 7, 
 router.get('/baselinker-settings', telegramAuth, requireTelegramRole('admin'), asyncHandler(async (req, res) => {
   const { getQueueScope } = require('../services/baseLinkerQueueScope');
   const { isBaseLinkerConfigured } = require('../services/baseLinkerClient');
-  const { getBaseLinkerAccountBinding } = require('../services/baseLinkerAccount');
-  const binding = getBaseLinkerAccountBinding();
   res.json({
     ...await getQueueScope(),
     apiConfigured: isBaseLinkerConfigured(),
-    accountIdentitySource: binding.source,
-    accountIdentityStable: binding.stable === true,
   });
 }));
 
@@ -44,12 +40,9 @@ router.get('/baselinker-settings/statuses', telegramAuth, requireTelegramRole('a
 router.post('/baselinker-settings', telegramAuth, requireTelegramRole('admin'), asyncHandler(async (req, res) => {
   const { saveQueueSettings } = require('../services/baseLinkerQueueScope');
   const { isBaseLinkerConfigured } = require('../services/baseLinkerClient');
-  const { getBaseLinkerAccountBinding } = require('../services/baseLinkerAccount');
   const settings = await saveQueueSettings(req.body);
-  const binding = getBaseLinkerAccountBinding();
   try {
     getIO()?.to('baselinker_staff').emit('baselinker_orders_changed', {
-      accountScope: binding.accountScope,
       resync: true,
       reason: 'queue_settings_changed',
     });
@@ -57,8 +50,6 @@ router.post('/baselinker-settings', telegramAuth, requireTelegramRole('admin'), 
   res.json({
     ...settings,
     apiConfigured: isBaseLinkerConfigured(),
-    accountIdentitySource: binding.source,
-    accountIdentityStable: binding.stable === true,
   });
 }));
 

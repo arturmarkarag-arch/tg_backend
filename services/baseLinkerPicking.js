@@ -7,7 +7,6 @@ const { compactOrders } = require('./baseLinkerPublicDto');
 const { recordBaseLinkerOrderSnapshots } = require('./baseLinkerOrderSnapshots');
 const { setBaseLinkerOrderStatus } = require('./baseLinkerOrderCommands');
 const { getQueueScope, classifyUpstreamOrder } = require('./baseLinkerQueueScope');
-const { getBaseLinkerAccountScope, scopedLockKey } = require('./baseLinkerAccount');
 const { getIO } = require('../socket');
 
 const {
@@ -190,7 +189,6 @@ function emitPickingUpdate(doc, clientMutationId = '') {
     const state = publicState(doc);
     const orderIds = [String(doc.orderId)];
     io.to('baselinker_staff').emit('baselinker_picking_updated', {
-      accountScope: getBaseLinkerAccountScope(),
       orderId: String(doc.orderId),
       orderIds,
       state,
@@ -562,18 +560,16 @@ function isDuplicateKeyError(error) {
   return Number(error?.code) === 11000;
 }
 
-const claimIndexReadyByScope = new Map();
+let claimIndexReadyPromise = null;
 
 async function ensureClaimIndexReady() {
-  const accountScope = getBaseLinkerAccountScope();
-  if (!claimIndexReadyByScope.has(accountScope)) {
-    const promise = (async () => {
+  if (!claimIndexReadyPromise) {
+    claimIndexReadyPromise = (async () => {
       // Rows produced by the retired local-only Sent contract never proved that
       // BaseLinker changed status. Invalidate them once and require exact
       // upstream reconciliation before they can be trusted again.
       const migratedAt = new Date();
       await BaseLinkerPickingOrder.collection.updateMany({
-        accountScope,
         status: 'sent',
         history: { $elemMatch: { action: 'order_sent_local' } },
         'history.action': { $ne: 'legacy_local_sent_invalidated' },
@@ -605,19 +601,18 @@ async function ensureClaimIndexReady() {
       });
 
       // Remove every persisted field from the retired logical/multi-order
-      // abstraction. accountScope + orderId is the only local order identity.
+      // abstraction. orderId is the only local order identity.
       await BaseLinkerPickingOrder.collection.updateMany(
-        { accountScope },
+        {},
         { $unset: { claimKey: '', groupKey: '', externalOrderId: '', memberOrderIds: '' } },
       );
       return BaseLinkerPickingOrder.syncIndexes();
     })().catch((error) => {
-      claimIndexReadyByScope.delete(accountScope);
+      claimIndexReadyPromise = null;
       throw error;
     });
-    claimIndexReadyByScope.set(accountScope, promise);
   }
-  return claimIndexReadyByScope.get(accountScope);
+  return claimIndexReadyPromise;
 }
 
 function claimAvailabilityFilter(actor, now, adminForce) {
@@ -727,14 +722,12 @@ async function claimPickingOrder({ orderId, user, force = false, clientMutationI
   const scope = await getQueueScope();
   if (!scope.configured) throw appError('baselinker_queue_not_configured');
   assertOrderActionable(order, scope);
-  const accountScope = getBaseLinkerAccountScope();
-
   await ensureClaimIndexReady();
 
-  // Locks reduce contention; accountScope+orderId unique index + revision CAS
-  // is the durable correctness boundary across processes.
-  return withLock(scopedLockKey(`baselinker-worker:${actor.by}`, accountScope), () => (
-    withLock(scopedLockKey(`baselinker-order:${requestedId}`, accountScope), async () => {
+  // Locks reduce contention; unique orderId index + revision CAS is the durable
+  // correctness boundary across processes.
+  return withLock(`baselinker-worker:${actor.by}`, () => (
+    withLock(`baselinker-order:${requestedId}`, async () => {
       let candidate = await BaseLinkerPickingOrder.findOne({ orderId: requestedId });
 
       const activeOther = await BaseLinkerPickingOrder.findOne({
@@ -888,7 +881,7 @@ async function heartbeatPickingOrder({ orderId, user }) {
 async function updatePickingItem({ orderId, lineKey, user, expectedRevision, state, pickedQty, issueNote, clientMutationId = '' }) {
   const actor = actorOf(user);
   const id = String(orderId);
-  return withLock(scopedLockKey(`baselinker-picking:${id}`), async () => {
+  return withLock(`baselinker-picking:${id}`, async () => {
     const doc = await BaseLinkerPickingOrder.findOne({ orderId: id });
     if (!doc) throw appError('baselinker_picking_not_started');
     await verifyTrackedPickingOrderUpstream(doc, actor, { clientMutationId });
@@ -942,7 +935,7 @@ async function updatePickingItem({ orderId, lineKey, user, expectedRevision, sta
 async function releasePickingOrder({ orderId, user, expectedRevision, force = false, clientMutationId = '' }) {
   const actor = actorOf(user);
   const id = String(orderId);
-  return withLock(scopedLockKey(`baselinker-picking:${id}`), async () => {
+  return withLock(`baselinker-picking:${id}`, async () => {
     const doc = await BaseLinkerPickingOrder.findOne({ orderId: id });
     if (!doc) throw appError('baselinker_picking_not_started');
     await verifyTrackedPickingOrderUpstream(doc, actor, { clientMutationId });
@@ -974,7 +967,7 @@ async function markPickingOrderPacked({ orderId, user, expectedRevision, clientM
   const actor = actorOf(user);
   const id = String(orderId || '').trim();
 
-  return withLock(scopedLockKey(`baselinker-order:${id}`), async () => {
+  return withLock(`baselinker-order:${id}`, async () => {
     const doc = await BaseLinkerPickingOrder.findOne({ orderId: id });
     if (!doc) throw appError('baselinker_picking_not_started');
     assertOwner(doc, actor);
@@ -1062,7 +1055,7 @@ async function markPickingOrderSent({ orderId, user, expectedRevision, clientMut
     throw appError('baselinker_queue_not_configured');
   }
 
-  return withLock(scopedLockKey(`baselinker-order:${id}`), async () => {
+  return withLock(`baselinker-order:${id}`, async () => {
     const doc = await BaseLinkerPickingOrder.findOne({ orderId: id });
     if (!doc) throw appError('baselinker_picking_not_started');
 
@@ -1161,7 +1154,7 @@ async function reopenPickingOrder({ orderId, user, expectedRevision, clientMutat
   if (user?.role !== 'admin') throw appError('forbidden');
   const actor = actorOf(user);
   const id = String(orderId);
-  return withLock(scopedLockKey(`baselinker-picking:${id}`), async () => {
+  return withLock(`baselinker-picking:${id}`, async () => {
     const doc = await BaseLinkerPickingOrder.findOne({ orderId: id });
     if (!doc) throw appError('baselinker_picking_not_started');
     await verifyTrackedPickingOrderUpstream(doc, actor, { force: true, clientMutationId });
@@ -1293,7 +1286,7 @@ async function markPickingOrdersUpstreamUpdated({
 async function acknowledgeUpstreamReview({ orderId, user, expectedRevision, clientMutationId = '' }) {
   const actor = actorOf(user);
   const id = String(orderId || '');
-  return withLock(scopedLockKey(`baselinker-picking:${id}`), async () => {
+  return withLock(`baselinker-picking:${id}`, async () => {
     const doc = await BaseLinkerPickingOrder.findOne({ orderId: id });
     if (!doc) throw appError('baselinker_picking_not_started');
     const beforeRevision = Number(doc.revision || 0);
@@ -1345,7 +1338,7 @@ async function reconcilePickingFromUpstreamChanges({ orders = [], removedOrderId
     const localOrderId = String(snapshot.orderId || '');
     if (!localOrderId) continue;
 
-    await withLock(scopedLockKey(`baselinker-order:${localOrderId}`), async () => {
+    await withLock(`baselinker-order:${localOrderId}`, async () => {
       const doc = await BaseLinkerPickingOrder.findOne({ orderId: localOrderId });
       if (!doc) return;
 

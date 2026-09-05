@@ -11,27 +11,24 @@ The integration is split into two authorities:
 
 The BaseLinker token exists only on the server as `BASELINKER_API_TOKEN`. Order reads remain source-of-truth reads from BaseLinker. The one intentional order write is the operator action **Відправив**: the server calls `setOrderStatus` for that exact `order_id`, then performs exact `getOrders(order_id)` verification before persisting local Sent. No other order-field/status mutation is allowed by this module.
 
-## Account isolation
+## Deployment identity
 
-Every persisted BaseLinker cache row, picking record, print job, queue setting,
-journal cursor and scheduler/worker lock belongs to an `accountScope`. Queries
-are tenant-scoped at the Mongoose model boundary, not only in individual
-services. A missing filter in future service code therefore fails closed and
-cannot expose another BaseLinker account's data.
+This integration intentionally supports **one BaseLinker account per deployment**.
+`BASELINKER_API_TOKEN` is the only BaseLinker credential used by the runtime.
+There is no runtime account switching, token-derived account namespace,
+`accountScope`, cross-account cache migration or automatic cleanup when the token
+is replaced.
 
-BaseLinker does not publish a documented account-identity endpoint. Configure
-`BASELINKER_ACCOUNT_KEY` with a stable, non-secret shop identifier for an
-explicit binding. Keep that value unchanged when regenerating the API token for
-the same BaseLinker account, and change it when intentionally switching to a
-different account.
+Changing the token to a different BaseLinker account while keeping the same MongoDB
+data is an unsupported administrative operation. If that is ever required, the
+BaseLinker cache/picking/audit collections and BaseLinker-specific settings must be
+migrated or cleaned explicitly before the new account is used. Normal production
+operation assumes the account does not change under a running installation.
 
-Without the explicit key, the server fingerprints the **entire** token into an opaque scope. API tokens are credentials, not a documented account identity, so no substring/prefix is interpreted as an account ID. Token rotation without `BASELINKER_ACCOUNT_KEY` therefore starts a new isolated namespace rather than risking a cross-account merge. The secret token itself is never persisted as the scope.
-
-Legacy documents that have no `accountScope` are retained in MongoDB but are
-invisible to all live account-scoped reads. They must never be assigned to a
-shop automatically because historical mixed rows cannot be attributed safely.
-Queue settings are also per-account, so a newly selected account must have its
-three statuses selected once before its cache warms.
+This deliberate simplification does **not** weaken order integrity inside the
+configured account: `order_id` remains the only local order identity, exact upstream
+reads remain authoritative, and cache/picking rows from different `order_id`s are
+never merged.
 
 ## Access
 
@@ -51,7 +48,7 @@ Administrators select three distinct BaseLinker statuses in **Settings → Syste
 
 The old single `statusId` setting is treated only as a migration fallback for Intake. The queue is not considered configured until Sent and Cancelled are also selected, and all three IDs must be different. The API token remains server-side.
 
-Admin-only routes: `GET/POST /admin/baselinker-settings` and `GET /admin/baselinker-settings/statuses`. Status options come from `getOrderStatusList`; saves are validated against the current BaseLinker list and persisted in an account-scoped `AppSetting` namespace based on `baselinker.queueSettings.v1`. Every save changes a revision/scope key so an older scan cannot publish into a newer configuration or account.
+Admin-only routes: `GET/POST /admin/baselinker-settings` and `GET /admin/baselinker-settings/statuses`. Status options come from `getOrderStatusList`; saves are validated against the current BaseLinker list and persisted under the single `AppSetting` key `baselinker.queueSettings.v1`. Every save changes a revision/scope key so an older scan cannot publish into a newer status configuration.
 
 The scheduled full reconciliation scans only two upstream subsets:
 
@@ -62,7 +59,7 @@ Cancelled is intentionally not a third historical scan. Journal events refresh e
 
 The periodic full reconciliation is also a **status-loss detector**, not merely a cache refresh. If an order that was previously known in Intake/Sent disappears from both status-filtered scans, the server performs exact `getOrders(order_id)` reads for a bounded batch of those disappeared IDs. That exact result decides whether the order is now Cancelled, Sent, another status, or missing/deleted. The stale cached status is never allowed to decide. Remaining recovery work is persisted as a health counter and retried on later reconciliation passes.
 
-`GET /orders` reads MongoDB only and never starts an upstream scan. It returns `baselinker_queue_not_configured` until all three statuses are selected and `baselinker_queue_warming` until a complete scoped snapshot exists. A truncated BaseLinker scan is rejected before sweep/publication.
+`GET /orders` reads MongoDB only and never starts an upstream scan. It returns `baselinker_queue_not_configured` until all three statuses are selected and `baselinker_queue_warming` until a complete queue snapshot exists. A truncated BaseLinker scan is rejected before sweep/publication.
 
 The journal is the incremental path. It is polled in the background (15 seconds by default). For every BaseLinker event that can change something visible or operational on an order (products, payment, order data/status, delivery, package/label state, invoice, receipt, merge/split/copy), the server fetches only the affected `order_id` through exact `getOrders(order_id)`, reconciles the current snapshot, and marks already locally tracked work as **Updated**. Event type `18` is a status transition; its `object_id` is the BaseLinker status ID. Blacklist-only events are ignored.
 
@@ -94,7 +91,7 @@ No `createPackage`, package deletion or shipment mutation exists in this module.
 
 ## Local fulfilment state
 
-Collection: `BaseLinkerPickingOrder`, unique by `(accountScope, BaseLinker order_id)`.
+Collection: `BaseLinkerPickingOrder`, unique by BaseLinker `order_id`.
 
 Detailed picking states:
 

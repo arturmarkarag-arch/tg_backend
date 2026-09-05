@@ -6,9 +6,9 @@ function read(rel) {
 }
 
 describe('BaseLinker picking claim race guard', () => {
-  it('uses accountScope + exact orderId as the durable DB uniqueness boundary', () => {
+  it('uses exact orderId as the durable DB uniqueness boundary', () => {
     const model = read('models/BaseLinkerPickingOrder.js');
-    expect(model).toContain("BaseLinkerPickingOrderSchema.index({ accountScope: 1, orderId: 1 }, { unique: true })");
+    expect(model).toContain("BaseLinkerPickingOrderSchema.index({ orderId: 1 }, { unique: true })");
     expect(model).not.toContain('claimKey');
     expect(model).not.toContain('memberOrderIds');
     expect(model).not.toContain('groupKey');

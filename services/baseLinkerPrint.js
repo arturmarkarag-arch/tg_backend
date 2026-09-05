@@ -5,7 +5,6 @@ const {
   fetchVerifiedBaseLinkerOrderPackage,
   fetchVerifiedBaseLinkerOrderLabel,
 } = require('./baseLinkerShipments');
-const { getBaseLinkerAccountScope } = require('./baseLinkerAccount');
 const { getIO } = require('../socket');
 const { appError } = require('../utils/errors');
 
@@ -124,7 +123,6 @@ function emitJob(job) {
     const io = getIO();
     if (!io || !job?.requestedByTelegramId) return;
     io.to(`user_${job.requestedByTelegramId}`).emit('baselinker_print_job_updated', {
-      accountScope: getBaseLinkerAccountScope(),
       jobId: job.jobId,
       status: job.status,
       printerName: job.printerName || '',

@@ -9,7 +9,6 @@ const { getQueueScope } = require('./baseLinkerQueueScope');
 const { syncErrorDetails, retryDelayMs } = require('./baseLinkerSyncError');
 const { runAsSchedulerLeader } = require('./schedulerLeader');
 const { getIO } = require('../socket');
-const { getBaseLinkerAccountScope, scopedSettingKey, scopedLockKey } = require('./baseLinkerAccount');
 
 const JOURNAL_STATE_KEY = 'baselinker.journal.v1';
 const TICK_MS = Math.min(60_000, Math.max(5_000, Number(process.env.BASELINKER_JOURNAL_POLL_MS) || 15_000));
@@ -105,7 +104,7 @@ function selectJournalWindow(logs, maxUniqueOrders = MAX_CHANGED_ORDERS_PER_TICK
 
 async function loadJournalState() {
   const row = await AppSetting.findOne({
-    key: scopedSettingKey(JOURNAL_STATE_KEY, getBaseLinkerAccountScope()),
+    key: JOURNAL_STATE_KEY,
   }).lean();
   const value = row?.value && typeof row.value === 'object' ? row.value : {};
   return {
@@ -134,7 +133,7 @@ async function saveJournalState(state) {
     nextRetryAt: state.nextRetryAt || null,
   };
   await AppSetting.findOneAndUpdate(
-    { key: scopedSettingKey(JOURNAL_STATE_KEY, getBaseLinkerAccountScope()) },
+    { key: JOURNAL_STATE_KEY },
     { $set: { value } },
     { upsert: true, new: true, setDefaultsOnInsert: true },
   );
@@ -152,7 +151,7 @@ function emitOrdersChanged(payload) {
   try {
     const io = getIO();
     if (!io) return;
-    io.to('baselinker_staff').emit('baselinker_orders_changed', { accountScope: getBaseLinkerAccountScope(), ...(payload || {}) });
+    io.to('baselinker_staff').emit('baselinker_orders_changed', payload || {});
   } catch (_) {
     // Realtime is best-effort. Journal cursor is persisted only after the
     // upstream/local reconciliation succeeded, not after socket delivery.
@@ -208,7 +207,7 @@ async function runBaseLinkerJournalTick() {
   const scope = await getQueueScope();
   if (!scope.configured) return { skipped: true, reason: 'queue_not_configured' };
 
-  return runAsSchedulerLeader(scopedLockKey('baselinker-journal', scope.accountScope), async () => {
+  return runAsSchedulerLeader('baselinker-journal', async () => {
     const state = await loadJournalState();
     if (state.scopeKey === scope.scopeKey && Date.parse(state.nextRetryAt) > Date.now()) return { skipped: true, reason: 'backoff' };
     const healthy = { ...state, scopeKey: scope.scopeKey, lastError: null, failureCount: 0, nextRetryAt: null };

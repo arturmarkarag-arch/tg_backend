@@ -160,7 +160,7 @@ ${router}`).not.toMatch(/callBaseLinker\(['"](?:addOrder|deleteOrder|setOrderFie
     expect(first[0].requestedQty).toBe(3);
     expect(second[0].requestedQty).toBe(4);
 
-    expect(model).toContain("BaseLinkerPickingOrderSchema.index({ accountScope: 1, orderId: 1 }, { unique: true })");
+    expect(model).toContain("BaseLinkerPickingOrderSchema.index({ orderId: 1 }, { unique: true })");
     expect(model).not.toContain('memberOrderIds');
     expect(model).not.toContain('groupKey');
     expect(source).not.toContain('mergeOrderGroup');
@@ -176,7 +176,7 @@ ${router}`).not.toMatch(/callBaseLinker\(['"](?:addOrder|deleteOrder|setOrderFie
     expect(router).not.toContain('memberOrderIds');
     expect(picking).toContain('async function fetchExactOrder(orderId)');
     expect(picking).toContain('const order = await fetchExactOrder(requestedId)');
-    expect(picking).toContain('withLock(scopedLockKey(`baselinker-order:${requestedId}`');
+    expect(picking).toContain('withLock(`baselinker-order:${requestedId}`');
     expect(picking).not.toContain('baselinker_picking_group_mismatch');
   });
 

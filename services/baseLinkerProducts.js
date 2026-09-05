@@ -1,5 +1,4 @@
 const { callBaseLinker } = require('./baseLinkerClient');
-const { getBaseLinkerAccountScope } = require('./baseLinkerAccount');
 
 const PRODUCT_CACHE_TTL_MS = 5 * 60 * 1000;
 const LOOKUP_CHUNK_SIZE = 100;
@@ -62,18 +61,17 @@ function normalizeImageUrls(images) {
 }
 
 function getCached(key) {
-  const scopedKey = `${getBaseLinkerAccountScope()}|${key}`;
-  const cached = productCache.get(scopedKey);
+  const cached = productCache.get(key);
   if (!cached) return null;
   if (cached.expiresAt <= Date.now()) {
-    productCache.delete(scopedKey);
+    productCache.delete(key);
     return null;
   }
   return cached.value;
 }
 
 function setCached(key, value) {
-  productCache.set(`${getBaseLinkerAccountScope()}|${key}`, {
+  productCache.set(key, {
     value,
     expiresAt: Date.now() + PRODUCT_CACHE_TTL_MS,
   });

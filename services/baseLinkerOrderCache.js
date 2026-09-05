@@ -10,11 +10,6 @@ const { appError } = require('../utils/errors');
 const { compactOrder } = require('./baseLinkerPublicDto');
 const { baseLinkerOrderSnapshotHash, recordBaseLinkerOrderSnapshots } = require('./baseLinkerOrderSnapshots');
 const {
-  getBaseLinkerAccountScope,
-  scopedSettingKey,
-  scopedLockKey,
-} = require('./baseLinkerAccount');
-const {
   getQueueScope,
   orderInIntakeScope,
   orderInSentScope,
@@ -65,11 +60,10 @@ function orderSearchText(order) {
   ].filter(Boolean).join(' ').toLowerCase();
 }
 
-function cacheRowForOrder(order, syncToken = '', accountScope = getBaseLinkerAccountScope()) {
+function cacheRowForOrder(order, syncToken = '') {
   const orderId = String(order?.order_id ?? '').trim();
   if (!orderId) return null;
   return {
-    accountScope,
     orderId,
     orderIdNumeric: Number(order?.order_id || 0) || 0,
     orderStatusId: Number.isInteger(Number(order?.order_status_id)) ? Number(order.order_status_id) : null,
@@ -88,7 +82,7 @@ async function ensureIndexes() {
     indexPromise = (async () => {
       // One-time cleanup of the retired logical-order compatibility field.
       await BaseLinkerOrderCache.collection.updateMany(
-        { accountScope: getBaseLinkerAccountScope() },
+        {},
         { $unset: { groupKey: '' } },
       );
       return BaseLinkerOrderCache.syncIndexes();
@@ -101,15 +95,14 @@ async function ensureIndexes() {
 }
 
 async function upsertCachedOrders(orders, { syncToken = '', source = 'cache_refresh' } = {}) {
-  const accountScope = getBaseLinkerAccountScope();
-  const rows = (orders || []).map((order) => cacheRowForOrder(order, syncToken, accountScope)).filter(Boolean);
+  const rows = (orders || []).map((order) => cacheRowForOrder(order, syncToken)).filter(Boolean);
   if (!rows.length) return 0;
   await ensureIndexes();
   // Preserve the exact upstream payload before the mutable latest-cache row is overwritten.
   await recordBaseLinkerOrderSnapshots(orders, { source });
   const operations = rows.map((row) => ({
     updateOne: {
-      filter: { accountScope, orderId: row.orderId },
+      filter: { orderId: row.orderId },
       update: { $set: row },
       upsert: true,
     },
@@ -121,7 +114,7 @@ async function upsertCachedOrders(orders, { syncToken = '', source = 'cache_refr
 async function removeCachedOrders(orderIds) {
   const ids = [...new Set((orderIds || []).map((id) => String(id || '')).filter(Boolean))];
   if (!ids.length) return 0;
-  const result = await BaseLinkerOrderCache.deleteMany({ accountScope: getBaseLinkerAccountScope(), orderId: { $in: ids } });
+  const result = await BaseLinkerOrderCache.deleteMany({ orderId: { $in: ids } });
   return Number(result?.deletedCount || 0);
 }
 
@@ -129,7 +122,6 @@ function retainedPickingFilter(now = new Date()) {
   const sentCutoff = new Date(now.getTime() - SENT_RETENTION_MS);
   return {
     $and: [
-      { accountScope: getBaseLinkerAccountScope() },
       // Cancelled/Sent are upstream terminal facts. Keep them after they leave
       // intake only while somebody still has to acknowledge the change, or
       // while a local Sent record is inside the same 30-day history window.
@@ -164,7 +156,7 @@ async function retainedPickingOrderIds({ touchedOrderIds = null } = {}) {
 
 async function cacheState(scope = null) {
   scope = scope || await getQueueScope();
-  const row = await AppSetting.findOne({ key: scopedSettingKey(CACHE_STATE_KEY, scope.accountScope) }).lean();
+  const row = await AppSetting.findOne({ key: CACHE_STATE_KEY }).lean();
   const value = row?.value && typeof row.value === 'object' ? row.value : {};
   return {
     initialized: value.initialized === true && scope.configured && value.scopeKey === scope.scopeKey,
@@ -176,9 +168,9 @@ async function cacheState(scope = null) {
   };
 }
 
-async function saveCacheState(value, accountScope = getBaseLinkerAccountScope()) {
+async function saveCacheState(value) {
   await AppSetting.findOneAndUpdate(
-    { key: scopedSettingKey(CACHE_STATE_KEY, accountScope) },
+    { key: CACHE_STATE_KEY },
     { $set: { value } },
     { upsert: true, new: true, setDefaultsOnInsert: true },
   );
@@ -229,7 +221,6 @@ async function recoverDisappearedKnownOrders(scope, scannedOrders, { enabled = f
   // statuses can legitimately be called "disappeared". Cancelled/Other rows
   // retained for audit are not polled forever.
   const previousRows = await BaseLinkerOrderCache.find({
-    accountScope: scope.accountScope,
     orderStatusId: { $in: [scope.intakeStatusId, scope.sentStatusId] },
   }).select('orderId orderStatusId').lean();
   const disappeared = previousRows
@@ -317,11 +308,11 @@ async function bootstrapCacheUnlocked(previousState = null) {
   await upsertCachedOrders([...scannedOrders, ...cacheableRecovered], { syncToken, source: 'full_sync' });
 
   const retainedIds = [...retainedIdsSet];
-  const sweep = { accountScope: scope.accountScope, syncToken: { $ne: syncToken } };
+  const sweep = { syncToken: { $ne: syncToken } };
   if (retainedIds.length) sweep.orderId = { $nin: retainedIds };
   await BaseLinkerOrderCache.deleteMany(sweep);
 
-  const orderCount = await BaseLinkerOrderCache.countDocuments({ accountScope: scope.accountScope });
+  const orderCount = await BaseLinkerOrderCache.countDocuments({});
   const lastFullSyncAt = new Date().toISOString();
   const state = {
     initialized: true,
@@ -331,7 +322,7 @@ async function bootstrapCacheUnlocked(previousState = null) {
     fallbackCheckedOrderCount: recovery.checkedOrderCount,
     fallbackPendingOrderCount: recovery.pendingOrderCount,
   };
-  await saveCacheState(state, scope.accountScope);
+  await saveCacheState(state);
   return state;
 }
 
@@ -340,7 +331,7 @@ async function ensureBaseLinkerOrderCacheReady(scope = null) {
   if (!scope.configured) throw appError('baselinker_queue_not_configured');
   const current = await cacheState(scope);
   if (current.initialized) {
-    const actualCount = await BaseLinkerOrderCache.countDocuments({ accountScope: scope.accountScope });
+    const actualCount = await BaseLinkerOrderCache.countDocuments({});
     if (actualCount > 0 || current.orderCount === 0) return { ...current, orderCount: actualCount };
   }
   throw appError('baselinker_queue_warming');
@@ -350,11 +341,11 @@ async function ensureBaseLinkerOrderCacheReady(scope = null) {
 async function syncBaseLinkerOrderCache({ force = false, maxAgeMs = CACHE_REFRESH_MS } = {}) {
   const scope = await getQueueScope();
   if (!scope.configured) return { skipped: true, reason: 'queue_not_configured' };
-  return withLock(scopedLockKey('baselinker-order-cache-sync', scope.accountScope), async () => {
+  return withLock('baselinker-order-cache-sync', async () => {
     const current = await cacheState(scope);
     const safeMaxAgeMs = Math.min(CACHE_REFRESH_MS, Math.max(30_000, Number(maxAgeMs) || CACHE_REFRESH_MS));
     if (!force && current.initialized && Date.now() - Date.parse(current.lastFullSyncAt) < safeMaxAgeMs) {
-      const count = await BaseLinkerOrderCache.countDocuments({ accountScope: scope.accountScope });
+      const count = await BaseLinkerOrderCache.countDocuments({});
       if (count > 0 || current.orderCount === 0) return { skipped: true, reason: 'fresh' };
     }
     return bootstrapCacheUnlocked(current);
@@ -366,7 +357,6 @@ async function getKnownCachedOrderIds(orderIds = []) {
   const ids = [...new Set((orderIds || []).map((id) => String(id || '')).filter(Boolean))];
   if (!ids.length) return [];
   const rows = await BaseLinkerOrderCache.find({
-    accountScope: getBaseLinkerAccountScope(),
     orderId: { $in: ids },
   }).select('orderId').lean();
   return rows.map((row) => String(row.orderId || '')).filter(Boolean);
@@ -375,7 +365,7 @@ async function getKnownCachedOrderIds(orderIds = []) {
 async function refreshBaseLinkerOrderCache({ orders = [], removedOrderIds = [] } = {}) {
   const initialScope = await getQueueScope();
   if (!initialScope.configured) return;
-  return withLock(scopedLockKey('baselinker-order-cache-sync', initialScope.accountScope), async () => {
+  return withLock('baselinker-order-cache-sync', async () => {
     const scope = await getQueueScope();
     const touchedIds = [...new Set([
       ...(orders || []).map((order) => String(order?.order_id || '')),
@@ -424,7 +414,7 @@ async function getCachedOrderPage({ workflowFilter = 'processing', packedBy = ''
     ? String(workflowFilter)
     : 'processing';
   const safePackedBy = String(packedBy || '').trim().slice(0, 120);
-  const match = { accountScope: scope.accountScope };
+  const match = {};
   const normalizedSearch = String(search || '').trim().toLowerCase().slice(0, 160);
   if (normalizedSearch) match.searchText = { $regex: escapeRegex(normalizedSearch), $options: 'i' };
 
@@ -445,7 +435,7 @@ async function getCachedOrderPage({ workflowFilter = 'processing', packedBy = ''
     { $match: match },
     { $sort: { sortAt: -1, orderIdNumeric: -1 } },
     {
-      // accountScope + orderId is unique at the storage layer. Never collapse,
+      // orderId is unique at the storage layer. Never collapse,
       // group or merge order rows in the read path; derive display flags from
       // the one exact cached BaseLinker order instead.
       $project: {
@@ -468,15 +458,12 @@ async function getCachedOrderPage({ workflowFilter = 'processing', packedBy = ''
     {
       $lookup: {
         from: pickingCollection,
-        let: { cacheOrderId: '$_id', accountScope: scope.accountScope },
+        let: { cacheOrderId: '$_id' },
         pipeline: [
           {
             $match: {
               $expr: {
-                $and: [
-                  { $eq: ['$accountScope', '$$accountScope'] },
-                  { $eq: ['$orderId', '$$cacheOrderId'] },
-                ],
+                $eq: ['$orderId', '$$cacheOrderId'],
               },
             },
           },
@@ -575,8 +562,7 @@ async function getCachedOrderPage({ workflowFilter = 'processing', packedBy = ''
     ? BaseLinkerPickingOrder.aggregate([
       {
         $match: {
-          accountScope: scope.accountScope,
-          packedBy: { $nin: ['', null] },
+                packedBy: { $nin: ['', null] },
           upstreamDisposition: { $in: ['', 'intake'] },
           $or: [{ workflowStage: 'packed' }, { status: 'packed' }],
         },
@@ -614,7 +600,6 @@ async function getCachedOrderPage({ workflowFilter = 'processing', packedBy = ''
 
   const orderIds = pageGroups.map((row) => String(row.orderId || '')).filter(Boolean);
   const docs = orderIds.length ? await BaseLinkerOrderCache.find({
-    accountScope: scope.accountScope,
     orderId: { $in: orderIds },
   }).lean() : [];
   const orderRank = new Map(orderIds.map((id, index) => [id, index]));

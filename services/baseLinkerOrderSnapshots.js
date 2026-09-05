@@ -2,7 +2,6 @@
 
 const crypto = require('crypto');
 const BaseLinkerOrderSnapshot = require('../models/BaseLinkerOrderSnapshot');
-const { getBaseLinkerAccountScope } = require('./baseLinkerAccount');
 
 function canonicalize(value) {
   if (Array.isArray(value)) return value.map(canonicalize);
@@ -37,10 +36,8 @@ async function recordBaseLinkerOrderSnapshots(orders = [], { source = 'unknown' 
   const rows = (Array.isArray(orders) ? orders : []).filter((order) => Number(order?.order_id) > 0);
   if (!rows.length) return [];
   await ensureSnapshotIndexesReady();
-  const accountScope = getBaseLinkerAccountScope();
   const observedAt = new Date();
   const records = rows.map((order) => ({
-    accountScope,
     orderId: String(order.order_id),
     snapshotHash: baseLinkerOrderSnapshotHash(order),
     source: String(source || 'unknown').slice(0, 64),
@@ -50,7 +47,7 @@ async function recordBaseLinkerOrderSnapshots(orders = [], { source = 'unknown' 
   try {
     await BaseLinkerOrderSnapshot.bulkWrite(records.map((record) => ({
       updateOne: {
-        filter: { accountScope, orderId: record.orderId, snapshotHash: record.snapshotHash },
+        filter: { orderId: record.orderId, snapshotHash: record.snapshotHash },
         update: { $setOnInsert: record },
         upsert: true,
       },

@@ -67,7 +67,9 @@
     "test:telegram-delivery-ledger": "node scripts/checkTelegramDeliveryLedgerV48.js",
     "test:ordering-reminder-delivery": "node scripts/checkOrderingReminderDeliveryV48.js",
     "test:receipt-supplement:lifecycle": "node scripts/checkReceiptSupplementLifecycle20260821.js",
-    "test:telegram-new-products:architecture": "node scripts/checkTelegramNewProductsArchitecture20260901.js"
+    "test:telegram-new-products:architecture": "node scripts/checkTelegramNewProductsArchitecture20260901.js",
+    "cleanup:baselinker:test": "node -r ../dev-use-test-db.js scripts/cleanupBaseLinkerDb.TEST.js",
+    "cleanup:baselinker:prod": "node scripts/cleanupBaseLinkerDb.PROD.js"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1030.0",

@@ -4,8 +4,6 @@ const {
   PERSISTED_ITEM_STATES,
 } = require('../domain/baseLinkerPickingState');
 const mongoose = require('mongoose');
-const baseLinkerAccountScopePlugin = require('./plugins/baseLinkerAccountScope');
-const { getBaseLinkerAccountScope } = require('../services/baseLinkerAccount');
 
 const PickingHistoryEntrySchema = new mongoose.Schema({
   at: { type: Date, default: Date.now },
@@ -43,7 +41,6 @@ const PickingItemSchema = new mongoose.Schema({
 }, { _id: false });
 
 const BaseLinkerPickingOrderSchema = new mongoose.Schema({
-  accountScope: { type: String, required: true, default: getBaseLinkerAccountScope, index: true, maxlength: 80 },
   orderId: { type: String, required: true },
   orderFingerprint: { type: String, default: '' },
   status: {
@@ -108,13 +105,13 @@ const BaseLinkerPickingOrderSchema = new mongoose.Schema({
   history: { type: [PickingHistoryEntrySchema], default: [] },
 }, { timestamps: true });
 
-BaseLinkerPickingOrderSchema.index({ accountScope: 1, orderId: 1 }, { unique: true });
-BaseLinkerPickingOrderSchema.index({ accountScope: 1, status: 1, updatedAt: -1 });
-BaseLinkerPickingOrderSchema.index({ accountScope: 1, workflowStage: 1, updatedAt: -1 });
-BaseLinkerPickingOrderSchema.index({ accountScope: 1, workflowStage: 1, packedBy: 1, packedAt: -1 });
-BaseLinkerPickingOrderSchema.index({ accountScope: 1, ownerTelegramId: 1, status: 1 });
-// The account-scoped unique(orderId) index above is the DB backstop for claim races.
-BaseLinkerPickingOrderSchema.index({ accountScope: 1, upstreamReviewRequired: 1, updatedAt: -1 });
-BaseLinkerPickingOrderSchema.plugin(baseLinkerAccountScopePlugin);
+BaseLinkerPickingOrderSchema.index({ orderId: 1 }, { unique: true });
+BaseLinkerPickingOrderSchema.index({ status: 1, updatedAt: -1 });
+BaseLinkerPickingOrderSchema.index({ workflowStage: 1, updatedAt: -1 });
+BaseLinkerPickingOrderSchema.index({ workflowStage: 1, packedBy: 1, packedAt: -1 });
+BaseLinkerPickingOrderSchema.index({ ownerTelegramId: 1, status: 1 });
+// The unique(orderId) index above is the DB backstop for claim races.
+BaseLinkerPickingOrderSchema.index({ upstreamReviewRequired: 1, updatedAt: -1 });
+
 
 module.exports = mongoose.model('BaseLinkerPickingOrder', BaseLinkerPickingOrderSchema);

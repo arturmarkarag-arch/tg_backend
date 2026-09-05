@@ -26,9 +26,7 @@ const modelSrc = read('models/BaseLinkerPickingOrder.js');
 const commandSrc = read('services/baseLinkerOrderCommands.js');
 const shipmentsSrc = read('services/baseLinkerShipments.js');
 const snapshotSrc = read('services/baseLinkerOrderSnapshots.js');
-const accountSrc = read('services/baseLinkerAccount.js');
 const printSrc = read('services/baseLinkerPrint.js');
-const scopePluginSrc = read('models/plugins/baseLinkerAccountScope.js');
 
 check('three distinct queue status ids are required', () => {
   assert(scopeSrc.includes('intakeStatusId'));
@@ -115,15 +113,15 @@ check('Sent is the sole explicit upstream write and is exact-order verified', ()
     assert(!pickingSrc.includes(token) && !cacheSrc.includes(token) && !journalSrc.includes(token) && !commandSrc.includes(token), token);
   }
 });
-check('exact accountScope + orderId is the only picking identity', () => {
-  assert(modelSrc.includes("index({ accountScope: 1, orderId: 1 }, { unique: true })"));
-  for (const token of ['memberOrderIds', 'claimKey', 'groupKey']) assert(!modelSrc.includes(token), token);
+check('exact orderId is the only picking identity', () => {
+  assert(modelSrc.includes("index({ orderId: 1 }, { unique: true })"));
+  for (const token of ['memberOrderIds', 'claimKey', 'groupKey', 'accountScope']) assert(!modelSrc.includes(token), token);
   for (const token of ['mergeOrderGroup', 'fetchExactOrderGroup', 'claimKeyForGroup']) assert(!pickingSrc.includes(token), token);
 });
-check('Mongoose BaseLinker models fail closed to current accountScope', () => {
-  assert(modelSrc.includes('plugin(baseLinkerAccountScopePlugin)'));
-  assert(scopePluginSrc.includes("this.where({ accountScope: getBaseLinkerAccountScope() })"));
-  assert(scopePluginSrc.includes("schema.pre('aggregate'"));
+check('runtime is intentionally single-account with no account namespace machinery', () => {
+  assert(!fs.existsSync(path.join(root, 'services/baseLinkerAccount.js')));
+  assert(!fs.existsSync(path.join(root, 'models/plugins/baseLinkerAccountScope.js')));
+  for (const source of [cacheSrc, journalSrc, pickingSrc, routeSrc, scopeSrc]) assert(!source.includes('accountScope'));
 });
 check('interactive picking mutations cannot trust a stale local status indefinitely', () => {
   assert(pickingSrc.includes('UPSTREAM_VERIFICATION_TTL_MS'));
@@ -139,10 +137,11 @@ check('order-page read path never groups or merges order rows', () => {
   assert(!identityPart.includes('$group'));
   assert(identityPart.includes("_id: '$orderId'"));
 });
-check('API token structure is never treated as stable account identity', () => {
-  assert(accountSrc.includes("source: 'token_fingerprint'"));
-  assert(accountSrc.includes('API tokens are credentials, not account identity'));
-  assert(!accountSrc.includes("split('-')"));
+check('API-key/account switching is not implemented in runtime', () => {
+  for (const source of [cacheSrc, journalSrc, pickingSrc, routeSrc, scopeSrc, ordersSrc, printSrc]) {
+    assert(!source.includes('BASELINKER_ACCOUNT_KEY'));
+    assert(!source.includes('accountIdentity'));
+  }
 });
 check('immutable content-addressed order snapshots are persisted', () => {
   assert(snapshotSrc.includes("createHash('sha256')"));

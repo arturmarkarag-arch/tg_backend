@@ -1,6 +1,5 @@
 const { callBaseLinker } = require('./baseLinkerClient');
 const { appError } = require('../utils/errors');
-const { getBaseLinkerAccountScope } = require('./baseLinkerAccount');
 
 // Worker fulfilment does not need commissions, connect payloads, discounts or
 // arbitrary extra fields. BaseLinker defaults those optional expansions to off,
@@ -146,15 +145,14 @@ async function fetchBaseLinkerOrders(options = {}, callApi = callBaseLinker) {
   return { orders, pageCount: Math.min(pageCount + (truncated ? 0 : 1), maxPages), truncated, nextDateConfirmedFrom, nextIdFrom };
 }
 
-const metaCache = new Map();
-const metaInFlight = new Map();
+let metaCache = null;
+let metaInFlight = null;
 
 async function fetchBaseLinkerOrderMeta(callApi = callBaseLinker) {
   const now = Date.now();
-  const accountScope = getBaseLinkerAccountScope();
-  const cached = metaCache.get(accountScope);
+  const cached = metaCache;
   if (callApi === callBaseLinker && cached && now < cached.expiresAt) return cached.value;
-  if (callApi === callBaseLinker && metaInFlight.has(accountScope)) return metaInFlight.get(accountScope);
+  if (callApi === callBaseLinker && metaInFlight) return metaInFlight;
 
   const load = async () => {
     const [statusesPayload, sourcesPayload] = await Promise.all([
@@ -170,18 +168,18 @@ async function fetchBaseLinkerOrderMeta(callApi = callBaseLinker) {
     };
 
     if (callApi === callBaseLinker) {
-      metaCache.set(accountScope, { value: result, expiresAt: Date.now() + (5 * 60 * 1000) });
+      metaCache = { value: result, expiresAt: Date.now() + (5 * 60 * 1000) };
     }
     return result;
   };
 
   if (callApi !== callBaseLinker) return load();
   const inFlight = load();
-  metaInFlight.set(accountScope, inFlight);
+  metaInFlight = inFlight;
   try {
     return await inFlight;
   } finally {
-    if (metaInFlight.get(accountScope) === inFlight) metaInFlight.delete(accountScope);
+    if (metaInFlight === inFlight) metaInFlight = null;
   }
 }
 

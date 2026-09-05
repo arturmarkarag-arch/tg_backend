@@ -13,7 +13,6 @@ const {
   isBaseLinkerJournalSchedulerStarted,
 } = require('../services/baseLinkerJournal');
 const { getQueueScope } = require('../services/baseLinkerQueueScope');
-const { getBaseLinkerAccountScope, getBaseLinkerAccountBinding } = require('../services/baseLinkerAccount');
 const { fetchBaseLinkerProductCatalog } = require('../services/baseLinkerProducts');
 const { compactOrders, compactProductCatalog } = require('../services/baseLinkerPublicDto');
 const {
@@ -44,12 +43,8 @@ router.use(requireBaseLinkerPickingAccess);
 router.get('/status', asyncHandler(async (req, res) => {
   const [cache, journal] = await Promise.all([cacheState(), loadJournalState()]);
   const scope = await getQueueScope();
-  const binding = getBaseLinkerAccountBinding();
   res.json({
     configured: isBaseLinkerConfigured(),
-    accountScope: scope.accountScope,
-    accountIdentitySource: binding.source,
-    accountIdentityStable: binding.stable === true,
     queueConfigured: scope.configured,
     intakeStatusId: scope.intakeStatusId,
     intakeStatusName: scope.intakeStatusName,
@@ -78,7 +73,7 @@ router.get('/status', asyncHandler(async (req, res) => {
 router.post('/sync', asyncHandler(async (req, res) => {
   if (!isBaseLinkerConfigured()) throw appError('baselinker_not_configured');
   const result = await syncBaseLinkerOrderCache({ force: true });
-  res.json({ ...result, accountScope: getBaseLinkerAccountScope(), syncedAt: new Date().toISOString() });
+  res.json({ ...result, syncedAt: new Date().toISOString() });
 }));
 
 router.get('/meta', asyncHandler(async (req, res) => {
@@ -136,7 +131,6 @@ router.get('/orders', asyncHandler(async (req, res) => {
 
   res.json({
     ...result,
-    accountScope: getBaseLinkerAccountScope(),
     orders: compactOrders(result.orders || []),
     productCatalog: compactProductCatalog(catalog.productCatalog || {}),
     productCatalogStats: catalog.productCatalogStats,
@@ -158,7 +152,7 @@ router.get('/orders/:orderId/packages/:packageId/details', asyncHandler(async (r
     packageId: req.params.packageId,
     courierCode: req.query.courierCode,
   });
-  res.json({ ...result, accountScope: getBaseLinkerAccountScope(), fetchedAt: new Date().toISOString() });
+  res.json({ ...result, fetchedAt: new Date().toISOString() });
 }));
 
 router.get('/orders/:orderId/packages/:packageId/label', asyncHandler(async (req, res) => {

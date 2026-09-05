@@ -4,10 +4,6 @@ const crypto = require('crypto');
 const AppSetting = require('../models/AppSetting');
 const { callBaseLinker } = require('./baseLinkerClient');
 const { appError } = require('../utils/errors');
-const {
-  getBaseLinkerAccountScope,
-  scopedSettingKey,
-} = require('./baseLinkerAccount');
 
 const QUEUE_SETTINGS_KEY = 'baselinker.queueSettings.v1';
 const SENT_LOOKBACK_DAYS = 30;
@@ -17,7 +13,7 @@ function positiveStatusId(value) {
   return Number.isSafeInteger(id) && id > 0 ? id : null;
 }
 
-function queueScopeFromSettings(value = {}, now = Date.now(), accountScope = getBaseLinkerAccountScope()) {
+function queueScopeFromSettings(value = {}, now = Date.now()) {
   // Backward compatibility: the former single statusId becomes the intake
   // status after deployment. Sent/cancelled must still be chosen explicitly.
   const intakeStatusId = positiveStatusId(value.intakeStatusId ?? value.statusId);
@@ -28,7 +24,6 @@ function queueScopeFromSettings(value = {}, now = Date.now(), accountScope = get
   const sentDateInStatusFrom = Math.floor(now / 1000) - SENT_LOOKBACK_DAYS * 86400;
 
   return {
-    accountScope,
     configured,
     intakeStatusId,
     intakeStatusName: String(value.intakeStatusName ?? value.statusName ?? ''),
@@ -39,15 +34,14 @@ function queueScopeFromSettings(value = {}, now = Date.now(), accountScope = get
     sentLookbackDays: SENT_LOOKBACK_DAYS,
     sentDateInStatusFrom,
     scopeKey: configured
-      ? `${accountScope}|${intakeStatusId}:all|${sentStatusId}:${SENT_LOOKBACK_DAYS}|${cancelledStatusId}:${value.revision || 'settings-v2'}`
+      ? `${intakeStatusId}:all|${sentStatusId}:${SENT_LOOKBACK_DAYS}|${cancelledStatusId}:${value.revision || 'settings-v2'}`
       : null,
   };
 }
 
 async function getQueueScope() {
-  const accountScope = getBaseLinkerAccountScope();
-  const row = await AppSetting.findOne({ key: scopedSettingKey(QUEUE_SETTINGS_KEY, accountScope) }).lean();
-  return queueScopeFromSettings(row?.value || {}, Date.now(), accountScope);
+  const row = await AppSetting.findOne({ key: QUEUE_SETTINGS_KEY }).lean();
+  return queueScopeFromSettings(row?.value || {}, Date.now());
 }
 
 function orderIsConfirmed(order) {
@@ -86,7 +80,6 @@ async function getQueueStatusOptions() {
 }
 
 async function saveQueueSettings({ intakeStatusId, sentStatusId, cancelledStatusId } = {}) {
-  const accountScope = getBaseLinkerAccountScope();
   const ids = [positiveStatusId(intakeStatusId), positiveStatusId(sentStatusId), positiveStatusId(cancelledStatusId)];
   if (ids.some((id) => !id) || new Set(ids).size !== 3) throw appError('baselinker_queue_settings_invalid');
 
@@ -106,11 +99,11 @@ async function saveQueueSettings({ intakeStatusId, sentStatusId, cancelledStatus
     revision: crypto.randomUUID(),
   };
   await AppSetting.findOneAndUpdate(
-    { key: scopedSettingKey(QUEUE_SETTINGS_KEY, accountScope) },
+    { key: QUEUE_SETTINGS_KEY },
     { $set: { value } },
     { upsert: true, new: true, setDefaultsOnInsert: true },
   );
-  return queueScopeFromSettings(value, Date.now(), accountScope);
+  return queueScopeFromSettings(value, Date.now());
 }
 
 module.exports = {
