@@ -130,6 +130,7 @@ function emitJob(job) {
       packageId: job.packageId,
       labelExtension: job.labelExtension || '',
       error: job.lastError || '',
+      submittedAt: job.submittedAt || null,
       completedAt: job.completedAt || null,
     });
   } catch (_) {
@@ -294,6 +295,27 @@ async function getPrintJobPayload({ jobId, agentId }) {
   }
 }
 
+async function submitPrintJob({ jobId, agentId, detail }) {
+  const id = agentIdOf(agentId);
+  const now = new Date();
+  const job = await BaseLinkerPrintJob.findOneAndUpdate(
+    { jobId: text(jobId), targetAgentId: id, status: { $in: ['claimed', 'printing'] } },
+    {
+      $set: {
+        status: 'submitted',
+        submittedAt: now,
+        completedAt: now,
+        leaseUntil: null,
+        lastError: text(detail || 'Windows accepted the print job, but physical completion was not confirmed.').slice(0, 1000),
+      },
+    },
+    { new: true },
+  ).lean();
+  if (!job) throw appError('baselinker_print_job_not_claimed');
+  emitJob(job);
+  return job;
+}
+
 async function completePrintJob({ jobId, agentId }) {
   const id = agentIdOf(agentId);
   const job = await BaseLinkerPrintJob.findOneAndUpdate(
@@ -332,6 +354,7 @@ module.exports = {
   queuePrintJob,
   claimNextPrintJob,
   getPrintJobPayload,
+  submitPrintJob,
   completePrintJob,
   failPrintJob,
 };

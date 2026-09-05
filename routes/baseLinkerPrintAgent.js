@@ -5,6 +5,7 @@ const {
   heartbeatPrintAgent,
   claimNextPrintJob,
   getPrintJobPayload,
+  submitPrintJob,
   completePrintJob,
   failPrintJob,
 } = require('../services/baseLinkerPrint');
@@ -62,6 +63,15 @@ router.get('/jobs/:jobId/payload', asyncHandler(async (req, res) => {
     'X-Print-Printer-Name': encodeURIComponent(job.printerName || ''),
   });
   res.send(label.buffer);
+}));
+
+router.post('/jobs/:jobId/submitted', asyncHandler(async (req, res) => {
+  await submitPrintJob({
+    jobId: req.params.jobId,
+    agentId: req.body?.agentId,
+    detail: req.body?.detail,
+  });
+  res.json({ ok: true });
 }));
 
 router.post('/jobs/:jobId/complete', asyncHandler(async (req, res) => {

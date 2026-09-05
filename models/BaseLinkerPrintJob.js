@@ -14,13 +14,14 @@ const baseLinkerPrintJobSchema = new mongoose.Schema({
 
   status: {
     type: String,
-    enum: ['pending', 'claimed', 'printing', 'succeeded', 'failed', 'expired'],
+    enum: ['pending', 'claimed', 'printing', 'submitted', 'succeeded', 'failed', 'expired'],
     default: 'pending',
     index: true,
   },
   attempts: { type: Number, default: 0, min: 0 },
   claimedAt: { type: Date, default: null },
   leaseUntil: { type: Date, default: null },
+  submittedAt: { type: Date, default: null },
   completedAt: { type: Date, default: null },
   expiresAt: { type: Date, required: true },
   lastError: { type: String, default: '', trim: true, maxlength: 1000 },

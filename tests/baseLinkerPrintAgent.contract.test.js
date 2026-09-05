@@ -19,10 +19,10 @@ describe('BaseLinker Print Agent contract', () => {
     expect(service).toContain('queuePrintJob');
     expect(service).toContain('claimNextPrintJob');
     expect(service).toContain('getPrintJobPayload');
-    expect(service).toContain('fetchBaseLinkerLabel');
+    expect(service).toContain('fetchVerifiedBaseLinkerOrderLabel');
     const queueStart = service.indexOf('async function queuePrintJob');
     const payloadStart = service.indexOf('async function getPrintJobPayload');
-    const labelCall = service.indexOf('await fetchBaseLinkerLabel', payloadStart);
+    const labelCall = service.indexOf('await fetchVerifiedBaseLinkerOrderLabel', payloadStart);
     expect(queueStart).toBeGreaterThan(-1);
     expect(payloadStart).toBeGreaterThan(queueStart);
     expect(labelCall).toBeGreaterThan(payloadStart);
@@ -31,12 +31,21 @@ describe('BaseLinker Print Agent contract', () => {
   it('has durable job state, lease, expiry and a single atomic claim', () => {
     const model = read('models/BaseLinkerPrintJob.js');
     const service = read('services/baseLinkerPrint.js');
-    expect(model).toContain("enum: ['pending', 'claimed', 'printing', 'succeeded', 'failed', 'expired']");
+    expect(model).toContain("enum: ['pending', 'claimed', 'printing', 'submitted', 'succeeded', 'failed', 'expired']");
     expect(model).toContain('leaseUntil');
     expect(model).toContain('expiresAt');
     expect(service).toContain('findOneAndUpdate');
     expect(service).toContain("status: 'pending'");
     expect(service).toContain("status: 'claimed'");
+  });
+
+  it('keeps submitted separate from physically confirmed success', () => {
+    const route = read('routes/baseLinkerPrintAgent.js');
+    const service = read('services/baseLinkerPrint.js');
+    expect(route).toContain("router.post('/jobs/:jobId/submitted'");
+    expect(service).toContain('async function submitPrintJob');
+    expect(service).toContain("status: 'submitted'");
+    expect(service).toContain('submitPrintJob');
   });
 
   it('mounts the agent endpoint outside Telegram auth but protects it with agent-token middleware', () => {

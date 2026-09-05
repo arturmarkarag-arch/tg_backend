@@ -1,7 +1,19 @@
-Base: server-20260902-shop-switch-session-context-fixed.zip
+Base: server_FULL_SINGLE_ACCOUNT_REDEPLOY_20260906.zip
+Purpose: tri-state Print Agent result contract, REBASED onto current SINGLE-ACCOUNT BaseLinker runtime.
+Safe to overlay on that base.
 Changed files:
-- routes/shopTransfer.js
-- routes/v1/telegram.js
-- services/shopAssignmentCommand.js
-- utils/errors.js
-- docs/changes/2026-09-02-shop-switch-duplicate-skeleton-recovery.md
+- models/BaseLinkerPrintJob.js
+- services/baseLinkerPrint.js
+- routes/baseLinkerPrintAgent.js
+- tests/baseLinkerPrintAgent.contract.test.js
+
+Preserved current invariants:
+- NO accountScope/account switching machinery
+- exact order_id identity
+- exact order_id <-> package_id verification before label/print
+- current status/journal/source-of-truth logic untouched
+
+Tri-state contract:
+- succeeded = explicit Printed/Completed confirmation only
+- submitted = renderer/spooler accepted job, physical completion not confirmed
+- failed/expired = explicit error/timeout
