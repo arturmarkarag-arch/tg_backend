@@ -3,6 +3,7 @@ const BaseLinkerPickingOrder = require('../models/BaseLinkerPickingOrder');
 const { fetchBaseLinkerOrders } = require('./baseLinkerOrders');
 const { withLock } = require('../utils/lock');
 const { appError } = require('../utils/errors');
+const { compactOrders } = require('./baseLinkerPublicDto');
 const { getIO } = require('../socket');
 
 const {
@@ -160,13 +161,35 @@ function publicState(doc) {
   const takeoverAt = plain.ownerTelegramId && lastActivityMs
     ? new Date(lastActivityMs + CLAIM_STALE_MS).toISOString()
     : null;
+  const items = (Array.isArray(plain.items) ? plain.items : []).map((item) => ({
+    lineKey: String(item?.lineKey || ''),
+    name: String(item?.name || ''),
+    requestedQty: Number(item?.requestedQty || 0),
+    state: String(item?.state || 'pending'),
+    pickedQty: Number(item?.pickedQty || 0),
+    issueNote: String(item?.issueNote || ''),
+  }));
+
+  // Public worker state is intentionally a DTO, not a Mongo document dump.
+  // Audit/history/fingerprints/actor metadata stay server-side and can be
+  // exposed later through a dedicated diagnostic endpoint if ever needed.
   return {
-    ...plain,
-    _id: plain._id ? String(plain._id) : undefined,
+    orderId: String(plain.orderId || ''),
+    groupKey: String(plain.groupKey || ''),
+    memberOrderIds: (Array.isArray(plain.memberOrderIds) ? plain.memberOrderIds : []).map(String),
+    status: String(plain.status || 'new'),
+    revision: Number(plain.revision || 0),
+    ownerTelegramId: String(plain.ownerTelegramId || ''),
+    ownerName: String(plain.ownerName || ''),
     progress: progressFor(plain.items || []),
+    items,
     claimTakeoverAvailableAt: takeoverAt,
-    claimStaleMs: CLAIM_STALE_MS,
-    history: Array.isArray(plain.history) ? plain.history.slice(-40) : [],
+    lastUpstreamChangeAt: plain.lastUpstreamChangeAt || null,
+    lastUpstreamChangeSummary: {
+      added: Number(plain.lastUpstreamChangeSummary?.added || 0),
+      removed: Number(plain.lastUpstreamChangeSummary?.removed || 0),
+      changed: Number(plain.lastUpstreamChangeSummary?.changed || 0),
+    },
   };
 }
 
@@ -395,7 +418,7 @@ async function claimPickingOrder({ orderId, memberOrderIds = [], user, force = f
     });
     await doc.save();
     emitPickingUpdate(doc);
-    return { state: publicState(doc), orders: group.orders, syncChanged: sync.changed === true };
+    return { state: publicState(doc), orders: compactOrders(group.orders), syncChanged: sync.changed === true };
   }, { ttlMs: 30_000, waitMs: 10_000 }), { ttlMs: 30_000, waitMs: 10_000 });
 }
 
@@ -577,7 +600,7 @@ async function markPickingOrderPacked({ orderId, user, expectedRevision, allowIs
     });
     await doc.save();
     emitPickingUpdate(doc);
-    return { state: publicState(doc), orders: group.orders };
+    return { state: publicState(doc), orders: compactOrders(group.orders) };
   }, { ttlMs: 30_000, waitMs: 10_000 });
 }
 

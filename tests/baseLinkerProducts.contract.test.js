@@ -68,7 +68,7 @@ describe('BaseLinker product catalog enrichment', () => {
 
     expect(calls[0].method).toBe('getInventoryProductsData');
     expect(calls[0].params.inventory_id).toBe(307);
-    expect(calls[0].params.include_channels_media).toBe(true);
+    expect(calls[0].params.include_channels_media).toBe(false);
     expect(result.productCatalog['db:307:2685'].images).toEqual(['https://cdn/base.jpg']);
   });
 
@@ -90,7 +90,6 @@ describe('BaseLinker product catalog enrichment', () => {
       products: [{ storage: 'db', storage_id: 0, product_id: 2685 }],
     }], callApi);
 
-    expect(result.productCatalog['db:0:2685'].inventoryId).toBe(307);
-    expect(result.productCatalog['db:0:2685'].lookupMode).toBe('inventory_scan');
+    expect(result.productCatalog['db:0:2685']).toEqual({ state: 'resolved', images: ['https://cdn/found.jpg'] });
   });
 });

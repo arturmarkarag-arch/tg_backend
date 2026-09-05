@@ -1,12 +1,10 @@
 const { callBaseLinker } = require('./baseLinkerClient');
 const { appError } = require('../utils/errors');
 
-const BASE_INCLUDE_FLAGS = Object.freeze({
-  include_custom_extra_fields: true,
-  include_commissions: true,
-  include_connect_data: true,
-  include_discounts_data: true,
-});
+// Worker fulfilment does not need commissions, connect payloads, discounts or
+// arbitrary extra fields. BaseLinker defaults those optional expansions to off,
+// so do not request bytes that we would discard immediately.
+const BASE_INCLUDE_FLAGS = Object.freeze({});
 
 function toOptionalPositiveInt(value) {
   if (value === undefined || value === null || value === '') return null;

@@ -7,6 +7,7 @@ const { getPrintAgentStatus, queuePrintJob } = require('../services/baseLinkerPr
 const { fetchBaseLinkerOrders, fetchBaseLinkerOrderMeta } = require('../services/baseLinkerOrders');
 const { getCachedOrderPage, refreshBaseLinkerOrderCache } = require('../services/baseLinkerOrderCache');
 const { fetchBaseLinkerProductCatalog } = require('../services/baseLinkerProducts');
+const { compactOrders, compactProductCatalog } = require('../services/baseLinkerPublicDto');
 const {
   fetchBaseLinkerOrderPackages,
   fetchBaseLinkerPackageDetails,
@@ -90,7 +91,9 @@ router.get('/orders', asyncHandler(async (req, res) => {
 
   res.json({
     ...result,
-    ...catalog,
+    orders: compactOrders(result.orders || []),
+    productCatalog: compactProductCatalog(catalog.productCatalog || {}),
+    productCatalogStats: catalog.productCatalogStats,
     pickingStates,
     fetchedAt: new Date().toISOString(),
   });

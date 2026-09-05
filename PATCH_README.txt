@@ -1,12 +1,17 @@
-BaseLinker server-pagination SERVER patch — manual file replacement.
+BaseLinker compact worker payload — manual server patch
+Date: 2026-09-05
 
-Apply together with the paired client patch.
+Apply on top of the latest BaseLinker real-server-pagination + problems-to-deferred server patches.
 
-Changes:
-- new dedicated BaseLinkerOrderCache Mongo model (not the warehouse Order model);
-- first use bootstraps BaseLinker snapshots once, then keeps them fresh via getJournalList events;
-- /api/baselinker/orders now pages/searches/filters from Mongo cache and returns only 10/20/50 logical orders;
-- local workflow counts (Processing/Deferred/Packed/Sent) are calculated server-side;
-- exact order reads remain live against BaseLinker and are never served only from cache.
+What changed:
+- /api/baselinker/orders now exposes a small worker DTO instead of raw BaseLinker order objects.
+- Cached order rows are stored compactly on future refreshes; old rows are projected compactly at read time immediately.
+- Customer/contact/invoice/payment/commission/transaction/address data is not returned by the worker list endpoint.
+- Product catalog entries contain state + the first image only; full descriptions, prices, stock, dimensions, tags, media and product blobs are not kept in the BaseLinker product cache response.
+- getOrders no longer requests optional custom fields / commissions / connect / discount expansions.
+- getInventoryProductsData no longer requests channel media expansion.
+- Picking public/socket state no longer returns Mongo history, fingerprints, packed/sent audit blobs or per-item actor metadata.
+- Journal socket order/catalog patches use the same compact DTO.
+- Critical claim/pack reconciliation still re-reads current BaseLinker truth server-side and is unchanged.
 
-Important: on the first deployment only, the server performs one initial BaseLinker cache bootstrap. With ~2,000 existing orders this is ~20 getOrders requests once. Subsequent page loads do not rescan those 2,000 orders; journal updates only changed orders.
+No client files are required for this patch: existing client shape is preserved for the fields it actually uses (including catalog.images as a one-item array).

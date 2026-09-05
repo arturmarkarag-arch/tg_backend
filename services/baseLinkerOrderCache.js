@@ -7,6 +7,7 @@ const BaseLinkerPickingOrder = require('../models/BaseLinkerPickingOrder');
 const { fetchBaseLinkerOrders } = require('./baseLinkerOrders');
 const { withLock } = require('../utils/lock');
 const { appError } = require('../utils/errors');
+const { compactOrder } = require('./baseLinkerPublicDto');
 
 const CACHE_STATE_KEY = 'baselinker.orderCache.v1';
 const CACHE_BOOTSTRAP_MAX_PAGES = Math.min(90, Math.max(1, Number(process.env.BASELINKER_ORDER_CACHE_BOOTSTRAP_PAGES) || 90));
@@ -44,15 +45,6 @@ function orderSearchText(order) {
     order?.order_id,
     order?.shop_order_id,
     order?.external_order_id,
-    order?.email,
-    order?.phone,
-    order?.delivery_fullname,
-    order?.delivery_company,
-    order?.invoice_fullname,
-    order?.invoice_company,
-    order?.invoice_nip,
-    order?.user_login,
-    order?.delivery_package_nr,
     ...products.flatMap((product) => [
       product?.name,
       product?.sku,
@@ -74,7 +66,7 @@ function cacheRowForOrder(order, syncToken = '') {
     orderStatusId: Number.isInteger(Number(order?.order_status_id)) ? Number(order.order_status_id) : null,
     sortAt: Number(order?.date_confirmed || order?.date_add || 0) || 0,
     searchText: orderSearchText(order),
-    order,
+    order: compactOrder(order),
     syncToken: String(syncToken || ''),
     upstreamCachedAt: new Date(),
   };
@@ -191,7 +183,12 @@ function displayStageExpression() {
   return {
     $switch: {
       branches: [
-        { case: { $eq: ['$localStatus', 'paused'] }, then: 'deferred' },
+        {
+          case: {
+            $in: ['$localStatus', ['paused', 'problem', 'ready_to_pack_with_issue']],
+          },
+          then: 'deferred',
+        },
         { case: { $eq: ['$localStatus', 'packed'] }, then: 'packed' },
         { case: { $eq: ['$localStatus', 'sent'] }, then: 'sent' },
       ],
@@ -314,7 +311,10 @@ async function getCachedOrderPage({ statusId, workflowFilter = 'processing', sea
   const total = Number(workflowCounts[safeWorkflow] || 0);
   const pageCount = Math.max(1, Math.ceil(total / safePageSize));
   return {
-    orders: docs.map((doc) => doc.order).filter(Boolean),
+    // Old cache rows may still contain the historical full BaseLinker object.
+    // Project again at read time so the HTTP contract is compact immediately,
+    // even before every cached row is naturally refreshed by the journal.
+    orders: docs.map((doc) => compactOrder(doc.order)).filter(Boolean),
     page: Math.min(safePage, pageCount),
     pageSize: safePageSize,
     pageCount,

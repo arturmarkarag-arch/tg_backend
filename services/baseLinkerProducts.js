@@ -80,25 +80,17 @@ function setCached(key, value) {
   });
 }
 
-function inventoryEntry(product, inventoryId, lookupMode = 'direct') {
-  return {
-    state: 'resolved',
-    source: 'inventory',
-    inventoryId: Number(inventoryId),
-    lookupMode,
-    images: normalizeImageUrls(product?.images),
-    product,
-  };
+function compactImageEntry(state, images) {
+  const first = normalizeImageUrls(images)[0] || '';
+  return { state, images: first ? [first] : [] };
 }
 
-function externalEntry(product, storageId) {
-  return {
-    state: 'resolved',
-    source: 'external_storage',
-    storageId,
-    images: normalizeImageUrls(product?.images),
-    product,
-  };
+function inventoryEntry(product) {
+  return compactImageEntry('resolved', product?.images);
+}
+
+function externalEntry(product) {
+  return compactImageEntry('resolved', product?.images);
 }
 
 async function getInventories(callApi) {
@@ -171,7 +163,7 @@ async function resolveExternalRefs(refs, productCatalog, warnings, callApi) {
           const ref = byProductId.get(String(productId));
           const product = products[productId] ?? products[String(productId)];
           if (!ref || !product) continue;
-          const entry = externalEntry(product, apiStorageId);
+          const entry = externalEntry(product);
           productCatalog[ref.key] = entry;
           setCached(ref.key, entry);
         }
@@ -213,7 +205,7 @@ async function tryDirectInventoryRefs(refs, productCatalog, unresolved, warnings
         const payload = await callApi('getInventoryProductsData', {
           inventory_id: inventoryId,
           products: ids.map((id) => Number.isSafeInteger(Number(id)) ? Number(id) : id),
-          include_channels_media: true,
+          include_channels_media: false,
         });
         const products = payload?.products && typeof payload.products === 'object' ? payload.products : {};
         for (const productId of ids) {
@@ -221,7 +213,7 @@ async function tryDirectInventoryRefs(refs, productCatalog, unresolved, warnings
           const product = products[productId] ?? products[String(productId)];
           if (!ref || !product) continue;
           found.add(ref.key);
-          const entry = inventoryEntry(product, inventoryId, 'direct');
+          const entry = inventoryEntry(product);
           productCatalog[ref.key] = entry;
           setCached(ref.key, entry);
         }
@@ -265,7 +257,7 @@ async function resolveUnmappedInventoryRefs(refs, productCatalog, warnings, call
         const payload = await callApi('getInventoryProductsData', {
           inventory_id: inventoryId,
           products: ids.map((id) => Number.isSafeInteger(Number(id)) ? Number(id) : id),
-          include_channels_media: true,
+          include_channels_media: false,
         });
         const products = payload?.products && typeof payload.products === 'object' ? payload.products : {};
         for (const productId of ids) {
@@ -286,16 +278,11 @@ async function resolveUnmappedInventoryRefs(refs, productCatalog, warnings, call
     const matches = matchesByProductId.get(ref.productId) || [];
     if (matches.length === 1) {
       const match = matches[0];
-      const entry = inventoryEntry(match.product, match.inventoryId, 'inventory_scan');
+      const entry = inventoryEntry(match.product);
       productCatalog[ref.key] = entry;
       setCached(ref.key, entry);
     } else if (matches.length > 1) {
-      productCatalog[ref.key] = {
-        state: 'ambiguous',
-        source: 'inventory',
-        inventoryIds: matches.map((match) => match.inventoryId),
-        images: [],
-      };
+      productCatalog[ref.key] = { state: 'ambiguous', images: [] };
     }
   }
 }
@@ -322,7 +309,7 @@ async function fetchBaseLinkerProductCatalog(orders, callApi = callBaseLinker) {
   await resolveUnmappedInventoryRefs(unresolvedInternal, productCatalog, warnings, callApi);
 
   for (const ref of unsupportedRefs) {
-    productCatalog[ref.key] = { state: 'unsupported_storage', source: ref.storage, images: [] };
+    productCatalog[ref.key] = { state: 'unsupported_storage', images: [] };
   }
 
   const resolved = Object.values(productCatalog).filter((entry) => entry?.state === 'resolved').length;

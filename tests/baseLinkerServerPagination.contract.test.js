@@ -14,6 +14,15 @@ describe('BaseLinker server-side pagination contract', () => {
     expect(route).not.toMatch(/maxPages:\s*req\.query\.maxPages/);
   });
 
+  it('projects cached/live orders before sending them to the browser', () => {
+    const route = read('routes/baseLinker.js');
+    const cache = read('services/baseLinkerOrderCache.js');
+    expect(route).toContain('compactOrders(result.orders || [])');
+    expect(route).toContain('compactProductCatalog');
+    expect(cache).toContain('order: compactOrder(order)');
+    expect(cache).toContain('compactOrder(doc.order)');
+  });
+
   it('keeps exact order reads live for claim/pack recovery', () => {
     const route = read('routes/baseLinker.js');
     expect(route).toContain("if (exactOrderId)");
@@ -24,6 +33,12 @@ describe('BaseLinker server-side pagination contract', () => {
     const journal = read('services/baseLinkerJournal.js');
     expect(journal).toContain('refreshBaseLinkerOrderCache');
     expect(journal).toMatch(/refreshBaseLinkerOrderCache\(\{ orders: upserts, removedOrderIds \}\)/);
+  });
+
+  it('puts paused and unresolved-problem orders into Deferred before pagination/counting', () => {
+    const cache = read('services/baseLinkerOrderCache.js');
+    expect(cache).toContain("['paused', 'problem', 'ready_to_pack_with_issue']");
+    expect(cache).toContain("then: 'deferred'");
   });
 
   it('paginates logical fulfilment groups and exposes exact workflow counts', () => {

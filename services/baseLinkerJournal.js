@@ -8,6 +8,7 @@ const { refreshBaseLinkerOrderCache } = require('./baseLinkerOrderCache');
 const { getPickingStates, reconcilePickingFromUpstreamChanges } = require('./baseLinkerPicking');
 const { runAsSchedulerLeader } = require('./schedulerLeader');
 const { getIO } = require('../socket');
+const { compactOrders, compactProductCatalog } = require('./baseLinkerPublicDto');
 
 const JOURNAL_STATE_KEY = 'baselinker.journal.v1';
 const TICK_MS = Math.min(60_000, Math.max(5_000, Number(process.env.BASELINKER_JOURNAL_POLL_MS) || 15_000));
@@ -266,10 +267,9 @@ async function runBaseLinkerJournalTick() {
     const now = new Date().toISOString();
     emitOrdersChanged({
       resync: false,
-      orders: upserts,
+      orders: compactOrders(upserts),
       removedOrderIds,
-      productCatalog: catalog.productCatalog || {},
-      productCatalogWarnings: catalog.productCatalogWarnings || [],
+      productCatalog: compactProductCatalog(catalog.productCatalog || {}),
       pickingStates,
       journalLastLogId: window.cutoffLogId,
       fetchedAt: now,
