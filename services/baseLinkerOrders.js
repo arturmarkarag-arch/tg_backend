@@ -77,9 +77,9 @@ async function fetchBaseLinkerOrders(options = {}, callApi = callBaseLinker) {
   }
 
   const unconfirmedMode = baseParams.get_unconfirmed_orders === true;
-  // A status-only scan (our intake queue) uses id_from so it can start at the
-  // beginning of that status without inventing a date window. Date-bounded
-  // scans (Sent = 30 days) keep BaseLinker's documented date cursor.
+  // Status-only scans use id_from so Intake can be unbounded and Sent/Cancelled
+  // can be filtered correctly by date_in_status after the exact-status scan.
+  // We deliberately do not invent a date_confirmed window for terminal shelves.
   const idCursorMode = unconfirmedMode || baseParams.date_confirmed_from === undefined;
   let cursor = idCursorMode ? null : (baseParams.date_confirmed_from ?? null);
   const byId = new Map();

@@ -8,7 +8,7 @@ const BaseLinkerOrderSnapshotSchema = new mongoose.Schema({
   orderId: { type: String, required: true, index: true },
   snapshotHash: { type: String, required: true, maxlength: 64 },
   source: { type: String, default: 'unknown', maxlength: 64 },
-  observedAt: { type: Date, default: Date.now, index: true },
+  observedAt: { type: Date, default: Date.now },
   order: { type: mongoose.Schema.Types.Mixed, required: true },
 }, { timestamps: false });
 
@@ -17,5 +17,6 @@ BaseLinkerOrderSnapshotSchema.index(
   { unique: true },
 );
 BaseLinkerOrderSnapshotSchema.index({ orderId: 1, observedAt: -1 });
+BaseLinkerOrderSnapshotSchema.index({ observedAt: 1 }, { expireAfterSeconds: 14 * 24 * 60 * 60 });
 
 module.exports = mongoose.model('BaseLinkerOrderSnapshot', BaseLinkerOrderSnapshotSchema);

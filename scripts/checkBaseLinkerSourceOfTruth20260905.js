@@ -27,6 +27,11 @@ const commandSrc = read('services/baseLinkerOrderCommands.js');
 const shipmentsSrc = read('services/baseLinkerShipments.js');
 const snapshotSrc = read('services/baseLinkerOrderSnapshots.js');
 const printSrc = read('services/baseLinkerPrint.js');
+const retentionSrc = read('services/baseLinkerRetention.js');
+const snapshotModelSrc = read('models/BaseLinkerOrderSnapshot.js');
+const cacheModelSrc = read('models/BaseLinkerOrderCache.js');
+const printAgentModelSrc = read('models/BaseLinkerPrintAgent.js');
+const retentionSchedulerSrc = read('services/retention.js');
 
 check('three distinct queue status ids are required', () => {
   assert(scopeSrc.includes('intakeStatusId'));
@@ -39,17 +44,20 @@ check('Intake has no date boundary', () => {
   assert(block.includes('statusId: scope.intakeStatusId'));
   assert(!block.includes('dateConfirmedFrom'));
 });
-check('Sent is fixed to 30 days by upstream date_in_status, not confirmation date', () => {
-  assert(scopeSrc.includes('const SENT_LOOKBACK_DAYS = 30'));
+check('Sent and Cancelled are fixed to 14 days by upstream date_in_status', () => {
+  assert(scopeSrc.includes('const HISTORY_LOOKBACK_DAYS = 14'));
   assert(scopeSrc.includes('sentDateInStatusFrom'));
+  assert(scopeSrc.includes('cancelledDateInStatusFrom'));
   assert(scopeSrc.includes('Number(order?.date_in_status) >= scope.sentDateInStatusFrom'));
-  const sentBlock = cacheSrc.slice(cacheSrc.indexOf('const sent = await fetchBaseLinkerOrders'), cacheSrc.indexOf('const byId = new Map'));
-  assert(sentBlock.includes('statusId: scope.sentStatusId'));
-  assert(!sentBlock.includes('dateConfirmedFrom'));
+  assert(scopeSrc.includes('Number(order?.date_in_status) >= scope.cancelledDateInStatusFrom'));
+  const scan = cacheSrc.slice(cacheSrc.indexOf('async function scanConfiguredScopes'), cacheSrc.indexOf('async function recoverDisappearedKnownOrders'));
+  assert(scan.includes('statusId: scope.sentStatusId'));
+  assert(scan.includes('statusId: scope.cancelledStatusId'));
+  assert(!scan.includes('dateConfirmedFrom'));
 });
-check('Cancelled is not mass-scanned', () => {
-  const scan = cacheSrc.slice(cacheSrc.indexOf('async function scanConfiguredScopes'), cacheSrc.indexOf('async function bootstrapCacheUnlocked'));
-  assert(!scan.includes('statusId: scope.cancelledStatusId'));
+check('queue scans exactly Intake, Sent and Cancelled statuses', () => {
+  const scan = cacheSrc.slice(cacheSrc.indexOf('async function scanConfiguredScopes'), cacheSrc.indexOf('async function recoverDisappearedKnownOrders'));
+  for (const token of ['statusId: scope.intakeStatusId', 'statusId: scope.sentStatusId', 'statusId: scope.cancelledStatusId']) assert(scan.includes(token), token);
 });
 check('status-only intake scan uses id_from pagination', () => {
   assert(ordersSrc.includes('const idCursorMode = unconfirmedMode || baseParams.date_confirmed_from === undefined'));
@@ -65,7 +73,8 @@ check('journal remembers prior cache membership before cancellation refresh', ()
 });
 check('silent journal fallback exact-rereads known orders that disappear from scanned statuses', () => {
   assert(cacheSrc.includes('async function recoverDisappearedKnownOrders'));
-  assert(cacheSrc.includes("orderStatusId: { $in: [scope.intakeStatusId, scope.sentStatusId] }"));
+  assert(cacheSrc.includes('{ orderStatusId: scope.intakeStatusId }'));
+  assert(cacheSrc.includes('scope.cancelledDateInStatusFrom'));
   assert(cacheSrc.includes('fetchBaseLinkerOrders({ orderId: row.orderId, includeUnconfirmed: true, maxPages: 1 })'));
   assert(cacheSrc.includes('fallbackPendingOrderCount'));
   assert(cacheSrc.includes('removedOrderIds: recovery.removedOrderIds'));
@@ -162,8 +171,31 @@ check('operator-facing errors exist for upstream terminal states', () => {
   assert(errorsSrc.includes('baselinker_order_cancelled'));
   assert(errorsSrc.includes('baselinker_order_already_sent'));
 });
-check('/status exposes all three upstream statuses and Sent retention', () => {
-  for (const token of ['intakeStatusId', 'sentStatusId', 'cancelledStatusId', 'sentLookbackDays']) assert(routeSrc.includes(token));
+check('/status exposes all three upstream statuses and 14-day terminal retention', () => {
+  for (const token of ['intakeStatusId', 'sentStatusId', 'cancelledStatusId', 'historyLookbackDays', 'sentLookbackDays', 'cancelledLookbackDays']) assert(routeSrc.includes(token));
+});
+check('Cancelled has a first-class server shelf', () => {
+  assert(cacheSrc.includes("'processing', 'deferred', 'packed', 'sent', 'cancelled', 'updated'"));
+  assert(cacheSrc.includes("then: 'cancelled'"));
+  assert(cacheSrc.includes('upstreamCancelledRecent'));
+  assert(cacheSrc.includes('cancelled: 0'));
+});
+check('BaseLinker retention purges stale history but never age-purges active Intake', () => {
+  assert(retentionSrc.includes('BASELINKER_HISTORY_RETENTION_DAYS = HISTORY_LOOKBACK_DAYS'));
+  assert(retentionSrc.includes('BaseLinkerOrderSnapshot.deleteMany'));
+  assert(retentionSrc.includes('BaseLinkerPickingOrder.deleteOne'));
+  assert(retentionSrc.includes('fetchBaseLinkerOrders({ orderId, includeUnconfirmed: true, maxPages: 1 })'));
+  assert(retentionSrc.includes("if (disposition === 'intake') return"));
+  assert(retentionSrc.includes('date_in_status'));
+  assert(retentionSrc.includes('fail-closed'));
+  assert(retentionSrc.includes('BaseLinkerOrderCache.deleteMany'));
+  assert(retentionSrc.includes('scope.sentStatusId'));
+  assert(retentionSrc.includes('scope.cancelledStatusId'));
+  assert(!retentionSrc.includes('orderStatusId: scope.intakeStatusId, statusChangedAt'));
+  assert(retentionSchedulerSrc.includes('purgeExpiredBaseLinkerData'));
+  assert(snapshotModelSrc.includes('expireAfterSeconds: 14 * 24 * 60 * 60'));
+  assert(printAgentModelSrc.includes('expireAfterSeconds: 14 * 24 * 60 * 60'));
+  assert(cacheModelSrc.includes('orderStatusId: 1, statusChangedAt: 1'));
 });
 check('manual refresh is a real upstream reconciliation, not a cache-only GET', () => {
   assert(routeSrc.includes("router.post('/sync'"));
@@ -201,7 +233,9 @@ const scope = loadScope();
 const now = Date.now();
 const cfg = scope.queueScopeFromSettings({ intakeStatusId: 99, sentStatusId: 100, cancelledStatusId: 101, revision: 'gate' }, now);
 check('behavior: ancient Intake order is still in scope', () => assert.equal(scope.orderInIntakeScope({ order_status_id: 99, confirmed: true, date_confirmed: 1 }, cfg), true));
-check('behavior: Sent older than 30 days in its current status is out of scope', () => assert.equal(scope.orderInSentScope({ order_status_id: 100, confirmed: true, date_in_status: cfg.sentDateInStatusFrom - 1 }, cfg), false));
+check('behavior: Sent older than 14 days in its current status is out of scope', () => assert.equal(scope.orderInSentScope({ order_status_id: 100, confirmed: true, date_in_status: cfg.sentDateInStatusFrom - 1 }, cfg), false));
+check('behavior: Cancelled older than 14 days is out of scope', () => assert.equal(scope.orderInCancelledScope({ order_status_id: 101, date_in_status: cfg.cancelledDateInStatusFrom - 1 }, cfg), false));
+check('behavior: recent Cancelled is retained', () => assert.equal(scope.orderInCancelledScope({ order_status_id: 101, date_in_status: cfg.cancelledDateInStatusFrom + 60 }, cfg), true));
 check('behavior: old confirmation does not hide an order moved to Sent today', () => assert.equal(scope.orderInSentScope({ order_status_id: 100, confirmed: true, date_confirmed: 1, date_in_status: cfg.sentDateInStatusFrom + 60 }, cfg), true));
 check('behavior: current Cancelled status classifies terminal', () => assert.equal(scope.classifyUpstreamOrder({ order_status_id: 101 }, cfg), 'cancelled'));
 

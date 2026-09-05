@@ -11,6 +11,6 @@ const baseLinkerPrintAgentSchema = new mongoose.Schema({
 
 baseLinkerPrintAgentSchema.index({ agentId: 1 }, { unique: true });
 baseLinkerPrintAgentSchema.index({ lastSeenAt: -1 });
-baseLinkerPrintAgentSchema.index({ updatedAt: 1 }, { expireAfterSeconds: 30 * 24 * 60 * 60 });
+baseLinkerPrintAgentSchema.index({ updatedAt: 1 }, { expireAfterSeconds: 14 * 24 * 60 * 60 });
 
 module.exports = mongoose.model('BaseLinkerPrintAgent', baseLinkerPrintAgentSchema);

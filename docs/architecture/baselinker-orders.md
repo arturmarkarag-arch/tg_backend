@@ -43,21 +43,22 @@ The server enforces the capability through `requireBaseLinkerPickingAccess`; hid
 Administrators select three distinct BaseLinker statuses in **Settings → System → BaseLinker work queue**:
 
 - **Intake / ready to pack** — the only upstream status scanned without a date limit. Every order currently in this explicitly selected status is eligible, including `confirmed=false` rows whose `date_confirmed` is still empty.
-- **Sent / Wysłano** — an upstream status and a 30-day history shelf based on BaseLinker's `date_in_status`, not the unrelated confirmation date. A manual BaseLinker transition to this status is materialised locally as Sent; the local **Відправив** action writes exactly this configured status upstream and verifies it before local persistence.
-- **Cancelled / Anulowane** — never mass-scanned historically. It is used as a terminal signal when journal/exact refresh shows that an order already known to our queue moved to the selected cancelled status.
+- **Sent / Wysłano** — an upstream status and a 14-day history shelf based on BaseLinker's `date_in_status`, not the unrelated confirmation date. A manual BaseLinker transition to this status is materialised locally as Sent; the local **Відправив** action writes exactly this configured status upstream and verifies it before local persistence.
+- **Cancelled / Anulowane** — a separate 14-day history shelf based on BaseLinker `date_in_status`. A new cancellation is also shown in **Updated** until the operator acknowledges the upstream change.
 
 The old single `statusId` setting is treated only as a migration fallback for Intake. The queue is not considered configured until Sent and Cancelled are also selected, and all three IDs must be different. The API token remains server-side.
 
 Admin-only routes: `GET/POST /admin/baselinker-settings` and `GET /admin/baselinker-settings/statuses`. Status options come from `getOrderStatusList`; saves are validated against the current BaseLinker list and persisted under the single `AppSetting` key `baselinker.queueSettings.v1`. Every save changes a revision/scope key so an older scan cannot publish into a newer status configuration.
 
-The scheduled full reconciliation scans only two upstream subsets:
+The scheduled full reconciliation scans only three explicitly configured upstream subsets:
 
 1. all Intake orders, including unconfirmed rows, paged with BaseLinker's `id_from` cursor and no date boundary;
-2. all orders in the exact Sent status, paged by `id_from`; the server then keeps only rows whose BaseLinker `date_in_status` is inside the 30-day history window. BaseLinker has no `date_in_status` request filter, so using `date_confirmed_from` here would incorrectly hide old orders moved to Sent recently.
+2. all orders in the exact Sent status, paged by `id_from`; the server then keeps only rows whose BaseLinker `date_in_status` is inside the 14-day history window.
+3. all orders in the exact Cancelled status, filtered the same way by `date_in_status` to the last 14 days. BaseLinker has no `date_in_status` request filter, so using `date_confirmed_from` here would incorrectly hide an old order moved to Sent or Cancelled recently.
 
-Cancelled is intentionally not a third historical scan. Journal events refresh exact `order_id`s. Before an exact refresh is published, the server remembers whether that order was already present in our cache. If such a known order is now Cancelled, it is materialised as an **Updated** attention record even when nobody had claimed it yet. The card is read-only until an operator acknowledges it with **Прийнято**.
+Journal events still refresh exact `order_id`s. Before an exact refresh is published, the server remembers whether that order was already present in our cache. A newly observed Cancelled order is read-only, appears on the dedicated **Анульовані** shelf, and if it changed while locally tracked it also appears in **Оновлені** until the operator acknowledges it with **Прийнято**.
 
-The periodic full reconciliation is also a **status-loss detector**, not merely a cache refresh. If an order that was previously known in Intake/Sent disappears from both status-filtered scans, the server performs exact `getOrders(order_id)` reads for a bounded batch of those disappeared IDs. That exact result decides whether the order is now Cancelled, Sent, another status, or missing/deleted. The stale cached status is never allowed to decide. Remaining recovery work is persisted as a health counter and retried on later reconciliation passes.
+The periodic full reconciliation is also a **status-loss detector**, not merely a cache refresh. If an order that was previously known on a currently retained Intake/Sent/Cancelled shelf disappears from those status-filtered scans, the server performs exact `getOrders(order_id)` reads for a bounded batch of those disappeared IDs. That exact result decides whether the order is now Cancelled, Sent, another status, or missing/deleted. The stale cached status is never allowed to decide. Remaining recovery work is persisted as a health counter and retried on later reconciliation passes.
 
 `GET /orders` reads MongoDB only and never starts an upstream scan. It returns `baselinker_queue_not_configured` until all three statuses are selected and `baselinker_queue_warming` until a complete queue snapshot exists. A truncated BaseLinker scan is rejected before sweep/publication.
 
@@ -67,9 +68,22 @@ BaseLinker documents that `getJournalList` can return an empty list when the met
 
 BaseLinker remains source of truth. Local progress and acknowledgement live only in `BaseLinkerPickingOrder`; local order content/status never overrides an exact upstream result.
 
-`/status` exposes the three configured status IDs/names, fixed `sentLookbackDays=30`, cache/journal readiness, whether the journal scheduler is actually started in this process, journal cursor/poll/last-change health, degraded reconciliation cadence, fallback reconciliation backlog and last sync error. Errors persist across ticks/restarts with bounded retry backoff.
+`/status` exposes the three configured status IDs/names and fixed `historyLookbackDays=14`, `sentLookbackDays=14`, `cancelledLookbackDays=14`, cache/journal readiness, whether the journal scheduler is actually started in this process, journal cursor/poll/last-change health, degraded reconciliation cadence, fallback reconciliation backlog and last sync error. Errors persist across ticks/restarts with bounded retry backoff.
 
 Upstream reference: [getOrders](https://api.baselinker.com/index.php?method=getOrders), [getJournalList](https://api.baselinker.com/index.php?method=getJournalList).
+
+## BaseLinker data retention
+
+BaseLinker history is bounded so MongoDB cannot grow without limit:
+
+- active Intake cache/picking is not age-purged while BaseLinker still keeps the order in the configured Intake status;
+- Sent and Cancelled cache rows leave the mirror after 14 days by BaseLinker `date_in_status`;
+- immutable raw order snapshots have a 14-day Mongo TTL and an application-side purge;
+- terminal/non-actionable local `BaseLinkerPickingOrder` rows are purged after 14 days;
+- print jobs already use a stricter 7-day TTL; ephemeral Print Agent registrations use a 14-day TTL;
+- the existing retention scheduler runs once on server start and then daily, with a scheduler-leader lock so multiple workers do not duplicate the sweep.
+
+The retention boundary never treats local age as authority over an active order: if BaseLinker still reports the configured Intake status, that order remains operational regardless of its creation date.
 
 ## Product enrichment
 
@@ -156,9 +170,9 @@ When the product composition changes:
 
 Journal changes that do not alter product lines (payment, package/label, invoice/receipt, delivery, BaseLinker status or other order data) still mark an already tracked order as Updated so staff can review the new source-of-truth state.
 
-If the exact BaseLinker status is the configured **Cancelled** status, all warehouse mutations are blocked. The card remains visible in Updated with the received BaseLinker status and only the acknowledgement action **Прийнято**. A previously cached-but-never-claimed Intake order follows the same cancellation-attention rule instead of disappearing silently.
+If the exact BaseLinker status is the configured **Cancelled** status, all warehouse mutations are blocked. The order remains on the dedicated **Анульовані** shelf for 14 days by `date_in_status`. If the cancellation was a newly observed change on a locally tracked order, it also remains visible in **Оновлені** until **Прийнято**.
 
-If the exact BaseLinker status is the configured **Sent** status, warehouse mutations are also blocked and the order is shown on the Sent shelf only inside the 30-day history window.
+If the exact BaseLinker status is the configured **Sent** status, warehouse mutations are also blocked and the order is shown on the Sent shelf only inside the 14-day history window.
 
 ### Problems and packing
 
@@ -183,11 +197,11 @@ Admin reopen is still audited, but upstream status remains authoritative and blo
 The BaseLinker page is a warehouse work queue, not a BaseLinker order editor:
 
 - BaseLinker order content/status is upstream source-of-truth; our shelves are local fulfilment state;
-- workflow filters include Processing, Deferred, Packed, Sent and the independent **Updated** attention filter;
+- workflow filters include Processing, Deferred, Packed, Sent, Cancelled and the independent **Updated** attention filter;
 - **Updated is an overlay**, not a replacement workflow stage: a Packed/Deferred/Sent order can simultaneously require upstream review;
 - every order header exposes the compact link **Зам-ня №… ↗** to the exact BaseLinker order; there is no extra large button;
-- Cancelled cards are read-only and expose only **Прийнято** as a warehouse mutation;
-- Sent upstream history is bounded to 30 days;
+- Cancelled cards are read-only; **Прийнято** is shown only when the cancellation is still awaiting upstream-change acknowledgement;
+- Sent and Cancelled upstream history is bounded to 14 days;
 - product item controls are disabled when BaseLinker reports a configured terminal upstream status;
 - product image allocation is enlarged by ~10% without changing the surrounding flexible grid contract;
 - **Проблему вирішено** is immediately below **Змінити проблему**;

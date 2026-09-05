@@ -6,7 +6,9 @@ const {
   queueScopeFromSettings,
   orderInIntakeScope,
   orderInSentScope,
+  orderInCancelledScope,
   orderInQueueScope,
+  HISTORY_LOOKBACK_DAYS,
 } = require('../services/baseLinkerQueueScope');
 const { appError } = require('../utils/errors');
 const { retryDelayMs } = require('../services/baseLinkerSyncError');
@@ -19,7 +21,9 @@ function scopeMock() {
     getQueueScope: async () => getQueueScope(),
     orderInIntakeScope,
     orderInSentScope,
+    orderInCancelledScope,
     orderInQueueScope,
+    HISTORY_LOOKBACK_DAYS,
   };
 }
 
@@ -110,13 +114,14 @@ describe('scoped BaseLinker queue', () => {
     expect(h.fetch).not.toHaveBeenCalled();
   });
 
-  it('scans exact Intake and Sent statuses without date heuristics, then applies Sent retention by date_in_status', async () => {
+  it('scans exact Intake, Sent and Cancelled statuses, then applies 14-day terminal retention by date_in_status', async () => {
     const h = cacheHarness();
     const scope = getQueueScope();
     const intake = { order_id: 1, order_status_id: 99, confirmed: true, date_confirmed: 1 };
     const sentRecent = { order_id: 2, order_status_id: 100, confirmed: true, date_in_status: scope.sentDateInStatusFrom + 60 };
+    const cancelledRecent = { order_id: 3, order_status_id: 101, confirmed: true, date_in_status: scope.cancelledDateInStatusFrom + 60 };
     h.fetch.mockImplementation(async ({ statusId }) => ({
-      orders: statusId === 99 ? [intake] : statusId === 100 ? [sentRecent] : [],
+      orders: statusId === 99 ? [intake] : statusId === 100 ? [sentRecent] : statusId === 101 ? [cancelledRecent] : [],
       truncated: false,
     }));
 
@@ -133,16 +138,17 @@ describe('scoped BaseLinker queue', () => {
       includeUnconfirmed: true,
     }));
     expect(h.fetch.mock.calls[1][0]).not.toHaveProperty('dateConfirmedFrom');
-    expect(h.reconcile).toHaveBeenCalledWith({ orders: [intake, sentRecent], removedOrderIds: [] });
-    expect(h.model.bulkWrite.mock.calls[0][0]).toHaveLength(2);
+    expect(h.fetch).toHaveBeenNthCalledWith(3, expect.objectContaining({ statusId: 101, includeUnconfirmed: true }));
+    expect(h.fetch.mock.calls[2][0]).not.toHaveProperty('dateConfirmedFrom');
+    expect(h.reconcile).toHaveBeenCalledWith({ orders: [intake, sentRecent, cancelledRecent], removedOrderIds: [] });
+    expect(h.model.bulkWrite.mock.calls[0][0]).toHaveLength(3);
   });
 
-  it('does not mass-scan the Cancelled status', async () => {
+  it('mass-scans only the three explicitly configured statuses', async () => {
     const h = cacheHarness();
     await h.service.syncBaseLinkerOrderCache();
     const scannedStatuses = h.fetch.mock.calls.map(([args]) => args.statusId);
-    expect(scannedStatuses).toEqual([99, 100]);
-    expect(scannedStatuses).not.toContain(101);
+    expect(scannedStatuses).toEqual([99, 100, 101]);
   });
 
   it('exact-rereads a known order that disappears from Intake/Sent and observes Cancelled', async () => {
@@ -150,7 +156,7 @@ describe('scoped BaseLinker queue', () => {
     const h = cacheHarness({ initialized: true, scopeKey: scope.scopeKey, lastFullSyncAt: '2000-01-01T00:00:00.000Z', orderCount: 1 });
     h.model.find.mockImplementation((filter) => ({
       select: () => ({
-        lean: async () => filter?.orderStatusId?.$in ? [{ orderId: '123', orderStatusId: 99 }] : [],
+        lean: async () => Array.isArray(filter?.$or) ? [{ orderId: '123', orderStatusId: 99 }] : [],
       }),
       lean: async () => [],
     }));
@@ -171,7 +177,7 @@ describe('scoped BaseLinker queue', () => {
     }));
   });
 
-  it('intake ignores age, while Sent excludes orders older than the 30-day cutoff', () => {
+  it('intake ignores age, while Sent and Cancelled expire after the 14-day cutoff', () => {
     const scope = getQueueScope();
     const ancientIntake = { order_status_id: 99, date_confirmed: 1, confirmed: true };
     expect(orderInIntakeScope(ancientIntake, scope)).toBe(true);
@@ -180,7 +186,10 @@ describe('scoped BaseLinker queue', () => {
     const sentAtBoundary = { order_status_id: 100, date_in_status: scope.sentDateInStatusFrom, confirmed: true };
     expect(orderInSentScope(sentAtBoundary, scope)).toBe(true);
     expect(orderInSentScope({ ...sentAtBoundary, date_in_status: scope.sentDateInStatusFrom - 1 }, scope)).toBe(false);
-    expect(orderInQueueScope({ ...sentAtBoundary, order_status_id: 101 }, scope)).toBe(false);
+    const cancelledAtBoundary = { order_status_id: 101, date_in_status: scope.cancelledDateInStatusFrom, confirmed: true };
+    expect(orderInCancelledScope(cancelledAtBoundary, scope)).toBe(true);
+    expect(orderInCancelledScope({ ...cancelledAtBoundary, date_in_status: scope.cancelledDateInStatusFrom - 1 }, scope)).toBe(false);
+    expect(orderInQueueScope(cancelledAtBoundary, scope)).toBe(true);
     expect(orderInQueueScope({ ...ancientIntake, confirmed: false }, scope)).toBe(true);
   });
 

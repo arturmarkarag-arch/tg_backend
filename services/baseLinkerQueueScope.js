@@ -6,7 +6,9 @@ const { callBaseLinker } = require('./baseLinkerClient');
 const { appError } = require('../utils/errors');
 
 const QUEUE_SETTINGS_KEY = 'baselinker.queueSettings.v1';
-const SENT_LOOKBACK_DAYS = 30;
+const HISTORY_LOOKBACK_DAYS = 14;
+const SENT_LOOKBACK_DAYS = HISTORY_LOOKBACK_DAYS;
+const CANCELLED_LOOKBACK_DAYS = HISTORY_LOOKBACK_DAYS;
 
 function positiveStatusId(value) {
   const id = Number(value);
@@ -22,6 +24,7 @@ function queueScopeFromSettings(value = {}, now = Date.now()) {
   const distinct = new Set([intakeStatusId, sentStatusId, cancelledStatusId].filter(Boolean)).size === 3;
   const configured = Boolean(intakeStatusId && sentStatusId && cancelledStatusId && distinct);
   const sentDateInStatusFrom = Math.floor(now / 1000) - SENT_LOOKBACK_DAYS * 86400;
+  const cancelledDateInStatusFrom = Math.floor(now / 1000) - CANCELLED_LOOKBACK_DAYS * 86400;
 
   return {
     configured,
@@ -31,10 +34,13 @@ function queueScopeFromSettings(value = {}, now = Date.now()) {
     sentStatusName: String(value.sentStatusName || ''),
     cancelledStatusId,
     cancelledStatusName: String(value.cancelledStatusName || ''),
+    historyLookbackDays: HISTORY_LOOKBACK_DAYS,
     sentLookbackDays: SENT_LOOKBACK_DAYS,
+    cancelledLookbackDays: CANCELLED_LOOKBACK_DAYS,
     sentDateInStatusFrom,
+    cancelledDateInStatusFrom,
     scopeKey: configured
-      ? `${intakeStatusId}:all|${sentStatusId}:${SENT_LOOKBACK_DAYS}|${cancelledStatusId}:${value.revision || 'settings-v2'}`
+      ? `${intakeStatusId}:all|${sentStatusId}:${SENT_LOOKBACK_DAYS}|${cancelledStatusId}:${CANCELLED_LOOKBACK_DAYS}|${value.revision || 'settings-v3'}`
       : null,
   };
 }
@@ -59,9 +65,18 @@ function orderInSentScope(order, scope) {
     && Number(order?.date_in_status) >= scope.sentDateInStatusFrom;
 }
 
-function orderInQueueScope(order, scope) {
-  return orderInIntakeScope(order, scope) || orderInSentScope(order, scope);
+function orderInCancelledScope(order, scope) {
+  return scope.configured
+    && Number(order?.order_status_id) === scope.cancelledStatusId
+    && Number(order?.date_in_status) >= scope.cancelledDateInStatusFrom;
 }
+
+function orderInQueueScope(order, scope) {
+  return orderInIntakeScope(order, scope)
+    || orderInSentScope(order, scope)
+    || orderInCancelledScope(order, scope);
+}
+
 
 function classifyUpstreamOrder(order, scope) {
   const statusId = Number(order?.order_status_id);
@@ -95,7 +110,9 @@ async function saveQueueSettings({ intakeStatusId, sentStatusId, cancelledStatus
     sentStatusName: sent.name,
     cancelledStatusId: cancelled.id,
     cancelledStatusName: cancelled.name,
+    historyLookbackDays: HISTORY_LOOKBACK_DAYS,
     sentLookbackDays: SENT_LOOKBACK_DAYS,
+    cancelledLookbackDays: CANCELLED_LOOKBACK_DAYS,
     revision: crypto.randomUUID(),
   };
   await AppSetting.findOneAndUpdate(
@@ -108,11 +125,14 @@ async function saveQueueSettings({ intakeStatusId, sentStatusId, cancelledStatus
 
 module.exports = {
   QUEUE_SETTINGS_KEY,
+  HISTORY_LOOKBACK_DAYS,
   SENT_LOOKBACK_DAYS,
+  CANCELLED_LOOKBACK_DAYS,
   queueScopeFromSettings,
   getQueueScope,
   orderInIntakeScope,
   orderInSentScope,
+  orderInCancelledScope,
   orderInQueueScope,
   classifyUpstreamOrder,
   getQueueStatusOptions,

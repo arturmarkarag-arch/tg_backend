@@ -112,6 +112,8 @@ BaseLinkerPickingOrderSchema.index({ workflowStage: 1, packedBy: 1, packedAt: -1
 BaseLinkerPickingOrderSchema.index({ ownerTelegramId: 1, status: 1 });
 // The unique(orderId) index above is the DB backstop for claim races.
 BaseLinkerPickingOrderSchema.index({ upstreamReviewRequired: 1, updatedAt: -1 });
+BaseLinkerPickingOrderSchema.index({ upstreamDisposition: 1, lastUpstreamChangeAt: 1 });
+BaseLinkerPickingOrderSchema.index({ status: 1, sentAt: 1 });
 
 
 module.exports = mongoose.model('BaseLinkerPickingOrder', BaseLinkerPickingOrderSchema);

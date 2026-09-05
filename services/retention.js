@@ -6,6 +6,7 @@ const Product = require('../models/Product');
 const ShopProduct = require('../models/ShopProduct');
 const ProductVector = require('../models/ProductVector');
 const { runAsSchedulerLeader } = require('./schedulerLeader');
+const { purgeExpiredBaseLinkerData } = require('./baseLinkerRetention');
 
 // A warehouse product that has stayed archived this long is treated as "no longer the
 // warehouse's concern, but still worth keeping in the shop catalogue" — see
@@ -127,10 +128,10 @@ async function convertStaleArchivedToShop(now = Date.now()) {
   return converted;
 }
 
-// Run the (non-TTL) sweeps now and then once a day. TTL-based log retention is
-// handled by MongoDB itself via the indexes declared on the log schemas — only
-// the filtered PickingTask purge needs an application-side timer. The interval is
-// unref()'d so it never keeps the process alive on shutdown.
+// Run application-side retention sweeps now and then once a day. Mongo TTL
+// indexes handle simple age-only collections; filtered/conditional retention
+// (completed picking tasks and BaseLinker terminal history) is swept here. The
+// interval is unref()'d so it never keeps the process alive on shutdown.
 function startRetentionScheduler() {
   const runOnce = async () => runAsSchedulerLeader('retention', async () => {
     try {
@@ -139,6 +140,10 @@ function startRetentionScheduler() {
     }
     try {
       const c = await convertStaleArchivedToShop();
+    } catch (err) {
+    }
+    try {
+      await purgeExpiredBaseLinkerData();
     } catch (err) {
     }
   }, { ttlMs: 30 * 60 * 1000 });
@@ -154,4 +159,5 @@ module.exports = {
   startRetentionScheduler,
   COMPLETED_PICKING_RETENTION_DAYS,
   ARCHIVE_TO_SHOP_DAYS,
+  purgeExpiredBaseLinkerData,
 };

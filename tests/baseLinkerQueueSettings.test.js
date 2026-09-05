@@ -40,11 +40,11 @@ describe('BaseLinker queue settings storage', () => {
       intakeStatusName: 'Do opakowania',
       sentStatusId: null,
       cancelledStatusId: null,
-      sentLookbackDays: 30,
+      sentLookbackDays: 14,
     });
   });
 
-  it('persists three distinct upstream statuses and fixes Sent retention to 30 days', async () => {
+  it('persists three distinct upstream statuses and fixes Sent/Cancelled retention to 14 days', async () => {
     const h = harness();
     const saved = await h.load().saveQueueSettings({
       intakeStatusId: 99,
@@ -59,9 +59,11 @@ describe('BaseLinker queue settings storage', () => {
       sentStatusName: 'Wysłano',
       cancelledStatusId: 101,
       cancelledStatusName: 'Anulowane',
-      sentLookbackDays: 30,
+      sentLookbackDays: 14,
     });
     expect(saved.sentDateInStatusFrom).toBeGreaterThan(0);
+    expect(saved.cancelledDateInStatusFrom).toBeGreaterThan(0);
+    expect(saved.cancelledLookbackDays).toBe(14);
     expect(h.api).toHaveBeenCalledWith('getOrderStatusList', {});
     expect(h.value()).toMatchObject({ intakeStatusId: 99, sentStatusId: 100, cancelledStatusId: 101 });
   });

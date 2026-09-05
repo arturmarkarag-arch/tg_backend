@@ -22,5 +22,6 @@ const BaseLinkerOrderCacheSchema = new mongoose.Schema({
 
 BaseLinkerOrderCacheSchema.index({ orderId: 1 }, { unique: true });
 BaseLinkerOrderCacheSchema.index({ orderStatusId: 1, sortAt: -1, orderIdNumeric: -1 });
+BaseLinkerOrderCacheSchema.index({ orderStatusId: 1, statusChangedAt: 1 });
 
 module.exports = mongoose.model('BaseLinkerOrderCache', BaseLinkerOrderCacheSchema);

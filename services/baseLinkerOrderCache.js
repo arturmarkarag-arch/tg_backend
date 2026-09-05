@@ -13,7 +13,9 @@ const {
   getQueueScope,
   orderInIntakeScope,
   orderInSentScope,
+  orderInCancelledScope,
   orderInQueueScope,
+  HISTORY_LOOKBACK_DAYS,
 } = require('./baseLinkerQueueScope');
 
 const CACHE_STATE_KEY = 'baselinker.orderCache.v2';
@@ -22,11 +24,11 @@ const CACHE_STATE_KEY = 'baselinker.orderCache.v2';
 const CACHE_BOOTSTRAP_MAX_PAGES = Math.min(90, Math.max(1, Number(process.env.BASELINKER_QUEUE_MAX_PAGES) || 90));
 const CACHE_REFRESH_MS = 5 * 60_000;
 // Full queue scans can tell us that a previously known order disappeared from
-// Intake/Sent, but only an exact getOrders(order_id) may tell us WHERE it went.
+// Intake/Sent/Cancelled, but only an exact getOrders(order_id) may tell us WHERE it went.
 // Bound the recovery batch so a degraded journal cannot create an API storm.
 const FALLBACK_EXACT_REFRESH_LIMIT = Math.min(30, Math.max(1, Number(process.env.BASELINKER_FALLBACK_EXACT_REFRESH_LIMIT) || 20));
 const PAGE_SIZE_VALUES = new Set([10, 20, 50]);
-const SENT_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+const HISTORY_RETENTION_MS = HISTORY_LOOKBACK_DAYS * 24 * 60 * 60 * 1000;
 let indexPromise = null;
 
 function safePositiveInt(value, fallback = 1) {
@@ -119,25 +121,24 @@ async function removeCachedOrders(orderIds) {
 }
 
 function retainedPickingFilter(now = new Date()) {
-  const sentCutoff = new Date(now.getTime() - SENT_RETENTION_MS);
+  const historyCutoff = new Date(now.getTime() - HISTORY_RETENTION_MS);
   return {
     $and: [
-      // Cancelled/Sent are upstream terminal facts. Keep them after they leave
-      // intake only while somebody still has to acknowledge the change, or
-      // while a local Sent record is inside the same 30-day history window.
+      // Terminal upstream facts are retained only inside the same 14-day
+      // history window. Intake remains unbounded while BaseLinker keeps it actionable.
       {
         $or: [
           { upstreamDisposition: { $in: ['', 'intake'] } },
-          { upstreamReviewRequired: true },
-          { sentAt: { $gte: sentCutoff } },
+          { upstreamReviewRequired: true, lastUpstreamChangeAt: { $gte: historyCutoff } },
+          { sentAt: { $gte: historyCutoff } },
         ],
       },
       {
         $or: [
           { workflowStage: { $in: ['processing', 'deferred', 'packed'] } },
           { status: { $in: ['in_progress', 'paused', 'problem', 'ready_to_pack', 'ready_to_pack_with_issue', 'packed'] } },
-          { sentAt: { $gte: sentCutoff } },
-          { upstreamReviewRequired: true },
+          { sentAt: { $gte: historyCutoff } },
+          { upstreamReviewRequired: true, lastUpstreamChangeAt: { $gte: historyCutoff } },
         ],
       },
     ],
@@ -194,7 +195,7 @@ async function scanConfiguredScopes(scope) {
 
   const sent = await fetchBaseLinkerOrders({
     statusId: scope.sentStatusId,
-    // BaseLinker has no date_in_status filter. To make the 30-day Sent shelf
+    // BaseLinker has no date_in_status filter. To make the 14-day Sent shelf
     // correct even for an old order moved to Sent today, scan this exact status
     // and apply the documented date_in_status field locally.
     includeUnconfirmed: true,
@@ -207,9 +208,24 @@ async function scanConfiguredScopes(scope) {
     });
   }
 
+  const cancelled = await fetchBaseLinkerOrders({
+    statusId: scope.cancelledStatusId,
+    // Same contract as Sent: BaseLinker cannot filter by date_in_status, so scan
+    // the exact Cancelled status and keep only rows that entered it in 14 days.
+    includeUnconfirmed: true,
+    maxPages: CACHE_BOOTSTRAP_MAX_PAGES,
+  });
+  if (cancelled.truncated) {
+    throw appError('baselinker_order_cache_bootstrap_truncated', {
+      scope: 'cancelled_status',
+      maxOrders: CACHE_BOOTSTRAP_MAX_PAGES * 100,
+    });
+  }
+
   const byId = new Map();
   for (const order of intake.orders || []) if (orderInIntakeScope(order, scope)) byId.set(String(order.order_id), order);
   for (const order of sent.orders || []) if (orderInSentScope(order, scope)) byId.set(String(order.order_id), order);
+  for (const order of cancelled.orders || []) if (orderInCancelledScope(order, scope)) byId.set(String(order.order_id), order);
   return [...byId.values()];
 }
 
@@ -217,11 +233,15 @@ async function recoverDisappearedKnownOrders(scope, scannedOrders, { enabled = f
   if (!enabled) return { orders: [], removedOrderIds: [], pendingOrderCount: 0, checkedOrderCount: 0 };
 
   const scannedIds = new Set((scannedOrders || []).map((order) => String(order?.order_id || '')).filter(Boolean));
-  // Only rows that PREVIOUSLY belonged to one of the two scanned upstream
-  // statuses can legitimately be called "disappeared". Cancelled/Other rows
-  // retained for audit are not polled forever.
+  // Only rows that PREVIOUSLY belonged to a currently retained scanned shelf
+  // can legitimately be called "disappeared". Terminal rows that
+  // already aged out of the 14-day shelf are not exact-polled forever.
   const previousRows = await BaseLinkerOrderCache.find({
-    orderStatusId: { $in: [scope.intakeStatusId, scope.sentStatusId] },
+    $or: [
+      { orderStatusId: scope.intakeStatusId },
+      { orderStatusId: scope.sentStatusId, statusChangedAt: { $gte: scope.sentDateInStatusFrom } },
+      { orderStatusId: scope.cancelledStatusId, statusChangedAt: { $gte: scope.cancelledDateInStatusFrom } },
+    ],
   }).select('orderId orderStatusId').lean();
   const disappeared = previousRows
     .filter((row) => !scannedIds.has(String(row?.orderId || '')))
@@ -410,7 +430,7 @@ async function getCachedOrderPage({ workflowFilter = 'processing', packedBy = ''
 
   const safePage = safePositiveInt(page, 1);
   const safePageSize = normalizePageSize(pageSize);
-  const safeWorkflow = ['processing', 'deferred', 'packed', 'sent', 'updated'].includes(String(workflowFilter))
+  const safeWorkflow = ['processing', 'deferred', 'packed', 'sent', 'cancelled', 'updated'].includes(String(workflowFilter))
     ? String(workflowFilter)
     : 'processing';
   const safePackedBy = String(packedBy || '').trim().slice(0, 120);
@@ -420,8 +440,9 @@ async function getCachedOrderPage({ workflowFilter = 'processing', packedBy = ''
 
   const pickingCollection = BaseLinkerPickingOrder.collection.name;
   const skip = (safePage - 1) * safePageSize;
-  const localSentCutoff = new Date(Date.now() - SENT_RETENTION_MS);
+  const localSentCutoff = new Date(Date.now() - HISTORY_RETENTION_MS);
   const upstreamSentCutoffSeconds = scope.sentDateInStatusFrom;
+  const upstreamCancelledCutoffSeconds = scope.cancelledDateInStatusFrom;
 
   const pageMatch = safeWorkflow === 'updated'
     ? { updatedEligible: true }
@@ -453,6 +474,13 @@ async function getCachedOrderPage({ workflowFilter = 'processing', packedBy = ''
           ],
         },
         upstreamCancelled: { $cond: [{ $eq: ['$orderStatusId', scope.cancelledStatusId] }, 1, 0] },
+        upstreamCancelledRecent: {
+          $cond: [
+            { $and: [{ $eq: ['$orderStatusId', scope.cancelledStatusId] }, { $gte: ['$statusChangedAt', upstreamCancelledCutoffSeconds] }] },
+            1,
+            0,
+          ],
+        },
       },
     },
     {
@@ -489,16 +517,24 @@ async function getCachedOrderPage({ workflowFilter = 'processing', packedBy = ''
     {
       $addFields: {
         displayStage: {
-          $cond: [
-            { $eq: ['$upstreamSentRecent', 1] },
-            'sent',
-            '$localDisplayStage',
-          ],
+          $switch: {
+            branches: [
+              { case: { $eq: ['$upstreamCancelledRecent', 1] }, then: 'cancelled' },
+              { case: { $eq: ['$upstreamSentRecent', 1] }, then: 'sent' },
+            ],
+            default: '$localDisplayStage',
+          },
         },
         updatedEligible: {
           $and: [
             { $eq: ['$localUpstreamReviewRequired', true] },
-            { $or: [{ $ne: ['$upstreamSent', 1] }, { $eq: ['$upstreamSentRecent', 1] }] },
+            {
+              $or: [
+                { $eq: ['$upstreamSentRecent', 1] },
+                { $eq: ['$upstreamCancelledRecent', 1] },
+                { $and: [{ $ne: ['$upstreamSent', 1] }, { $ne: ['$upstreamCancelled', 1] }] },
+              ],
+            },
           ],
         },
       },
@@ -512,13 +548,9 @@ async function getCachedOrderPage({ workflowFilter = 'processing', packedBy = ''
               // when the retained cache row is an older Intake snapshot (e.g.
               // BaseLinker stopped returning the order). Never let that stale
               // cache status put the card back into Processing after review.
-              { case: { $in: ['$localUpstreamDisposition', ['cancelled', 'other', 'missing', 'unverified']] }, then: false },
-              // Cancellation is visible only in Updated until the operator
-              // presses "Прийнято". It must never fall back into Processing.
-              { case: { $eq: ['$upstreamCancelled', 1] }, then: false },
-              // BaseLinker Sent is a read-only 30-day history shelf regardless
-              // of stale local stage.
+              { case: { $eq: ['$upstreamCancelled', 1] }, then: { $eq: ['$upstreamCancelledRecent', 1] } },
               { case: { $eq: ['$upstreamSent', 1] }, then: { $eq: ['$upstreamSentRecent', 1] } },
+              { case: { $in: ['$localUpstreamDisposition', ['other', 'missing', 'unverified']] }, then: false },
               // Fresh unclaimed intake order.
               { case: { $eq: ['$hasPickingDoc', false] }, then: { $eq: ['$intakeEligible', 1] } },
             ],
@@ -588,7 +620,7 @@ async function getCachedOrderPage({ workflowFilter = 'processing', packedBy = ''
   ]);
   const facet = facetRows?.[0] || {};
   const pageGroups = Array.isArray(facet?.page) ? facet.page : [];
-  const workflowCounts = { processing: 0, deferred: 0, packed: 0, sent: 0, updated: Number(facet?.updatedCount?.[0]?.count || 0) };
+  const workflowCounts = { processing: 0, deferred: 0, packed: 0, sent: 0, cancelled: 0, updated: Number(facet?.updatedCount?.[0]?.count || 0) };
   for (const row of facet?.counts || []) {
     if (Object.prototype.hasOwnProperty.call(workflowCounts, row?._id)) workflowCounts[row._id] = Number(row.count || 0);
   }
@@ -623,7 +655,9 @@ async function getCachedOrderPage({ workflowFilter = 'processing', packedBy = ''
     workflowCounts,
     packedByOptions,
     activePackedBy: safeWorkflow === 'packed' ? safePackedBy : '',
-    sentRetentionDays: 30,
+    historyRetentionDays: HISTORY_LOOKBACK_DAYS,
+    sentRetentionDays: HISTORY_LOOKBACK_DAYS,
+    cancelledRetentionDays: HISTORY_LOOKBACK_DAYS,
   };
 }
 
