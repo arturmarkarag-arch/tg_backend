@@ -84,19 +84,28 @@ const KEEP = [
 ];
 
 // Дефолти піддокументів User — мають збігатися зі схемою models/User.js.
+// Повна заміна `cartState` скидає актуальну навігацію і прибирає фізичні
+// legacy orderItems/orderItemIds/currentPage, не створюючи їх знову.
 const CART_DEFAULT = {
-  orderItems: {},
-  orderItemIds: [],
-  lastOrderPositions: 0,
   navigationSessionId: '',
   lastViewedProductId: '',
-  lastViewedOrderNumber: 0,
   currentIndex: 0,
-  currentPage: 0,
   updatedAt: null,
 };
 const MINIAPP_DEFAULT = {
   updatedAt: null,
+};
+const USER_STATE_DIRTY_QUERY = {
+  $or: [
+    { 'cartState.navigationSessionId': { $exists: true, $nin: ['', null] } },
+    { 'cartState.lastViewedProductId': { $exists: true, $nin: ['', null] } },
+    { 'cartState.currentIndex': { $gt: 0 } },
+    { 'cartState.orderItems': { $exists: true } },
+    { 'cartState.orderItemIds': { $exists: true } },
+    { 'cartState.lastOrderPositions': { $exists: true } },
+    { 'cartState.lastViewedOrderNumber': { $exists: true } },
+    { 'cartState.currentPage': { $exists: true } },
+  ],
 };
 
 const pad = (n) => String(n).padStart(7);
@@ -155,15 +164,15 @@ async function main() {
 
   // ── Користувачі: акаунти лишаються, транзакційні поля обнуляються ─────────
   const usersTotal = await count('users');
-  const usersWithCart = existing.has('users')
-    ? await db.collection('users').countDocuments({ 'cartState.orderItemIds.0': { $exists: true } })
+  const usersWithState = existing.has('users')
+    ? await db.collection('users').countDocuments(USER_STATE_DIRTY_QUERY)
     : 0;
   const usersWithHistory = existing.has('users')
     ? await db.collection('users').countDocuments({ 'history.0': { $exists: true } })
     : 0;
   console.log('\n👤 КОРИСТУВАЧІ (акаунти НЕ видаляються):');
   console.log(`   ${pad(usersTotal)}  акаунтів усього`);
-  console.log(`   ${pad(usersWithCart)}  з непорожнім кошиком → очищається`);
+  console.log(`   ${pad(usersWithState)}  з навігаційним/legacy cartState → стан скидається`);
   console.log(`   ${pad(usersWithHistory)}  з непорожньою історією → очищається`);
   if (EXECUTE && existing.has('users')) {
     const r = await db.collection('users').updateMany({}, {

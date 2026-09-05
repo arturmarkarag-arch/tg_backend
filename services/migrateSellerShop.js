@@ -192,9 +192,7 @@ async function migrateSellerShop({
 
   if (resetCartNavigation) {
     userUpdate['cartState.lastViewedProductId'] = '';
-    userUpdate['cartState.lastViewedOrderNumber'] = 0;
     userUpdate['cartState.currentIndex'] = 0;
-    userUpdate['cartState.currentPage'] = 0;
     userUpdate['cartState.updatedAt'] = new Date();
   }
 

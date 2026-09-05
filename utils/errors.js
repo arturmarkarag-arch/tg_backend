@@ -53,6 +53,8 @@ const ERRORS = {
   receipt_delete_item_failed:{ status: 500, message: 'Не вдалося видалити позицію' },
 
   // ── Users ──────────────────────────────────────────────────────────────────
+  user_activity_filter_retired: { status: 400, message: 'Цей фільтр активності застарів. Стан замовлень доступний у межах конкретної сесії.' },
+  cleared_cart_legacy_unrestorable: { status: 409, message: 'Знімок старого кошика не містить сесії замовлення. Автоматичне відновлення недоступне; перегляньте історію замовлень.' },
   user_not_found:           { status: 404, message: 'Користувача не знайдено' },
   user_telegram_id_taken:   { status: 409, message: ({ telegramId } = {}) =>
                                 `Користувач з Telegram ID ${telegramId || ''} вже існує. Оновіть сторінку і повторіть.` },
@@ -461,7 +463,6 @@ const ERRORS = {
   transfer_not_pending:         { status: 409, message: 'Запит вже оброблений (схвалений/відхилений/скасований)' },
   transfer_seller_moved:        { status: 409, message: 'Продавець вже змінив магазин поки запит очікував' },
   transfer_target_occupied:     { status: 409, message: 'Цільовий магазин вже зайнятий іншим продавцем' },
-  transfer_cart_decision_required: { status: 400, message: 'Необхідно вказати рішення щодо кошика (cartDecision: "clear" або "keep")' },
   transfer_target_in_conflict:  { status: 409, message: 'Цільовий магазин уже в стані конфлікту (декілька продавців або замовлень). Спочатку вирішіть конфлікт у розділі конфліктів, потім повторіть перенесення.' },
   conflict_resolve_invalid:     { status: 400, message: 'Некоректні параметри вирішення конфлікту' },
   conflict_seller_not_found:    { status: 404, message: 'Продавця конфлікту не знайдено' },

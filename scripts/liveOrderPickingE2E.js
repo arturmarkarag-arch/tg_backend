@@ -615,12 +615,14 @@ async function scenarioHappy() {
     const dbOrder = await Order.findById(first._id).lean();
     eq(dbOrder.items.filter((i) => !terminalItem(i)).length, 2, 'happy: one Order contains multiple product positions');
 
-    // Navigation-state compatibility: seed legacy cart fields, then send the
-    // payload shape used by an OLD client (including empty orderItems arrays).
-    // The navigation endpoint must update only the cursor and leave those legacy
-    // snapshots untouched. A second save must also succeed without cart_stale.
+    // Navigation-state compatibility: old clients may still SEND derived page
+    // and legacy cart payload fields. The endpoint must ignore those extras,
+    // persist only the canonical navigation cursor, and never perform a hidden
+    // physical cleanup of legacy Mongo fields (that is a separate maintenance
+    // operation). Seed the old fields through the native collection because the
+    // current Mongoose schema intentionally no longer knows them.
     const legacyProbeId = str(world.products[0]._id);
-    await User.updateOne(
+    await User.collection.updateOne(
       { telegramId: str(seller.telegramId) },
       { $set: {
         [`cartState.orderItems.${legacyProbeId}`]: 7,
@@ -629,7 +631,7 @@ async function scenarioHappy() {
     );
     const stateSave1 = await api('POST', '/api/v1/telegram/mini-app/state', seller, {
       currentIndex: 1,
-      currentPage: 0,
+      currentPage: 17,
       productId: str(world.products[1]._id),
       orderNumber: world.products[1].orderNumber || 0,
       orderItems: {},
@@ -637,9 +639,19 @@ async function scenarioHappy() {
       orderingSessionId: sid,
     });
     eq(stateSave1.status, 200, 'happy: navigation state accepts legacy payload without cart_stale');
-    const afterState1 = await User.findOne({ telegramId: str(seller.telegramId) }).lean();
-    eq(Number(afterState1?.cartState?.orderItems?.[legacyProbeId] ?? afterState1?.cartState?.orderItems?.get?.(legacyProbeId)), 7, 'happy: navigation save does not erase legacy cartState.orderItems');
-    check((afterState1?.cartState?.orderItemIds || []).map(String).includes(legacyProbeId), 'happy: navigation save does not erase legacy cartState.orderItemIds');
+    eq(stateSave1.data?.cartState?.currentIndex, 1, 'happy: response exposes canonical navigation currentIndex');
+    eq(str(stateSave1.data?.cartState?.lastViewedProductId), str(world.products[1]._id), 'happy: response exposes canonical navigation productId');
+    check(!Object.prototype.hasOwnProperty.call(stateSave1.data?.cartState || {}, 'currentPage'), 'happy: derived currentPage is not returned by canonical cartState');
+    check(!Object.prototype.hasOwnProperty.call(stateSave1.data?.cartState || {}, 'orderItems'), 'happy: legacy orderItems are not returned by canonical cartState');
+    check(!Object.prototype.hasOwnProperty.call(stateSave1.data?.cartState || {}, 'orderItemIds'), 'happy: legacy orderItemIds are not returned by canonical cartState');
+
+    const afterState1 = await User.collection.findOne({ telegramId: str(seller.telegramId) });
+    eq(afterState1?.cartState?.currentIndex, 1, 'happy: canonical currentIndex persisted');
+    eq(str(afterState1?.cartState?.lastViewedProductId), str(world.products[1]._id), 'happy: canonical productId persisted');
+    check(!Object.prototype.hasOwnProperty.call(afterState1?.cartState || {}, 'currentPage'), 'happy: old-client currentPage is accepted but not persisted');
+    eq(Number(afterState1?.cartState?.orderItems?.[legacyProbeId]), 7, 'happy: navigation save does not erase pre-existing legacy cartState.orderItems');
+    check((afterState1?.cartState?.orderItemIds || []).map(String).includes(legacyProbeId), 'happy: navigation save does not erase pre-existing legacy cartState.orderItemIds');
+
     const stateSave2 = await api('POST', '/api/v1/telegram/mini-app/state', seller, {
       currentIndex: 0,
       currentPage: 0,

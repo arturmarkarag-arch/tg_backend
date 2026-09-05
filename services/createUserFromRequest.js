@@ -82,12 +82,10 @@ async function resolveAndCreateUser({
     // A successful registration is an explicit return to the system. Keep the
     // historical Google link, but clear stale runtime/account flags.
     existing.botBlocked = false;
-    existing.isOnline = false;
     existing.miniAppState = { updatedAt: null };
     existing.cartState = {
-      orderItems: {}, orderItemIds: [], lastOrderPositions: 0,
       navigationSessionId: '', lastViewedProductId: '',
-      lastViewedOrderNumber: 0, currentIndex: 0, currentPage: 0,
+      currentIndex: 0,
       updatedAt: null,
     };
     existing.history.push({

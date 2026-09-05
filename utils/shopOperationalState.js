@@ -47,7 +47,7 @@ function normalizeAssignedUser(user) {
   return {
     name,
     telegramId,
-    username: String(user?.username || ''),
+    username: String(user?.telegramUsername || user?.username || ''),
     role: String(user?.role || ''),
     operational: operationalIssues.length === 0,
     operationalIssues,

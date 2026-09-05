@@ -890,9 +890,7 @@ router.post('/seed-conflicts', asyncHandler(async (req, res) => {
         targetShopHasSeller: true,
         targetShopSellerName: `${occupant.firstName} ${occupant.lastName}`,
         targetShopSellerTelegramId: occupant.telegramId,
-        targetSellerCartHasItems: false, targetSellerCartItemCount: 0,
         targetSellerHasActiveOrder: false, sourceShopHasActiveOrder: false,
-        cartHasItems: false, cartItemCount: 0,
       },
     });
     scenarios.push({ id: 'A', label: 'Target has seller, no orders', requestId: String(req._id), shop: shopA.name });
@@ -914,10 +912,8 @@ router.post('/seed-conflicts', asyncHandler(async (req, res) => {
         targetShopHasSeller: true,
         targetShopSellerName: `${occupant.firstName} ${occupant.lastName}`,
         targetShopSellerTelegramId: occupant.telegramId,
-        targetSellerCartHasItems: true, targetSellerCartItemCount: occOrder.items.length,
         targetSellerHasActiveOrder: true, targetSellerActiveOrderId: occOrder._id,
         sourceShopHasActiveOrder: true, sourceShopActiveOrderId: reqOrder._id,
-        cartHasItems: true, cartItemCount: reqOrder.items.length,
       },
     });
     scenarios.push({ id: 'B', label: 'Both sellers have active orders', requestId: String(req._id), shop: shopBtgt.name });
@@ -936,7 +932,6 @@ router.post('/seed-conflicts', asyncHandler(async (req, res) => {
       conflictSnapshot: {
         targetShopHasSeller: false,
         sourceShopHasActiveOrder: true, sourceShopActiveOrderId: reqOrder._id,
-        cartHasItems: true, cartItemCount: reqOrder.items.length,
       },
     });
     scenarios.push({ id: 'C', label: 'Requester has order, target empty', requestId: String(req._id), shop: shopCtgt.name });
@@ -954,8 +949,6 @@ router.post('/seed-conflicts', asyncHandler(async (req, res) => {
       conflictSnapshot: {
         targetShopHasSeller: false,
         sourceShopHasActiveOrder: true, sourceShopActiveOrderId: orderD._id,
-        cartHasItems: true, cartItemCount: orderD.items.length,
-        crossGroup: true,
       },
     });
     scenarios.push({ id: 'D', label: 'Order migrates from another group', requestId: String(req._id), fromShop: shopD.name, toShop: shopA.name });

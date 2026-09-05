@@ -17,23 +17,18 @@ const { activeOrderShopFilter } = require('../utils/orderShopFilter');
 const { getTelegramUsernameMap } = require('../utils/telegramUsername');
 const { ASSIGNED_SHOP_ROLES, buildCurrentAssignment } = require('../utils/shopOperationalState');
 const { buildLiveActiveOrderFilter } = require('../utils/orderStatus');
+const { getIO } = require('../socket');
+const {
+  ASSIGNED_SELLER_FIELDS, REFERENCE_SHOP_FIELDS, SETTINGS_SHOP_FIELDS,
+  toAssignedSeller, toReferenceShop, toSettingsShop,
+} = require('../services/readModels/userDirectoryReadModel');
 
 const router = express.Router();
 
 // Public / non-staff projection of a shop — ONLY the fields registration and a
 // shop-picker need. Carries NO seller personal data (name/phone/telegramId/cart/
 // history). Used by the public /registry endpoint and the non-staff branch of GET /.
-function toMinimalShop(s) {
-  return {
-    _id: s._id,
-    name: s.name,
-    address: s.address || '',
-    cityId: s.cityId?._id ? String(s.cityId._id) : (s.cityId || null),
-    city: s.cityId?.name || '',
-    deliveryGroupId: s.deliveryGroupId ? String(s.deliveryGroupId) : '',
-    isActive: s.isActive,
-  };
-}
+const toMinimalShop = toReferenceShop;
 
 // ─── GET /api/shops ──────────────────────────────────────────────────────────
 // Список магазинів. За замовчуванням тільки активні. Requires auth (mounted
@@ -69,10 +64,10 @@ router.get('/', asyncHandler(async (req, res) => {
 
     // Sort: most-recently-changed seller assignment first (missing → last),
     // then alphabetical. Mirrors the previous client-side order.
-    const SHOP_SORT = { lastSellerChangedAt: -1, name: 1 };
+    const SHOP_SORT = { lastSellerChangedAt: -1, name: 1, _id: 1 };
 
     let total = null;
-    let query = Shop.find(filter).populate('cityId', 'name country').sort(SHOP_SORT);
+    let query = Shop.find(filter).select(['admin', 'warehouse'].includes(req.telegramUser?.role) ? SETTINGS_SHOP_FIELDS : REFERENCE_SHOP_FIELDS).populate('cityId', 'name').sort(SHOP_SORT);
     if (paginate) {
       total = await Shop.countDocuments(filter);
       query = query.skip((page - 1) * pageSize).limit(pageSize);
@@ -89,49 +84,21 @@ router.get('/', asyncHandler(async (req, res) => {
       return res.json(envelope(shops.map(toMinimalShop)));
     }
 
-    // Sellers per shop — full data so the Shops tab can render cart/activity
-    // status and phone without a separate /users round-trip. NOTE: `history` is
-    // deliberately NOT selected here — it can be large and the "previously
-    // assigned" feature is computed server-side below (lastExSellers) instead of
-    // shipping every seller's full history to the client.
-    const shopIds = shops.map((s) => s._id);
-    const sellers = await User.find({ role: { $in: ASSIGNED_SHOP_ROLES }, shopId: { $in: shopIds } })
-      .select('shopId firstName lastName telegramId role phoneNumber cartState miniAppState accountState botBlocked')
-      .lean();
-
-    // Compute cartItemCount + lastOrderAt the same way GET /users does, so the
-    // client treats both responses identically.
-    const getCartCount = (u) => {
-      const items = u.cartState?.orderItems;
-      if (!items) return 0;
-      const obj = items instanceof Map ? Object.fromEntries(items) : items;
-      return Object.values(obj).reduce((s, q) => s + (Number(q) || 0), 0);
-    };
-    const sellerTids = sellers.map((s) => s.telegramId).filter(Boolean);
-    const lastOrders = sellerTids.length
-      ? await Order.aggregate([
-        { $match: { buyerTelegramId: { $in: sellerTids } } },
-        { $sort: { createdAt: -1 } },
-        { $group: { _id: '$buyerTelegramId', lastOrderAt: { $first: '$createdAt' } } },
-      ])
-      : [];
-    const lastOrderMap = new Map(lastOrders.map((o) => [o._id, o.lastOrderAt]));
-    const sellerUsernameMap = await getTelegramUsernameMap(sellerTids);
-
-    const sellersByShop = {};   // shopId → full seller objects (UI cards)
-    const sellerNamesByShop = {}; // shopId → display-name strings (legacy)
-    for (const s of sellers) {
-      const sid = String(s.shopId);
+    // Only assignments for the returned shops. No cart/history/activity/order
+    // statistics enter either the Mongo projection or the response contract.
+    const shopIds = shops.map((shop) => shop._id);
+    const sellers = shopIds.length ? await User.find({ role: { $in: ASSIGNED_SHOP_ROLES }, shopId: { $in: shopIds } })
+      .select(ASSIGNED_SELLER_FIELDS).sort({ _id: 1 }).lean() : [];
+    const sellerUsernameMap = await getTelegramUsernameMap(sellers.map((seller) => seller.telegramId));
+    const sellersByShop = {};
+    const sellerNamesByShop = {};
+    for (const seller of sellers) {
+      const sid = String(seller.shopId);
       if (!sellersByShop[sid]) sellersByShop[sid] = [];
       if (!sellerNamesByShop[sid]) sellerNamesByShop[sid] = [];
-      sellersByShop[sid].push({
-        ...s,
-        cartItemCount: getCartCount(s),
-        lastOrderAt: lastOrderMap.get(s.telegramId) || null,
-        telegramUsername: sellerUsernameMap.get(String(s.telegramId)) || '',
-      });
-      const label = [s.firstName, s.lastName].filter(Boolean).join(' ') || String(s.telegramId);
-      sellerNamesByShop[sid].push(s.role === 'admin' ? `${label} (адмін)` : label);
+      sellersByShop[sid].push(toAssignedSeller(seller, sellerUsernameMap.get(String(seller.telegramId)) || ''));
+      const label = [seller.firstName, seller.lastName].filter(Boolean).join(' ') || String(seller.telegramId);
+      sellerNamesByShop[sid].push(seller.role === 'admin' ? `${label} (адмін)` : label);
     }
 
     // "Previously assigned" (last 2 ex-sellers) per shop — computed server-side
@@ -161,7 +128,7 @@ router.get('/', asyncHandler(async (req, res) => {
       const shopSellerNames = sellerNamesByShop[sid] || [];
       const currentAssignment = buildCurrentAssignment(shopSellers, { shop: s });
       return {
-        ...s,
+        ...toSettingsShop(s),
         cityId: s.cityId?._id ? String(s.cityId._id) : (s.cityId || null),
         city: s.cityId?.name || '',
         // Same CURRENT assignment contract used by readiness/session dashboards.
@@ -188,10 +155,22 @@ async function computeLastExSellersByShopName(shops) {
   const shopNames = shops.map((s) => s.name).filter(Boolean);
   const map = {}; // shopName → { telegramId → { seller, at } }
   if (shopNames.length) {
-    const exSellers = await User.find({
-      role: { $in: ASSIGNED_SHOP_ROLES },
-      history: { $elemMatch: { action: 'shop_changed', 'meta.fromShop': { $in: shopNames } } },
-    }).select('firstName lastName telegramId history').lean();
+    const exSellers = await User.aggregate([
+      { $match: {
+        role: { $in: ASSIGNED_SHOP_ROLES },
+        history: { $elemMatch: { action: 'shop_changed', 'meta.fromShop': { $in: shopNames } } },
+      } },
+      { $project: {
+        firstName: 1, lastName: 1, telegramId: 1,
+        history: { $filter: {
+          input: { $ifNull: ['$history', []] }, as: 'entry',
+          cond: { $and: [
+            { $eq: ['$$entry.action', 'shop_changed'] },
+            { $in: ['$$entry.meta.fromShop', shopNames] },
+          ] },
+        } },
+      } },
+    ]);
 
     for (const s of exSellers) {
       if (!Array.isArray(s.history)) continue;
@@ -255,7 +234,7 @@ router.get('/cities', asyncHandler(async (req, res) => {
 router.get('/registry', asyncHandler(async (req, res) => {
   const filter = { isActive: true };
   if (req.query.cityId) filter.cityId = req.query.cityId;
-  const shops = await Shop.find(filter).populate('cityId', 'name').sort({ name: 1 }).lean();
+  const shops = await Shop.find(filter).select(REFERENCE_SHOP_FIELDS).populate('cityId', 'name').sort({ name: 1, _id: 1 }).lean();
   res.json(shops.map(toMinimalShop));
 }));
 
@@ -270,6 +249,7 @@ router.get('/without-seller', telegramAuth, requireTelegramRoles(['admin', 'ware
     shopId: { $ne: null },
   });
   const shops = await Shop.find({ isActive: true, _id: { $nin: assignedShopIds } })
+    .select(SETTINGS_SHOP_FIELDS)
     .populate('cityId', 'name')
     .sort({ name: 1 })
     .lean();
@@ -278,7 +258,7 @@ router.get('/without-seller', telegramAuth, requireTelegramRoles(['admin', 'ware
   // warning block can expand a row straight into the edit form (ShopRow/ShopForm
   // need deliveryGroupId/isActive/etc.). sellers is [] by definition here.
   const result = shops.map((s) => ({
-    ...s,
+    ...toSettingsShop(s),
     cityId: s.cityId?._id ? String(s.cityId._id) : (s.cityId || null),
     city: s.cityId?.name || '',
     sellers: [],
@@ -288,24 +268,35 @@ router.get('/without-seller', telegramAuth, requireTelegramRoles(['admin', 'ware
   res.json({ shops: result, count: result.length });
 }));
 
+// Authenticated reference data for staff dropdowns. No seller joins, history
+// lookup or Order aggregation. /registry remains the public registration route.
+router.get('/reference', telegramAuth, requireTelegramRoles(['admin', 'warehouse']), asyncHandler(async (req, res) => {
+  const filter = req.query.includeInactive === 'true' ? {} : { isActive: true };
+  if (req.query.cityId) filter.cityId = req.query.cityId;
+  if (req.query.deliveryGroupId) filter.deliveryGroupId = req.query.deliveryGroupId;
+  const shops = await Shop.find(filter).select(REFERENCE_SHOP_FIELDS)
+    .populate('cityId', 'name').sort({ name: 1, _id: 1 }).lean();
+  res.json(shops.map(toReferenceShop));
+}));
+
 // ─── GET /api/shops/:id ───────────────────────────────────────────────────────
 router.get('/:id', asyncHandler(async (req, res) => {
-  const shop = await Shop.findById(req.params.id).populate('cityId', 'name country').lean();
+  const shop = await Shop.findById(req.params.id).select(SETTINGS_SHOP_FIELDS).populate('cityId', 'name').lean();
   if (!shop) throw appError('shop_not_found');
 
-  const cityId = shop.cityId?._id ? String(shop.cityId._id) : (shop.cityId || null);
-  const base = { ...shop, cityId, city: shop.cityId?.name || '' }; // city computed from populate, not stored field
+  const base = toSettingsShop(shop); // city computed from populate, not stored field
 
   // The seller list (names + telegramIds) is STAFF-ONLY — a seller must not be
   // able to enumerate other sellers via shop ids.
   if (!['admin', 'warehouse'].includes(req.telegramUser?.role)) {
-    return res.json(base);
+    return res.json(toReferenceShop(shop));
   }
 
   const sellers = await User.find({ shopId: shop._id, role: { $in: ASSIGNED_SHOP_ROLES } })
-    .select('telegramId firstName lastName role')
-    .lean();
-  res.json({ ...base, sellers });
+    .select(ASSIGNED_SELLER_FIELDS).sort({ _id: 1 }).lean();
+  const usernames = await getTelegramUsernameMap(sellers.map((seller) => seller.telegramId));
+  const assigned = sellers.map((seller) => toAssignedSeller(seller, usernames.get(String(seller.telegramId)) || ''));
+  res.json({ ...base, sellers: assigned, currentAssignment: buildCurrentAssignment(assigned, { shop }) });
 }));
 
 // ─── POST /api/shops ──────────────────────────────────────────────────────────
@@ -328,7 +319,8 @@ router.post('/', telegramAuth, requireTelegramRole('admin'), asyncHandler(async 
     address: address ? String(address).trim() : '',
   });
 
-  res.status(201).json(shop);
+  try { getIO()?.to('staff').emit('user_directory_changed', {}); } catch (_) {}
+  res.status(201).json(toSettingsShop(shop));
 }));
 
 // ─── PATCH /api/shops/:id ─────────────────────────────────────────────────────
@@ -338,7 +330,8 @@ router.patch('/:id', telegramAuth, requireTelegramRole('admin'), asyncHandler(as
     patch: req.body || {},
     actor: req.telegramUser,
   });
-  res.json(result.shop);
+  try { getIO()?.to('staff').emit('user_directory_changed', {}); } catch (_) {}
+  res.json(toSettingsShop(result.shop));
 }));
 
 // ─── DELETE /api/shops/:id ────────────────────────────────────────────────────
@@ -370,6 +363,7 @@ router.delete('/:id', telegramAuth, requireTelegramRole('admin'), asyncHandler(a
     if (result?._shopId) {
       await invalidateShop(result._shopId);
       delete result._shopId;
+      try { getIO()?.to('staff').emit('user_directory_changed', {}); } catch (_) {}
     }
     return res.json(result);
   } finally {

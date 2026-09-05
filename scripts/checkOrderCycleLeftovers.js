@@ -58,11 +58,12 @@ async function main() {
 
   console.log('\n👤 СТАН КОРИСТУВАЧІВ (має бути 0, окрім «усього»):');
   console.log(`   ${pad(await count('users'))}  усього акаунтів`);
-  console.log(`   ${pad(await count('users', { 'cartState.lastViewedProductId': { $nin: ['', null] } }))}  з непорожнім cartState.lastViewedProductId`);
+  console.log(`   ${pad(await count('users', { 'cartState.lastViewedProductId': { $exists: true, $nin: ['', null] } }))}  з непорожнім cartState.lastViewedProductId`);
   console.log(`   ${pad(await count('users', { 'cartState.currentIndex': { $gt: 0 } }))}  з cartState.currentIndex > 0`);
-  console.log(`   ${pad(await count('users', { 'cartState.currentPage': { $gt: 0 } }))}  з cartState.currentPage > 0`);
-  console.log(`   ${pad(await count('users', { 'cartState.navigationSessionId': { $nin: ['', null] } }))}  з непорожнім cartState.navigationSessionId`);
-  console.log(`   ${pad(await count('users', { 'cartState.orderItemIds.0': { $exists: true } }))}  з непорожнім кошиком`);
+  console.log(`   ${pad(await count('users', { 'cartState.navigationSessionId': { $exists: true, $nin: ['', null] } }))}  з непорожнім cartState.navigationSessionId`);
+  console.log(`   ${pad(await count('users', { 'cartState.currentPage': { $exists: true } }))}  з legacy cartState.currentPage (має бути 0)`);
+  console.log(`   ${pad(await count('users', { 'cartState.orderItems': { $exists: true } }))}  з legacy cartState.orderItems (має бути 0)`);
+  console.log(`   ${pad(await count('users', { 'cartState.orderItemIds': { $exists: true } }))}  з legacy cartState.orderItemIds (має бути 0)`);
   console.log(`   ${pad(await count('users', { 'history.0': { $exists: true } }))}  з непорожньою history`);
 
   // Хто саме тримає стан — щоб було видно, чи це один акаунт, який просто
@@ -70,9 +71,11 @@ async function main() {
   if (existing.has('users')) {
     const dirty = await db.collection('users').find(
       { $or: [
-        { 'cartState.lastViewedProductId': { $nin: ['', null] } },
+        { 'cartState.lastViewedProductId': { $exists: true, $nin: ['', null] } },
         { 'cartState.currentIndex': { $gt: 0 } },
-        { 'cartState.currentPage': { $gt: 0 } },
+        { 'cartState.currentPage': { $exists: true } },
+        { 'cartState.orderItems': { $exists: true } },
+        { 'cartState.orderItemIds': { $exists: true } },
       ] },
       { projection: { telegramId: 1, firstName: 1, lastName: 1, role: 1, cartState: 1 } },
     ).limit(10).toArray();
@@ -81,7 +84,7 @@ async function main() {
       for (const u of dirty) {
         const cs = u.cartState || {};
         console.log(`     ${u.telegramId} ${u.firstName || ''} ${u.lastName || ''} [${u.role}]`);
-        console.log(`        productId=${cs.lastViewedProductId || '—'} index=${cs.currentIndex} page=${cs.currentPage}`);
+        console.log(`        productId=${cs.lastViewedProductId || '—'} index=${cs.currentIndex} legacyPage=${cs.currentPage ?? '—'}`);
         console.log(`        updatedAt=${cs.updatedAt ? new Date(cs.updatedAt).toISOString() : 'null'}  navSession=${cs.navigationSessionId || '—'}`);
       }
       console.log('\n   Якщо updatedAt ПІЗНІШЕ за час запуску чистки — стан записав назад');

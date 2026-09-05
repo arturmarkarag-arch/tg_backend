@@ -37,12 +37,6 @@ const UserSchema = new mongoose.Schema(
     // їх так само, як раніше.
     shopId: { type: mongoose.Schema.Types.ObjectId, ref: 'Shop', default: null },
     botBlocked: { type: Boolean, default: false },
-    // Legacy capability container kept only so existing documents deserialize
-    // cleanly during rollout. BaseLinker access is now a PRIMARY `baselinker`
-    // role; this flag no longer grants any runtime access.
-    permissions: {
-      baseLinkerPicking: { type: Boolean, default: false },
-    },
     // Soft-removal state. `removed` closes ALL application access but keeps the
     // row as historical information. Missing field on legacy rows is treated as
     // active for backwards compatibility; successful self-registration can
@@ -61,27 +55,20 @@ const UserSchema = new mongoose.Schema(
     // null until their first open after this field was introduced.
     lastAppOpenedAt: { type: Date, default: null },
     // NOT a cursor. The authoritative catalogue cursor lives in cartState
-    // (lastViewedProductId / currentIndex / currentPage / navigationSessionId).
+    // (lastViewedProductId / currentIndex / navigationSessionId).
     // What survives here is one activity marker — "the seller was browsing the
-    // catalogue at this moment" — read by /users (window activity),
+    // catalogue at this moment" — read by
     // groupMemberSync and sellersLastSeen. The old duplicate cursor fields were
     // written and reset but never read back, so they are gone.
     miniAppState: {
       updatedAt: { type: Date, default: null },
     },
     cartState: {
-      orderItems:          { type: Map, of: Number, default: {} },
-      orderItemIds:        { type: [String], default: [] },
-      lastOrderPositions:  { type: Number, default: 0 },
       navigationSessionId: { type: String, default: '' },
       lastViewedProductId:    { type: String, default: '' },
-      lastViewedOrderNumber:  { type: Number, default: 0 },
       currentIndex:           { type: Number, default: 0 },
-      currentPage:            { type: Number, default: 0 },
       updatedAt:              { type: Date, default: null },
     },
-    isOnline: { type: Boolean, default: false },
-    lastActive: { type: Date, default: Date.now },
     history: { type: [UserHistoryEntrySchema], default: [] },
   },
   { timestamps: true }
@@ -100,5 +87,11 @@ UserSchema.index(
   { googleSub: 1 },
   { unique: true, partialFilterExpression: { googleSub: { $gt: '' } } },
 );
+
+// New directory query shapes. accountState stays a residual predicate so
+// legacy documents without it remain active and no state migration is needed.
+UserSchema.index({ shopId: 1, role: 1, createdAt: -1, _id: -1 });
+UserSchema.index({ role: 1, createdAt: -1, _id: -1 });
+UserSchema.index({ createdAt: -1, _id: -1 });
 
 module.exports = mongoose.model('User', UserSchema);

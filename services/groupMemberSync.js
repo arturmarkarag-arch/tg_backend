@@ -126,7 +126,7 @@ async function getMembersWithStatus(groupChatId) {
         ...(observedIds.length ? [{ telegramId: { $in: observedIds } }] : []),
       ],
     },
-    'telegramId role firstName lastName phoneNumber shopId lastAppOpenedAt miniAppState cartState createdAt botBlocked',
+    'telegramId role firstName lastName phoneNumber shopId lastAppOpenedAt miniAppState.updatedAt cartState.updatedAt createdAt botBlocked',
   ).lean();
 
   const userByTid = new Map(users.map((u) => [String(u.telegramId), u]));

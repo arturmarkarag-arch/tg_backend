@@ -999,12 +999,9 @@ async function placeOrderImpl(req, res) {
       await order.save({ session: mongoSession });
     }
 
-    // Clear the buyer's cart inside the SAME transaction. Якщо винести цю
-    // операцію назовні (як було раніше з .catch warn), отримаємо вікно, у якому
-    // замовлення вже існує, але кошик ще «повний» — і клієнт може повторно
-    // оформити те саме. Тепер або обидві дії проходять, або жодна.
+    // Keep the seller activity write inside the Order transaction. It also
+    // fences concurrent assignment changes; quantities live only in Order.
     {
-      const activePositions = (order.items || []).filter((i) => !i.cancelled && !i.skipped && !i.voided).length;
       // The request topology (buyer/shop/session) was resolved before the
       // transaction. Assignment changes use another command/lock, so a tx retry
       // MUST NOT blindly reuse that stale shop. Make the User write conditional on
@@ -1015,9 +1012,6 @@ async function placeOrderImpl(req, res) {
         shopId: buyer.shopId,
         session: mongoSession,
         set: {
-          'cartState.lastOrderPositions': activePositions,
-          'cartState.orderItems': {},
-          'cartState.orderItemIds': [],
           'cartState.updatedAt': new Date(),
         },
       });
@@ -1273,10 +1267,7 @@ router.patch('/:id/snapshot', staffOnly, async (req, res) => {
         if (currentUser) {
           const userUpdate = {
             shopId: targetShop._id,
-            'cartState.orderItems': {},
-            'cartState.orderItemIds': [],
             'cartState.updatedAt': new Date(),
-            'cartState.reservedForGroupId': null,
           };
 
           const userWrite = await User.updateOne(
@@ -1514,9 +1505,6 @@ router.post('/:id/stale/restore-to-cart', telegramAuth, adminOnly, asyncHandler(
         shopId: buyerShop._id,
         session: mongoSession,
         set: {
-          'cartState.lastOrderPositions': restoredPositions,
-          'cartState.orderItems': {},
-          'cartState.orderItemIds': [],
           'cartState.updatedAt': new Date(),
         },
       });
@@ -1780,9 +1768,6 @@ router.post('/upsert-item', telegramAuth, requireOrderingWindowOpen, asyncHandle
           shopId: user.shopId,
           session: mongoSession,
           set: {
-            'cartState.lastOrderPositions': 1,
-            'cartState.orderItems': {},
-            'cartState.orderItemIds': [],
             'cartState.updatedAt': new Date(),
           },
         });
@@ -1855,15 +1840,11 @@ router.post('/upsert-item', telegramAuth, requireOrderingWindowOpen, asyncHandle
       // A deleted order must NOT be saved — save() on a removed doc re-inserts it.
       if (closed !== 'deleted') await order.save({ session: mongoSession });
 
-      const activePositions = order.items.filter((i) => !i.cancelled && !i.skipped && !i.voided).length;
       await updateSellerStateForExpectedAssignment({
         telegramId: user.telegramId,
         shopId: user.shopId,
         session: mongoSession,
         set: {
-          'cartState.lastOrderPositions': activePositions,
-          'cartState.orderItems': {},
-          'cartState.orderItemIds': [],
           'cartState.updatedAt': new Date(),
         },
       });
@@ -1954,7 +1935,6 @@ router.post('/set-item-qty', telegramAuth, requireOrderingWindowOpen, asyncHandl
         shopId: user.shopId,
         session,
         set: {
-          'cartState.lastOrderPositions': order.items.filter((i) => !i.cancelled && !i.skipped && !i.voided).length,
           'cartState.updatedAt': new Date(),
         },
       });
@@ -2033,7 +2013,6 @@ router.post('/remove-item', telegramAuth, requireOrderingWindowOpen, asyncHandle
         shopId: user.shopId,
         session,
         set: {
-          'cartState.lastOrderPositions': order.items.filter((i) => !i.cancelled && !i.skipped && !i.voided).length,
           'cartState.updatedAt': new Date(),
         },
       });

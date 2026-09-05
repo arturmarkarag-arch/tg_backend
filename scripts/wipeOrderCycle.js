@@ -67,19 +67,29 @@ const FEEDBACK = [
 ];
 
 // Дефолти піддокументів User — мають збігатися зі схемою models/User.js.
+// `cartState` тепер містить ТІЛЬКИ приватну навігацію каталогу; кількості/позиції
+// замовлення живуть у Order. Повна заміна піддокумента одночасно прибирає
+// legacy orderItems/orderItemIds/currentPage, якщо вони ще фізично є в Mongo.
 const CART_DEFAULT = {
-  orderItems: {},
-  orderItemIds: [],
-  lastOrderPositions: 0,
   navigationSessionId: '',
   lastViewedProductId: '',
-  lastViewedOrderNumber: 0,
   currentIndex: 0,
-  currentPage: 0,
   updatedAt: null,
 };
 const MINIAPP_DEFAULT = {
   updatedAt: null,
+};
+const USER_STATE_DIRTY_QUERY = {
+  $or: [
+    { 'cartState.navigationSessionId': { $exists: true, $nin: ['', null] } },
+    { 'cartState.lastViewedProductId': { $exists: true, $nin: ['', null] } },
+    { 'cartState.currentIndex': { $gt: 0 } },
+    { 'cartState.orderItems': { $exists: true } },
+    { 'cartState.orderItemIds': { $exists: true } },
+    { 'cartState.lastOrderPositions': { $exists: true } },
+    { 'cartState.lastViewedOrderNumber': { $exists: true } },
+    { 'cartState.currentPage': { $exists: true } },
+  ],
 };
 
 const pad = (n) => String(n).padStart(7);
@@ -161,15 +171,15 @@ async function main() {
 
   // ── Користувачі: кошики / стан мініапки / історія ─────────────────────────
   const usersTotal = await count('users');
-  const usersWithCart = existing.has('users')
-    ? await db.collection('users').countDocuments({ 'cartState.orderItemIds.0': { $exists: true } })
+  const usersWithState = existing.has('users')
+    ? await db.collection('users').countDocuments(USER_STATE_DIRTY_QUERY)
     : 0;
   const usersWithHistory = existing.has('users')
     ? await db.collection('users').countDocuments({ 'history.0': { $exists: true } })
     : 0;
   console.log(`👤 КОРИСТУВАЧІ${KEEP_CARTS ? '  — пропущено (--keep-carts)' : ''}:`);
   console.log(`   ${pad(usersTotal)}  акаунтів усього (самі акаунти НЕ видаляються)`);
-  console.log(`   ${pad(usersWithCart)}  з непорожнім кошиком → кошик очищається`);
+  console.log(`   ${pad(usersWithState)}  з навігаційним/legacy cartState → стан скидається`);
   console.log(`   ${pad(usersWithHistory)}  з непорожньою історією → історія очищається`);
   if (EXECUTE && !KEEP_CARTS && existing.has('users')) {
     const r = await db.collection('users').updateMany({}, {

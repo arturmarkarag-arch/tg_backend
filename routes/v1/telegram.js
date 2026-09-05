@@ -36,49 +36,7 @@ function normalizePhoneNumber(raw) {
   return '+' + digits;
 }
 
-function normalizeMiniAppState(miniAppState) {
-  if (!miniAppState || typeof miniAppState !== 'object') return miniAppState;
-  return { ...miniAppState };
-}
-
-function normalizeCartState(cartState) {
-  const defaults = {
-    orderItems: {},
-    orderItemIds: [],
-    lastOrderPositions: 0,
-
-    navigationSessionId: '',
-
-    lastViewedProductId: '',
-    lastViewedOrderNumber: 0,
-    currentIndex: 0,
-    currentPage: 0,
-    updatedAt: null,
-    lastModifiedByTelegramId: null,
-    lastModifiedByName: null,
-    activeSellerCount: 1,
-  };
-
-  if (!cartState || typeof cartState !== 'object') return defaults;
-
-  const result = { ...defaults, ...cartState };
-
-  if (result.orderItems instanceof Map) {
-    result.orderItems = Object.fromEntries(result.orderItems);
-  } else if (
-    result.orderItems &&
-    typeof result.orderItems === 'object' &&
-    !Array.isArray(result.orderItems)
-  ) {
-    result.orderItems = Object.fromEntries(
-      Object.entries(result.orderItems)
-    );
-  } else {
-    result.orderItems = {};
-  }
-
-  return result;
-}
+const { NAVIGATION_USER_FIELDS, normalizeCartState, normalizeMiniAppState } = require('../../utils/catalogNavigationState');
 
 async function resolveOrderingSessionContext(user, userShop = null) {
   const resolvedShop = userShop || (user?.shopId ? await getShop(user.shopId) : null);
@@ -156,16 +114,6 @@ async function buildUserProfile(user) {
   } catch (error) {
   }
 
-  let activeSellerCount = 1;
-  if (userShop) {
-    const thirtyMinsAgo = new Date(Date.now() - 30 * 60 * 1000);
-    activeSellerCount = await User.countDocuments({
-      shopId: userShop._id,
-      'miniAppState.updatedAt': { $gte: thirtyMinsAgo },
-    });
-    if (activeSellerCount < 1) activeSellerCount = 1;
-  }
-
   let catalogState = normalizeCartState(user.cartState);
 
   const navigationSessionChanged =
@@ -179,9 +127,7 @@ async function buildUserProfile(user) {
       ...catalogState,
       navigationSessionId: currentOrderingSessionId,
       lastViewedProductId: '',
-      lastViewedOrderNumber: 0,
       currentIndex: 0,
-      currentPage: 0,
       updatedAt: now,
     };
 
@@ -194,44 +140,32 @@ async function buildUserProfile(user) {
         $set: {
           'cartState.navigationSessionId': currentOrderingSessionId,
           'cartState.lastViewedProductId': '',
-          'cartState.lastViewedOrderNumber': 0,
           'cartState.currentIndex': 0,
-          'cartState.currentPage': 0,
           'cartState.updatedAt': now,
         },
       },
       { new: true }
-    ).lean();
+    ).select(NAVIGATION_USER_FIELDS).lean();
 
     if (resetUser) {
       catalogState = normalizeCartState(resetUser.cartState);
     } else {
       // Another concurrent profile request may already have reset the session and
       // the seller may even have progressed. Never overwrite that fresher state.
-      const freshUser = await User.findById(user._id).lean();
+      const freshUser = await User.findById(user._id).select(NAVIGATION_USER_FIELDS).lean();
       catalogState = normalizeCartState(freshUser?.cartState);
     }
   }
 
-  const normalizedCartState = {
-    ...catalogState,
-    activeSellerCount,
-  };
-
   return {
     telegramId: user.telegramId,
     role: user.role,
-    permissions: {
-      // Legacy field retained in the payload for old clients during rollout.
-      // Runtime authorization is role-based now; never advertise this bit.
-      baseLinkerPicking: false,
-    },
     firstName: user.firstName,
     lastName: user.lastName,
     phoneNumber: user.phoneNumber || '',
     googleEmail: user.googleEmail || '',
     shopId: userShop ? String(userShop._id) : null,
-    shop: userShop ? { _id: userShop._id, name: userShop.name, city: userShop.cityId?.name || '', deliveryGroupId: userShop.deliveryGroupId, cartState: normalizedCartState } : null,
+    shop: userShop ? { _id: userShop._id, name: userShop.name, city: userShop.cityId?.name || '', deliveryGroupId: userShop.deliveryGroupId, cartState: catalogState } : null,
     // catalogState is always present regardless of role — lets admin/warehouse
     // restore their last catalog position across sessions and devices.
     orderingSessionId: currentOrderingSessionId,
@@ -290,7 +224,7 @@ router.post('/me', asyncHandler(async (req, res) => {
 
 // PATCH /api/v1/telegram/me/shop — seller оновлює свій магазин.
 // Якщо є активне замовлення — воно автоматично переноситься до нового магазину.
-// Кошик (cartState.orderItems) НЕ очищається — слідує за продавцем.
+// Канонічні замовлення обробляє команда призначення магазину.
 // Усі записи (User, Order, PickingTask) виконуються в одній транзакції MongoDB,
 // щоб збій між кроками не залишив User та Order у різних магазинах.
 router.patch('/me/shop', asyncHandler(async (req, res) => {
@@ -384,6 +318,7 @@ router.patch('/me/profile', asyncHandler(async (req, res) => {
   if (Object.keys(patch).length === 0) throw appError('me_profile_no_changes');
 
   await User.updateOne({ telegramId: user.telegramId }, { $set: patch });
+  try { getIO()?.to('staff').emit('user_directory_changed', {}); } catch (_) {}
   const fresh = await User.findOne({ telegramId: user.telegramId }).lean();
   res.json({
     firstName: fresh?.firstName || '',
@@ -429,8 +364,7 @@ router.post('/google/unlink', asyncHandler(async (req, res) => {
 //   курсор каталогу розійшовся  → last-write-wins, без 409.
 // Цей endpoint є ТІЛЬКИ navigation-state. Legacy cartState.orderItems /
 // orderItemIds тут навмисно не читаємо і не пишемо: реальні замовлення живуть
-// в Order, а старі cart-поля ще використовуються окремими recovery/legacy
-// шляхами. Курсор каталогу — last-write-wins; оптимістичний лок по
+// в Order. Курсор каталогу — last-write-wins; оптимістичний лок по
 // cartState.updatedAt звідси прибрано: він
 // віддавав 409 (cart_stale) на кожен keepalive-save при згортанні мініаппа,
 // бо той запис рухає серверний updatedAt, а відповіді на teardown ніхто не
@@ -440,7 +374,6 @@ router.post('/mini-app/state', asyncHandler(async (req, res) => {
     currentIndex,
     currentPage,
     productId,
-    orderNumber,
     orderingSessionId,
   } = req.body || {};
   const telegramId = req.telegramId;
@@ -448,11 +381,12 @@ router.post('/mini-app/state', asyncHandler(async (req, res) => {
   if (!Number.isInteger(currentIndex) || currentIndex < 0) {
     throw appError('me_state_invalid_index', { field: 'currentIndex' });
   }
-  if (!Number.isInteger(currentPage) || currentPage < 0) {
+  // Old clients may still send the derived page; it is validated but not stored.
+  if (currentPage !== undefined && (!Number.isInteger(currentPage) || currentPage < 0)) {
     throw appError('me_state_invalid_index', { field: 'currentPage' });
   }
 
-  const user = await User.findOne({ telegramId }).lean();
+  const user = await User.findOne({ telegramId }).select(NAVIGATION_USER_FIELDS).lean();
   if (!user) {
     const pendingRequest = await RegistrationRequest.findOne({
       telegramId,
@@ -496,17 +430,15 @@ router.post('/mini-app/state', asyncHandler(async (req, res) => {
             $set: {
               'cartState.navigationSessionId': currentOrderingSessionId,
               'cartState.lastViewedProductId': '',
-              'cartState.lastViewedOrderNumber': 0,
               'cartState.currentIndex': 0,
-              'cartState.currentPage': 0,
               'cartState.updatedAt': now,
             },
           },
           { new: true }
-        ).lean();
+        ).select(NAVIGATION_USER_FIELDS).lean();
 
         if (!latestUser) {
-          latestUser = await User.findOne({ telegramId }).lean();
+          latestUser = await User.findOne({ telegramId }).select(NAVIGATION_USER_FIELDS).lean();
         }
       }
 
@@ -528,11 +460,7 @@ router.post('/mini-app/state', asyncHandler(async (req, res) => {
     'miniAppState.updatedAt': now,
     // Navigation-only contract: never mutate legacy cart item snapshots here.
     'cartState.lastViewedProductId': String(productId || ''),
-    'cartState.lastViewedOrderNumber': Number.isFinite(Number(orderNumber))
-      ? Number(orderNumber)
-      : 0,
     'cartState.currentIndex': currentIndex,
-    'cartState.currentPage': currentPage,
     'cartState.updatedAt': now,
   };
 
@@ -544,7 +472,7 @@ router.post('/mini-app/state', asyncHandler(async (req, res) => {
     { telegramId },
     { $set: statePatch },
     { new: true }
-  ).lean();
+  ).select(NAVIGATION_USER_FIELDS).lean();
 
   if (!updatedUser) throw appError('user_not_found');
 
@@ -560,62 +488,27 @@ router.post('/mini-app/state', asyncHandler(async (req, res) => {
   });
 }));
 
-// POST /api/v1/telegram/mini-app/reset-state — очистити кошик магазину і навігаційний стан продавця
-// Захищено telegramAuth middleware — telegramId береться ТІЛЬКИ з req.telegramId
+// POST /api/v1/telegram/mini-app/reset-state — reset private navigation only.
+// No Order data changes and no operational dashboard events are emitted.
 router.post('/mini-app/reset-state', asyncHandler(async (req, res) => {
   const telegramId = req.telegramId;
-
+  const now = new Date();
   const user = await User.findOneAndUpdate(
     { telegramId },
-    {
-      $set: {
-        // miniAppState has no cursor to reset any more — only the activity mark.
-        // The real cursor is cleared in the cartState patch below.
-        'miniAppState.updatedAt': new Date(),
-      },
-    },
+    { $set: {
+      'miniAppState.updatedAt': now,
+      'cartState.lastViewedProductId': '',
+      'cartState.currentIndex': 0,
+      'cartState.updatedAt': now,
+    } },
     { new: true }
-  ).lean();
-
+  ).select('miniAppState.updatedAt cartState.navigationSessionId cartState.lastViewedProductId cartState.currentIndex cartState.updatedAt').lean();
   if (!user) {
-    const pendingRequest = await RegistrationRequest.findOne({ telegramId, status: 'pending' }).lean();
+    const pendingRequest = await RegistrationRequest.findOne({ telegramId, status: 'pending' }).select('_id').lean();
     if (pendingRequest) throw appError('registration_pending');
     throw appError('user_not_found');
   }
-
-  // Очищаємо кошик продавця (тепер зберігається в User)
-  let cartState = normalizeCartState(null);
-  if (user && user.shopId) {
-    const updatedUser = await User.findOneAndUpdate(
-      { telegramId },
-      {
-        $set: {
-          'cartState.orderItems': {},
-          'cartState.orderItemIds': [],
-          'cartState.lastOrderPositions': 0,
-          'cartState.lastViewedProductId': '',
-          'cartState.lastViewedOrderNumber': 0,
-          'cartState.currentIndex': 0,
-          'cartState.currentPage': 0,
-          'cartState.updatedAt': new Date(),
-        },
-      },
-      { new: true }
-    ).lean();
-    if (updatedUser) cartState = normalizeCartState(updatedUser.cartState);
-
-    // Keep picking dashboards fresh when cart is explicitly reset.
-    const io = getIO();
-    if (io) {
-      try {
-        const shopDoc = await Shop.findById(user.shopId).select('deliveryGroupId').lean();
-        const groupId = shopDoc?.deliveryGroupId;
-        if (groupId) io.to(`picking_group_${String(groupId)}`).emit('shop_status_changed', { groupId: String(groupId) });
-      } catch (_) { /* non-critical */ }
-    }
-  }
-
-  res.json({ miniAppState: normalizeMiniAppState(user.miniAppState), cartState });
+  res.json({ miniAppState: normalizeMiniAppState(user.miniAppState), cartState: normalizeCartState(user.cartState) });
 }));
 
 /**

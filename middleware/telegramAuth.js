@@ -41,7 +41,10 @@ async function telegramAuth(req, res, next) {
     jwtIat = session.iat;
   }
 
-  const user = await User.findOne({ telegramId }).lean();
+  // Authentication needs identity, role, assignment and revocation only.
+  const user = await User.findOne({ telegramId })
+    .select('_id telegramId role firstName lastName phoneNumber shopNumber shopId accountState botBlocked sessionsValidFrom createdAt updatedAt')
+    .lean();
   if (!user || isRemovedUser(user)) {
     return next(appError('not_registered'));
   }

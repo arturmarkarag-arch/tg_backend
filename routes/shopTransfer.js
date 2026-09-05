@@ -14,6 +14,7 @@ const { computeTargetShopState } = require('../utils/shopConflict');
 const { activeOrderShopFilter } = require('../utils/orderShopFilter');
 const { getIO } = require('../socket');
 const { withLock } = require('../utils/lock');
+const { TRANSFER_FIELDS, toShopTransferDto } = require('../utils/shopTransferDto');
 
 /**
  * Run `fn` while holding the per-seller shop locks for every telegramId in `ids`.
@@ -117,7 +118,7 @@ router.post('/', telegramAuth, requireTelegramRole('seller'), asyncHandler(async
   const existing = await ShopTransferRequest.findOne({
     sellerTelegramId: seller.telegramId,
     status: 'pending',
-  }).lean();
+  }).select(TRANSFER_FIELDS).lean();
   if (existing) throw appError('transfer_already_pending');
 
   const conflictSnapshot = await buildConflictSnapshot(toShopId, seller.shopId);
@@ -149,7 +150,7 @@ router.post('/', telegramAuth, requireTelegramRole('seller'), asyncHandler(async
     throw err;
   }
 
-  res.status(201).json(request);
+  res.status(201).json(toShopTransferDto(request));
 }));
 
 // ─── DELETE /api/shop-transfer/my  (seller cancels own pending request) ───────
@@ -161,7 +162,7 @@ router.delete('/my', telegramAuth, requireTelegramRole('seller'), asyncHandler(a
     { new: true }
   );
   if (!updated) throw appError('transfer_not_found');
-  res.json(updated);
+  res.json(toShopTransferDto(updated));
 }));
 
 // ─── GET /api/shop-transfer/my  (seller checks own request) ──────────────────
@@ -170,8 +171,8 @@ router.get('/my', telegramAuth, requireTelegramRole('seller'), asyncHandler(asyn
   const request = await ShopTransferRequest.findOne({
     sellerTelegramId: seller.telegramId,
     status: 'pending',
-  }).lean();
-  res.json(request || null);
+  }).select(TRANSFER_FIELDS).lean();
+  res.json(toShopTransferDto(request));
 }));
 
 // ─── GET /api/shop-transfer  (admin: list all pending) ───────────────────────
@@ -182,9 +183,10 @@ router.get('/', telegramAuth, requireTelegramRole('admin'), asyncHandler(async (
     : { status: 'pending' };
 
   const requests = await ShopTransferRequest.find(query)
+    .select(TRANSFER_FIELDS)
     .sort({ createdAt: -1 })
     .lean();
-  res.json(requests);
+  res.json(requests.map(toShopTransferDto));
 }));
 
 // ─── POST /api/shop-transfer/:id/approve  (admin approves) ───────────────────
@@ -291,7 +293,6 @@ router.post('/:id/approve', telegramAuth, requireTelegramRole('admin'), asyncHan
       request.resolvedAt = new Date();
       request.resolvedBy = admin.telegramId;
       request.resolvedByName = [admin.firstName, admin.lastName].filter(Boolean).join(' ');
-      request.displacedSellerTelegramId = '';
       await request.save({ session });
 
       resolvedRequest = request.toObject();
@@ -316,7 +317,7 @@ router.post('/:id/approve', telegramAuth, requireTelegramRole('admin'), asyncHan
     }
   } catch (_) { /* best-effort */ }
 
-  res.json(resolvedRequest);
+  res.json(toShopTransferDto(resolvedRequest));
 }));
 
 // ─── POST /api/shop-transfer/:id/reject  (admin rejects) ─────────────────────
@@ -335,7 +336,7 @@ router.post('/:id/reject', telegramAuth, requireTelegramRole('admin'), asyncHand
   request.rejectReason = reason ? String(reason).trim() : '';
   await request.save();
 
-  res.json(request);
+  res.json(toShopTransferDto(request));
 }));
 
 module.exports = router;

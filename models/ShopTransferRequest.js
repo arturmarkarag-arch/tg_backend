@@ -8,13 +8,8 @@ const ConflictSnapshotSchema = new mongoose.Schema({
   targetShopSellerName: { type: String, default: '' },
   targetShopSellerTelegramId: { type: String, default: '' },
   // First existing target seller's state (legacy snapshot fields; informational only)
-  targetSellerCartHasItems: { type: Boolean, default: false },
-  targetSellerCartItemCount: { type: Number, default: 0 },
   targetSellerHasActiveOrder: { type: Boolean, default: false },
   targetSellerActiveOrderId: { type: mongoose.Schema.Types.ObjectId, ref: 'Order', default: null },
-  // Requesting seller's cart
-  cartHasItems: { type: Boolean, default: false },
-  cartItemCount: { type: Number, default: 0 },
   // Requesting seller's current shop active order. It may follow the seller only
   // while ordering is still open; after freeze it remains owned by the old shop.
   sourceShopHasActiveOrder: { type: Boolean, default: false },
@@ -60,14 +55,6 @@ const ShopTransferRequestSchema = new mongoose.Schema({
   resolvedBy: { type: String, default: null }, // admin telegramId
   resolvedByName: { type: String, default: '' },
   rejectReason: { type: String, default: '' },
-
-  // Admin decision on requesting seller's cart: 'clear' | 'keep' | null
-  cartDecision: { type: String, enum: ['clear', 'keep', null], default: null },
-
-  // Deprecated legacy displacement fields. Kept only so historical request docs
-  // remain readable; current approval never removes an existing target seller.
-  displacedSellerDecision: { type: String, enum: ['clear_cart', 'keep_cart', null], default: null },
-  displacedSellerTelegramId: { type: String, default: '' },
 
   // Optional profile data update requested by the seller
   profileUpdate: {
