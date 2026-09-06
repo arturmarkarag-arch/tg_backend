@@ -1,79 +1,76 @@
 'use strict';
 
-const crypto = require('crypto');
-const AppSetting = require('../models/AppSetting');
-const { callBaseLinker } = require('./baseLinkerClient');
 const { appError } = require('../utils/errors');
+const {
+  listBaseLinkerAccounts,
+  getBaseLinkerAccount,
+  saveAccountQueue,
+} = require('./baseLinkerAccounts');
+const { makeBaseLinkerAccountCaller } = require('./baseLinkerClient');
 
-const QUEUE_SETTINGS_KEY = 'baselinker.queueSettings.v1';
-const HISTORY_LOOKBACK_DAYS = 14;
-const SENT_LOOKBACK_DAYS = HISTORY_LOOKBACK_DAYS;
-const CANCELLED_LOOKBACK_DAYS = HISTORY_LOOKBACK_DAYS;
+const HISTORY_RETENTION_DAYS = 14;
 
 function positiveStatusId(value) {
   const id = Number(value);
   return Number.isSafeInteger(id) && id > 0 ? id : null;
 }
 
-function queueScopeFromSettings(value = {}, now = Date.now()) {
-  // Backward compatibility: the former single statusId becomes the intake
-  // status after deployment. Sent/cancelled must still be chosen explicitly.
-  const intakeStatusId = positiveStatusId(value.intakeStatusId ?? value.statusId);
+function queueScopeFromSettings(value = {}, _now = Date.now(), account = {}) {
+  const intakeStatusId = positiveStatusId(value.intakeStatusId);
   const sentStatusId = positiveStatusId(value.sentStatusId);
   const cancelledStatusId = positiveStatusId(value.cancelledStatusId);
-  const distinct = new Set([intakeStatusId, sentStatusId, cancelledStatusId].filter(Boolean)).size === 3;
-  const configured = Boolean(intakeStatusId && sentStatusId && cancelledStatusId && distinct);
-  const sentDateInStatusFrom = Math.floor(now / 1000) - SENT_LOOKBACK_DAYS * 86400;
-  const cancelledDateInStatusFrom = Math.floor(now / 1000) - CANCELLED_LOOKBACK_DAYS * 86400;
+  const ids = [intakeStatusId, sentStatusId, cancelledStatusId];
+  const distinct = new Set(ids.filter(Boolean)).size === 3;
+  const statusById = new Map((Array.isArray(account?.metadataSnapshot?.statuses) ? account.metadataSnapshot.statuses : [])
+    .map((status) => [positiveStatusId(status?.id), status])
+    .filter(([id]) => id));
+  const resolved = ids.map((id) => statusById.get(id));
+  const configured = Boolean(ids.every(Boolean) && distinct && resolved.every(Boolean));
+  const accountId = String(account?.accountId || '').trim();
+  if (!accountId) throw appError('baselinker_account_id_required');
 
   return {
+    baseLinkerAccountId: accountId,
+    accountName: String(account?.name || ''),
+    accountEnabled: account?.enabled === true,
     configured,
     intakeStatusId,
-    intakeStatusName: String(value.intakeStatusName ?? value.statusName ?? ''),
+    intakeStatusName: String(resolved[0]?.name || ''),
     sentStatusId,
-    sentStatusName: String(value.sentStatusName || ''),
+    sentStatusName: String(resolved[1]?.name || ''),
     cancelledStatusId,
-    cancelledStatusName: String(value.cancelledStatusName || ''),
-    historyLookbackDays: HISTORY_LOOKBACK_DAYS,
-    sentLookbackDays: SENT_LOOKBACK_DAYS,
-    cancelledLookbackDays: CANCELLED_LOOKBACK_DAYS,
-    sentDateInStatusFrom,
-    cancelledDateInStatusFrom,
+    cancelledStatusName: String(resolved[2]?.name || ''),
+    historyRetentionDays: HISTORY_RETENTION_DAYS,
     scopeKey: configured
-      ? `${intakeStatusId}:all|${sentStatusId}:${SENT_LOOKBACK_DAYS}|${cancelledStatusId}:${CANCELLED_LOOKBACK_DAYS}|${value.revision || 'settings-v3'}`
+      ? `${accountId}|${intakeStatusId}|${sentStatusId}|${cancelledStatusId}|${value.revision || ''}`
       : null,
   };
 }
 
-async function getQueueScope() {
-  const row = await AppSetting.findOne({ key: QUEUE_SETTINGS_KEY }).lean();
-  return queueScopeFromSettings(row?.value || {}, Date.now());
+async function getQueueScope(accountId) {
+  const id = String(accountId || '').trim();
+  if (!id) throw appError('baselinker_account_id_required');
+  const account = await getBaseLinkerAccount(id, { lean: true });
+  return queueScopeFromSettings(account.queue || {}, Date.now(), account);
+}
+
+async function getAllQueueScopes({ enabledOnly = true } = {}) {
+  const accounts = await listBaseLinkerAccounts({ includeDisabled: !enabledOnly });
+  return accounts.map((account) => queueScopeFromSettings(account.queue || {}, Date.now(), account));
 }
 
 function orderInIntakeScope(order, scope) {
-  return scope.configured
-    && Number(order?.order_status_id) === scope.intakeStatusId;
+  return scope?.configured && Number(order?.order_status_id) === scope.intakeStatusId;
 }
-
 function orderInSentScope(order, scope) {
-  return scope.configured
-    && Number(order?.order_status_id) === scope.sentStatusId
-    && Number(order?.date_in_status) >= scope.sentDateInStatusFrom;
+  return scope?.configured && Number(order?.order_status_id) === scope.sentStatusId;
 }
-
 function orderInCancelledScope(order, scope) {
-  return scope.configured
-    && Number(order?.order_status_id) === scope.cancelledStatusId
-    && Number(order?.date_in_status) >= scope.cancelledDateInStatusFrom;
+  return scope?.configured && Number(order?.order_status_id) === scope.cancelledStatusId;
 }
-
 function orderInQueueScope(order, scope) {
-  return orderInIntakeScope(order, scope)
-    || orderInSentScope(order, scope)
-    || orderInCancelledScope(order, scope);
+  return orderInIntakeScope(order, scope) || orderInSentScope(order, scope) || orderInCancelledScope(order, scope);
 }
-
-
 function classifyUpstreamOrder(order, scope) {
   const statusId = Number(order?.order_status_id);
   if (!scope?.configured || !Number.isSafeInteger(statusId)) return 'other';
@@ -83,49 +80,37 @@ function classifyUpstreamOrder(order, scope) {
   return 'other';
 }
 
-async function getQueueStatusOptions() {
-  const payload = await callBaseLinker('getOrderStatusList', {});
+async function getQueueStatusOptions(accountId) {
+  const id = String(accountId || '').trim();
+  if (!id) throw appError('baselinker_account_id_required');
+  const payload = await makeBaseLinkerAccountCaller(id)('getOrderStatusList', {});
   if (!Array.isArray(payload.statuses)) throw appError('baselinker_invalid_response', { upstreamMethod: 'getOrderStatusList' });
-  return payload.statuses.map((status) => ({ id: Number(status.id), name: String(status.name || '') }))
+  return payload.statuses.map((status) => ({ id: Number(status.id), name: String(status.name || ''), color: String(status.color || '') }))
     .filter((status) => Number.isSafeInteger(status.id) && status.id > 0);
 }
 
-async function saveQueueSettings({ intakeStatusId, sentStatusId, cancelledStatusId } = {}) {
-  const ids = [positiveStatusId(intakeStatusId), positiveStatusId(sentStatusId), positiveStatusId(cancelledStatusId)];
-  if (ids.some((id) => !id) || new Set(ids).size !== 3) throw appError('baselinker_queue_settings_invalid');
-
-  const options = await getQueueStatusOptions();
-  const byId = new Map(options.map((option) => [option.id, option]));
-  const [intake, sent, cancelled] = ids.map((id) => byId.get(id));
-  if (!intake || !sent || !cancelled) throw appError('baselinker_queue_status_unknown');
-
-  const value = {
-    intakeStatusId: intake.id,
-    intakeStatusName: intake.name,
-    sentStatusId: sent.id,
-    sentStatusName: sent.name,
-    cancelledStatusId: cancelled.id,
-    cancelledStatusName: cancelled.name,
-    historyLookbackDays: HISTORY_LOOKBACK_DAYS,
-    sentLookbackDays: SENT_LOOKBACK_DAYS,
-    cancelledLookbackDays: CANCELLED_LOOKBACK_DAYS,
-    revision: crypto.randomUUID(),
-  };
-  await AppSetting.findOneAndUpdate(
-    { key: QUEUE_SETTINGS_KEY },
-    { $set: { value } },
-    { upsert: true, new: true, setDefaultsOnInsert: true },
-  );
-  return queueScopeFromSettings(value, Date.now());
+async function saveQueueSettings(accountId, { intakeStatusId, sentStatusId, cancelledStatusId } = {}) {
+  const id = String(accountId || '').trim();
+  if (!id) throw appError('baselinker_account_id_required');
+  // Queue changes are rare admin operations. Refresh all API-derived metadata so
+  // the selected status IDs and future source/inventory labels share one snapshot.
+  const { refreshBaseLinkerAccountMetadata } = require('./baseLinkerAccountValidation');
+  const validation = await refreshBaseLinkerAccountMetadata(id);
+  await saveAccountQueue(id, {
+    intakeStatusId,
+    sentStatusId,
+    cancelledStatusId,
+    statuses: validation.metadata.statuses,
+  });
+  const updated = await getBaseLinkerAccount(id, { lean: true });
+  return queueScopeFromSettings(updated.queue || {}, Date.now(), updated);
 }
 
 module.exports = {
-  QUEUE_SETTINGS_KEY,
-  HISTORY_LOOKBACK_DAYS,
-  SENT_LOOKBACK_DAYS,
-  CANCELLED_LOOKBACK_DAYS,
+  HISTORY_RETENTION_DAYS,
   queueScopeFromSettings,
   getQueueScope,
+  getAllQueueScopes,
   orderInIntakeScope,
   orderInSentScope,
   orderInCancelledScope,

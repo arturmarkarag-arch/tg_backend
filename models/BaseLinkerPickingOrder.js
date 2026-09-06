@@ -54,12 +54,20 @@ const PickingItemSchema = new mongoose.Schema({
 }, { _id: false });
 
 const BaseLinkerPickingOrderSchema = new mongoose.Schema({
+  baseLinkerAccountId: { type: String, required: true, trim: true, maxlength: 64, index: true },
+  // Human labels are snapshots only; accountId/source IDs remain identity.
+  baseLinkerAccountNameSnapshot: { type: String, default: '', trim: true, maxlength: 160 },
   orderId: { type: String, required: true },
   orderFingerprint: { type: String, default: '' },
   // Minimal source metadata needed to render our own local workflow after the
   // order leaves Intake. This is not a BaseLinker order mirror.
   sourceShopOrderId: { type: String, default: '' },
   sourceExternalOrderId: { type: String, default: '' },
+  sourceType: { type: String, default: '', trim: true, lowercase: true, maxlength: 80 },
+  sourceId: { type: String, default: '', trim: true, maxlength: 120 },
+  sourceNameSnapshot: { type: String, default: '', trim: true, maxlength: 240 },
+  sourceNameLastKnown: { type: String, default: '', trim: true, maxlength: 240 },
+  sourceResolvedAt: { type: Date, default: null },
   sourceDateAdd: { type: Number, default: 0 },
   sourceDateConfirmed: { type: Number, default: 0 },
   sourceDeliveryPackageModule: { type: String, default: '' },
@@ -75,7 +83,8 @@ const BaseLinkerPickingOrderSchema = new mongoose.Schema({
   workflowStage: {
     type: String,
     enum: PERSISTED_WORKFLOW_STAGES,
-    default: undefined,
+    required: true,
+    default: 'processing',
   },
   revision: { type: Number, default: 1 },
 
@@ -88,7 +97,7 @@ const BaseLinkerPickingOrderSchema = new mongoose.Schema({
 
   packingMode: {
     type: String,
-    enum: ['', 'full', 'partial', 'with_issue'],
+    enum: ['', 'full'],
     default: '',
   },
   packedSummary: {
@@ -126,12 +135,12 @@ const BaseLinkerPickingOrderSchema = new mongoose.Schema({
   history: { type: [PickingHistoryEntrySchema], default: [] },
 }, { timestamps: true, optimisticConcurrency: true });
 
-BaseLinkerPickingOrderSchema.index({ orderId: 1 }, { unique: true });
+BaseLinkerPickingOrderSchema.index({ baseLinkerAccountId: 1, orderId: 1 }, { unique: true });
 BaseLinkerPickingOrderSchema.index({ status: 1, updatedAt: -1 });
 BaseLinkerPickingOrderSchema.index({ workflowStage: 1, updatedAt: -1 });
 BaseLinkerPickingOrderSchema.index({ workflowStage: 1, packedBy: 1, packedAt: -1 });
 BaseLinkerPickingOrderSchema.index({ ownerTelegramId: 1, status: 1 });
-// The unique(orderId) index above is the DB backstop for claim races.
+// The composite unique account+order index above is the DB backstop for claim races.
 BaseLinkerPickingOrderSchema.index({ upstreamReviewRequired: 1, updatedAt: -1 });
 BaseLinkerPickingOrderSchema.index({ upstreamDisposition: 1, lastUpstreamChangeAt: 1 });
 BaseLinkerPickingOrderSchema.index({ status: 1, sentAt: 1 });

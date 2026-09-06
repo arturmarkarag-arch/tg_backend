@@ -69,7 +69,9 @@
     "test:receipt-supplement:lifecycle": "node scripts/checkReceiptSupplementLifecycle20260821.js",
     "test:telegram-new-products:architecture": "node scripts/checkTelegramNewProductsArchitecture20260901.js",
     "cleanup:baselinker:test": "node -r ../dev-use-test-db.js scripts/cleanupBaseLinkerDb.TEST.js",
-    "cleanup:baselinker:prod": "node scripts/cleanupBaseLinkerDb.PROD.js"
+    "cleanup:baselinker:prod": "node scripts/cleanupBaseLinkerDb.PROD.js",
+    "test:baselinker:architecture": "node scripts/checkBaseLinkerMultiAccountContract20260906.js",
+    "test:baselinker:collisions": "node scripts/checkBaseLinkerCollisions20260906.js"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1030.0",

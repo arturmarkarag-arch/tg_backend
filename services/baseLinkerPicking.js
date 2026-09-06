@@ -1,6 +1,9 @@
 const crypto = require('crypto');
 const BaseLinkerPickingOrder = require('../models/BaseLinkerPickingOrder');
 const { fetchBaseLinkerOrders } = require('./baseLinkerOrders');
+const { makeBaseLinkerAccountCaller } = require('./baseLinkerClient');
+const { getBaseLinkerAccount } = require('./baseLinkerAccounts');
+const { orderKey, resolveSourceName } = require('./baseLinkerIdentity');
 const { withLock } = require('../utils/lock');
 const { appError } = require('../utils/errors');
 const { compactOrders } = require('./baseLinkerPublicDto');
@@ -35,6 +38,12 @@ function actorOf(user) {
     byName: [user?.firstName, user?.lastName].filter(Boolean).join(' ').trim() || String(user?.telegramId || ''),
     byRole: String(user?.role || ''),
   };
+}
+
+async function requireAccountEnabled(accountId) {
+  const id = String(accountId || '').trim();
+  if (!id) throw appError('baselinker_account_id_required');
+  return getBaseLinkerAccount(id, { requireEnabled: true, lean: true });
 }
 
 function sha(value) {
@@ -136,27 +145,6 @@ async function savePickingDoc(doc) {
   }
 }
 
-function hasExplicitDeferredAction(doc) {
-  // Deferred is an explicit order-level shelf. History lets a mixed/buggy
-  // deployment distinguish a real worker "Відкласти" from the old bug where
-  // saving one problem line auto-moved the card to Deferred. Admin reopen resets
-  // that explicit decision; a later release sets it again.
-  let explicitlyDeferred = false;
-  for (const entry of Array.isArray(doc?.history) ? doc.history : []) {
-    const action = String(entry?.action || '');
-    if (action === 'order_released') explicitlyDeferred = true;
-    if (action === 'order_reopened_by_admin') explicitlyDeferred = false;
-  }
-  return explicitlyDeferred;
-}
-
-function shouldRepairImplicitAutoDeferred(doc) {
-  if (!doc || !doc.ownerTelegramId) return false;
-  if (workflowStageFor(doc) !== WORKFLOW_STAGE.DEFERRED) return false;
-  if (![ORDER_STATUS.PROBLEM, ORDER_STATUS.READY_WITH_ISSUE].includes(String(doc.status || ''))) return false;
-  return !hasExplicitDeferredAction(doc);
-}
-
 function publicState(doc) {
   if (!doc) return null;
   const plain = typeof doc.toObject === 'function' ? doc.toObject() : { ...doc };
@@ -177,7 +165,13 @@ function publicState(doc) {
   // Audit/history/fingerprints/actor metadata stay server-side and can be
   // exposed later through a dedicated diagnostic endpoint if ever needed.
   return {
+    baseLinkerAccountId: String(plain.baseLinkerAccountId || ''),
+    baseLinkerAccountName: String(plain.baseLinkerAccountNameSnapshot || ''),
+    orderKey: orderKey(plain.baseLinkerAccountId, plain.orderId),
     orderId: String(plain.orderId || ''),
+    sourceType: String(plain.sourceType || ''),
+    sourceId: String(plain.sourceId || ''),
+    sourceName: String(plain.sourceNameLastKnown || plain.sourceNameSnapshot || ''),
     status: String(plain.status || 'new'),
     workflowStage: workflowStageFor(plain),
     revision: Number(plain.revision || 0),
@@ -215,8 +209,11 @@ function emitPickingUpdate(doc, clientMutationId = '') {
     const io = getIO();
     if (!io) return;
     const state = publicState(doc);
+    const baseLinkerAccountId = String(doc.baseLinkerAccountId || '');
     const orderIds = [String(doc.orderId)];
     io.to('baselinker_staff').emit('baselinker_picking_updated', {
+      baseLinkerAccountId,
+      orderKey: orderKey(baseLinkerAccountId, doc.orderId),
       orderId: String(doc.orderId),
       orderIds,
       state,
@@ -225,7 +222,7 @@ function emitPickingUpdate(doc, clientMutationId = '') {
   } catch (_) { /* best-effort realtime only */ }
 }
 
-async function fetchExactOrder(orderId) {
+async function fetchExactOrder(baseLinkerAccountId, orderId) {
   const id = Number(orderId);
   if (!Number.isSafeInteger(id) || id <= 0) throw appError('baselinker_order_id_invalid');
 
@@ -235,7 +232,7 @@ async function fetchExactOrder(orderId) {
     orderId: id,
     includeUnconfirmed: true,
     maxPages: 1,
-  });
+  }, makeBaseLinkerAccountCaller(baseLinkerAccountId));
   const order = (result.orders || []).find((candidate) => String(candidate?.order_id) === String(id));
   if (!order) throw appError('baselinker_order_not_returned', { orderId: id, upstreamMethod: 'getOrders' });
   if (!Array.isArray(order.products) || order.products.length === 0) throw appError('baselinker_order_has_no_products', { orderId: id });
@@ -339,6 +336,8 @@ function syncDocWithOrder(doc, order, actor) {
   const nextSourceMeta = {
     sourceShopOrderId: text(order?.shop_order_id),
     sourceExternalOrderId: text(order?.external_order_id),
+    sourceType: text(order?.order_source).toLowerCase(),
+    sourceId: text(order?.order_source_id),
     sourceDateAdd: Number(order?.date_add || 0) || 0,
     sourceDateConfirmed: Number(order?.date_confirmed || 0) || 0,
     sourceDeliveryPackageModule: text(order?.delivery_package_module),
@@ -346,6 +345,12 @@ function syncDocWithOrder(doc, order, actor) {
   };
   const metadataChanged = Object.entries(nextSourceMeta).some(([key, value]) => String(doc?.[key] ?? '') !== String(value ?? ''));
   Object.assign(doc, nextSourceMeta);
+  const resolvedSourceName = text(order?.sourceName);
+  if (resolvedSourceName) {
+    if (!doc.sourceNameSnapshot) doc.sourceNameSnapshot = resolvedSourceName;
+    doc.sourceNameLastKnown = resolvedSourceName;
+    doc.sourceResolvedAt = new Date();
+  }
   const wasInitialized = Boolean(doc.orderFingerprint);
   const sourceItems = buildSourceItems(order);
   const nextFingerprint = orderFingerprint(sourceItems);
@@ -498,10 +503,11 @@ async function verifyTrackedPickingOrderUpstream(doc, actor, {
     return { order: null, disposition: String(doc.upstreamDisposition || ''), changed: false };
   }
 
-  const scope = await getQueueScope();
+  const accountId = String(doc.baseLinkerAccountId || '');
+  const scope = await getQueueScope(accountId);
   if (!scope.configured) throw appError('baselinker_queue_not_configured');
   const id = String(doc.orderId || '');
-  const order = exactOrder === undefined ? await fetchOptionalExactOrder(id) : exactOrder;
+  const order = exactOrder === undefined ? await fetchOptionalExactOrder(accountId, id) : exactOrder;
   const now = new Date();
 
   if (!order) {
@@ -616,18 +622,28 @@ async function verifyTrackedPickingOrderUpstream(doc, actor, {
   return { order, disposition, changed: stateChanged, syncChanged: sync.changed };
 }
 
-async function getPickingStates(orderIds = []) {
-  const ids = [...new Set((orderIds || []).map((id) => String(id || '').trim()).filter(Boolean))];
-  if (!ids.length) return {};
-  const docs = await BaseLinkerPickingOrder.find({
-    orderId: { $in: ids },
-  }).lean();
-  const requested = new Set(ids);
+async function getPickingStates(orderRefs = [], defaultAccountId = '') {
+  const refs = [];
+  for (const entry of orderRefs || []) {
+    const accountId = String(entry && typeof entry === 'object' ? entry.baseLinkerAccountId : defaultAccountId || '').trim();
+    const id = String(entry && typeof entry === 'object' ? entry.orderId : entry || '').trim();
+    if (accountId && id) refs.push({ accountId, id, key: orderKey(accountId, id) });
+  }
+  if (!refs.length) return {};
+  const byAccount = new Map();
+  for (const ref of refs) {
+    if (!byAccount.has(ref.accountId)) byAccount.set(ref.accountId, []);
+    byAccount.get(ref.accountId).push(ref.id);
+  }
+  const docs = [];
+  for (const [accountId, ids] of byAccount) {
+    docs.push(...await BaseLinkerPickingOrder.find({ baseLinkerAccountId: accountId, orderId: { $in: [...new Set(ids)] } }).lean());
+  }
+  const requested = new Set(refs.map((ref) => ref.key));
   const result = {};
   for (const doc of docs) {
-    const state = publicState(doc);
-    const id = String(doc.orderId);
-    if (requested.has(id)) result[id] = state;
+    const key = orderKey(doc.baseLinkerAccountId, doc.orderId);
+    if (requested.has(key)) result[key] = publicState(doc);
   }
   return result;
 }
@@ -650,50 +666,7 @@ let claimIndexReadyPromise = null;
 
 async function ensureClaimIndexReady() {
   if (!claimIndexReadyPromise) {
-    claimIndexReadyPromise = (async () => {
-      // Rows produced by the retired local-only Sent contract never proved that
-      // BaseLinker changed status. Invalidate them once and require exact
-      // upstream reconciliation before they can be trusted again.
-      const migratedAt = new Date();
-      await BaseLinkerPickingOrder.collection.updateMany({
-        status: 'sent',
-        history: { $elemMatch: { action: 'order_sent_local' } },
-        'history.action': { $ne: 'legacy_local_sent_invalidated' },
-      }, {
-        $set: {
-          status: 'packed',
-          workflowStage: WORKFLOW_STAGE.PACKED,
-          upstreamDisposition: 'unverified',
-          lastUpstreamStatusId: null,
-          upstreamReviewRequired: true,
-          upstreamReviewedAt: null,
-          lastUpstreamChangeAt: migratedAt,
-          sentAt: null,
-          sentBy: '',
-          sentByName: '',
-          lastActivityAt: migratedAt,
-        },
-        $inc: { revision: 1 },
-        $push: {
-          history: {
-            at: migratedAt,
-            action: 'legacy_local_sent_invalidated',
-            by: 'system',
-            byName: 'BaseLinker integrity migration',
-            byRole: 'system',
-            meta: { reason: 'legacy_sent_was_not_upstream_verified' },
-          },
-        },
-      });
-
-      // Remove every persisted field from the retired logical/multi-order
-      // abstraction. orderId is the only local order identity.
-      await BaseLinkerPickingOrder.collection.updateMany(
-        {},
-        { $unset: { claimKey: '', groupKey: '', externalOrderId: '', memberOrderIds: '' } },
-      );
-      return BaseLinkerPickingOrder.syncIndexes();
-    })().catch((error) => {
+    claimIndexReadyPromise = BaseLinkerPickingOrder.createIndexes().catch((error) => {
       claimIndexReadyPromise = null;
       throw error;
     });
@@ -724,8 +697,10 @@ function claimConflictFromDoc(doc) {
   });
 }
 
-function buildNewClaimedDoc({ requestedId, order, scope, actor, now }) {
+function buildNewClaimedDoc({ baseLinkerAccountId, account, requestedId, order, scope, actor, now }) {
   const doc = new BaseLinkerPickingOrder({
+    baseLinkerAccountId,
+    baseLinkerAccountNameSnapshot: String(account?.name || ''),
     orderId: requestedId,
     status: 'in_progress',
     workflowStage: WORKFLOW_STAGE.PROCESSING,
@@ -735,6 +710,12 @@ function buildNewClaimedDoc({ requestedId, order, scope, actor, now }) {
     lastUpstreamVerifiedAt: now,
   });
   const sync = syncDocWithOrder(doc, order, actor);
+  const currentSourceName = resolveSourceName(account?.metadataSnapshot?.sources, order?.order_source, order?.order_source_id);
+  if (currentSourceName) {
+    doc.sourceNameSnapshot = currentSourceName;
+    doc.sourceNameLastKnown = currentSourceName;
+    doc.sourceResolvedAt = now;
+  }
   doc.ownerTelegramId = actor.by;
   doc.ownerName = actor.byName;
   doc.claimedAt = now;
@@ -781,6 +762,12 @@ function buildExistingClaimUpdate({ doc, order, scope, actor, now, adminForce })
   return {
     sync,
     set: {
+      baseLinkerAccountNameSnapshot: plain.baseLinkerAccountNameSnapshot || '',
+      sourceType: plain.sourceType || '',
+      sourceId: plain.sourceId || '',
+      sourceNameSnapshot: plain.sourceNameSnapshot || '',
+      sourceNameLastKnown: plain.sourceNameLastKnown || '',
+      sourceResolvedAt: plain.sourceResolvedAt || null,
       orderFingerprint: plain.orderFingerprint || '',
       sourceShopOrderId: plain.sourceShopOrderId || '',
       sourceExternalOrderId: plain.sourceExternalOrderId || '',
@@ -807,20 +794,30 @@ function buildExistingClaimUpdate({ doc, order, scope, actor, now, adminForce })
   };
 }
 
-async function claimPickingOrder({ orderId, user, force = false, clientMutationId = '' }) {
+async function claimPickingOrder({ baseLinkerAccountId, orderId, user, force = false, clientMutationId = '' }) {
   const actor = actorOf(user);
+  const accountId = String(baseLinkerAccountId || '').trim();
+  if (!accountId) throw appError('baselinker_account_id_required');
   const requestedId = String(orderId || '').trim();
-  const order = await fetchExactOrder(requestedId);
-  const scope = await getQueueScope();
+  const [order, scope, account] = await Promise.all([
+    fetchExactOrder(accountId, requestedId),
+    getQueueScope(accountId),
+    getBaseLinkerAccount(accountId, { requireEnabled: true, lean: true }),
+  ]);
   if (!scope.configured) throw appError('baselinker_queue_not_configured');
+  order.baseLinkerAccountId = accountId;
+  order.baseLinkerAccountName = String(account?.name || '');
+  order.baseLinkerAccountColor = String(account?.color || '');
+  order.sourceName = resolveSourceName(account?.metadataSnapshot?.sources, order?.order_source, order?.order_source_id);
+  order.orderKey = orderKey(accountId, order?.order_id);
   assertOrderActionable(order, scope);
   await ensureClaimIndexReady();
 
-  // Locks reduce contention; unique orderId index + revision CAS is the durable
-  // correctness boundary across processes.
+  // Locks reduce contention; the composite accountId + orderId unique index plus
+  // revision CAS is the durable correctness boundary across processes.
   return withLock(`baselinker-worker:${actor.by}`, () => (
-    withLock(`baselinker-order:${requestedId}`, async () => {
-      let candidate = await BaseLinkerPickingOrder.findOne({ orderId: requestedId });
+    withLock(`baselinker-order:${accountId}:${requestedId}`, async () => {
+      let candidate = await BaseLinkerPickingOrder.findOne({ baseLinkerAccountId: accountId, orderId: requestedId });
 
       const activeOther = await BaseLinkerPickingOrder.findOne({
         ownerTelegramId: actor.by,
@@ -833,7 +830,7 @@ async function claimPickingOrder({ orderId, user, force = false, clientMutationI
       const adminForce = user?.role === 'admin' && force === true;
 
       if (!candidate) {
-        const created = buildNewClaimedDoc({ requestedId, order, scope, actor, now });
+        const created = buildNewClaimedDoc({ baseLinkerAccountId: accountId, account, requestedId, order, scope, actor, now });
         try {
           await savePickingDoc(created.doc);
           emitPickingUpdate(created.doc, clientMutationId);
@@ -844,7 +841,7 @@ async function claimPickingOrder({ orderId, user, force = false, clientMutationI
           };
         } catch (error) {
           if (!isDuplicateKeyError(error)) throw error;
-          candidate = await BaseLinkerPickingOrder.findOne({ orderId: requestedId });
+          candidate = await BaseLinkerPickingOrder.findOne({ baseLinkerAccountId: accountId, orderId: requestedId });
           if (!candidate) throw error;
         }
       }
@@ -865,6 +862,9 @@ async function claimPickingOrder({ orderId, user, force = false, clientMutationI
         if (TERMINAL_STATUSES.includes(candidate.status)) throw appError('baselinker_picking_terminal');
         assertNotUpstreamBlocked(candidate);
 
+        candidate.baseLinkerAccountNameSnapshot = String(account?.name || candidate.baseLinkerAccountNameSnapshot || '');
+        const currentSourceName = resolveSourceName(account?.metadataSnapshot?.sources, order?.order_source, order?.order_source_id);
+        if (currentSourceName) { candidate.sourceNameLastKnown = currentSourceName; candidate.sourceNameSnapshot = candidate.sourceNameSnapshot || currentSourceName; candidate.sourceResolvedAt = new Date(); }
         const update = buildExistingClaimUpdate({
           doc: candidate,
           order,
@@ -894,7 +894,7 @@ async function claimPickingOrder({ orderId, user, force = false, clientMutationI
           };
         }
 
-        const latest = await BaseLinkerPickingOrder.findOne({ orderId: requestedId });
+        const latest = await BaseLinkerPickingOrder.findOne({ baseLinkerAccountId: accountId, orderId: requestedId });
         if (!latest) throw appError('baselinker_picking_stale');
         const latestOwner = String(latest.ownerTelegramId || '');
         const latestActivityMs = latest.lastActivityAt ? new Date(latest.lastActivityAt).getTime() : 0;
@@ -907,16 +907,20 @@ async function claimPickingOrder({ orderId, user, force = false, clientMutationI
         candidate = latest;
       }
 
-      throw claimConflictFromDoc(await BaseLinkerPickingOrder.findOne({ orderId: requestedId }).lean());
+      throw claimConflictFromDoc(await BaseLinkerPickingOrder.findOne({ baseLinkerAccountId: accountId, orderId: requestedId }).lean());
     }, { ttlMs: 30_000, waitMs: 10_000 })
   ), { ttlMs: 30_000, waitMs: 10_000 });
 }
 
-async function heartbeatPickingOrder({ orderId, user }) {
+async function heartbeatPickingOrder({ baseLinkerAccountId, orderId, user }) {
   const actor = actorOf(user);
+  const accountId = String(baseLinkerAccountId || '').trim();
+  if (!accountId) throw appError('baselinker_account_id_required');
+  await requireAccountEnabled(accountId);
   const id = String(orderId);
-  return withLock(`baselinker-order:${id}`, async () => {
+  return withLock(`baselinker-order:${accountId}:${id}`, async () => {
     const current = await BaseLinkerPickingOrder.findOne({
+      baseLinkerAccountId: accountId,
       orderId: id,
       ownerTelegramId: actor.by,
       status: { $in: WORKING_STATUSES },
@@ -925,56 +929,31 @@ async function heartbeatPickingOrder({ orderId, user }) {
     await verifyTrackedPickingOrderUpstream(current, actor, { force: true });
 
     const now = new Date();
-    const repairImplicitDeferred = shouldRepairImplicitAutoDeferred(current);
-    const update = repairImplicitDeferred
-      ? {
-        $set: { lastActivityAt: now, workflowStage: WORKFLOW_STAGE.PROCESSING },
-        $inc: { revision: 1 },
-        $push: {
-          history: {
-            $each: [{
-              at: now,
-              by: actor.by,
-              byName: actor.byName,
-              byRole: actor.byRole,
-              action: 'implicit_problem_autodefer_repaired',
-              meta: {},
-            }],
-            $slice: -MAX_HISTORY,
-          },
-        },
-      }
-      : { $set: { lastActivityAt: now } };
-
-    let updated = await BaseLinkerPickingOrder.findOneAndUpdate(
+    const updated = await BaseLinkerPickingOrder.findOneAndUpdate(
       {
         _id: current._id,
-        ownerTelegramId: actor.by,
-        status: { $in: WORKING_STATUSES },
-        ...(repairImplicitDeferred ? { revision: Number(current.revision || 0) } : {}),
-      },
-      update,
-      { new: true },
-    ).lean();
-
-    if (!updated && repairImplicitDeferred) {
-      updated = await BaseLinkerPickingOrder.findOne({
+        baseLinkerAccountId: accountId,
         orderId: id,
         ownerTelegramId: actor.by,
         status: { $in: WORKING_STATUSES },
-      }).lean();
-    }
+      },
+      { $set: { lastActivityAt: now } },
+      { new: true },
+    ).lean();
     if (!updated) throw appError('baselinker_picking_not_owner');
     emitPickingUpdate(updated);
     return { ok: true, lastActivityAt: updated.lastActivityAt, state: publicState(updated) };
   }, { ttlMs: 30_000, waitMs: 10_000 });
 }
 
-async function updatePickingItem({ orderId, lineKey, user, expectedRevision, state, pickedQty, issueNote, clientMutationId = '' }) {
+async function updatePickingItem({ baseLinkerAccountId, orderId, lineKey, user, expectedRevision, state, pickedQty, issueNote, clientMutationId = '' }) {
   const actor = actorOf(user);
+  const accountId = String(baseLinkerAccountId || '').trim();
+  if (!accountId) throw appError('baselinker_account_id_required');
+  await requireAccountEnabled(accountId);
   const id = String(orderId);
-  return withLock(`baselinker-order:${id}`, async () => {
-    const doc = await BaseLinkerPickingOrder.findOne({ orderId: id });
+  return withLock(`baselinker-order:${accountId}:${id}`, async () => {
+    const doc = await BaseLinkerPickingOrder.findOne({ baseLinkerAccountId: accountId, orderId: id });
     if (!doc) throw appError('baselinker_picking_not_started');
     await verifyTrackedPickingOrderUpstream(doc, actor, { clientMutationId });
     assertOwner(doc, actor);
@@ -1024,11 +1003,14 @@ async function updatePickingItem({ orderId, lineKey, user, expectedRevision, sta
   }, { ttlMs: 15_000, waitMs: 6_000 });
 }
 
-async function releasePickingOrder({ orderId, user, expectedRevision, force = false, clientMutationId = '' }) {
+async function releasePickingOrder({ baseLinkerAccountId, orderId, user, expectedRevision, force = false, clientMutationId = '' }) {
   const actor = actorOf(user);
+  const accountId = String(baseLinkerAccountId || '').trim();
+  if (!accountId) throw appError('baselinker_account_id_required');
+  await requireAccountEnabled(accountId);
   const id = String(orderId);
-  return withLock(`baselinker-order:${id}`, async () => {
-    const doc = await BaseLinkerPickingOrder.findOne({ orderId: id });
+  return withLock(`baselinker-order:${accountId}:${id}`, async () => {
+    const doc = await BaseLinkerPickingOrder.findOne({ baseLinkerAccountId: accountId, orderId: id });
     if (!doc) throw appError('baselinker_picking_not_started');
     await verifyTrackedPickingOrderUpstream(doc, actor, { clientMutationId });
     assertNotUpstreamBlocked(doc);
@@ -1055,18 +1037,27 @@ async function releasePickingOrder({ orderId, user, expectedRevision, force = fa
   }, { ttlMs: 15_000, waitMs: 6_000 });
 }
 
-async function markPickingOrderPacked({ orderId, user, expectedRevision, clientMutationId = '' }) {
+async function markPickingOrderPacked({ baseLinkerAccountId, orderId, user, expectedRevision, clientMutationId = '' }) {
   const actor = actorOf(user);
+  const accountId = String(baseLinkerAccountId || '').trim();
+  if (!accountId) throw appError('baselinker_account_id_required');
+  await requireAccountEnabled(accountId);
   const id = String(orderId || '').trim();
 
-  return withLock(`baselinker-order:${id}`, async () => {
-    const doc = await BaseLinkerPickingOrder.findOne({ orderId: id });
+  return withLock(`baselinker-order:${accountId}:${id}`, async () => {
+    const doc = await BaseLinkerPickingOrder.findOne({ baseLinkerAccountId: accountId, orderId: id });
     if (!doc) throw appError('baselinker_picking_not_started');
     assertOwner(doc, actor);
     assertRevision(doc, expectedRevision);
 
-    const order = await fetchExactOrder(id);
-    const scope = await getQueueScope();
+    const order = await fetchExactOrder(accountId, id);
+    const accountMeta = await getBaseLinkerAccount(accountId, { lean: true });
+    order.baseLinkerAccountId = accountId;
+    order.baseLinkerAccountName = String(accountMeta?.name || '');
+    order.baseLinkerAccountColor = String(accountMeta?.color || '');
+    order.sourceName = resolveSourceName(accountMeta?.metadataSnapshot?.sources, order?.order_source, order?.order_source_id);
+    order.orderKey = orderKey(accountId, order?.order_id);
+    const scope = await getQueueScope(accountId);
     assertOrderActionable(order, scope);
     applyUpstreamDisposition(doc, order, scope, actor);
 
@@ -1138,19 +1129,28 @@ async function markPickingOrderPacked({ orderId, user, expectedRevision, clientM
   }, { ttlMs: 30_000, waitMs: 10_000 });
 }
 
-async function markPickingOrderSent({ orderId, user, expectedRevision, clientMutationId = '' }) {
+async function markPickingOrderSent({ baseLinkerAccountId, orderId, user, expectedRevision, clientMutationId = '' }) {
   const actor = actorOf(user);
+  const accountId = String(baseLinkerAccountId || '').trim();
+  if (!accountId) throw appError('baselinker_account_id_required');
+  await requireAccountEnabled(accountId);
   const id = String(orderId || '').trim();
-  const scope = await getQueueScope();
+  const scope = await getQueueScope(accountId);
   if (!scope.configured || !Number.isSafeInteger(Number(scope.sentStatusId))) {
     throw appError('baselinker_queue_not_configured');
   }
 
-  return withLock(`baselinker-order:${id}`, async () => {
-    const doc = await BaseLinkerPickingOrder.findOne({ orderId: id });
+  return withLock(`baselinker-order:${accountId}:${id}`, async () => {
+    const doc = await BaseLinkerPickingOrder.findOne({ baseLinkerAccountId: accountId, orderId: id });
     if (!doc) throw appError('baselinker_picking_not_started');
 
-    let order = await fetchExactOrder(id);
+    let order = await fetchExactOrder(accountId, id);
+    const accountMeta = await getBaseLinkerAccount(accountId, { lean: true });
+    order.baseLinkerAccountId = accountId;
+    order.baseLinkerAccountName = String(accountMeta?.name || '');
+    order.baseLinkerAccountColor = String(accountMeta?.color || '');
+    order.sourceName = resolveSourceName(accountMeta?.metadataSnapshot?.sources, order?.order_source, order?.order_source_id);
+    order.orderKey = orderKey(accountId, order?.order_id);
     let disposition = classifyUpstreamOrder(order, scope);
 
     // Idempotent recovery: if local Sent already exists, it is valid only while
@@ -1189,8 +1189,8 @@ async function markPickingOrderSent({ orderId, user, expectedRevision, clientMut
     // The only BaseLinker mutation in the picking module. Upstream goes first;
     // local Sent is never allowed to claim success while BaseLinker says otherwise.
     if (disposition !== 'sent') {
-      await setBaseLinkerOrderStatus({ orderId: id, statusId: scope.sentStatusId });
-      order = await fetchExactOrder(id);
+      await setBaseLinkerOrderStatus({ orderId: id, statusId: scope.sentStatusId }, makeBaseLinkerAccountCaller(accountId));
+      order = await fetchExactOrder(accountId, id);
       disposition = classifyUpstreamOrder(order, scope);
     }
     if (disposition !== 'sent' || Number(order?.order_status_id) !== Number(scope.sentStatusId)) {
@@ -1225,7 +1225,7 @@ async function markPickingOrderSent({ orderId, user, expectedRevision, clientMut
 
     try {
       const { removeIndexedOrders } = require('./baseLinkerOrderIndex');
-      await removeIndexedOrders([id]);
+      await removeIndexedOrders(accountId, [id]);
     } catch (error) {
       console.error('[baselinker] sent index removal failed', error);
     }
@@ -1235,12 +1235,15 @@ async function markPickingOrderSent({ orderId, user, expectedRevision, clientMut
   }, { ttlMs: 30_000, waitMs: 10_000 });
 }
 
-async function reopenPickingOrder({ orderId, user, expectedRevision, clientMutationId = '' }) {
+async function reopenPickingOrder({ baseLinkerAccountId, orderId, user, expectedRevision, clientMutationId = '' }) {
   if (user?.role !== 'admin') throw appError('forbidden');
   const actor = actorOf(user);
+  const accountId = String(baseLinkerAccountId || '').trim();
+  if (!accountId) throw appError('baselinker_account_id_required');
+  await requireAccountEnabled(accountId);
   const id = String(orderId);
-  return withLock(`baselinker-order:${id}`, async () => {
-    const doc = await BaseLinkerPickingOrder.findOne({ orderId: id });
+  return withLock(`baselinker-order:${accountId}:${id}`, async () => {
+    const doc = await BaseLinkerPickingOrder.findOne({ baseLinkerAccountId: accountId, orderId: id });
     if (!doc) throw appError('baselinker_picking_not_started');
     await verifyTrackedPickingOrderUpstream(doc, actor, { force: true, clientMutationId });
     assertNotUpstreamBlocked(doc);
@@ -1268,27 +1271,30 @@ async function reopenPickingOrder({ orderId, user, expectedRevision, clientMutat
 }
 
 
-async function fetchOptionalExactOrder(orderId) {
+async function fetchOptionalExactOrder(baseLinkerAccountId, orderId) {
   const id = Number(orderId);
   if (!Number.isSafeInteger(id) || id <= 0) return null;
   const result = await fetchBaseLinkerOrders({
     orderId: id,
     includeUnconfirmed: true,
     maxPages: 1,
-  });
+  }, makeBaseLinkerAccountCaller(baseLinkerAccountId));
   const order = (result.orders || []).find((candidate) => String(candidate?.order_id) === String(id)) || null;
   return order;
 }
 
 async function markPickingOrdersUpstreamUpdated({
+  baseLinkerAccountId,
   orderIds = [],
   orders = [],
   knownAdmittedOrderIds = [],
 } = {}) {
+  const accountId = String(baseLinkerAccountId || '').trim();
+  if (!accountId) throw appError('baselinker_account_id_required');
   const ids = [...new Set((orderIds || []).map((id) => String(id || '')).filter(Boolean))];
   if (!ids.length) return { marked: 0, materializedCancelled: 0, materializedUpdated: 0 };
   const actor = { by: 'system:baselinker-queue', byName: 'BaseLinker', byRole: 'system' };
-  const scope = await getQueueScope();
+  const scope = await getQueueScope(accountId);
   const known = new Set((knownAdmittedOrderIds || []).map(String));
   const exactById = new Map((orders || []).map((order) => [String(order?.order_id || ''), order]).filter(([id]) => id));
 
@@ -1300,15 +1306,18 @@ async function markPickingOrdersUpstreamUpdated({
   // worker actions. They therefore share the exact same per-order lock namespace.
   // Never let queue reconciliation race item/pack/sent mutations.
   for (const id of ids) {
-    await withLock(`baselinker-order:${id}`, async () => {
-      let doc = await BaseLinkerPickingOrder.findOne({ orderId: id });
+    await withLock(`baselinker-order:${accountId}:${id}`, async () => {
+      let doc = await BaseLinkerPickingOrder.findOne({ baseLinkerAccountId: accountId, orderId: id });
       const order = exactById.get(id) || null;
       let newlyMaterialized = false;
 
       if (!doc && known.has(id)) {
         const disposition = order ? classifyUpstreamOrder(order, scope) : 'missing';
         if (!['intake', 'sent'].includes(disposition)) {
+          const account = await getBaseLinkerAccount(accountId, { lean: true }).catch(() => null);
           doc = new BaseLinkerPickingOrder({
+            baseLinkerAccountId: accountId,
+            baseLinkerAccountNameSnapshot: String(account?.name || ''),
             orderId: id,
             status: ORDER_STATUS.PAUSED,
             workflowStage: WORKFLOW_STAGE.DEFERRED,
@@ -1317,7 +1326,11 @@ async function markPickingOrdersUpstreamUpdated({
             lastUpstreamStatusId: order && Number.isSafeInteger(Number(order?.order_status_id)) ? Number(order.order_status_id) : null,
             lastUpstreamVerifiedAt: new Date(),
           });
-          if (order) syncDocWithOrder(doc, order, actor);
+          if (order) {
+            const sourceName = resolveSourceName(account?.metadataSnapshot?.sources, order?.order_source, order?.order_source_id);
+            if (sourceName) order.sourceName = sourceName;
+            syncDocWithOrder(doc, order, actor);
+          }
           doc.upstreamReviewRequired = true;
           doc.upstreamReviewedAt = null;
           doc.lastUpstreamChangeAt = new Date();
@@ -1335,7 +1348,7 @@ async function markPickingOrdersUpstreamUpdated({
             newlyMaterialized = true;
           } catch (error) {
             if (!isDuplicateKeyError(error)) throw error;
-            doc = await BaseLinkerPickingOrder.findOne({ orderId: id });
+            doc = await BaseLinkerPickingOrder.findOne({ baseLinkerAccountId: accountId, orderId: id });
           }
         }
       }
@@ -1355,11 +1368,14 @@ async function markPickingOrdersUpstreamUpdated({
   return { marked, materializedCancelled, materializedUpdated };
 }
 
-async function acknowledgeUpstreamReview({ orderId, user, expectedRevision, clientMutationId = '' }) {
+async function acknowledgeUpstreamReview({ baseLinkerAccountId, orderId, user, expectedRevision, clientMutationId = '' }) {
   const actor = actorOf(user);
+  const accountId = String(baseLinkerAccountId || '').trim();
+  if (!accountId) throw appError('baselinker_account_id_required');
+  await requireAccountEnabled(accountId);
   const id = String(orderId || '');
-  return withLock(`baselinker-order:${id}`, async () => {
-    const doc = await BaseLinkerPickingOrder.findOne({ orderId: id });
+  return withLock(`baselinker-order:${accountId}:${id}`, async () => {
+    const doc = await BaseLinkerPickingOrder.findOne({ baseLinkerAccountId: accountId, orderId: id });
     if (!doc) throw appError('baselinker_picking_not_started');
     const beforeRevision = Number(doc.revision || 0);
     await verifyTrackedPickingOrderUpstream(doc, actor, {
@@ -1386,7 +1402,9 @@ async function acknowledgeUpstreamReview({ orderId, user, expectedRevision, clie
   }, { ttlMs: 15_000, waitMs: 6_000 });
 }
 
-async function reconcilePickingFromUpstreamChanges({ orders = [], removedOrderIds = [] } = {}) {
+async function reconcilePickingFromUpstreamChanges({ baseLinkerAccountId, orders = [], removedOrderIds = [] } = {}) {
+  const accountId = String(baseLinkerAccountId || '').trim();
+  if (!accountId) throw appError('baselinker_account_id_required');
   const changedOrders = Array.isArray(orders) ? orders.filter(Boolean) : [];
   const changedById = new Map(changedOrders
     .map((order) => [String(order?.order_id || ''), order])
@@ -1395,9 +1413,9 @@ async function reconcilePickingFromUpstreamChanges({ orders = [], removedOrderId
   const affectedIds = [...new Set([...changedById.keys(), ...removed])];
   if (!affectedIds.length) return { reconciled: 0, changed: 0, released: 0 };
 
-  const docs = await BaseLinkerPickingOrder.find({ orderId: { $in: affectedIds } }).lean();
+  const docs = await BaseLinkerPickingOrder.find({ baseLinkerAccountId: accountId, orderId: { $in: affectedIds } }).lean();
   const systemActor = { by: 'system:baselinker-queue', byName: 'BaseLinker', byRole: 'system' };
-  const scope = await getQueueScope();
+  const scope = await getQueueScope(accountId);
   let reconciled = 0;
   let changed = 0;
   let released = 0;
@@ -1406,13 +1424,13 @@ async function reconcilePickingFromUpstreamChanges({ orders = [], removedOrderId
     const localOrderId = String(row.orderId || '');
     if (!localOrderId) continue;
 
-    await withLock(`baselinker-order:${localOrderId}`, async () => {
-      const doc = await BaseLinkerPickingOrder.findOne({ orderId: localOrderId });
+    await withLock(`baselinker-order:${accountId}:${localOrderId}`, async () => {
+      const doc = await BaseLinkerPickingOrder.findOne({ baseLinkerAccountId: accountId, orderId: localOrderId });
       if (!doc) return;
 
       const exactOrder = removed.has(localOrderId)
         ? null
-        : (changedById.get(localOrderId) || await fetchOptionalExactOrder(localOrderId));
+        : (changedById.get(localOrderId) || await fetchOptionalExactOrder(accountId, localOrderId));
 
       if (!exactOrder) {
         const previousDisposition = String(doc.upstreamDisposition || '');

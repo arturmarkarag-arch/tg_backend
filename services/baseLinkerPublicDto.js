@@ -26,6 +26,11 @@ function compactOrderProduct(product = {}) {
 
 function compactOrder(order = {}) {
   const out = {};
+  setIfDefined(out, 'baseLinkerAccountId', order.baseLinkerAccountId);
+  setIfDefined(out, 'baseLinkerAccountName', order.baseLinkerAccountName);
+  setIfDefined(out, 'baseLinkerAccountColor', order.baseLinkerAccountColor);
+  setIfDefined(out, 'sourceName', order.sourceName);
+  setIfDefined(out, 'orderKey', order.orderKey);
   setIfDefined(out, 'order_id', order.order_id);
   setIfDefined(out, 'shop_order_id', order.shop_order_id);
   setIfDefined(out, 'external_order_id', order.external_order_id);

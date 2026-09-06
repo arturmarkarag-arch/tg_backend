@@ -1,4 +1,3 @@
-const { callBaseLinker } = require('./baseLinkerClient');
 const { appError } = require('../utils/errors');
 
 const MAX_LABEL_BYTES = Math.max(1024 * 1024, Number(process.env.BASELINKER_MAX_LABEL_BYTES) || (20 * 1024 * 1024));
@@ -24,7 +23,8 @@ function courierCode(value) {
   return code;
 }
 
-async function fetchBaseLinkerOrderPackages(orderId, callApi = callBaseLinker) {
+async function fetchBaseLinkerOrderPackages(orderId, callApi) {
+  if (typeof callApi !== 'function') throw appError('baselinker_account_id_required');
   const id = positiveInt(orderId, 'baselinker_order_id_invalid');
   const payload = await callApi('getOrderPackages', { order_id: id });
   return {
@@ -33,7 +33,8 @@ async function fetchBaseLinkerOrderPackages(orderId, callApi = callBaseLinker) {
   };
 }
 
-async function fetchBaseLinkerPackageDetails(packageId, callApi = callBaseLinker) {
+async function fetchBaseLinkerPackageDetails(packageId, callApi) {
+  if (typeof callApi !== 'function') throw appError('baselinker_account_id_required');
   const id = positiveInt(packageId, 'baselinker_package_id_invalid');
   const payload = await callApi('getPackageDetails', { package_id: id });
   return {
@@ -42,7 +43,8 @@ async function fetchBaseLinkerPackageDetails(packageId, callApi = callBaseLinker
   };
 }
 
-async function fetchBaseLinkerLabel({ packageId, courierCode: rawCourierCode }, callApi = callBaseLinker) {
+async function fetchBaseLinkerLabel({ packageId, courierCode: rawCourierCode }, callApi) {
+  if (typeof callApi !== 'function') throw appError('baselinker_account_id_required');
   const id = positiveInt(packageId, 'baselinker_package_id_invalid');
   const code = courierCode(rawCourierCode);
   const payload = await callApi('getLabel', {
@@ -78,7 +80,8 @@ async function fetchBaseLinkerLabel({ packageId, courierCode: rawCourierCode }, 
 }
 
 
-async function fetchVerifiedBaseLinkerOrderPackage({ orderId, packageId, courierCode: rawCourierCode }, callApi = callBaseLinker) {
+async function fetchVerifiedBaseLinkerOrderPackage({ orderId, packageId, courierCode: rawCourierCode }, callApi) {
+  if (typeof callApi !== 'function') throw appError('baselinker_account_id_required');
   const order = positiveInt(orderId, 'baselinker_order_id_invalid');
   const packageNumber = positiveInt(packageId, 'baselinker_package_id_invalid');
   const { packages } = await fetchBaseLinkerOrderPackages(order, callApi);
@@ -109,7 +112,8 @@ async function fetchVerifiedBaseLinkerOrderPackage({ orderId, packageId, courier
   };
 }
 
-async function fetchVerifiedBaseLinkerOrderLabel({ orderId, packageId, courierCode: rawCourierCode }, callApi = callBaseLinker) {
+async function fetchVerifiedBaseLinkerOrderLabel({ orderId, packageId, courierCode: rawCourierCode }, callApi) {
+  if (typeof callApi !== 'function') throw appError('baselinker_account_id_required');
   const binding = await fetchVerifiedBaseLinkerOrderPackage({
     orderId,
     packageId,

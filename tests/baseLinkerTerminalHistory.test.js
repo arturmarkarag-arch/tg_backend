@@ -1,40 +1,35 @@
-const { scanQueue } = require('../services/baseLinkerOrderIndex');
-const { queueScopeFromSettings } = require('../services/baseLinkerQueueScope');
+const fs = require('fs');
+const path = require('path');
 
-describe('BaseLinker terminal history index', () => {
-  it('scans all three configured statuses and keeps terminal rows by date_in_status', async () => {
-    const now = Date.UTC(2026, 8, 6, 12, 0, 0);
-    const scope = queueScopeFromSettings({
-      intakeStatusId: 10,
-      sentStatusId: 20,
-      cancelledStatusId: 30,
-      revision: 'test',
-    }, now);
-    const recent = Math.floor(now / 1000) - (2 * 86400);
-    const expired = Math.floor(now / 1000) - (15 * 86400);
-    const fetchOrders = vi.fn(async ({ statusId }) => ({
-      truncated: false,
-      orders: statusId === 10
-        ? [{ order_id: 1, order_status_id: 10, date_in_status: expired }]
-        : statusId === 20
-          ? [
-              { order_id: 2, order_status_id: 20, date_in_status: recent },
-              { order_id: 3, order_status_id: 20, date_in_status: expired },
-            ]
-          : [
-              { order_id: 4, order_status_id: 30, date_in_status: recent },
-              { order_id: 5, order_status_id: 30, date_in_status: expired },
-            ],
-    }));
+const root = path.join(__dirname, '..');
+const read = (rel) => fs.readFileSync(path.join(root, rel), 'utf8');
 
-    const result = await scanQueue(scope, fetchOrders);
+describe('BaseLinker terminal history contract', () => {
+  it('does not scan Sent/Cancelled statuses as upstream history shelves', () => {
+    const index = read('services/baseLinkerOrderIndex.js');
+    expect(index).toContain('async function scanIntake');
+    expect(index).not.toContain('async function scanTerminalHistory');
+    expect(index).not.toContain('async function scanQueue');
+    expect(index).not.toContain('TERMINAL_INDEX_REFRESH_MS');
+    expect(index).not.toContain('BASELINKER_TERMINAL_REFRESH_MS');
+  });
 
-    expect(fetchOrders.mock.calls.map(([options]) => options.statusId)).toEqual([10, 20, 30]);
-    expect(fetchOrders.mock.calls.every(([options]) => options.includeUnconfirmed === true)).toBe(true);
-    expect(result.rows.map(({ orderId, disposition, dateInStatus }) => ({ orderId, disposition, dateInStatus }))).toEqual([
-      { orderId: '1', disposition: 'intake', dateInStatus: 0 },
-      { orderId: '2', disposition: 'sent', dateInStatus: recent },
-      { orderId: '4', disposition: 'cancelled', dateInStatus: recent },
-    ]);
+  it('materializes transitions only after an Intake row departs and is reread exactly', () => {
+    const index = read('services/baseLinkerOrderIndex.js');
+    expect(index).toContain('const departedIds = [...previousIds].filter((id) => !currentIds.has(id))');
+    expect(index).toContain('const order = await exactOrder(scope, id)');
+    expect(index).toContain('classifyUpstreamOrder(order, scope)');
+    expect(index).toContain('reconcilePickingFromUpstreamChanges');
+    expect(index).toContain('knownAdmittedOrderIds: untrackedDeparted');
+  });
+
+  it('keeps Sent/Cancelled history in local picking state with local retention', () => {
+    const indexModel = read('models/BaseLinkerOrderIndex.js');
+    const pickingModel = read('models/BaseLinkerPickingOrder.js');
+    const retention = read('services/baseLinkerRetention.js');
+    expect(indexModel).not.toContain('upstreamDisposition:');
+    expect(indexModel).not.toContain('dateInStatus:');
+    expect(pickingModel).toContain('upstreamDisposition:');
+    expect(retention).toContain('BASELINKER_HISTORY_RETENTION_DAYS');
   });
 });

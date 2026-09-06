@@ -117,7 +117,18 @@ const ERRORS = {
   block_concurrent_modification: { status: 409, message: 'Блок змінюється кількома користувачами одночасно. Спробуйте ще раз.' },
 
   // ── BaseLinker ──────────────────────────────────────────────────────────────
-  baselinker_not_configured: { status: 503, message: 'BaseLinker не налаштовано. Додайте BASELINKER_API_TOKEN у середовище сервера.' },
+  baselinker_not_configured: { status: 503, message: 'BaseLinker не налаштовано. Додайте хоча б один BaseLinker-акаунт у Settings.' },
+  baselinker_account_id_required: { status: 400, message: 'Не вказано BaseLinker accountId. Для мультиакаунтної системи order_id без accountId неоднозначний.' },
+  baselinker_account_not_found: { status: 404, message: 'BaseLinker-акаунт не знайдено.' },
+  baselinker_account_disabled: { status: 409, message: 'Цей BaseLinker-акаунт вимкнений. Нові API-операції для нього заблоковані.' },
+  baselinker_account_name_required: { status: 400, message: 'Вкажіть назву BaseLinker-акаунта.' },
+  baselinker_token_required: { status: 400, message: 'Вкажіть API-токен BaseLinker.' },
+  baselinker_token_encryption_not_configured: { status: 503, message: 'Для збереження BaseLinker-токенів на сервері потрібно налаштувати BASELINKER_TOKEN_ENCRYPTION_KEY.' },
+  baselinker_token_decrypt_failed: { status: 503, message: 'Не вдалося розшифрувати BaseLinker-токен. Перевірте BASELINKER_TOKEN_ENCRYPTION_KEY.' },
+  baselinker_token_already_connected: { status: 409, message: 'Цей самий API-токен уже підключений до іншого BaseLinker-акаунта.' },
+  baselinker_token_rotation_confirmation_required: { status: 409, message: 'Заміна токена зберігає поточний accountId. Потрібно явно підтвердити, що новий токен належить цьому самому BaseLinker-акаунту.' },
+  baselinker_source_filter_invalid: { status: 400, message: 'Некоректний фільтр джерела BaseLinker. Конкретне джерело завжди задається разом з accountId, sourceType і sourceId.' },
+  baselinker_rate_budget_exhausted: { status: 429, message: ({ retryAfterMs } = {}) => `Наш безпечний бюджет BaseLinker API для цього акаунта вичерпано.${retryAfterMs ? ` Повторіть приблизно через ${Math.ceil(Number(retryAfterMs) / 1000)} с.` : ''}` },
   baselinker_timeout:        { status: 504, message: ({ upstreamMethod } = {}) =>
                                 `BaseLinker не відповів вчасно${upstreamMethod ? ` на ${upstreamMethod}` : ''}. Повторіть запит.` },
   baselinker_network_error:  { status: 502, message: ({ upstreamMethod, upstreamMessage } = {}) =>
@@ -126,7 +137,7 @@ const ERRORS = {
   baselinker_http_error:     { status: 502, message: ({ upstreamMethod, upstreamStatus, upstreamCode, upstreamMessage } = {}) => {
                                 const where = upstreamMethod ? ` під час ${upstreamMethod}` : '';
                                 const details = `${upstreamCode ? ` (${upstreamCode})` : ''}${upstreamMessage ? `: ${upstreamMessage}` : ''}`;
-                                if (Number(upstreamStatus) === 401) return `BaseLinker відхилив API-токен${where} (HTTP 401). Перевірте BASELINKER_API_TOKEN.${details}`;
+                                if (Number(upstreamStatus) === 401) return `BaseLinker відхилив API-токен${where} (HTTP 401). Перевірте API-токен цього BaseLinker-акаунта в Налаштуваннях.${details}`;
                                 if (Number(upstreamStatus) === 403) return `BaseLinker заборонив цю API-операцію${where} (HTTP 403). Перевірте права API-токена.${details}`;
                                 if (Number(upstreamStatus) === 429) return `BaseLinker тимчасово відхилив запит через ліміт API${where} (HTTP 429). Зачекайте трохи й повторіть.${details}`;
                                 return `BaseLinker повернув HTTP ${upstreamStatus || 'помилку'}${where}${details}.`;

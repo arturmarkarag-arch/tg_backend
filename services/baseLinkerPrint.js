@@ -6,6 +6,8 @@ const {
   fetchVerifiedBaseLinkerOrderLabel,
 } = require('./baseLinkerShipments');
 const { getIO } = require('../socket');
+const { makeBaseLinkerAccountCaller } = require('./baseLinkerClient');
+const { getBaseLinkerAccount } = require('./baseLinkerAccounts');
 const { appError } = require('../utils/errors');
 
 const AGENT_ONLINE_MS = Math.max(15_000, Number(process.env.BASELINKER_PRINT_AGENT_ONLINE_MS) || 35_000);
@@ -126,6 +128,7 @@ function emitJob(job) {
       jobId: job.jobId,
       status: job.status,
       printerName: job.printerName || '',
+      baseLinkerAccountId: job.baseLinkerAccountId || '',
       orderId: job.orderId || '',
       packageId: job.packageId,
       labelExtension: job.labelExtension || '',
@@ -138,7 +141,11 @@ function emitJob(job) {
   }
 }
 
-async function queuePrintJob({ orderId, packageId, courierCode, user }) {
+async function queuePrintJob({ baseLinkerAccountId, orderId, packageId, courierCode, user }) {
+  const accountId = text(baseLinkerAccountId);
+  if (!accountId) throw appError('baselinker_account_id_required');
+  await getBaseLinkerAccount(accountId, { requireEnabled: true });
+  const callApi = makeBaseLinkerAccountCaller(accountId);
   const order = positiveInt(orderId, 'baselinker_order_id_invalid');
   const id = positiveInt(packageId, 'baselinker_package_id_invalid');
   const requestedCode = courierCodeOf(courierCode);
@@ -151,12 +158,13 @@ async function queuePrintJob({ orderId, packageId, courierCode, user }) {
     orderId: order,
     packageId: id,
     courierCode: requestedCode,
-  });
+  }, callApi);
   const code = binding.courierCode;
 
   const agent = await chooseOnlineAgent();
   const dedupeCutoff = new Date(Date.now() - DEDUPE_MS);
   const existing = await BaseLinkerPrintJob.findOne({
+    baseLinkerAccountId: accountId,
     orderId: String(order),
     packageId: id,
     targetAgentId: agent.agentId,
@@ -169,6 +177,7 @@ async function queuePrintJob({ orderId, packageId, courierCode, user }) {
       status: existing.status,
       agentId: existing.targetAgentId,
       printerName: existing.printerName || agent.printerName || '',
+      baseLinkerAccountId: accountId,
       deduped: true,
     };
   }
@@ -176,6 +185,7 @@ async function queuePrintJob({ orderId, packageId, courierCode, user }) {
   const now = new Date();
   const job = await BaseLinkerPrintJob.create({
     jobId: crypto.randomUUID(),
+    baseLinkerAccountId: accountId,
     orderId: String(order),
     packageId: id,
     courierCode: code,
@@ -193,6 +203,7 @@ async function queuePrintJob({ orderId, packageId, courierCode, user }) {
     status: job.status,
     agentId: job.targetAgentId,
     printerName: job.printerName,
+    baseLinkerAccountId: accountId,
     deduped: false,
   };
 }
@@ -251,6 +262,7 @@ async function claimNextPrintJob({ agentId }) {
   emitJob(job);
   return {
     jobId: job.jobId,
+    baseLinkerAccountId: job.baseLinkerAccountId || '',
     orderId: job.orderId || '',
     packageId: job.packageId,
     courierCode: job.courierCode,
@@ -275,11 +287,14 @@ async function getPrintJobPayload({ jobId, agentId }) {
   try {
     // Re-verify immediately before obtaining the physical label. A job can
     // sit in the queue while upstream shipment data changes.
+    const accountId = text(job.baseLinkerAccountId);
+    if (!accountId) throw appError('baselinker_account_id_required');
+    await getBaseLinkerAccount(accountId, { requireEnabled: true });
     const label = await fetchVerifiedBaseLinkerOrderLabel({
       orderId: job.orderId,
       packageId: job.packageId,
       courierCode: job.courierCode,
-    });
+    }, makeBaseLinkerAccountCaller(accountId));
     job.labelExtension = label.extension;
     job.leaseUntil = new Date(Date.now() + JOB_LEASE_MS);
     await job.save();

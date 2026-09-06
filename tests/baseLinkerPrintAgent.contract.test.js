@@ -59,6 +59,6 @@ describe('BaseLinker Print Agent contract', () => {
   it('keeps the user-facing print request inside the protected BaseLinker router', () => {
     const route = read('routes/baseLinker.js');
     expect(route).toContain("router.use(requireBaseLinkerPickingAccess)");
-    expect(route).toContain("router.post('/packages/:packageId/print'");
+    expect(route).toContain("router.post('/accounts/:accountId/orders/:orderId/packages/:packageId/print'");
   });
 });

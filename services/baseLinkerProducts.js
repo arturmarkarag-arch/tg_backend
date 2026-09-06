@@ -1,4 +1,6 @@
-const { callBaseLinker } = require('./baseLinkerClient');
+const { makeBaseLinkerAccountCaller } = require('./baseLinkerClient');
+const { appError } = require('../utils/errors');
+const { productKey } = require('./baseLinkerIdentity');
 
 const PRODUCT_CACHE_TTL_MS = 5 * 60 * 1000;
 const LOOKUP_CHUNK_SIZE = 100;
@@ -9,12 +11,10 @@ function cleanId(value) {
   return String(value).trim();
 }
 
-function catalogKeyForOrderProduct(product) {
-  const storage = cleanId(product?.storage).toLowerCase();
-  const storageId = cleanId(product?.storage_id);
-  const productId = cleanId(product?.product_id);
-  if (!storage || !productId) return null;
-  return `${storage}:${storageId}:${productId}`;
+function catalogKeyForOrderProduct(product, accountId = '') {
+  const account = cleanId(accountId || product?.baseLinkerAccountId);
+  if (!account) throw appError('baselinker_account_id_required');
+  return productKey(account, product) || null;
 }
 
 function chunk(values, size = LOOKUP_CHUNK_SIZE) {
@@ -94,10 +94,12 @@ function collectOrderProductRefs(orders) {
   const refsByKey = new Map();
   for (const order of Array.isArray(orders) ? orders : []) {
     for (const product of Array.isArray(order?.products) ? order.products : []) {
-      const key = catalogKeyForOrderProduct(product);
+      const accountId = cleanId(order?.baseLinkerAccountId);
+      const key = catalogKeyForOrderProduct(product, accountId);
       if (!key || refsByKey.has(key)) continue;
       refsByKey.set(key, {
         key,
+        accountId,
         storage: cleanId(product.storage).toLowerCase(),
         storageId: cleanId(product.storage_id),
         productId: cleanId(product.product_id),
@@ -210,7 +212,7 @@ async function tryDirectInventoryRefs(refs, productCatalog, unresolved, warnings
  * changing/persisting that upstream payload. The catalog is supplementary
  * current product data used for photos, features and packing context.
  */
-async function fetchBaseLinkerProductCatalog(orders, callApi = callBaseLinker) {
+async function fetchBaseLinkerProductCatalogSingle(orders, callApi) {
   const refs = collectOrderProductRefs(orders);
   const productCatalog = {};
   const warnings = [];
@@ -245,6 +247,39 @@ async function fetchBaseLinkerProductCatalog(orders, callApi = callBaseLinker) {
     },
     productCatalogWarnings: warnings,
   };
+}
+
+
+async function fetchBaseLinkerProductCatalog(orders, callApi = null) {
+  const list = Array.isArray(orders) ? orders : [];
+  if (callApi) return fetchBaseLinkerProductCatalogSingle(list, callApi);
+
+  const groups = new Map();
+  for (const order of list) {
+    const accountId = cleanId(order?.baseLinkerAccountId);
+    if (!accountId) throw appError('baselinker_account_id_required');
+    if (!groups.has(accountId)) groups.set(accountId, []);
+    groups.get(accountId).push(order);
+  }
+
+  const merged = {
+    productCatalog: {},
+    productCatalogStats: { requested: 0, resolved: 0, unresolved: 0, warnings: 0 },
+    productCatalogWarnings: [],
+  };
+  for (const [accountId, groupOrders] of groups) {
+    const caller = makeBaseLinkerAccountCaller(accountId);
+    const result = await fetchBaseLinkerProductCatalogSingle(groupOrders, caller);
+    Object.assign(merged.productCatalog, result.productCatalog || {});
+    for (const key of ['requested', 'resolved', 'unresolved', 'warnings']) {
+      merged.productCatalogStats[key] += Number(result.productCatalogStats?.[key] || 0);
+    }
+    merged.productCatalogWarnings.push(...(result.productCatalogWarnings || []).map((warning) => ({
+      baseLinkerAccountId: accountId,
+      ...warning,
+    })));
+  }
+  return merged;
 }
 
 module.exports = {

@@ -94,8 +94,11 @@ describe('BaseLinker compact worker payload', () => {
 
   it('keeps public picking state operational and drops history/fingerprints/audit metadata', () => {
     const state = publicState({
+      baseLinkerAccountId: 'account-A',
+      baseLinkerAccountNameSnapshot: 'BL A',
       orderId: '156189781',
       status: 'problem',
+      workflowStage: 'processing',
       revision: 10,
       ownerTelegramId: '123',
       ownerName: 'Worker',
@@ -117,6 +120,8 @@ describe('BaseLinker compact worker payload', () => {
       }],
     });
 
+    expect(state.baseLinkerAccountId).toBe('account-A');
+    expect(state.orderKey).toBe('account-A:156189781');
     expect(state.orderId).toBe('156189781');
     expect(state.items).toEqual([{
       lineKey: 'op:1',

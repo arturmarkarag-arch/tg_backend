@@ -24,34 +24,94 @@ const ORDERING_SCHEDULE_KEY = 'ordering.schedule';
 const ORDERING_SCHEDULE_DEFAULTS = { openHour: 16, openMinute: 0, closeHour: 7, closeMinute: 30 };
 
 router.get('/baselinker-settings', telegramAuth, requireTelegramRole('admin'), asyncHandler(async (req, res) => {
-  const { getQueueScope } = require('../services/baseLinkerQueueScope');
-  const { isBaseLinkerConfigured } = require('../services/baseLinkerClient');
+  const { listBaseLinkerAccounts, MASTER_KEY_ENV } = require('../services/baseLinkerAccounts');
+  res.set('Cache-Control', 'no-store');
   res.json({
-    ...await getQueueScope(),
-    apiConfigured: isBaseLinkerConfigured(),
+    accounts: await listBaseLinkerAccounts({ includeDisabled: true }),
+    tokenEncryptionConfigured: Boolean(String(process.env[MASTER_KEY_ENV] || '').trim()),
   });
 }));
 
-router.get('/baselinker-settings/statuses', telegramAuth, requireTelegramRole('admin'), asyncHandler(async (req, res) => {
+router.post('/baselinker-settings/validate', telegramAuth, requireTelegramRole('admin'), asyncHandler(async (req, res) => {
+  const { validateBaseLinkerToken } = require('../services/baseLinkerAccountValidation');
+  res.set('Cache-Control', 'no-store');
+  res.json(await validateBaseLinkerToken(req.body?.token));
+}));
+
+router.post('/baselinker-settings/accounts', telegramAuth, requireTelegramRole('admin'), asyncHandler(async (req, res) => {
+  const { createBaseLinkerAccount } = require('../services/baseLinkerAccounts');
+  const { validateBaseLinkerToken } = require('../services/baseLinkerAccountValidation');
+  const validated = await validateBaseLinkerToken(req.body?.token);
+  const account = await createBaseLinkerAccount({
+    name: req.body?.name,
+    color: req.body?.color,
+    token: req.body?.token,
+    queue: {
+      intakeStatusId: req.body?.intakeStatusId,
+      sentStatusId: req.body?.sentStatusId,
+      cancelledStatusId: req.body?.cancelledStatusId,
+    },
+    statuses: validated.metadata.statuses,
+    metadataSnapshot: validated.metadata,
+  });
+  try {
+    getIO()?.to('baselinker_staff').emit('baselinker_orders_changed', { resync: true, reason: 'account_added', baseLinkerAccountId: account.accountId });
+  } catch (_) { /* durable account wins */ }
+  res.status(201).json({ account, validation: validated.summary });
+}));
+
+router.patch('/baselinker-settings/accounts/:accountId', telegramAuth, requireTelegramRole('admin'), asyncHandler(async (req, res) => {
+  const { updateBaseLinkerAccount, getBaseLinkerAccount, buildValidatedQueue } = require('../services/baseLinkerAccounts');
+  const current = await getBaseLinkerAccount(req.params.accountId, { lean: true });
+  if (req.body?.enabled === true && current.enabled !== true) {
+    // Re-enable is an explicit admin operation, so probing a disabled token is
+    // allowed here. Fail closed if the token or the configured status IDs are no
+    // longer valid; ordinary disabled runtime never performs this traffic.
+    const { refreshBaseLinkerAccountMetadata } = require('../services/baseLinkerAccountValidation');
+    const validation = await refreshBaseLinkerAccountMetadata(req.params.accountId, { allowDisabled: true });
+    buildValidatedQueue(current.queue || {}, validation.metadata.statuses);
+  }
+  const account = await updateBaseLinkerAccount(req.params.accountId, req.body || {}, { allowEnable: req.body?.enabled === true });
+  try {
+    getIO()?.to('baselinker_staff').emit('baselinker_orders_changed', { resync: true, reason: account.enabled ? 'account_updated' : 'account_disabled', baseLinkerAccountId: account.accountId });
+  } catch (_) { /* durable account wins */ }
+  res.json({ account });
+}));
+
+router.post('/baselinker-settings/accounts/:accountId/token', telegramAuth, requireTelegramRole('admin'), asyncHandler(async (req, res) => {
+  if (req.body?.confirmSameAccount !== true) throw appError('baselinker_token_rotation_confirmation_required');
+  const { rotateBaseLinkerToken } = require('../services/baseLinkerAccounts');
+  const { validateBaseLinkerToken } = require('../services/baseLinkerAccountValidation');
+  const validated = await validateBaseLinkerToken(req.body?.token);
+  const account = await rotateBaseLinkerToken(req.params.accountId, req.body?.token, {
+    confirmSameAccount: req.body?.confirmSameAccount === true,
+    metadataSnapshot: validated.metadata,
+  });
+  res.json({ account, validation: validated.summary });
+}));
+
+router.post('/baselinker-settings/accounts/:accountId/refresh', telegramAuth, requireTelegramRole('admin'), asyncHandler(async (req, res) => {
+  const { refreshBaseLinkerAccountMetadata } = require('../services/baseLinkerAccountValidation');
+  const { getBaseLinkerAccount, publicAccount } = require('../services/baseLinkerAccounts');
+  const validation = await refreshBaseLinkerAccountMetadata(req.params.accountId, { allowDisabled: true });
+  res.json({ account: publicAccount(await getBaseLinkerAccount(req.params.accountId)), validation: validation.summary });
+}));
+
+router.get('/baselinker-settings/accounts/:accountId/statuses', telegramAuth, requireTelegramRole('admin'), asyncHandler(async (req, res) => {
   const { getQueueStatusOptions } = require('../services/baseLinkerQueueScope');
   res.set('Cache-Control', 'no-store');
-  res.json({ statuses: await getQueueStatusOptions() });
+  res.json({ statuses: await getQueueStatusOptions(req.params.accountId) });
 }));
 
-router.post('/baselinker-settings', telegramAuth, requireTelegramRole('admin'), asyncHandler(async (req, res) => {
+router.post('/baselinker-settings/accounts/:accountId/queue', telegramAuth, requireTelegramRole('admin'), asyncHandler(async (req, res) => {
   const { saveQueueSettings } = require('../services/baseLinkerQueueScope');
-  const { isBaseLinkerConfigured } = require('../services/baseLinkerClient');
-  const settings = await saveQueueSettings(req.body);
+  const { getBaseLinkerAccount, publicAccount } = require('../services/baseLinkerAccounts');
+  await saveQueueSettings(req.params.accountId, req.body || {});
+  const account = publicAccount(await getBaseLinkerAccount(req.params.accountId));
   try {
-    getIO()?.to('baselinker_staff').emit('baselinker_orders_changed', {
-      resync: true,
-      reason: 'queue_settings_changed',
-    });
-  } catch (_) { /* Settings are durable; socket delivery is best effort. */ }
-  res.json({
-    ...settings,
-    apiConfigured: isBaseLinkerConfigured(),
-  });
+    getIO()?.to('baselinker_staff').emit('baselinker_orders_changed', { resync: true, reason: 'queue_settings_changed', baseLinkerAccountId: account.accountId });
+  } catch (_) { /* durable settings win */ }
+  res.json({ account });
 }));
 
 async function getAppSetting(key, defaultValue = null) {

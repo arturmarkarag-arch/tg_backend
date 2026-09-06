@@ -5,9 +5,13 @@ const {
 } = require('../services/baseLinkerProducts');
 
 describe('BaseLinker product catalog enrichment', () => {
-  it('keeps a stable catalog key from the order-line source identifiers', () => {
-    expect(catalogKeyForOrderProduct({ storage: 'shop', storage_id: 2445, product_id: '524' }))
-      .toBe('shop:2445:524');
+  it('namespaces a stable catalog key by our BaseLinker account UUID', () => {
+    expect(catalogKeyForOrderProduct({ storage: 'shop', storage_id: 2445, product_id: '524' }, 'A'))
+      .toBe('A:shop:2445:524');
+    expect(catalogKeyForOrderProduct({ storage: 'shop', storage_id: 2445, product_id: '524' }, 'B'))
+      .toBe('B:shop:2445:524');
+    expect(() => catalogKeyForOrderProduct({ storage: 'shop', storage_id: 2445, product_id: '524' }))
+      .toThrow();
   });
 
   it('prefers default inventory gallery images and removes duplicates', () => {
@@ -19,7 +23,7 @@ describe('BaseLinker product catalog enrichment', () => {
     })).toEqual(['https://cdn/one.jpg', 'https://cdn/two.jpg', 'https://cdn/channel.jpg']);
   });
 
-  it('loads external shop product details/photos in one storage-aware lookup', async () => {
+  it('loads external shop product details/photos in one storage-aware lookup inside that account namespace', async () => {
     const calls = [];
     const callApi = async (method, params) => {
       calls.push({ method, params });
@@ -35,6 +39,7 @@ describe('BaseLinker product catalog enrichment', () => {
     };
 
     const result = await fetchBaseLinkerProductCatalog([{
+      baseLinkerAccountId: 'A',
       order_id: 1,
       products: [{ storage: 'shop', storage_id: 2445, product_id: '524', order_product_id: 10 }],
     }], callApi);
@@ -43,11 +48,11 @@ describe('BaseLinker product catalog enrichment', () => {
       method: 'getExternalStorageProductsData',
       params: { storage_id: 'shop_2445', products: ['524'] },
     }]);
-    expect(result.productCatalog['shop:2445:524'].images).toEqual(['https://cdn/product.jpg']);
+    expect(result.productCatalog['A:shop:2445:524'].images).toEqual(['https://cdn/product.jpg']);
     expect(result.productCatalogStats.resolved).toBe(1);
   });
 
-  it('uses inventory product data for Base inventory lines', async () => {
+  it('uses exact inventory product data for Base inventory lines', async () => {
     const calls = [];
     const callApi = async (method, params) => {
       calls.push({ method, params });
@@ -63,33 +68,55 @@ describe('BaseLinker product catalog enrichment', () => {
     };
 
     const result = await fetchBaseLinkerProductCatalog([{
+      baseLinkerAccountId: 'A',
       products: [{ storage: 'db', storage_id: 307, product_id: 2685 }],
     }], callApi);
 
     expect(calls[0].method).toBe('getInventoryProductsData');
     expect(calls[0].params.inventory_id).toBe(307);
     expect(calls[0].params.include_channels_media).toBe(false);
-    expect(result.productCatalog['db:307:2685'].images).toEqual(['https://cdn/base.jpg']);
+    expect(result.productCatalog['A:db:307:2685'].images).toEqual(['https://cdn/base.jpg']);
   });
 
-  it('can resolve a Base product with missing inventory id by exact product-id scan', async () => {
-    const callApi = async (method, params) => {
-      if (method === 'getInventories') {
-        return { status: 'SUCCESS', inventories: [{ inventory_id: 306 }, { inventory_id: 307 }] };
-      }
-      if (method === 'getInventoryProductsData' && params.inventory_id === 306) {
-        return { status: 'SUCCESS', products: {} };
-      }
-      if (method === 'getInventoryProductsData' && params.inventory_id === 307) {
-        return { status: 'SUCCESS', products: { 2685: { images: { 1: 'https://cdn/found.jpg' } } } };
-      }
-      throw new Error(`unexpected ${method}`);
-    };
+  it('fails closed when an ordered Base product has no exact inventory id instead of scanning inventories heuristically', async () => {
+    const callApi = vi.fn(async () => {
+      throw new Error('upstream must not be called without exact storage_id');
+    });
 
     const result = await fetchBaseLinkerProductCatalog([{
+      baseLinkerAccountId: 'A',
       products: [{ storage: 'db', storage_id: 0, product_id: 2685 }],
     }], callApi);
 
-    expect(result.productCatalog['db:0:2685']).toEqual({ state: 'resolved', images: ['https://cdn/found.jpg'] });
+    expect(callApi).not.toHaveBeenCalled();
+    expect(result.productCatalog['A:db:0:2685']).toEqual({ state: 'unresolved_exact_source', images: [] });
+  });
+
+  it('keeps identical BaseLinker product ids from two accounts in separate cache keys', async () => {
+    const calls = { A: 0, B: 0 };
+    const makeCaller = (accountId) => async (method) => {
+      calls[accountId] += 1;
+      expect(method).toBe('getInventoryProductsData');
+      return {
+        status: 'SUCCESS',
+        products: {
+          2685: { images: { 1: `https://cdn/${accountId}.jpg` } },
+        },
+      };
+    };
+
+    const resultA = await fetchBaseLinkerProductCatalog([{
+      baseLinkerAccountId: 'A',
+      products: [{ storage: 'db', storage_id: 307, product_id: 2685 }],
+    }], makeCaller('A'));
+    const resultB = await fetchBaseLinkerProductCatalog([{
+      baseLinkerAccountId: 'B',
+      products: [{ storage: 'db', storage_id: 307, product_id: 2685 }],
+    }], makeCaller('B'));
+
+    expect(resultA.productCatalog['A:db:307:2685'].images).toEqual(['https://cdn/A.jpg']);
+    expect(resultB.productCatalog['B:db:307:2685'].images).toEqual(['https://cdn/B.jpg']);
+    expect(resultA.productCatalog['B:db:307:2685']).toBeUndefined();
+    expect(resultB.productCatalog['A:db:307:2685']).toBeUndefined();
   });
 });

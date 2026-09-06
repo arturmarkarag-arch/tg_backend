@@ -27,10 +27,9 @@ const WORKING_STATUSES = Object.freeze([
 const TERMINAL_STATUSES = Object.freeze([ORDER_STATUS.PACKED, ORDER_STATUS.SENT]);
 
 const CURRENT_ISSUE_STATES = Object.freeze(['shortage', 'not_found']);
-const LEGACY_ISSUE_STATES = Object.freeze(['damaged', 'other']);
-const ISSUE_STATES = new Set([...CURRENT_ISSUE_STATES, ...LEGACY_ISSUE_STATES]);
+const ISSUE_STATES = new Set(CURRENT_ISSUE_STATES);
 const WRITABLE_ITEM_STATES = new Set(['pending', 'picked', ...CURRENT_ISSUE_STATES]);
-const PERSISTED_ITEM_STATES = Object.freeze(['pending', 'picked', ...CURRENT_ISSUE_STATES, ...LEGACY_ISSUE_STATES]);
+const PERSISTED_ITEM_STATES = Object.freeze(['pending', 'picked', ...CURRENT_ISSUE_STATES]);
 
 function hasIssues(items = []) {
   return items.some((item) => ISSUE_STATES.has(String(item?.state || '')));
@@ -77,26 +76,17 @@ function deriveWorkingStatus(items = [], hasOwner = false) {
   return hasOwner ? ORDER_STATUS.IN_PROGRESS : ORDER_STATUS.PAUSED;
 }
 
-function legacyWorkflowStageForStatus(status) {
-  const value = String(status || '');
-  if (value === ORDER_STATUS.SENT) return WORKFLOW_STAGE.SENT;
-  if (value === ORDER_STATUS.PACKED) return WORKFLOW_STAGE.PACKED;
-  if ([ORDER_STATUS.PAUSED, ORDER_STATUS.PROBLEM, ORDER_STATUS.READY_WITH_ISSUE].includes(value)) {
-    return WORKFLOW_STAGE.DEFERRED;
-  }
-  return WORKFLOW_STAGE.PROCESSING;
-}
-
 function workflowStageFor(state = {}) {
   const explicit = String(state?.workflowStage || '');
-  if (PERSISTED_WORKFLOW_STAGES.includes(explicit)) return explicit;
-  return legacyWorkflowStageForStatus(state?.status);
+  if (!PERSISTED_WORKFLOW_STAGES.includes(explicit)) {
+    throw new Error('baselinker_workflow_stage_invalid');
+  }
+  return explicit;
 }
 
 function workflowStageAfterWorkingStatus(previousStage, status) {
-  const current = PERSISTED_WORKFLOW_STAGES.includes(String(previousStage || ''))
-    ? String(previousStage)
-    : legacyWorkflowStageForStatus(status);
+  const current = String(previousStage || '');
+  if (!PERSISTED_WORKFLOW_STAGES.includes(current)) throw new Error('baselinker_workflow_stage_invalid');
 
   // Item-level state must never move the whole order between operational
   // shelves. A shortage/not-found changes the detailed picking status, but a
@@ -116,7 +106,6 @@ module.exports = {
   WORKING_STATUSES,
   TERMINAL_STATUSES,
   CURRENT_ISSUE_STATES,
-  LEGACY_ISSUE_STATES,
   ISSUE_STATES,
   WRITABLE_ITEM_STATES,
   PERSISTED_ITEM_STATES,
@@ -126,7 +115,6 @@ module.exports = {
   progressFor,
   packingReadiness,
   deriveWorkingStatus,
-  legacyWorkflowStageForStatus,
   workflowStageFor,
   workflowStageAfterWorkingStatus,
 };

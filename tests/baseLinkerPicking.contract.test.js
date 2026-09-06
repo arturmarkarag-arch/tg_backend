@@ -34,19 +34,20 @@ describe('BaseLinker local picking workflow', () => {
     const commands = read('services/baseLinkerOrderCommands.js');
     const router = read('routes/baseLinker.js');
     expect(picking).toContain('setBaseLinkerOrderStatus');
-    expect(commands).toContain("callBaseLinker('setOrderStatus'");
+    expect(commands).toContain("callApi('setOrderStatus'");
+    expect(commands).toContain("if (typeof callApi !== 'function') throw appError('baselinker_account_id_required')");
     expect(commands).toContain('order_id: id');
     expect(commands).toContain('status_id: status');
     expect(router).toContain('sole upstream mutation is "Sent"');
     expect(`${picking}
 ${commands}
-${router}`).not.toMatch(/callBaseLinker\(['"](?:addOrder|deleteOrder|setOrderFields|setOrderPayment)/i);
+${router}`).not.toMatch(/(?:callBaseLinker|callApi)\(['"](?:addOrder|deleteOrder|setOrderFields|setOrderPayment)/i);
   });
 
   it('requires a revision for item/release/pack/sent corrections and keeps admin-only reopen', () => {
     const router = read('routes/baseLinker.js');
     expect(router).toContain('expectedRevision');
-    expect(router).toContain("router.post('/picking/orders/:orderId/reopen', requireTelegramRole('admin')");
+    expect(router).toContain("router.post(`${pickingPrefix}/reopen`, ...pickingMutation('reopen', { adminOnly: true }))");
   });
 
   it('authorizes only admins or the dedicated baselinker role server-side', () => {
@@ -72,7 +73,7 @@ ${router}`).not.toMatch(/callBaseLinker\(['"](?:addOrder|deleteOrder|setOrderFie
     expect(picking).not.toContain('eligibleStatusIds');
   });
 
-  it('treats a shortage as handled work and becomes ready for explicit partial packing only after every line is handled', () => {
+  it('treats a shortage as handled work but still requires the problem to be resolved before packing', () => {
     const items = [
       { state: 'picked', requestedQty: 2, pickedQty: 2 },
       { state: 'shortage', requestedQty: 3, pickedQty: 1 },
@@ -163,7 +164,8 @@ ${router}`).not.toMatch(/callBaseLinker\(['"](?:addOrder|deleteOrder|setOrderFie
     expect(first[0].requestedQty).toBe(3);
     expect(second[0].requestedQty).toBe(4);
 
-    expect(model).toContain("BaseLinkerPickingOrderSchema.index({ orderId: 1 }, { unique: true })");
+    expect(model).toContain('BaseLinkerPickingOrderSchema.index({ baseLinkerAccountId: 1, orderId: 1 }, { unique: true })');
+    expect(model).not.toContain('BaseLinkerPickingOrderSchema.index({ orderId: 1 }, { unique: true })');
     expect(model).not.toContain('memberOrderIds');
     expect(model).not.toContain('groupKey');
     expect(source).not.toContain('mergeOrderGroup');
@@ -177,9 +179,9 @@ ${router}`).not.toMatch(/callBaseLinker\(['"](?:addOrder|deleteOrder|setOrderFie
     const picking = read('services/baseLinkerPicking.js');
     expect(router).toContain('orderId: req.params.orderId');
     expect(router).not.toContain('memberOrderIds');
-    expect(picking).toContain('async function fetchExactOrder(orderId)');
-    expect(picking).toContain('const order = await fetchExactOrder(requestedId)');
-    expect(picking).toContain('withLock(`baselinker-order:${requestedId}`');
+    expect(picking).toContain('async function fetchExactOrder(baseLinkerAccountId, orderId)');
+    expect(picking).toContain('fetchExactOrder(accountId, requestedId)');
+    expect(picking).toContain('withLock(`baselinker-order:${accountId}:${requestedId}`');
     expect(picking).not.toContain('baselinker_picking_group_mismatch');
   });
 
@@ -209,11 +211,13 @@ ${router}`).not.toMatch(/callBaseLinker\(['"](?:addOrder|deleteOrder|setOrderFie
     expect(picking).toContain('workflowStage: workflowStageFor(plain)');
   });
 
-  it('does not allow removed damaged/other reasons to be written by current clients', () => {
+  it('has only current issue states and contains no legacy BaseLinker reason fallback', () => {
     const domain = read('domain/baseLinkerPickingState.js');
     const picking = read('services/baseLinkerPicking.js');
     expect(domain).toContain("const CURRENT_ISSUE_STATES = Object.freeze(['shortage', 'not_found'])");
-    expect(domain).toContain("const LEGACY_ISSUE_STATES = Object.freeze(['damaged', 'other'])");
+    expect(domain).not.toContain('LEGACY_ISSUE_STATES');
+    expect(domain).not.toContain("'damaged'");
+    expect(domain).not.toContain("'other'");
     expect(picking).toContain('WRITABLE_ITEM_STATES.has(nextState)');
   });
 
@@ -222,8 +226,8 @@ ${router}`).not.toMatch(/callBaseLinker\(['"](?:addOrder|deleteOrder|setOrderFie
     const picking = read('services/baseLinkerPicking.js');
     const model = read('models/BaseLinkerPickingOrder.js');
     expect(picking).not.toContain('baselinker-picking:');
-    expect(picking).toContain('withLock(`baselinker-order:${id}`');
-    expect(picking).toContain('withLock(`baselinker-order:${requestedId}`');
+    expect(picking).toContain('withLock(`baselinker-order:${accountId}:${id}`');
+    expect(picking).toContain('withLock(`baselinker-order:${accountId}:${requestedId}`');
     expect(picking).toContain('async function savePickingDoc(doc)');
     expect(picking).toContain("error?.name === 'VersionError'");
     expect(model).toContain('optimisticConcurrency: true');

@@ -31,8 +31,8 @@ describe('BaseLinker picking state machine', () => {
     expect(WRITABLE_ITEM_STATES.has('shortage')).toBe(true);
     expect(WRITABLE_ITEM_STATES.has('damaged')).toBe(false);
     expect(WRITABLE_ITEM_STATES.has('other')).toBe(false);
-    expect(ISSUE_STATES.has('damaged')).toBe(true);
-    expect(ISSUE_STATES.has('other')).toBe(true);
+    expect(ISSUE_STATES.has('damaged')).toBe(false);
+    expect(ISSUE_STATES.has('other')).toBe(false);
   });
 
   it('calculates physical packed quantity separately from requested quantity', () => {
@@ -46,7 +46,7 @@ describe('BaseLinker picking state machine', () => {
   });
 
   it('keeps operational shelf independent from detailed picking status/ownership', () => {
-    expect(workflowStageFor({ status: ORDER_STATUS.PAUSED })).toBe(WORKFLOW_STAGE.DEFERRED);
+    expect(() => workflowStageFor({ status: ORDER_STATUS.PAUSED })).toThrow('baselinker_workflow_stage_invalid');
     expect(workflowStageFor({ status: ORDER_STATUS.IN_PROGRESS, workflowStage: WORKFLOW_STAGE.DEFERRED }))
       .toBe(WORKFLOW_STAGE.DEFERRED);
     expect(workflowStageAfterWorkingStatus(WORKFLOW_STAGE.DEFERRED, ORDER_STATUS.READY))
