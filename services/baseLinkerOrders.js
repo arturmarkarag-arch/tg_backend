@@ -82,8 +82,8 @@ async function fetchBaseLinkerOrders(options = {}, callApi = callBaseLinker) {
 
   const unconfirmedMode = baseParams.get_unconfirmed_orders === true;
   // Status-only scans use BaseLinker's documented id_from cursor. The warehouse
-  // core uses this for the unbounded confirmed Intake queue; terminal shelves
-  // come from our local PickingOrder history instead of scanning BaseLinker.
+  // core uses this both for unbounded Intake and for Sent/Cancelled scans whose
+  // date_in_status 14-day boundary must be applied after BaseLinker responds.
   const idCursorMode = unconfirmedMode || baseParams.date_confirmed_from === undefined;
   let cursor = idCursorMode ? (baseParams.id_from ?? null) : (baseParams.date_confirmed_from ?? null);
   const byId = new Map();

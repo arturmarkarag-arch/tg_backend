@@ -7,7 +7,13 @@ const BaseLinkerOrderIndex = require('../models/BaseLinkerOrderIndex');
 const BaseLinkerPickingOrder = require('../models/BaseLinkerPickingOrder');
 const { fetchBaseLinkerOrders } = require('./baseLinkerOrders');
 const { compactOrder } = require('./baseLinkerPublicDto');
-const { getQueueScope, classifyUpstreamOrder, HISTORY_LOOKBACK_DAYS } = require('./baseLinkerQueueScope');
+const {
+  getQueueScope,
+  classifyUpstreamOrder,
+  orderInSentScope,
+  orderInCancelledScope,
+  HISTORY_LOOKBACK_DAYS,
+} = require('./baseLinkerQueueScope');
 const { withLock } = require('../utils/lock');
 const { appError } = require('../utils/errors');
 const { getIO } = require('../socket');
@@ -163,8 +169,8 @@ async function saveIndexState(value) {
   );
 }
 
-async function scanIntake(scope) {
-  const result = await fetchBaseLinkerOrders({
+async function scanIntake(scope, fetchOrders = fetchBaseLinkerOrders) {
+  const result = await fetchOrders({
     statusId: scope.intakeStatusId,
     includeUnconfirmed: true,
     maxPages: INDEX_MAX_PAGES,
@@ -175,12 +181,50 @@ async function scanIntake(scope) {
   return (result.orders || []).filter((order) => Number(order?.order_status_id) === scope.intakeStatusId);
 }
 
+async function scanTerminalHistory(scope, disposition, fetchOrders = fetchBaseLinkerOrders) {
+  const sent = disposition === 'sent';
+  const statusId = sent ? scope.sentStatusId : scope.cancelledStatusId;
+  const inScope = sent ? orderInSentScope : orderInCancelledScope;
+  const result = await fetchOrders({
+    statusId,
+    includeUnconfirmed: true,
+    maxPages: INDEX_MAX_PAGES,
+  });
+  if (result.truncated) {
+    throw appError('baselinker_order_index_truncated', { maxOrders: INDEX_MAX_PAGES * 100 });
+  }
+  return (result.orders || []).filter((order) => inScope(order, scope));
+}
+
+async function scanQueue(scope, fetchOrders = fetchBaseLinkerOrders) {
+  // BaseLinker cannot filter getOrders by date_in_status. Scan each configured
+  // status with the documented id_from cursor, then apply the 14-day terminal
+  // boundary locally. Keep the calls sequential to avoid an API burst.
+  const intake = await scanIntake(scope, fetchOrders);
+  const sent = await scanTerminalHistory(scope, 'sent', fetchOrders);
+  const cancelled = await scanTerminalHistory(scope, 'cancelled', fetchOrders);
+  const byId = new Map();
+  for (const [disposition, orders] of [['intake', intake], ['sent', sent], ['cancelled', cancelled]]) {
+    for (const order of orders) {
+      const orderId = orderIdString(order?.order_id);
+      if (!orderId) continue;
+      byId.set(orderId, {
+        order,
+        orderId,
+        disposition,
+        dateInStatus: disposition === 'intake' ? 0 : Number(order?.date_in_status || 0),
+      });
+    }
+  }
+  return { intake, sent, cancelled, rows: [...byId.values()] };
+}
+
 async function exactOrder(orderId) {
   const result = await fetchBaseLinkerOrders({ orderId, includeUnconfirmed: true, maxPages: 1 });
   return (result.orders || []).find((row) => String(row?.order_id || '') === String(orderId)) || null;
 }
 
-async function reconcileIndexTransition({ scope, currentOrders, previousIds }) {
+async function reconcileIndexTransition({ scope, currentOrders, previousIds, previousIntakeIds }) {
   const { reconcilePickingFromUpstreamChanges, markPickingOrdersUpstreamUpdated } = require('./baseLinkerPicking');
   const currentById = new Map(currentOrders.map((order) => [String(order.order_id), order]));
   const currentIds = new Set(currentById.keys());
@@ -216,7 +260,10 @@ async function reconcileIndexTransition({ scope, currentOrders, previousIds }) {
     await markPickingOrdersUpstreamUpdated({
       orderIds: untrackedDeparted,
       orders: exactOrders,
-      knownAdmittedOrderIds: untrackedDeparted,
+      // Only a row that actually departed Intake was admitted to warehouse
+      // work. An expired terminal-history row must not be re-materialized as a
+      // fresh Updated/Cancelled local PickingOrder.
+      knownAdmittedOrderIds: untrackedDeparted.filter((id) => previousIntakeIds.has(id)),
     });
   }
   return { departed: effectiveDeparted.length, restoredIntakeIds: [...restoredIntakeIds] };
@@ -226,19 +273,26 @@ async function performIndexSync(scope, { resetIndex = false } = {}) {
   await ensureBaseLinkerOrderIndexReady();
   if (resetIndex) await BaseLinkerOrderIndex.deleteMany({});
   const syncToken = crypto.randomUUID();
-  const previousRows = await BaseLinkerOrderIndex.find({}).select('orderId').lean();
+  const previousRows = await BaseLinkerOrderIndex.find({}).select('orderId upstreamDisposition').lean();
   const previousIds = new Set(previousRows.map((row) => String(row.orderId || '')).filter(Boolean));
-  const currentOrders = await scanIntake(scope);
+  const previousIntakeIds = new Set(previousRows
+    .filter((row) => !row.upstreamDisposition || row.upstreamDisposition === 'intake')
+    .map((row) => String(row.orderId || ''))
+    .filter(Boolean));
+  const queue = await scanQueue(scope);
+  const currentOrders = queue.rows.map((row) => row.order);
   const now = new Date();
 
-  if (currentOrders.length) {
-    await BaseLinkerOrderIndex.bulkWrite(currentOrders.map((order) => ({
+  if (queue.rows.length) {
+    await BaseLinkerOrderIndex.bulkWrite(queue.rows.map((row) => ({
       updateOne: {
-        filter: { orderId: String(order.order_id) },
+        filter: { orderId: row.orderId },
         update: {
           $set: {
-            orderId: String(order.order_id),
-            orderIdNumeric: Number(order.order_id),
+            orderId: row.orderId,
+            orderIdNumeric: Number(row.orderId),
+            upstreamDisposition: row.disposition,
+            dateInStatus: row.dateInStatus,
             syncToken,
             seenAt: now,
           },
@@ -250,7 +304,12 @@ async function performIndexSync(scope, { resetIndex = false } = {}) {
 
   // Reconcile before sweep. If any exact read fails, the stale ID rows remain
   // and the whole sync fails closed instead of silently dropping warehouse work.
-  const transition = await reconcileIndexTransition({ scope, currentOrders, previousIds });
+  const transition = await reconcileIndexTransition({
+    scope,
+    currentOrders,
+    previousIds,
+    previousIntakeIds,
+  });
   if (transition.restoredIntakeIds?.length) {
     await BaseLinkerOrderIndex.updateMany(
       { orderId: { $in: transition.restoredIntakeIds } },
@@ -260,7 +319,7 @@ async function performIndexSync(scope, { resetIndex = false } = {}) {
   await BaseLinkerOrderIndex.deleteMany({ syncToken: { $ne: syncToken } });
   const orderCount = await BaseLinkerOrderIndex.countDocuments({});
   const lastSyncAt = now.toISOString();
-  const currentIds = new Set(currentOrders.map((order) => String(order?.order_id || '')).filter(Boolean));
+  const currentIds = new Set(queue.rows.map((row) => row.orderId));
   const added = [...currentIds].filter((id) => !previousIds.has(id)).length;
   const membershipChanged = resetIndex || added > 0 || Number(transition.departed || 0) > 0;
   await saveIndexState({ initialized: true, scopeKey: scope.scopeKey, lastSyncAt, orderCount, lastError: null });
@@ -395,6 +454,18 @@ async function liveIntakeOrdersForIds(scope, ids) {
   return found;
 }
 
+async function liveExactOrdersForIds(ids) {
+  const found = new Map();
+  // A terminal page contains at most pageSize (50) rows. Exact reads avoid
+  // persisting a full BaseLinker order mirror while still rendering current
+  // product/package data for the selected history page.
+  await Promise.all(ids.map(async (id) => {
+    const order = await exactOrder(id);
+    if (order) found.set(String(id), order);
+  }));
+  return found;
+}
+
 async function getIndexedOrderPage({ workflowFilter = 'processing', packedBy = '', search = '', page = 1, pageSize: pageSizeInput = 10 } = {}) {
   const scope = await getQueueScope();
   await syncBaseLinkerOrderIndex({ maxAgeMs: INDEX_REFRESH_MS });
@@ -407,12 +478,13 @@ async function getIndexedOrderPage({ workflowFilter = 'processing', packedBy = '
   const safePackedBy = safeWorkflow === 'packed' ? String(packedBy || '').trim().slice(0, 120) : '';
 
   const [indexRows, pickingDocs] = await Promise.all([
-    BaseLinkerOrderIndex.find({}).select('orderId orderIdNumeric').sort({ orderIdNumeric: -1 }).lean(),
+    BaseLinkerOrderIndex.find({}).select('orderId orderIdNumeric upstreamDisposition dateInStatus').sort({ orderIdNumeric: -1 }).lean(),
     BaseLinkerPickingOrder.find({}).lean(),
   ]);
   const pickingById = new Map(pickingDocs.map((doc) => [String(doc.orderId || ''), doc]).filter(([id]) => id));
   const indexIds = indexRows.map((row) => String(row.orderId || '')).filter(Boolean);
   const indexSet = new Set(indexIds);
+  const indexById = new Map(indexRows.map((row) => [String(row.orderId || ''), row]).filter(([id]) => id));
 
   const workflowCounts = { processing: 0, deferred: 0, packed: 0, sent: 0, cancelled: 0, updated: 0 };
   const rowIdsByStage = { processing: [], deferred: [], packed: [], sent: [], cancelled: [], updated: [] };
@@ -421,8 +493,10 @@ async function getIndexedOrderPage({ workflowFilter = 'processing', packedBy = '
   // its own workflow shelf; an unclaimed Intake ID is Processing.
   for (const id of indexIds) {
     const doc = pickingById.get(id);
-    const stage = doc ? localDisplayStage(doc) : 'processing';
-    if (stage === 'sent' || stage === 'cancelled') continue;
+    const indexedDisposition = String(indexById.get(id)?.upstreamDisposition || 'intake');
+    const stage = ['sent', 'cancelled'].includes(indexedDisposition)
+      ? indexedDisposition
+      : (doc ? localDisplayStage(doc) : 'processing');
     if (!rowIdsByStage[stage].includes(id)) rowIdsByStage[stage].push(id);
   }
 
@@ -430,8 +504,10 @@ async function getIndexedOrderPage({ workflowFilter = 'processing', packedBy = '
   for (const doc of pickingDocs) {
     const id = String(doc.orderId || '');
     if (!id || !pickingIsRecentHistory(doc)) continue;
-    const stage = localDisplayStage(doc);
-    if (!rowIdsByStage[stage].includes(id)) rowIdsByStage[stage].push(id);
+    if (!indexSet.has(id)) {
+      const stage = localDisplayStage(doc);
+      if (!rowIdsByStage[stage].includes(id)) rowIdsByStage[stage].push(id);
+    }
     if (doc.upstreamReviewRequired === true && !rowIdsByStage.updated.includes(id)) rowIdsByStage.updated.push(id);
   }
 
@@ -447,8 +523,8 @@ async function getIndexedOrderPage({ workflowFilter = 'processing', packedBy = '
     // Product/customer search over untouched Intake orders is an explicit live
     // BaseLinker read. The full response is used only in this request and never
     // written to Mongo. Local PickingOrder rows are searched from our own data.
-    const live = await scanIntake(scope);
-    liveSearchOrders = new Map(live.map((order) => [String(order.order_id), order]));
+    const live = await scanQueue(scope);
+    liveSearchOrders = new Map(live.rows.map((row) => [row.orderId, row.order]));
     for (const stage of Object.keys(rowIdsByStage)) {
       rowIdsByStage[stage] = rowIdsByStage[stage].filter((id) => {
         const doc = pickingById.get(id);
@@ -471,7 +547,11 @@ async function getIndexedOrderPage({ workflowFilter = 'processing', packedBy = '
   const selectedIds = allIds.slice((actualPage - 1) * safePageSize, actualPage * safePageSize);
 
   const ordersById = new Map();
-  const selectedIntakeIds = selectedIds.filter((id) => indexSet.has(id));
+  const selectedIntakeIds = selectedIds.filter((id) => indexSet.has(id)
+    && String(indexById.get(id)?.upstreamDisposition || 'intake') === 'intake');
+  const selectedTerminalIds = selectedIds.filter((id) => indexSet.has(id)
+    && ['sent', 'cancelled'].includes(String(indexById.get(id)?.upstreamDisposition || ''))
+    && !pickingById.has(id));
   if (liveSearchOrders) {
     const trackedOrders = [];
     for (const id of selectedIntakeIds) {
@@ -487,6 +567,8 @@ async function getIndexedOrderPage({ workflowFilter = 'processing', packedBy = '
   } else {
     const live = await liveIntakeOrdersForIds(scope, selectedIntakeIds);
     for (const [id, order] of live) ordersById.set(id, order);
+    const terminal = await liveExactOrdersForIds(selectedTerminalIds);
+    for (const [id, order] of terminal) ordersById.set(id, order);
   }
 
   for (const id of selectedIds) {
@@ -537,5 +619,7 @@ module.exports = {
   getIndexedOrderPage,
   orderFromPicking,
   scanIntake,
+  scanTerminalHistory,
+  scanQueue,
   getLocalOrderProjection,
 };

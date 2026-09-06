@@ -9,20 +9,24 @@ const read = (rel) => fs.readFileSync(path.join(root, rel), 'utf8');
     const model = read('models/BaseLinkerOrderIndex.js');
     expect(model).toContain('orderId:');
     expect(model).toContain('orderIdNumeric:');
+    expect(model).toContain('upstreamDisposition:');
+    expect(model).toContain('dateInStatus:');
     expect(model).toContain('syncToken:');
     expect(model).toContain('seenAt:');
     expect(model).not.toMatch(/\border\s*:/);
     for (const forbidden of ['products:', 'customer', 'delivery_address', 'email:', 'phone:']) expect(model).not.toContain(forbidden);
   });
 
-  it('scans only confirmed Intake and discards full payload after extracting ids', () => {
+  it('scans Intake plus bounded Sent/Cancelled history and stores no full payload', () => {
     const service = read('services/baseLinkerOrderIndex.js');
     const scan = service.slice(service.indexOf('async function scanIntake'), service.indexOf('async function exactOrder'));
     expect(scan).toContain('statusId: scope.intakeStatusId');
     expect(scan).toContain('includeUnconfirmed: true');
-    expect(scan).not.toContain('scope.sentStatusId');
-    expect(scan).not.toContain('scope.cancelledStatusId');
-    expect(service).toContain('orderId: String(order.order_id)');
+    expect(scan).toContain('scope.sentStatusId');
+    expect(scan).toContain('scope.cancelledStatusId');
+    expect(scan).toContain('orderInSentScope');
+    expect(scan).toContain('orderInCancelledScope');
+    expect(service).toContain('orderId: row.orderId');
     expect(service).not.toContain('order: compactOrder');
   });
 

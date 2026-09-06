@@ -65,12 +65,14 @@ check('server scheduler refreshes only the minimal queue index', () => {
   assert(schedulerSrc.includes("runAsSchedulerLeader('baselinker-queue-index'"));
 });
 
-check('background scan uses Intake status as the admission gate and includes unconfirmed rows', () => {
+check('background scan indexes Intake plus 14-day Sent and Cancelled membership', () => {
   const scan = indexSrc.slice(indexSrc.indexOf('async function scanIntake'), indexSrc.indexOf('async function exactOrder'));
   assert(scan.includes('statusId: scope.intakeStatusId'));
   assert(scan.includes('includeUnconfirmed: true'));
-  assert(!scan.includes('scope.sentStatusId'));
-  assert(!scan.includes('scope.cancelledStatusId'));
+  assert(scan.includes('scope.sentStatusId'));
+  assert(scan.includes('scope.cancelledStatusId'));
+  assert(scan.includes('orderInSentScope'));
+  assert(scan.includes('orderInCancelledScope'));
 });
 
 check('BaseLinker status scan uses documented id_from cursor', () => {
@@ -88,9 +90,11 @@ check('warehouse reads include unconfirmed because Intake status is the business
   assert(!indexSrc.includes('order?.confirmed !== false'));
 });
 
-check('new Intake index stores only order ids extracted from transient API responses', () => {
-  assert(indexSrc.includes('orderId: String(order.order_id)'));
-  assert(indexSrc.includes('orderIdNumeric: Number(order.order_id)'));
+check('queue index stores only order ids and shelf membership extracted from transient API responses', () => {
+  assert(indexSrc.includes('orderId: row.orderId'));
+  assert(indexSrc.includes('orderIdNumeric: Number(row.orderId)'));
+  assert(indexSrc.includes('upstreamDisposition: row.disposition'));
+  assert(indexSrc.includes('dateInStatus: row.dateInStatus'));
   assert(!indexSrc.includes('order: compactOrder(order)'));
   assert(!indexSrc.includes('rawOrder'));
 });
