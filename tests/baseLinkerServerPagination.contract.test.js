@@ -21,7 +21,7 @@ describe('BaseLinker ID-index pagination contract', () => {
     expect(index).toContain('liveIntakeOrdersForIds');
     expect(index).toContain('statusId: scope.intakeStatusId');
     expect(index).toContain('idFrom: Math.min(...numeric)');
-    expect(index).toContain('includeUnconfirmed: false');
+    expect(index).toContain('includeUnconfirmed: true');
   });
 
   it('renders already-tracked shelves from the local PickingOrder business state', () => {
@@ -34,8 +34,8 @@ describe('BaseLinker ID-index pagination contract', () => {
   it('keeps exact order reads live for critical one-order operations', () => {
     const route = read('routes/baseLinker.js');
     const picking = read('services/baseLinkerPicking.js');
-    expect(route).toMatch(/fetchBaseLinkerOrders\([\s\S]*orderId:\s*exactOrderId[\s\S]*includeUnconfirmed:\s*false[\s\S]*maxPages:\s*1/);
+    expect(route).toMatch(/fetchBaseLinkerOrders\([\s\S]*orderId:\s*exactOrderId[\s\S]*includeUnconfirmed:\s*true[\s\S]*maxPages:\s*1/);
     expect(picking).toContain('async function fetchExactOrder');
-    expect(picking).toContain('includeUnconfirmed: false');
+    expect(picking).toContain('includeUnconfirmed: true');
   });
 });

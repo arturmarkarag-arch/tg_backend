@@ -115,11 +115,11 @@ ${router}`).not.toMatch(/callBaseLinker\(['"](?:addOrder|deleteOrder|setOrderFie
     expect(picking).toContain('packedSummary');
   });
 
-  it('admits and exact-rereads confirmed BaseLinker orders only', () => {
+  it('uses Intake status as the warehouse admission gate and exact-rereads unconfirmed orders too', () => {
     const picking = read('services/baseLinkerPicking.js');
     const router = read('routes/baseLinker.js');
-    expect(picking).toMatch(/orderId:\s*id,[\s\S]{0,200}includeUnconfirmed:\s*false,[\s\S]{0,100}maxPages:\s*1/);
-    expect(router).toContain('includeUnconfirmed: false');
+    expect(picking).toMatch(/orderId:\s*id,[\s\S]{0,200}includeUnconfirmed:\s*true,[\s\S]{0,100}maxPages:\s*1/);
+    expect(router).toContain('includeUnconfirmed: true');
     expect(router).not.toContain("req.query.includeUnconfirmed === '1'");
     expect(picking).toContain("appError('baselinker_order_not_returned'");
   });

@@ -20,7 +20,7 @@ const HISTORY_RETENTION_MS = HISTORY_LOOKBACK_DAYS * 24 * 60 * 60 * 1000;
 let indexReadyPromise = null;
 let syncInFlight = null;
 
-function safePage(value) {
+function normalizePage(value) {
   const n = Number(value);
   return Number.isInteger(n) && n > 0 ? n : 1;
 }
@@ -166,17 +166,17 @@ async function saveIndexState(value) {
 async function scanIntake(scope) {
   const result = await fetchBaseLinkerOrders({
     statusId: scope.intakeStatusId,
-    includeUnconfirmed: false,
+    includeUnconfirmed: true,
     maxPages: INDEX_MAX_PAGES,
   });
   if (result.truncated) {
     throw appError('baselinker_order_index_truncated', { maxOrders: INDEX_MAX_PAGES * 100 });
   }
-  return (result.orders || []).filter((order) => Number(order?.order_status_id) === scope.intakeStatusId && order?.confirmed !== false);
+  return (result.orders || []).filter((order) => Number(order?.order_status_id) === scope.intakeStatusId);
 }
 
 async function exactOrder(orderId) {
-  const result = await fetchBaseLinkerOrders({ orderId, includeUnconfirmed: false, maxPages: 1 });
+  const result = await fetchBaseLinkerOrders({ orderId, includeUnconfirmed: true, maxPages: 1 });
   return (result.orders || []).find((row) => String(row?.order_id || '') === String(orderId)) || null;
 }
 
@@ -336,7 +336,7 @@ async function liveIntakeOrdersForIds(scope, ids) {
   const result = await fetchBaseLinkerOrders({
     statusId: scope.intakeStatusId,
     idFrom: Math.min(...numeric),
-    includeUnconfirmed: false,
+    includeUnconfirmed: true,
     maxPages: 2,
   });
   const found = new Map();
@@ -344,6 +344,22 @@ async function liveIntakeOrdersForIds(scope, ids) {
     const id = String(order?.order_id || '');
     if (wanted.has(id)) found.set(id, order);
     if (found.size === wanted.size) break;
+  }
+
+  // For already-tracked rows, the transient live page payload is also our
+  // immediate upstream-change detector. Compare it with PickingOrder now so a
+  // quantity/product change is visible on page refresh without persisting the
+  // BaseLinker order or waiting for the background index interval.
+  const trackedFoundRows = found.size
+    ? await BaseLinkerPickingOrder.find({ orderId: { $in: [...found.keys()] } }).select('orderId').lean()
+    : [];
+  if (trackedFoundRows.length) {
+    const trackedIds = new Set(trackedFoundRows.map((row) => String(row.orderId || '')).filter(Boolean));
+    const trackedOrders = [...found.entries()].filter(([id]) => trackedIds.has(id)).map(([, order]) => order);
+    if (trackedOrders.length) {
+      const { reconcilePickingFromUpstreamChanges } = require('./baseLinkerPicking');
+      await reconcilePickingFromUpstreamChanges({ orders: trackedOrders, removedOrderIds: [] });
+    }
   }
 
   // A status transition can race the page read after the index sync. Exact-read
@@ -385,7 +401,7 @@ async function getIndexedOrderPage({ workflowFilter = 'processing', packedBy = '
   const safeWorkflow = ['processing', 'deferred', 'packed', 'sent', 'cancelled', 'updated'].includes(String(workflowFilter))
     ? String(workflowFilter)
     : 'processing';
-  const safePage = safePage(page);
+  const requestedPage = normalizePage(page);
   const safePageSize = pageSize(pageSizeInput);
   const normalizedSearch = String(search || '').trim().toLowerCase().slice(0, 160);
   const safePackedBy = safeWorkflow === 'packed' ? String(packedBy || '').trim().slice(0, 120) : '';
@@ -451,18 +467,25 @@ async function getIndexedOrderPage({ workflowFilter = 'processing', packedBy = '
   const allIds = rowIdsByStage[safeWorkflow] || [];
   const total = allIds.length;
   const pageCount = Math.max(1, Math.ceil(total / safePageSize));
-  const actualPage = Math.min(safePage, pageCount);
+  const actualPage = Math.min(requestedPage, pageCount);
   const selectedIds = allIds.slice((actualPage - 1) * safePageSize, actualPage * safePageSize);
 
   const ordersById = new Map();
-  const freshIntakeIds = selectedIds.filter((id) => indexSet.has(id) && !pickingById.has(id));
+  const selectedIntakeIds = selectedIds.filter((id) => indexSet.has(id));
   if (liveSearchOrders) {
-    for (const id of freshIntakeIds) {
+    const trackedOrders = [];
+    for (const id of selectedIntakeIds) {
       const order = liveSearchOrders.get(id);
-      if (order) ordersById.set(id, order);
+      if (!order) continue;
+      ordersById.set(id, order);
+      if (pickingById.has(id)) trackedOrders.push(order);
+    }
+    if (trackedOrders.length) {
+      const { reconcilePickingFromUpstreamChanges } = require('./baseLinkerPicking');
+      await reconcilePickingFromUpstreamChanges({ orders: trackedOrders, removedOrderIds: [] });
     }
   } else {
-    const live = await liveIntakeOrdersForIds(scope, freshIntakeIds);
+    const live = await liveIntakeOrdersForIds(scope, selectedIntakeIds);
     for (const [id, order] of live) ordersById.set(id, order);
   }
 

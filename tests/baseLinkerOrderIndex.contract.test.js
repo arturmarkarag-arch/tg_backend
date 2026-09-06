@@ -19,7 +19,7 @@ const read = (rel) => fs.readFileSync(path.join(root, rel), 'utf8');
     const service = read('services/baseLinkerOrderIndex.js');
     const scan = service.slice(service.indexOf('async function scanIntake'), service.indexOf('async function exactOrder'));
     expect(scan).toContain('statusId: scope.intakeStatusId');
-    expect(scan).toContain('includeUnconfirmed: false');
+    expect(scan).toContain('includeUnconfirmed: true');
     expect(scan).not.toContain('scope.sentStatusId');
     expect(scan).not.toContain('scope.cancelledStatusId');
     expect(service).toContain('orderId: String(order.order_id)');
@@ -32,6 +32,13 @@ const read = (rel) => fs.readFileSync(path.join(root, rel), 'utf8');
     expect(service).toContain('const order = await exactOrder(id)');
     expect(service).toContain('reconcilePickingFromUpstreamChanges');
     expect(service).toContain('knownAdmittedOrderIds');
+  });
+
+  it('normalizes page input without shadowing the pagination helper', () => {
+    const service = read('services/baseLinkerOrderIndex.js');
+    expect(service).toContain('function normalizePage(value)');
+    expect(service).toContain('const requestedPage = normalizePage(page)');
+    expect(service).not.toContain('const safePage = safePage(page)');
   });
 
   it('does not depend on the retired journal/full-order mirror runtime', () => {

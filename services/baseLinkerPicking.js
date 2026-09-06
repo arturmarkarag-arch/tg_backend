@@ -198,6 +198,15 @@ function publicState(doc) {
       removed: Number(plain.lastUpstreamChangeSummary?.removed || 0),
       changed: Number(plain.lastUpstreamChangeSummary?.changed || 0),
     },
+    lastUpstreamChangeDetails: (Array.isArray(plain.lastUpstreamChangeDetails) ? plain.lastUpstreamChangeDetails : []).slice(0, 12).map((detail) => ({
+      kind: String(detail?.kind || ''),
+      lineKey: String(detail?.lineKey || ''),
+      name: String(detail?.name || ''),
+      field: String(detail?.field || ''),
+      fromValue: String(detail?.fromValue ?? ''),
+      toValue: String(detail?.toValue ?? ''),
+      qty: Number(detail?.qty || 0),
+    })),
   };
 }
 
@@ -220,11 +229,11 @@ async function fetchExactOrder(orderId) {
   const id = Number(orderId);
   if (!Number.isSafeInteger(id) || id <= 0) throw appError('baselinker_order_id_invalid');
 
-  // Warehouse work is admitted only from confirmed BaseLinker orders.
-  // BaseLinker documents that unconfirmed orders may be incomplete and still change.
+  // Warehouse admission is controlled by the configured Intake status.
+  // Include unconfirmed orders as well because BaseLinker confirmed is not our business-ready gate.
   const result = await fetchBaseLinkerOrders({
     orderId: id,
-    includeUnconfirmed: false,
+    includeUnconfirmed: true,
     maxPages: 1,
   });
   const order = (result.orders || []).find((candidate) => String(candidate?.order_id) === String(id));
@@ -289,6 +298,41 @@ function applyUpstreamDisposition(doc, order, scope, actor) {
   return { changed, releasedOwner, disposition: nextDisposition };
 }
 
+
+function upstreamLineChangeDetails(oldItem, sourceItem) {
+  const details = [];
+  const common = {
+    kind: 'changed',
+    lineKey: String(sourceItem?.lineKey || oldItem?.lineKey || ''),
+    name: String(sourceItem?.name || oldItem?.name || ''),
+  };
+  const fields = [
+    ['requestedQty', 'quantity'],
+    ['name', 'name'],
+    ['variantId', 'variant'],
+    ['sku', 'sku'],
+    ['ean', 'ean'],
+    ['attributes', 'attributes'],
+    ['productId', 'product'],
+  ];
+  for (const [key, field] of fields) {
+    const before = key === 'requestedQty' ? Number(oldItem?.[key] || 0) : String(oldItem?.[key] ?? '');
+    const after = key === 'requestedQty' ? Number(sourceItem?.[key] || 0) : String(sourceItem?.[key] ?? '');
+    if (String(before) === String(after)) continue;
+    details.push({
+      ...common,
+      field,
+      fromValue: String(before),
+      toValue: String(after),
+      qty: field === 'quantity' ? Number(after || 0) : 0,
+    });
+  }
+  if (!details.length) {
+    details.push({ ...common, field: 'product', fromValue: '', toValue: '', qty: Number(sourceItem?.requestedQty || 0) });
+  }
+  return details;
+}
+
 function syncDocWithOrder(doc, order, actor) {
   // Persist only the minimal source metadata needed by our own local workflow.
   // Full BaseLinker orders are never mirrored into Mongo.
@@ -316,12 +360,14 @@ function syncDocWithOrder(doc, order, actor) {
       updatedAt: null,
     }));
     doc.orderFingerprint = nextFingerprint;
+    doc.lastUpstreamChangeDetails = [];
     return { changed: false, metadataChanged, summary: { added: 0, removed: 0, changed: 0 }, initialized: true };
   }
   if (doc.orderFingerprint === nextFingerprint) return { changed: false, metadataChanged, summary: { added: 0, removed: 0, changed: 0 } };
 
   const oldByKey = new Map((doc.items || []).map((item) => [String(item.lineKey), item]));
   const nextItems = [];
+  const details = [];
   let added = 0;
   let changed = 0;
 
@@ -329,6 +375,15 @@ function syncDocWithOrder(doc, order, actor) {
     const old = oldByKey.get(source.lineKey);
     if (!old) {
       added += 1;
+      details.push({
+        kind: 'added',
+        lineKey: String(source.lineKey || ''),
+        name: String(source.name || ''),
+        field: 'product',
+        fromValue: '',
+        toValue: '',
+        qty: Number(source.requestedQty || 0),
+      });
       nextItems.push({
         ...source,
         state: 'pending',
@@ -343,6 +398,7 @@ function syncDocWithOrder(doc, order, actor) {
     oldByKey.delete(source.lineKey);
     if (String(old.sourceFingerprint || '') !== source.sourceFingerprint) {
       changed += 1;
+      details.push(...upstreamLineChangeDetails(old, source));
       nextItems.push({
         ...source,
         state: 'pending',
@@ -366,11 +422,23 @@ function syncDocWithOrder(doc, order, actor) {
   }
 
   const removed = oldByKey.size;
+  for (const removedItem of oldByKey.values()) {
+    details.push({
+      kind: 'removed',
+      lineKey: String(removedItem?.lineKey || ''),
+      name: String(removedItem?.name || ''),
+      field: 'product',
+      fromValue: '',
+      toValue: '',
+      qty: Number(removedItem?.requestedQty || 0),
+    });
+  }
   const summary = { added, removed, changed };
   doc.items = nextItems;
   doc.orderFingerprint = nextFingerprint;
   doc.lastUpstreamChangeAt = new Date();
   doc.lastUpstreamChangeSummary = summary;
+  doc.lastUpstreamChangeDetails = details.slice(0, 12);
   // Once a local picking document exists, any later BaseLinker line change
   // needs explicit review. It does not matter whether the worker had already
   // ticked one item or had only just claimed the order.
@@ -1205,7 +1273,7 @@ async function fetchOptionalExactOrder(orderId) {
   if (!Number.isSafeInteger(id) || id <= 0) return null;
   const result = await fetchBaseLinkerOrders({
     orderId: id,
-    includeUnconfirmed: false,
+    includeUnconfirmed: true,
     maxPages: 1,
   });
   const order = (result.orders || []).find((candidate) => String(candidate?.order_id) === String(id)) || null;
@@ -1355,6 +1423,7 @@ async function reconcilePickingFromUpstreamChanges({ orders = [], removedOrderId
         doc.upstreamReviewedAt = null;
         doc.lastUpstreamChangeAt = new Date();
         doc.lastUpstreamChangeSummary = { added: 0, removed: 0, changed: 0 };
+        doc.lastUpstreamChangeDetails = [];
         doc.revision = Number(doc.revision || 0) + 1;
         appendHistory(doc, 'upstream_order_missing', systemActor, {
           orderId: localOrderId,

@@ -14,6 +14,16 @@ const PickingHistoryEntrySchema = new mongoose.Schema({
   meta: { type: mongoose.Schema.Types.Mixed, default: {} },
 }, { _id: false });
 
+const UpstreamChangeDetailSchema = new mongoose.Schema({
+  kind: { type: String, enum: ['added', 'removed', 'changed'], required: true },
+  lineKey: { type: String, default: '' },
+  name: { type: String, default: '' },
+  field: { type: String, default: '' },
+  fromValue: { type: String, default: '' },
+  toValue: { type: String, default: '' },
+  qty: { type: Number, default: 0 },
+}, { _id: false });
+
 const PickingItemSchema = new mongoose.Schema({
   lineKey: { type: String, required: true },
   sourceOrderId: { type: String, default: '' },
@@ -111,6 +121,7 @@ const BaseLinkerPickingOrderSchema = new mongoose.Schema({
     removed: { type: Number, default: 0 },
     changed: { type: Number, default: 0 },
   },
+  lastUpstreamChangeDetails: { type: [UpstreamChangeDetailSchema], default: [] },
 
   history: { type: [PickingHistoryEntrySchema], default: [] },
 }, { timestamps: true, optimisticConcurrency: true });

@@ -83,7 +83,7 @@ router.get('/orders', asyncHandler(async (req, res) => {
     // BaseLinker truth and must never be satisfied only from a local projection.
     result = await fetchBaseLinkerOrders({
       orderId: exactOrderId,
-      includeUnconfirmed: false,
+      includeUnconfirmed: true,
       maxPages: 1,
     });
     if (!(result.orders || []).length) {

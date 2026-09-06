@@ -48,7 +48,7 @@ async function purgeVerifiedTerminalPicking(scope, cutoffDate, cutoffSeconds) {
         }).lean();
         if (!current) return;
 
-        const exact = await fetchBaseLinkerOrders({ orderId, includeUnconfirmed: false, maxPages: 1 });
+        const exact = await fetchBaseLinkerOrders({ orderId, includeUnconfirmed: true, maxPages: 1 });
         const order = (exact.orders || []).find((row) => String(row?.order_id || '') === orderId) || null;
         checked += 1;
         if (order) {

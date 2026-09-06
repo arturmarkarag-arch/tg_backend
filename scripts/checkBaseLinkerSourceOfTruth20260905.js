@@ -65,10 +65,10 @@ check('server scheduler refreshes only the minimal queue index', () => {
   assert(schedulerSrc.includes("runAsSchedulerLeader('baselinker-queue-index'"));
 });
 
-check('background scan reads only confirmed Intake status', () => {
+check('background scan uses Intake status as the admission gate and includes unconfirmed rows', () => {
   const scan = indexSrc.slice(indexSrc.indexOf('async function scanIntake'), indexSrc.indexOf('async function exactOrder'));
   assert(scan.includes('statusId: scope.intakeStatusId'));
-  assert(scan.includes('includeUnconfirmed: false'));
+  assert(scan.includes('includeUnconfirmed: true'));
   assert(!scan.includes('scope.sentStatusId'));
   assert(!scan.includes('scope.cancelledStatusId'));
 });
@@ -80,10 +80,12 @@ check('BaseLinker status scan uses documented id_from cursor', () => {
   assert(ordersSrc.includes('const advanced = lastOrderId + 1'));
 });
 
-check('all warehouse reads are confirmed-only', () => {
-  for (const src of [indexSrc, pickingSrc, retentionSrc, routeSrc]) assert(!src.includes('includeUnconfirmed: true'));
-  assert(indexSrc.includes('includeUnconfirmed: false'));
-  assert(pickingSrc.includes('includeUnconfirmed: false'));
+check('warehouse reads include unconfirmed because Intake status is the business-ready gate', () => {
+  assert(indexSrc.includes('includeUnconfirmed: true'));
+  assert(pickingSrc.includes('includeUnconfirmed: true'));
+  assert(retentionSrc.includes('includeUnconfirmed: true'));
+  assert(routeSrc.includes('includeUnconfirmed: true'));
+  assert(!indexSrc.includes('order?.confirmed !== false'));
 });
 
 check('new Intake index stores only order ids extracted from transient API responses', () => {
@@ -208,7 +210,7 @@ check('terminal local history retention remains 14 days and fail-closed', () => 
   assert(retentionSrc.includes('BASELINKER_HISTORY_RETENTION_DAYS = HISTORY_LOOKBACK_DAYS'));
   assert(retentionSrc.includes('BaseLinkerPickingOrder.deleteOne'));
   assert(retentionSrc.includes("if (classifyUpstreamOrder(order, scope) === 'intake') return"));
-  assert(retentionSrc.includes('includeUnconfirmed: false'));
+  assert(retentionSrc.includes('includeUnconfirmed: true'));
 });
 
 check('manual refresh is a real upstream Intake index refresh', () => {

@@ -7,7 +7,7 @@ Changes:
 - active local workflow retained even when upstream moves to ordinary non-Intake status
 - disappeared orders beyond exact-recovery batch are retained for next pass, never swept unchecked
 - packing no longer overwrites real upstreamDisposition with intake
-- confirmed-only BaseLinker order reads (get_unconfirmed_orders=false)
+- Intake-status admission; BaseLinker reads include unconfirmed rows (get_unconfirmed_orders=true)
 - exact missing order blocks further warehouse mutation until upstream exists again
 
 No BaseLinker accountScope logic is reintroduced.
