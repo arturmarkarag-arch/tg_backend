@@ -7,12 +7,25 @@ const { runAsSchedulerLeader } = require('./schedulerLeader');
 
 let timer = null;
 let running = false;
+let retryAfterMs = 0;
+const ERROR_BACKOFF_MS = Math.min(
+  30 * 60_000,
+  Math.max(60_000, Number(process.env.BASELINKER_QUEUE_ERROR_BACKOFF_MS) || (10 * 60_000)),
+);
 
 async function runBaseLinkerQueueTick() {
   if (!isBaseLinkerConfigured()) return { skipped: true, reason: 'not_configured' };
+  if (Date.now() < retryAfterMs) return { skipped: true, reason: 'error_backoff', retryAfter: new Date(retryAfterMs).toISOString() };
   const scope = await getQueueScope();
   if (!scope.configured) return { skipped: true, reason: 'queue_not_configured' };
-  return runAsSchedulerLeader('baselinker-queue-index', () => syncBaseLinkerOrderIndex({ force: true }), { ttlMs: Math.max(60_000, INDEX_REFRESH_MS * 3) });
+  try {
+    const result = await runAsSchedulerLeader('baselinker-queue-index', () => syncBaseLinkerOrderIndex({ force: true }), { ttlMs: Math.max(60_000, INDEX_REFRESH_MS * 3) });
+    retryAfterMs = 0;
+    return result;
+  } catch (error) {
+    retryAfterMs = Date.now() + ERROR_BACKOFF_MS;
+    throw error;
+  }
 }
 
 function startBaseLinkerQueueScheduler() {
@@ -38,4 +51,5 @@ module.exports = {
   runBaseLinkerQueueTick,
   startBaseLinkerQueueScheduler,
   isBaseLinkerQueueSchedulerStarted,
+  ERROR_BACKOFF_MS,
 };

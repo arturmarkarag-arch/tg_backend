@@ -20,6 +20,13 @@ const { getIO } = require('../socket');
 
 const INDEX_STATE_KEY = 'baselinker.orderIndex.v1';
 const INDEX_REFRESH_MS = Math.min(5 * 60_000, Math.max(15_000, Number(process.env.BASELINKER_QUEUE_REFRESH_MS) || 30_000));
+// Terminal status scans must walk every order in those BaseLinker statuses
+// because the API cannot filter by date_in_status. Keep that expensive scan
+// separate from the fast Intake membership refresh.
+const TERMINAL_INDEX_REFRESH_MS = Math.min(
+  60 * 60_000,
+  Math.max(5 * 60_000, Number(process.env.BASELINKER_TERMINAL_REFRESH_MS) || (5 * 60_000)),
+);
 const INDEX_MAX_PAGES = Math.min(90, Math.max(1, Number(process.env.BASELINKER_QUEUE_MAX_PAGES) || 90));
 const PAGE_SIZE_VALUES = new Set([10, 20, 50]);
 const HISTORY_RETENTION_MS = HISTORY_LOOKBACK_DAYS * 24 * 60 * 60 * 1000;
@@ -156,6 +163,9 @@ async function loadIndexState(scope = null) {
     initialized: value.initialized === true && scope.configured && value.scopeKey === scope.scopeKey,
     scopeKey: value.scopeKey || null,
     lastSyncAt: value.lastSyncAt || null,
+    lastTerminalAttemptAt: value.lastTerminalAttemptAt || null,
+    lastTerminalSyncAt: value.lastTerminalSyncAt || null,
+    lastTerminalError: value.lastTerminalError || null,
     orderCount: Number(value.orderCount || 0),
     lastError: value.lastError || null,
   };
@@ -224,10 +234,9 @@ async function exactOrder(orderId) {
   return (result.orders || []).find((row) => String(row?.order_id || '') === String(orderId)) || null;
 }
 
-async function reconcileIndexTransition({ scope, currentOrders, previousIds, previousIntakeIds }) {
+async function reconcileIndexTransition({ scope, currentOrders, currentIds, previousIds, previousIntakeIds }) {
   const { reconcilePickingFromUpstreamChanges, markPickingOrdersUpstreamUpdated } = require('./baseLinkerPicking');
   const currentById = new Map(currentOrders.map((order) => [String(order.order_id), order]));
-  const currentIds = new Set(currentById.keys());
 
   // Existing local work can be reconciled from the transient Intake scan with
   // zero extra BaseLinker requests. This catches product/status restoration
@@ -269,18 +278,50 @@ async function reconcileIndexTransition({ scope, currentOrders, previousIds, pre
   return { departed: effectiveDeparted.length, restoredIntakeIds: [...restoredIntakeIds] };
 }
 
-async function performIndexSync(scope, { resetIndex = false } = {}) {
+async function performIndexSync(scope, {
+  resetIndex = false,
+  refreshTerminal = false,
+  lastTerminalAttemptAt = null,
+  lastTerminalSyncAt = null,
+  lastTerminalError = null,
+} = {}) {
   await ensureBaseLinkerOrderIndexReady();
-  if (resetIndex) await BaseLinkerOrderIndex.deleteMany({});
   const syncToken = crypto.randomUUID();
-  const previousRows = await BaseLinkerOrderIndex.find({}).select('orderId upstreamDisposition').lean();
+  const previousRows = await BaseLinkerOrderIndex.find({})
+    .select('orderId orderIdNumeric upstreamDisposition dateInStatus')
+    .lean();
   const previousIds = new Set(previousRows.map((row) => String(row.orderId || '')).filter(Boolean));
   const previousIntakeIds = new Set(previousRows
     .filter((row) => !row.upstreamDisposition || row.upstreamDisposition === 'intake')
     .map((row) => String(row.orderId || ''))
     .filter(Boolean));
-  const queue = await scanQueue(scope);
+  let queue;
+  if (refreshTerminal) {
+    queue = await scanQueue(scope);
+  } else {
+    const intake = await scanIntake(scope);
+    const rows = intake.map((order) => ({
+      order,
+      orderId: orderIdString(order?.order_id),
+      disposition: 'intake',
+      dateInStatus: 0,
+    })).filter((row) => row.orderId);
+    for (const row of previousRows) {
+      const disposition = String(row.upstreamDisposition || 'intake');
+      if (!['sent', 'cancelled'].includes(disposition)) continue;
+      const orderId = orderIdString(row.orderId);
+      if (!orderId) continue;
+      rows.push({
+        order: null,
+        orderId,
+        disposition,
+        dateInStatus: Number(row.dateInStatus || 0),
+      });
+    }
+    queue = { intake, sent: [], cancelled: [], rows };
+  }
   const currentOrders = queue.rows.map((row) => row.order);
+  const currentIds = new Set(queue.rows.map((row) => row.orderId));
   const now = new Date();
 
   if (queue.rows.length) {
@@ -306,7 +347,8 @@ async function performIndexSync(scope, { resetIndex = false } = {}) {
   // and the whole sync fails closed instead of silently dropping warehouse work.
   const transition = await reconcileIndexTransition({
     scope,
-    currentOrders,
+    currentOrders: currentOrders.filter(Boolean),
+    currentIds,
     previousIds,
     previousIntakeIds,
   });
@@ -319,17 +361,38 @@ async function performIndexSync(scope, { resetIndex = false } = {}) {
   await BaseLinkerOrderIndex.deleteMany({ syncToken: { $ne: syncToken } });
   const orderCount = await BaseLinkerOrderIndex.countDocuments({});
   const lastSyncAt = now.toISOString();
-  const currentIds = new Set(queue.rows.map((row) => row.orderId));
   const added = [...currentIds].filter((id) => !previousIds.has(id)).length;
   const membershipChanged = resetIndex || added > 0 || Number(transition.departed || 0) > 0;
-  await saveIndexState({ initialized: true, scopeKey: scope.scopeKey, lastSyncAt, orderCount, lastError: null });
+  const nextLastTerminalSyncAt = refreshTerminal ? lastSyncAt : lastTerminalSyncAt;
+  const nextLastTerminalError = refreshTerminal ? null : lastTerminalError;
+  await saveIndexState({
+    initialized: true,
+    scopeKey: scope.scopeKey,
+    lastSyncAt,
+    lastTerminalAttemptAt,
+    lastTerminalSyncAt: nextLastTerminalSyncAt,
+    lastTerminalError: nextLastTerminalError,
+    orderCount,
+    lastError: null,
+  });
   // A stable queue refresh must be silent. Picking/product changes emit their
   // own exact-order socket event; queue membership changes are the only reason
   // to invalidate the paged list globally.
   if (membershipChanged) {
     emitQueueChanged({ resync: true, reason: 'queue_index_membership_changed', fetchedAt: lastSyncAt, added, departed: Number(transition.departed || 0) });
   }
-  return { initialized: true, orderCount, lastSyncAt, added, departed: transition.departed, membershipChanged };
+  return {
+    initialized: true,
+    orderCount,
+    lastSyncAt,
+    lastTerminalAttemptAt,
+    lastTerminalSyncAt: nextLastTerminalSyncAt,
+    lastTerminalError: nextLastTerminalError,
+    terminalRefreshed: refreshTerminal,
+    added,
+    departed: transition.departed,
+    membershipChanged,
+  };
 }
 
 async function syncBaseLinkerOrderIndex({ force = false, maxAgeMs = INDEX_REFRESH_MS } = {}) {
@@ -344,7 +407,19 @@ async function syncBaseLinkerOrderIndex({ force = false, maxAgeMs = INDEX_REFRES
 
   if (syncInFlight) return syncInFlight;
   const resetIndex = Boolean(state.scopeKey && state.scopeKey !== scope.scopeKey);
-  syncInFlight = withLock('baselinker-order-index-sync', () => performIndexSync(scope, { resetIndex }), { ttlMs: 120_000, waitMs: 15_000 })
+  const nowMs = Date.now();
+  const lastTerminalAttemptMs = state.lastTerminalAttemptAt ? Date.parse(state.lastTerminalAttemptAt) : 0;
+  const terminalAttemptAgeMs = lastTerminalAttemptMs > 0 ? nowMs - lastTerminalAttemptMs : Number.POSITIVE_INFINITY;
+  const refreshTerminal = resetIndex || !state.initialized
+    || !Number.isFinite(terminalAttemptAgeMs) || terminalAttemptAgeMs >= TERMINAL_INDEX_REFRESH_MS;
+  const terminalAttemptAt = refreshTerminal ? new Date(nowMs).toISOString() : state.lastTerminalAttemptAt;
+  syncInFlight = withLock('baselinker-order-index-sync', () => performIndexSync(scope, {
+    resetIndex,
+    refreshTerminal,
+    lastTerminalAttemptAt: terminalAttemptAt,
+    lastTerminalSyncAt: state.lastTerminalSyncAt,
+    lastTerminalError: state.lastTerminalError,
+  }), { ttlMs: 120_000, waitMs: 15_000 })
     .catch(async (error) => {
       try {
         await saveIndexState({
@@ -354,6 +429,11 @@ async function syncBaseLinkerOrderIndex({ force = false, maxAgeMs = INDEX_REFRES
           // reset/rebuild the index instead of accepting the new scope key.
           scopeKey: state.scopeKey,
           lastSyncAt: state.lastSyncAt,
+          lastTerminalAttemptAt: terminalAttemptAt,
+          lastTerminalSyncAt: state.lastTerminalSyncAt,
+          lastTerminalError: refreshTerminal
+            ? (error?.code || error?.message || 'terminal_queue_index_sync_failed')
+            : state.lastTerminalError,
           orderCount: state.orderCount,
           lastError: error?.code || error?.message || 'queue_index_sync_failed',
         });
@@ -454,15 +534,33 @@ async function liveIntakeOrdersForIds(scope, ids) {
   return found;
 }
 
-async function liveExactOrdersForIds(ids) {
+async function liveTerminalOrdersForIds(scope, ids, indexById) {
   const found = new Map();
-  // A terminal page contains at most pageSize (50) rows. Exact reads avoid
-  // persisting a full BaseLinker order mirror while still rendering current
-  // product/package data for the selected history page.
-  await Promise.all(ids.map(async (id) => {
-    const order = await exactOrder(id);
-    if (order) found.set(String(id), order);
-  }));
+  const groups = new Map();
+  for (const id of ids) {
+    const disposition = String(indexById.get(id)?.upstreamDisposition || '');
+    if (!['sent', 'cancelled'].includes(disposition)) continue;
+    if (!groups.has(disposition)) groups.set(disposition, []);
+    groups.get(disposition).push(String(id));
+  }
+  // One selected history page belongs to one status and contains at most 50
+  // adjacent indexed ids. A single status/id_from page therefore replaces up
+  // to 50 exact getOrders calls.
+  for (const [disposition, groupIds] of groups) {
+    const wanted = new Set(groupIds);
+    const numeric = groupIds.map(Number).filter((value) => Number.isSafeInteger(value) && value > 0);
+    if (!numeric.length) continue;
+    const result = await fetchBaseLinkerOrders({
+      statusId: disposition === 'sent' ? scope.sentStatusId : scope.cancelledStatusId,
+      idFrom: Math.min(...numeric),
+      includeUnconfirmed: true,
+      maxPages: 1,
+    });
+    for (const order of result.orders || []) {
+      const id = String(order?.order_id || '');
+      if (wanted.has(id)) found.set(id, order);
+    }
+  }
   return found;
 }
 
@@ -523,8 +621,11 @@ async function getIndexedOrderPage({ workflowFilter = 'processing', packedBy = '
     // Product/customer search over untouched Intake orders is an explicit live
     // BaseLinker read. The full response is used only in this request and never
     // written to Mongo. Local PickingOrder rows are searched from our own data.
-    const live = await scanQueue(scope);
-    liveSearchOrders = new Map(live.rows.map((row) => [row.orderId, row.order]));
+    // Searching terminal history must never trigger a full status walk on each
+    // keystroke. Untouched terminal rows can be found by order id; locally
+    // tracked rows retain their product metadata for text search.
+    const live = await scanIntake(scope);
+    liveSearchOrders = new Map(live.map((order) => [String(order.order_id), order]));
     for (const stage of Object.keys(rowIdsByStage)) {
       rowIdsByStage[stage] = rowIdsByStage[stage].filter((id) => {
         const doc = pickingById.get(id);
@@ -567,7 +668,7 @@ async function getIndexedOrderPage({ workflowFilter = 'processing', packedBy = '
   } else {
     const live = await liveIntakeOrdersForIds(scope, selectedIntakeIds);
     for (const [id, order] of live) ordersById.set(id, order);
-    const terminal = await liveExactOrdersForIds(selectedTerminalIds);
+    const terminal = await liveTerminalOrdersForIds(scope, selectedTerminalIds, indexById);
     for (const [id, order] of terminal) ordersById.set(id, order);
   }
 
@@ -611,6 +712,7 @@ async function getLocalOrderProjection(orderId) {
 module.exports = {
   INDEX_STATE_KEY,
   INDEX_REFRESH_MS,
+  TERMINAL_INDEX_REFRESH_MS,
   INDEX_MAX_PAGES,
   ensureBaseLinkerOrderIndexReady,
   loadIndexState,

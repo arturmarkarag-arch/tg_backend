@@ -5,7 +5,14 @@ const { asyncHandler, appError } = require('../utils/errors');
 const { isBaseLinkerConfigured } = require('../services/baseLinkerClient');
 const { getPrintAgentStatus, queuePrintJob } = require('../services/baseLinkerPrint');
 const { fetchBaseLinkerOrders, fetchBaseLinkerOrderMeta } = require('../services/baseLinkerOrders');
-const { getIndexedOrderPage, getLocalOrderProjection, loadIndexState, syncBaseLinkerOrderIndex, INDEX_REFRESH_MS } = require('../services/baseLinkerOrderIndex');
+const {
+  getIndexedOrderPage,
+  getLocalOrderProjection,
+  loadIndexState,
+  syncBaseLinkerOrderIndex,
+  INDEX_REFRESH_MS,
+  TERMINAL_INDEX_REFRESH_MS,
+} = require('../services/baseLinkerOrderIndex');
 const { isBaseLinkerQueueSchedulerStarted } = require('../services/baseLinkerQueueScheduler');
 const { getQueueScope } = require('../services/baseLinkerQueueScope');
 const { fetchBaseLinkerProductCatalog } = require('../services/baseLinkerProducts');
@@ -54,8 +61,11 @@ router.get('/status', asyncHandler(async (req, res) => {
     queueIndexOrderCount: index.orderCount,
     lastQueueSyncAt: index.lastSyncAt,
     lastQueueSyncError: index.lastError,
+    lastTerminalSyncAt: index.lastTerminalSyncAt,
+    lastTerminalSyncError: index.lastTerminalError,
     queueSchedulerStarted: isBaseLinkerQueueSchedulerStarted(),
     queueRefreshMs: INDEX_REFRESH_MS,
+    terminalQueueRefreshMs: TERMINAL_INDEX_REFRESH_MS,
   });
 }));
 

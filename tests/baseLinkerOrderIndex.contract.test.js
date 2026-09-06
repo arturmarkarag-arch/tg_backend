@@ -38,6 +38,16 @@ const read = (rel) => fs.readFileSync(path.join(root, rel), 'utf8');
     expect(service).toContain('knownAdmittedOrderIds');
   });
 
+  it('throttles full terminal scans and batches a selected terminal page', () => {
+    const service = read('services/baseLinkerOrderIndex.js');
+    expect(service).toContain('TERMINAL_INDEX_REFRESH_MS');
+    expect(service).toContain('lastTerminalAttemptAt');
+    expect(service).toContain('terminalAttemptAgeMs >= TERMINAL_INDEX_REFRESH_MS');
+    expect(service).toContain('async function liveTerminalOrdersForIds');
+    expect(service).toContain('idFrom: Math.min(...numeric)');
+    expect(service).not.toContain('await Promise.all(ids.map(async (id)');
+  });
+
   it('normalizes page input without shadowing the pagination helper', () => {
     const service = read('services/baseLinkerOrderIndex.js');
     expect(service).toContain('function normalizePage(value)');

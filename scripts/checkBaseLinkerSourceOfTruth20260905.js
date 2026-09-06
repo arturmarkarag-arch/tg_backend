@@ -169,6 +169,16 @@ check('stable 30s queue scans do not invalidate the client when membership is un
   assert(indexSrc.includes("reason: 'queue_index_membership_changed'"));
 });
 
+check('expensive terminal history scans are throttled and terminal pages are batched', () => {
+  assert(indexSrc.includes('TERMINAL_INDEX_REFRESH_MS'));
+  assert(indexSrc.includes('lastTerminalAttemptAt'));
+  assert(indexSrc.includes('terminalAttemptAgeMs >= TERMINAL_INDEX_REFRESH_MS'));
+  assert(indexSrc.includes('async function liveTerminalOrdersForIds'));
+  assert(indexSrc.includes('idFrom: Math.min(...numeric)'));
+  assert(schedulerSrc.includes('ERROR_BACKOFF_MS'));
+  assert(schedulerSrc.includes("reason: 'error_backoff'"));
+});
+
 check('failed scope migration preserves last successful scope for retry', () => {
   assert(indexSrc.includes('scopeKey: state.scopeKey'));
   assert(indexSrc.includes('reset/rebuild the index'));
