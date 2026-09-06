@@ -45,6 +45,8 @@ const read = (rel) => fs.readFileSync(path.join(root, rel), 'utf8');
     expect(service).toContain('terminalAttemptAgeMs >= TERMINAL_INDEX_REFRESH_MS');
     expect(service).toContain('async function liveTerminalOrdersForIds');
     expect(service).toContain('idFrom: Math.min(...numeric)');
+    expect(service).toContain('const fetchedRows = queue.rows.filter((row) => row.order)');
+    expect(service).toContain('if (refreshTerminal)');
     expect(service).not.toContain('await Promise.all(ids.map(async (id)');
   });
 

@@ -8,6 +8,7 @@ const { runAsSchedulerLeader } = require('./schedulerLeader');
 let timer = null;
 let running = false;
 let retryAfterMs = 0;
+// Do not keep probing a token that BaseLinker has already rate-blocked.
 const ERROR_BACKOFF_MS = Math.min(
   30 * 60_000,
   Math.max(60_000, Number(process.env.BASELINKER_QUEUE_ERROR_BACKOFF_MS) || (10 * 60_000)),

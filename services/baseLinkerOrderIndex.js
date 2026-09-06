@@ -290,8 +290,12 @@ async function performIndexSync(scope, {
   const previousRows = await BaseLinkerOrderIndex.find({})
     .select('orderId orderIdNumeric upstreamDisposition dateInStatus')
     .lean();
-  const previousIds = new Set(previousRows.map((row) => String(row.orderId || '')).filter(Boolean));
-  const previousIntakeIds = new Set(previousRows
+  // A settings revision defines a new scope. Keep old rows in Mongo until the
+  // replacement scan succeeds (fail closed), but never exact-read the entire
+  // old scope as if hundreds of orders had individually departed Intake.
+  const transitionPreviousRows = resetIndex ? [] : previousRows;
+  const previousIds = new Set(transitionPreviousRows.map((row) => String(row.orderId || '')).filter(Boolean));
+  const previousIntakeIds = new Set(transitionPreviousRows
     .filter((row) => !row.upstreamDisposition || row.upstreamDisposition === 'intake')
     .map((row) => String(row.orderId || ''))
     .filter(Boolean));
@@ -324,8 +328,9 @@ async function performIndexSync(scope, {
   const currentIds = new Set(queue.rows.map((row) => row.orderId));
   const now = new Date();
 
-  if (queue.rows.length) {
-    await BaseLinkerOrderIndex.bulkWrite(queue.rows.map((row) => ({
+  const fetchedRows = queue.rows.filter((row) => row.order);
+  if (fetchedRows.length) {
+    await BaseLinkerOrderIndex.bulkWrite(fetchedRows.map((row) => ({
       updateOne: {
         filter: { orderId: row.orderId },
         update: {
@@ -358,7 +363,19 @@ async function performIndexSync(scope, {
       { $set: { syncToken, seenAt: now } },
     );
   }
-  await BaseLinkerOrderIndex.deleteMany({ syncToken: { $ne: syncToken } });
+  // Intake is refreshed every fast tick. Terminal rows are swept only after an
+  // actual terminal scan; otherwise their previous syncToken remains untouched
+  // and hundreds of unchanged history rows do not get rewritten every 30s.
+  await BaseLinkerOrderIndex.deleteMany({
+    syncToken: { $ne: syncToken },
+    $or: [{ upstreamDisposition: 'intake' }, { upstreamDisposition: { $exists: false } }],
+  });
+  if (refreshTerminal) {
+    await BaseLinkerOrderIndex.deleteMany({
+      syncToken: { $ne: syncToken },
+      upstreamDisposition: { $in: ['sent', 'cancelled'] },
+    });
+  }
   const orderCount = await BaseLinkerOrderIndex.countDocuments({});
   const lastSyncAt = now.toISOString();
   const added = [...currentIds].filter((id) => !previousIds.has(id)).length;
