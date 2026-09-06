@@ -17,6 +17,7 @@ function buildOrdersParameters({
   dateConfirmedFrom,
   statusId,
   orderId,
+  idFrom,
   includeUnconfirmed = false,
 } = {}) {
   const params = {
@@ -38,6 +39,9 @@ function buildOrdersParameters({
   const order = toOptionalPositiveInt(orderId);
   if (order !== null) params.order_id = order;
 
+  const fromId = toOptionalPositiveInt(idFrom);
+  if (fromId !== null && order === null) params.id_from = fromId;
+
   return params;
 }
 
@@ -46,8 +50,8 @@ function buildOrdersParameters({
  * BaseLinker returns max 100 orders and explicitly documents advancing
  * date_confirmed_from to last date_confirmed + 1 second.
  *
- * No BaseLinker order is written into our warehouse Order collection. This
- * service is a read adapter; local picking state will get its own model later.
+ * This is a read adapter. Full BaseLinker orders are returned only to the
+ * current request/sync and are never persisted as a warehouse mirror.
  */
 async function fetchBaseLinkerOrders(options = {}, callApi = callBaseLinker) {
   const requestedMaxPages = Number(options.maxPages);
@@ -77,11 +81,11 @@ async function fetchBaseLinkerOrders(options = {}, callApi = callBaseLinker) {
   }
 
   const unconfirmedMode = baseParams.get_unconfirmed_orders === true;
-  // Status-only scans use id_from so Intake can be unbounded and Sent/Cancelled
-  // can be filtered correctly by date_in_status after the exact-status scan.
-  // We deliberately do not invent a date_confirmed window for terminal shelves.
+  // Status-only scans use BaseLinker's documented id_from cursor. The warehouse
+  // core uses this for the unbounded confirmed Intake queue; terminal shelves
+  // come from our local PickingOrder history instead of scanning BaseLinker.
   const idCursorMode = unconfirmedMode || baseParams.date_confirmed_from === undefined;
-  let cursor = idCursorMode ? null : (baseParams.date_confirmed_from ?? null);
+  let cursor = idCursorMode ? (baseParams.id_from ?? null) : (baseParams.date_confirmed_from ?? null);
   const byId = new Map();
   let pageCount = 0;
   let truncated = false;
@@ -90,6 +94,7 @@ async function fetchBaseLinkerOrders(options = {}, callApi = callBaseLinker) {
 
   for (; pageCount < maxPages; pageCount += 1) {
     const params = { ...baseParams };
+    delete params.id_from;
     if (idCursorMode) {
       if (cursor !== null) params.id_from = cursor;
     } else if (cursor !== null) {

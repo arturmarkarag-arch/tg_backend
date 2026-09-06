@@ -18,8 +18,11 @@ const PickingItemSchema = new mongoose.Schema({
   lineKey: { type: String, required: true },
   sourceOrderId: { type: String, default: '' },
   orderProductId: { type: String, default: '' },
+  storage: { type: String, default: '' },
+  storageId: { type: String, default: '' },
   productId: { type: String, default: '' },
   variantId: { type: String, default: '' },
+  auctionId: { type: String, default: '' },
   sku: { type: String, default: '' },
   ean: { type: String, default: '' },
   name: { type: String, default: '' },
@@ -43,6 +46,14 @@ const PickingItemSchema = new mongoose.Schema({
 const BaseLinkerPickingOrderSchema = new mongoose.Schema({
   orderId: { type: String, required: true },
   orderFingerprint: { type: String, default: '' },
+  // Minimal source metadata needed to render our own local workflow after the
+  // order leaves Intake. This is not a BaseLinker order mirror.
+  sourceShopOrderId: { type: String, default: '' },
+  sourceExternalOrderId: { type: String, default: '' },
+  sourceDateAdd: { type: Number, default: 0 },
+  sourceDateConfirmed: { type: Number, default: 0 },
+  sourceDeliveryPackageModule: { type: String, default: '' },
+  sourceDeliveryPackageNr: { type: String, default: '' },
   status: {
     type: String,
     enum: PERSISTED_ORDER_STATUSES,
@@ -95,7 +106,6 @@ const BaseLinkerPickingOrderSchema = new mongoose.Schema({
   },
   upstreamReviewRequired: { type: Boolean, default: false, index: true },
   upstreamReviewedAt: { type: Date, default: null },
-  lastUpstreamJournalTypes: { type: [Number], default: [] },
   lastUpstreamChangeSummary: {
     added: { type: Number, default: 0 },
     removed: { type: Number, default: 0 },

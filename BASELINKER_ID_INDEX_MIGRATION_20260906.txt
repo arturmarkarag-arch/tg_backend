@@ -1,0 +1,32 @@
+BaseLinker warehouse refactor — ID INDEX — 2026-09-06
+
+CURRENT CONTRACT
+- BaseLinker is the upstream source of order data.
+- BaseLinkerOrderIndex persists ONLY Intake order_id identity/cursor metadata.
+- BaseLinkerPickingOrder persists OUR warehouse work and the exact product-line facts admitted into that work.
+- Full BaseLinker orders are never persisted as a queue mirror.
+- Raw immutable BaseLinker order snapshots are retired.
+- getJournalList / degraded fallback are not part of the runtime core.
+- Queue scheduler scans confirmed Intake only.
+- IDs that leave Intake are exact-read before removal so manager cancellation/other status is reconciled.
+- CRM never cancels BaseLinker orders. The only upstream status write is verified Sent -> configured Wyslane.
+- Sent/Cancelled local history retention: 14 days.
+
+MIGRATION
+On first index initialization the server drops retired Mongo collections:
+  baselinkerordercaches
+  baselinkerordersnapshots
+and removes retired AppSetting state:
+  baselinker.orderCache.v2
+  baselinker.journal.v1
+
+RETIRED SOURCE FILES (must not exist in a full deployment)
+  models/BaseLinkerOrderCache.js
+  models/BaseLinkerOrderSnapshot.js
+  services/baseLinkerOrderCache.js
+  services/baseLinkerOrderSnapshots.js
+  services/baseLinkerJournal.js
+  tests/baseLinkerJournal.contract.test.js
+  tests/baseLinkerQueueSync.test.js
+
+Recommended deployment: replace the server directory with the FULL ID_INDEX archive rather than overlaying a patch, because an ordinary ZIP overlay cannot delete retired files.

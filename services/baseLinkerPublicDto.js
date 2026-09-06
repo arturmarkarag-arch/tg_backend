@@ -16,6 +16,7 @@ function compactOrderProduct(product = {}) {
   setIfDefined(out, 'product_id', product.product_id);
   setIfDefined(out, 'variant_id', product.variant_id);
   setIfDefined(out, 'name', product.name);
+  setIfDefined(out, 'attributes', product.attributes);
   setIfDefined(out, 'sku', product.sku);
   setIfDefined(out, 'ean', product.ean);
   setIfDefined(out, 'auction_id', product.auction_id);

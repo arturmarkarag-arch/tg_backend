@@ -5,13 +5,8 @@ const { asyncHandler, appError } = require('../utils/errors');
 const { isBaseLinkerConfigured } = require('../services/baseLinkerClient');
 const { getPrintAgentStatus, queuePrintJob } = require('../services/baseLinkerPrint');
 const { fetchBaseLinkerOrders, fetchBaseLinkerOrderMeta } = require('../services/baseLinkerOrders');
-const { getCachedOrderPage, cacheState, syncBaseLinkerOrderCache } = require('../services/baseLinkerOrderCache');
-const {
-  loadJournalState,
-  TICK_MS,
-  DEGRADED_RECONCILE_MS,
-  isBaseLinkerJournalSchedulerStarted,
-} = require('../services/baseLinkerJournal');
+const { getIndexedOrderPage, getLocalOrderProjection, loadIndexState, syncBaseLinkerOrderIndex, INDEX_REFRESH_MS } = require('../services/baseLinkerOrderIndex');
+const { isBaseLinkerQueueSchedulerStarted } = require('../services/baseLinkerQueueScheduler');
 const { getQueueScope } = require('../services/baseLinkerQueueScope');
 const { fetchBaseLinkerProductCatalog } = require('../services/baseLinkerProducts');
 const { compactOrders, compactProductCatalog } = require('../services/baseLinkerPublicDto');
@@ -41,8 +36,8 @@ const router = express.Router();
 router.use(requireBaseLinkerPickingAccess);
 
 router.get('/status', asyncHandler(async (req, res) => {
-  const [cache, journal] = await Promise.all([cacheState(), loadJournalState()]);
   const scope = await getQueueScope();
+  const index = await loadIndexState(scope);
   res.json({
     configured: isBaseLinkerConfigured(),
     queueConfigured: scope.configured,
@@ -55,26 +50,18 @@ router.get('/status', asyncHandler(async (req, res) => {
     historyLookbackDays: scope.historyLookbackDays,
     sentLookbackDays: scope.sentLookbackDays,
     cancelledLookbackDays: scope.cancelledLookbackDays,
-    cacheInitialized: cache.initialized,
-    lastFullSyncAt: cache.lastFullSyncAt,
-    fallbackCheckedOrderCount: cache.fallbackCheckedOrderCount,
-    fallbackPendingOrderCount: cache.fallbackPendingOrderCount,
-    journalInitialized: journal.initialized,
-    journalSchedulerStarted: isBaseLinkerJournalSchedulerStarted(),
-    journalPossiblyDisabled: journal.possiblyDisabled === true,
-    journalLastLogId: journal.lastLogId,
-    journalLastChangeAt: journal.lastChangeAt,
-    journalPollMs: TICK_MS,
-    degradedReconcileMs: DEGRADED_RECONCILE_MS,
-    lastJournalSuccessAt: journal.lastSuccessAt,
-    lastError: journal.lastError,
-    nextRetryAt: journal.nextRetryAt,
+    queueIndexInitialized: index.initialized,
+    queueIndexOrderCount: index.orderCount,
+    lastQueueSyncAt: index.lastSyncAt,
+    lastQueueSyncError: index.lastError,
+    queueSchedulerStarted: isBaseLinkerQueueSchedulerStarted(),
+    queueRefreshMs: INDEX_REFRESH_MS,
   });
 }));
 
 router.post('/sync', asyncHandler(async (req, res) => {
   if (!isBaseLinkerConfigured()) throw appError('baselinker_not_configured');
-  const result = await syncBaseLinkerOrderCache({ force: true });
+  const result = await syncBaseLinkerOrderIndex({ force: true });
   res.json({ ...result, syncedAt: new Date().toISOString() });
 }));
 
@@ -93,17 +80,21 @@ router.get('/orders', asyncHandler(async (req, res) => {
 
   if (exactOrderId) {
     // Exact reads stay live. Claim/pack/reconciliation depend on current
-    // BaseLinker truth and must never be satisfied only from the UI cache.
+    // BaseLinker truth and must never be satisfied only from a local projection.
     result = await fetchBaseLinkerOrders({
       orderId: exactOrderId,
       includeUnconfirmed: false,
       maxPages: 1,
     });
+    if (!(result.orders || []).length) {
+      const localOrder = await getLocalOrderProjection(exactOrderId);
+      if (localOrder) result = { ...result, orders: [localOrder] };
+    }
   } else {
-    // The work queue is server-paginated from a dedicated BaseLinker snapshot
-    // cache. The browser receives only the requested 10/20/50 exact order rows;
-    // it no longer downloads/scans the whole account on every page render.
-    result = await getCachedOrderPage({
+    // Numbered pagination is backed by a minimal Intake order_id index. Full
+    // BaseLinker order payloads are never persisted; untouched Intake rows are
+    // read live for the selected page and local workflow rows come from PickingOrder.
+    result = await getIndexedOrderPage({
       statusId: req.query.statusId,
       workflowFilter: req.query.workflowFilter,
       packedBy: req.query.packedBy,
@@ -113,7 +104,7 @@ router.get('/orders', asyncHandler(async (req, res) => {
     });
   }
 
-  // getOrders intentionally contains the order-line snapshot, not full catalog
+  // getOrders intentionally contains order-line data, not full catalog
   // media/details. Resolve current product catalog data only for this page.
   let catalog = {
     productCatalog: {},

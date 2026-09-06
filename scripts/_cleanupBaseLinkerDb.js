@@ -10,8 +10,7 @@ const {
   allowedSuffix,
 } = require('../utils/liveE2EDbGuard');
 
-const BaseLinkerOrderCache = require('../models/BaseLinkerOrderCache');
-const BaseLinkerOrderSnapshot = require('../models/BaseLinkerOrderSnapshot');
+const BaseLinkerOrderIndex = require('../models/BaseLinkerOrderIndex');
 const BaseLinkerPickingOrder = require('../models/BaseLinkerPickingOrder');
 const BaseLinkerPrintAgent = require('../models/BaseLinkerPrintAgent');
 const BaseLinkerPrintJob = require('../models/BaseLinkerPrintJob');
@@ -19,16 +18,23 @@ const AppSetting = require('../models/AppSetting');
 
 const SETTINGS_KEYS = Object.freeze([
   'baselinker.queueSettings.v1',
+  'baselinker.orderIndex.v1',
+  // Retired state keys are included so this script can clean a deployment that
+  // is upgrading from the old full-order mirror/journal architecture.
   'baselinker.orderCache.v2',
   'baselinker.journal.v1',
 ]);
 
 const MODELS = Object.freeze([
-  ['BaseLinkerOrderCache', BaseLinkerOrderCache, 'latest BaseLinker order mirror/cache'],
-  ['BaseLinkerOrderSnapshot', BaseLinkerOrderSnapshot, 'immutable BaseLinker raw snapshots'],
+  ['BaseLinkerOrderIndex', BaseLinkerOrderIndex, 'minimal Intake order_id index'],
   ['BaseLinkerPickingOrder', BaseLinkerPickingOrder, 'warehouse picking/local workflow'],
   ['BaseLinkerPrintJob', BaseLinkerPrintJob, 'queued/finished BaseLinker label jobs'],
   ['BaseLinkerPrintAgent', BaseLinkerPrintAgent, 'ephemeral Print Agent registrations'],
+]);
+
+const LEGACY_COLLECTIONS = Object.freeze([
+  ['baselinkerordercaches', 'RETIRED full BaseLinker order mirror/cache'],
+  ['baselinkerordersnapshots', 'RETIRED raw BaseLinker order snapshots'],
 ]);
 
 const argv = process.argv.slice(2);
@@ -60,13 +66,9 @@ function assertModeBeforeConnect(mode, uri) {
   }
 
   if (mode === 'PROD') {
-    if (testLoaded) {
-      fail('REFUSE PROD cleanup: TEST_ENV_LOADED is present. This process is wired to the TEST environment.');
-    }
+    if (testLoaded) fail('REFUSE PROD cleanup: TEST_ENV_LOADED is present. This process is wired to the TEST environment.');
     if (hostAllowed(uriHost)) {
-      fail(
-        `REFUSE PROD cleanup: Mongo host ${uriHost || 'unknown'} matches TEST guard suffix ${allowedSuffix()}.`
-      );
+      fail(`REFUSE PROD cleanup: Mongo host ${uriHost || 'unknown'} matches TEST guard suffix ${allowedSuffix()}.`);
     }
     return;
   }
@@ -81,29 +83,16 @@ function assertModeAfterConnect(mode) {
     return;
   }
   if (mode === 'PROD' && hostAllowed(connectedHost)) {
-    fail(
-      `REFUSE PROD cleanup after connect: connected Mongo host ${connectedHost || 'unknown'} matches TEST guard suffix ${allowedSuffix()}.`
-    );
+    fail(`REFUSE PROD cleanup after connect: connected Mongo host ${connectedHost || 'unknown'} matches TEST guard suffix ${allowedSuffix()}.`);
   }
 }
 
 function assertExecutionConfirmation(mode, dbName) {
   if (!EXECUTE) return;
-
   const confirmedDb = argValue('--confirm-db');
-  if (!confirmedDb || confirmedDb !== dbName) {
-    fail(
-      `REFUSE EXECUTE: pass the exact connected database name: --confirm-db=${dbName}`
-    );
-  }
-
-  if (mode === 'PROD') {
-    const productionAck = argValue('--confirm-production');
-    if (productionAck !== 'WIPE_BASELINKER_PROD') {
-      fail(
-        'REFUSE PROD EXECUTE: additionally pass --confirm-production=WIPE_BASELINKER_PROD'
-      );
-    }
+  if (!confirmedDb || confirmedDb !== dbName) fail(`REFUSE EXECUTE: pass the exact connected database name: --confirm-db=${dbName}`);
+  if (mode === 'PROD' && argValue('--confirm-production') !== 'WIPE_BASELINKER_PROD') {
+    fail('REFUSE PROD EXECUTE: additionally pass --confirm-production=WIPE_BASELINKER_PROD');
   }
 }
 
@@ -111,10 +100,13 @@ async function existingCollections(db) {
   return new Set((await db.listCollections({}, { nameOnly: true }).toArray()).map((row) => row.name));
 }
 
-async function countModelRows(existing, model) {
-  const collection = model.collection.collectionName;
+async function countCollection(existing, db, collection) {
   if (!existing.has(collection)) return 0;
-  return model.collection.countDocuments({});
+  return db.collection(collection).countDocuments({});
+}
+
+async function countModelRows(existing, model) {
+  return countCollection(existing, mongoose.connection.db, model.collection.collectionName);
 }
 
 async function countSettings(existing) {
@@ -131,9 +123,13 @@ async function printPlan(mode, db, existing) {
   console.log(`uri:  ${maskMongoUri(process.env.MONGODB_URI)}\n`);
 
   console.log('Collections to clear:');
-  for (const [name, model, description] of MODELS) {
+  for (const [, model, description] of MODELS) {
     const collection = model.collection.collectionName;
     const count = await countModelRows(existing, model);
+    console.log(`  ${String(count).padStart(8)}  ${collection.padEnd(34)} ${description}`);
+  }
+  for (const [collection, description] of LEGACY_COLLECTIONS) {
+    const count = await countCollection(existing, db, collection);
     console.log(`  ${String(count).padStart(8)}  ${collection.padEnd(34)} ${description}`);
   }
 
@@ -141,7 +137,7 @@ async function printPlan(mode, db, existing) {
   console.log(`\nAppSetting rows to clear: ${settingsCount}`);
   for (const key of SETTINGS_KEYS) console.log(`  - ${key}`);
 
-  console.log('\nAfter wipe, indexes are synchronized against the current SINGLE-ACCOUNT schemas.');
+  console.log('\nAfter wipe, indexes are synchronized against the current SINGLE-ACCOUNT ID-INDEX schemas.');
   console.log('BaseLinker queue statuses must be configured again after cleanup.');
 }
 
@@ -150,12 +146,14 @@ async function executeCleanup(db, existing) {
 
   for (const [name, model] of MODELS) {
     const collection = model.collection.collectionName;
-    if (!existing.has(collection)) {
-      deleted[name] = 0;
-      continue;
-    }
-    const result = await model.collection.deleteMany({});
+    if (!existing.has(collection)) { deleted[name] = 0; continue; }
+    const result = await db.collection(collection).deleteMany({});
     deleted[name] = Number(result.deletedCount || 0);
+  }
+  for (const [collection] of LEGACY_COLLECTIONS) {
+    if (!existing.has(collection)) { deleted[collection] = 0; continue; }
+    const result = await db.collection(collection).deleteMany({});
+    deleted[collection] = Number(result.deletedCount || 0);
   }
 
   const settingsCollection = AppSetting.collection.collectionName;
@@ -165,12 +163,7 @@ async function executeCleanup(db, existing) {
     deletedSettings = Number(result.deletedCount || 0);
   }
 
-  // Empty collections are the safest moment to replace any retired accountScope
-  // compound indexes with the current single-account indexes.
-  for (const [, model] of MODELS) {
-    await model.syncIndexes();
-  }
-
+  for (const [, model] of MODELS) await model.syncIndexes();
   return { deleted, deletedSettings };
 }
 
@@ -181,6 +174,10 @@ async function verifyEmpty(db) {
     const count = await countModelRows(existing, model);
     if (count !== 0) remaining.push(`${name}=${count}`);
   }
+  for (const [collection] of LEGACY_COLLECTIONS) {
+    const count = await countCollection(existing, db, collection);
+    if (count !== 0) remaining.push(`${collection}=${count}`);
+  }
   const settings = await countSettings(existing);
   if (settings !== 0) remaining.push(`BaseLinkerAppSettings=${settings}`);
   if (remaining.length) fail(`Cleanup verification failed: ${remaining.join(', ')}`, 3);
@@ -189,13 +186,11 @@ async function verifyEmpty(db) {
 async function runCleanup(mode) {
   const uri = String(process.env.MONGODB_URI || '').trim();
   if (!uri) fail('MONGODB_URI is not configured. Nothing was changed.');
-
   assertModeBeforeConnect(mode, uri);
 
   try {
     await mongoose.connect(uri);
     assertModeAfterConnect(mode);
-
     const db = mongoose.connection.db;
     const existing = await existingCollections(db);
     await printPlan(mode, db, existing);
@@ -213,11 +208,9 @@ async function runCleanup(mode) {
     await verifyEmpty(db);
 
     console.log('\n✅ BaseLinker cleanup complete and verified.');
-    for (const [name, count] of Object.entries(result.deleted)) {
-      console.log(`  deleted ${String(count).padStart(8)}  ${name}`);
-    }
+    for (const [name, count] of Object.entries(result.deleted)) console.log(`  deleted ${String(count).padStart(8)}  ${name}`);
     console.log(`  deleted ${String(result.deletedSettings).padStart(8)}  BaseLinker AppSetting rows`);
-    console.log('  indexes synchronized to current single-account schemas');
+    console.log('  indexes synchronized to current single-account ID-index schemas');
   } finally {
     await mongoose.disconnect().catch(() => {});
   }

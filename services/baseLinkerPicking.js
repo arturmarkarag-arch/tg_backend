@@ -4,7 +4,6 @@ const { fetchBaseLinkerOrders } = require('./baseLinkerOrders');
 const { withLock } = require('../utils/lock');
 const { appError } = require('../utils/errors');
 const { compactOrders } = require('./baseLinkerPublicDto');
-const { recordBaseLinkerOrderSnapshots } = require('./baseLinkerOrderSnapshots');
 const { setBaseLinkerOrderStatus } = require('./baseLinkerOrderCommands');
 const { getQueueScope, classifyUpstreamOrder } = require('./baseLinkerQueueScope');
 const { getIO } = require('../socket');
@@ -81,8 +80,11 @@ function buildSourceItems(order) {
       lineKey,
       sourceOrderId,
       orderProductId: text(product?.order_product_id),
+      storage: text(product?.storage),
+      storageId: text(product?.storage_id),
       productId: text(product?.product_id),
       variantId: text(product?.variant_id),
+      auctionId: text(product?.auction_id),
       sku: text(product?.sku),
       ean: text(product?.ean),
       name: text(product?.name),
@@ -191,7 +193,6 @@ function publicState(doc) {
     upstreamBlocked: ['cancelled', 'sent'].includes(String(plain.upstreamDisposition || '')),
     upstreamReviewRequired: plain.upstreamReviewRequired === true,
     upstreamReviewedAt: plain.upstreamReviewedAt || null,
-    lastUpstreamJournalTypes: (Array.isArray(plain.lastUpstreamJournalTypes) ? plain.lastUpstreamJournalTypes : []).map(Number).filter(Number.isFinite),
     lastUpstreamChangeSummary: {
       added: Number(plain.lastUpstreamChangeSummary?.added || 0),
       removed: Number(plain.lastUpstreamChangeSummary?.removed || 0),
@@ -229,7 +230,6 @@ async function fetchExactOrder(orderId) {
   const order = (result.orders || []).find((candidate) => String(candidate?.order_id) === String(id));
   if (!order) throw appError('baselinker_order_not_returned', { orderId: id, upstreamMethod: 'getOrders' });
   if (!Array.isArray(order.products) || order.products.length === 0) throw appError('baselinker_order_has_no_products', { orderId: id });
-  await recordBaseLinkerOrderSnapshots([order], { source: 'exact_order_read' });
   return order;
 }
 
@@ -290,6 +290,18 @@ function applyUpstreamDisposition(doc, order, scope, actor) {
 }
 
 function syncDocWithOrder(doc, order, actor) {
+  // Persist only the minimal source metadata needed by our own local workflow.
+  // Full BaseLinker orders are never mirrored into Mongo.
+  const nextSourceMeta = {
+    sourceShopOrderId: text(order?.shop_order_id),
+    sourceExternalOrderId: text(order?.external_order_id),
+    sourceDateAdd: Number(order?.date_add || 0) || 0,
+    sourceDateConfirmed: Number(order?.date_confirmed || 0) || 0,
+    sourceDeliveryPackageModule: text(order?.delivery_package_module),
+    sourceDeliveryPackageNr: text(order?.delivery_package_nr),
+  };
+  const metadataChanged = Object.entries(nextSourceMeta).some(([key, value]) => String(doc?.[key] ?? '') !== String(value ?? ''));
+  Object.assign(doc, nextSourceMeta);
   const wasInitialized = Boolean(doc.orderFingerprint);
   const sourceItems = buildSourceItems(order);
   const nextFingerprint = orderFingerprint(sourceItems);
@@ -304,9 +316,9 @@ function syncDocWithOrder(doc, order, actor) {
       updatedAt: null,
     }));
     doc.orderFingerprint = nextFingerprint;
-    return { changed: false, summary: { added: 0, removed: 0, changed: 0 }, initialized: true };
+    return { changed: false, metadataChanged, summary: { added: 0, removed: 0, changed: 0 }, initialized: true };
   }
-  if (doc.orderFingerprint === nextFingerprint) return { changed: false, summary: { added: 0, removed: 0, changed: 0 } };
+  if (doc.orderFingerprint === nextFingerprint) return { changed: false, metadataChanged, summary: { added: 0, removed: 0, changed: 0 } };
 
   const oldByKey = new Map((doc.items || []).map((item) => [String(item.lineKey), item]));
   const nextItems = [];
@@ -372,7 +384,7 @@ function syncDocWithOrder(doc, order, actor) {
     doc.workflowStage = workflowStageAfterWorkingStatus(previousWorkflowStage, doc.status);
   }
   appendHistory(doc, 'upstream_order_changed', actor, summary);
-  return { changed: true, summary };
+  return { changed: true, metadataChanged, summary };
 }
 
 function assertRevision(doc, expectedRevision) {
@@ -504,7 +516,7 @@ async function verifyTrackedPickingOrderUpstream(doc, actor, {
   }
 
   const dispositionChanged = previousDisposition !== String(doc.upstreamDisposition || '');
-  const stateChanged = sync.changed || upstreamState.changed || upstreamState.releasedOwner
+  const stateChanged = sync.changed || sync.metadataChanged || upstreamState.changed || upstreamState.releasedOwner
     || localTransitionChanged || dispositionChanged;
 
   if (stateChanged) {
@@ -702,6 +714,12 @@ function buildExistingClaimUpdate({ doc, order, scope, actor, now, adminForce })
     sync,
     set: {
       orderFingerprint: plain.orderFingerprint || '',
+      sourceShopOrderId: plain.sourceShopOrderId || '',
+      sourceExternalOrderId: plain.sourceExternalOrderId || '',
+      sourceDateAdd: Number(plain.sourceDateAdd || 0),
+      sourceDateConfirmed: Number(plain.sourceDateConfirmed || 0),
+      sourceDeliveryPackageModule: plain.sourceDeliveryPackageModule || '',
+      sourceDeliveryPackageNr: plain.sourceDeliveryPackageNr || '',
       ownerTelegramId: actor.by,
       ownerName: actor.byName,
       claimedAt: plain.claimedAt || now,
@@ -1138,10 +1156,10 @@ async function markPickingOrderSent({ orderId, user, expectedRevision, clientMut
     await savePickingDoc(doc);
 
     try {
-      const { refreshBaseLinkerOrderCache } = require('./baseLinkerOrderCache');
-      await refreshBaseLinkerOrderCache({ orders: [order], source: 'sent_transition' });
+      const { removeIndexedOrders } = require('./baseLinkerOrderIndex');
+      await removeIndexedOrders([id]);
     } catch (error) {
-      console.error('[baselinker] sent cache refresh failed', error);
+      console.error('[baselinker] sent index removal failed', error);
     }
 
     emitPickingUpdate(doc, clientMutationId);
@@ -1191,21 +1209,19 @@ async function fetchOptionalExactOrder(orderId) {
     maxPages: 1,
   });
   const order = (result.orders || []).find((candidate) => String(candidate?.order_id) === String(id)) || null;
-  if (order) await recordBaseLinkerOrderSnapshots([order], { source: 'optional_exact_order_read' });
   return order;
 }
 
 async function markPickingOrdersUpstreamUpdated({
   orderIds = [],
-  journalTypesByOrderId = {},
   orders = [],
-  knownCachedOrderIds = [],
+  knownAdmittedOrderIds = [],
 } = {}) {
   const ids = [...new Set((orderIds || []).map((id) => String(id || '')).filter(Boolean))];
   if (!ids.length) return { marked: 0, materializedCancelled: 0, materializedUpdated: 0 };
-  const actor = { by: 'system:baselinker-journal', byName: 'BaseLinker', byRole: 'system' };
+  const actor = { by: 'system:baselinker-queue', byName: 'BaseLinker', byRole: 'system' };
   const scope = await getQueueScope();
-  const known = new Set((knownCachedOrderIds || []).map(String));
+  const known = new Set((knownAdmittedOrderIds || []).map(String));
   const exactById = new Map((orders || []).map((order) => [String(order?.order_id || ''), order]).filter(([id]) => id));
 
   let marked = 0;
@@ -1214,11 +1230,12 @@ async function markPickingOrdersUpstreamUpdated({
 
   // Background upstream observations mutate the same PickingOrder documents as
   // worker actions. They therefore share the exact same per-order lock namespace.
-  // Never let journal/cache reconciliation race item/pack/sent mutations.
+  // Never let queue reconciliation race item/pack/sent mutations.
   for (const id of ids) {
     await withLock(`baselinker-order:${id}`, async () => {
       let doc = await BaseLinkerPickingOrder.findOne({ orderId: id });
       const order = exactById.get(id) || null;
+      let newlyMaterialized = false;
 
       if (!doc && known.has(id)) {
         const disposition = order ? classifyUpstreamOrder(order, scope) : 'missing';
@@ -1236,19 +1253,18 @@ async function markPickingOrdersUpstreamUpdated({
           doc.upstreamReviewRequired = true;
           doc.upstreamReviewedAt = null;
           doc.lastUpstreamChangeAt = new Date();
-          doc.lastUpstreamJournalTypes = [...new Set((journalTypesByOrderId[id] || []).map(Number).filter(Number.isFinite))];
           const action = disposition === 'cancelled' ? 'upstream_cancelled_before_claim' : 'upstream_updated_before_claim';
           appendHistory(doc, action, actor, {
             orderId: id,
             disposition,
             statusId: doc.lastUpstreamStatusId,
-            journalTypes: doc.lastUpstreamJournalTypes,
           });
           try {
             await savePickingDoc(doc);
             emitPickingUpdate(doc);
             materializedUpdated += 1;
             if (disposition === 'cancelled') materializedCancelled += 1;
+            newlyMaterialized = true;
           } catch (error) {
             if (!isDuplicateKeyError(error)) throw error;
             doc = await BaseLinkerPickingOrder.findOne({ orderId: id });
@@ -1256,14 +1272,12 @@ async function markPickingOrdersUpstreamUpdated({
         }
       }
 
-      if (!doc) return;
-      const types = [...new Set((journalTypesByOrderId[id] || []).map(Number).filter(Number.isFinite))];
+      if (!doc || newlyMaterialized) return;
       doc.upstreamReviewRequired = true;
       doc.upstreamReviewedAt = null;
       doc.lastUpstreamChangeAt = new Date();
-      doc.lastUpstreamJournalTypes = types;
       doc.revision = Number(doc.revision || 0) + 1;
-      appendHistory(doc, 'upstream_review_required', actor, { orderIds: [id], journalTypes: types });
+      appendHistory(doc, 'upstream_review_required', actor, { orderIds: [id] });
       await savePickingDoc(doc);
       emitPickingUpdate(doc);
       marked += 1;
@@ -1297,7 +1311,6 @@ async function acknowledgeUpstreamReview({ orderId, user, expectedRevision, clie
     doc.revision = Number(doc.revision || 0) + 1;
     appendHistory(doc, 'upstream_change_reviewed', actor, {
       lastUpstreamChangeAt: doc.lastUpstreamChangeAt || null,
-      journalTypes: doc.lastUpstreamJournalTypes || [],
     });
     await savePickingDoc(doc);
     emitPickingUpdate(doc, clientMutationId);
@@ -1307,9 +1320,6 @@ async function acknowledgeUpstreamReview({ orderId, user, expectedRevision, clie
 
 async function reconcilePickingFromUpstreamChanges({ orders = [], removedOrderIds = [] } = {}) {
   const changedOrders = Array.isArray(orders) ? orders.filter(Boolean) : [];
-  if (changedOrders.length) {
-    await recordBaseLinkerOrderSnapshots(changedOrders, { source: 'picking_reconcile' });
-  }
   const changedById = new Map(changedOrders
     .map((order) => [String(order?.order_id || ''), order])
     .filter(([id]) => id));
@@ -1318,14 +1328,14 @@ async function reconcilePickingFromUpstreamChanges({ orders = [], removedOrderId
   if (!affectedIds.length) return { reconciled: 0, changed: 0, released: 0 };
 
   const docs = await BaseLinkerPickingOrder.find({ orderId: { $in: affectedIds } }).lean();
-  const systemActor = { by: 'system:baselinker-journal', byName: 'BaseLinker', byRole: 'system' };
+  const systemActor = { by: 'system:baselinker-queue', byName: 'BaseLinker', byRole: 'system' };
   const scope = await getQueueScope();
   let reconciled = 0;
   let changed = 0;
   let released = 0;
 
-  for (const snapshot of docs) {
-    const localOrderId = String(snapshot.orderId || '');
+  for (const row of docs) {
+    const localOrderId = String(row.orderId || '');
     if (!localOrderId) continue;
 
     await withLock(`baselinker-order:${localOrderId}`, async () => {
@@ -1411,7 +1421,7 @@ async function reconcilePickingFromUpstreamChanges({ orders = [], removedOrderId
       }
 
       const dispositionChanged = previousDisposition !== String(doc.upstreamDisposition || '');
-      if (sync.changed || upstreamState.changed || upstreamState.releasedOwner || localTransitionChanged || dispositionChanged) {
+      if (sync.changed || sync.metadataChanged || upstreamState.changed || upstreamState.releasedOwner || localTransitionChanged || dispositionChanged) {
         if (disposition !== 'intake' || sync.changed || dispositionChanged) {
           doc.upstreamReviewRequired = true;
           doc.upstreamReviewedAt = null;

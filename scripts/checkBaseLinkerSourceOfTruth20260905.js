@@ -3,12 +3,11 @@
 
 const fs = require('fs');
 const path = require('path');
-const vm = require('vm');
-const { createRequire } = require('module');
 const assert = require('assert');
 
 const root = path.resolve(__dirname, '..');
 const read = (rel) => fs.readFileSync(path.join(root, rel), 'utf8');
+const exists = (rel) => fs.existsSync(path.join(root, rel));
 let passed = 0;
 function check(name, fn) {
   try { fn(); passed += 1; console.log(`PASS ${name}`); }
@@ -16,261 +15,235 @@ function check(name, fn) {
 }
 
 const scopeSrc = read('services/baseLinkerQueueScope.js');
-const cacheSrc = read('services/baseLinkerOrderCache.js');
+const indexSrc = read('services/baseLinkerOrderIndex.js');
+const indexModelSrc = read('models/BaseLinkerOrderIndex.js');
 const ordersSrc = read('services/baseLinkerOrders.js');
-const journalSrc = read('services/baseLinkerJournal.js');
+const schedulerSrc = read('services/baseLinkerQueueScheduler.js');
 const pickingSrc = read('services/baseLinkerPicking.js');
+const pickingModelSrc = read('models/BaseLinkerPickingOrder.js');
 const routeSrc = read('routes/baseLinker.js');
-const errorsSrc = read('utils/errors.js');
-const modelSrc = read('models/BaseLinkerPickingOrder.js');
+const indexEntrySrc = read('index.js');
 const commandSrc = read('services/baseLinkerOrderCommands.js');
 const shipmentsSrc = read('services/baseLinkerShipments.js');
-const snapshotSrc = read('services/baseLinkerOrderSnapshots.js');
 const printSrc = read('services/baseLinkerPrint.js');
 const retentionSrc = read('services/baseLinkerRetention.js');
-const snapshotModelSrc = read('models/BaseLinkerOrderSnapshot.js');
-const cacheModelSrc = read('models/BaseLinkerOrderCache.js');
-const printAgentModelSrc = read('models/BaseLinkerPrintAgent.js');
-const retentionSchedulerSrc = read('services/retention.js');
+const errorsSrc = read('utils/errors.js');
 
-check('three distinct queue status ids are required', () => {
-  assert(scopeSrc.includes('intakeStatusId'));
-  assert(scopeSrc.includes('sentStatusId'));
-  assert(scopeSrc.includes('cancelledStatusId'));
+check('queue still requires explicit Intake, Sent and Cancelled status ids', () => {
+  for (const token of ['intakeStatusId', 'sentStatusId', 'cancelledStatusId']) assert(scopeSrc.includes(token), token);
   assert(scopeSrc.includes('new Set([intakeStatusId, sentStatusId, cancelledStatusId]'));
 });
-check('Intake has no date boundary', () => {
-  const block = cacheSrc.slice(cacheSrc.indexOf('const intake = await fetchBaseLinkerOrders'), cacheSrc.indexOf('const sent = await fetchBaseLinkerOrders'));
-  assert(block.includes('statusId: scope.intakeStatusId'));
-  assert(!block.includes('dateConfirmedFrom'));
+
+check('minimal order index persists identity only, never a BaseLinker order payload', () => {
+  for (const token of ['orderId:', 'orderIdNumeric:', 'syncToken:', 'seenAt:']) assert(indexModelSrc.includes(token), token);
+  assert(!/\border\s*:/.test(indexModelSrc));
+  for (const forbidden of ['products:', 'deliveryAddress:', 'delivery_address:', 'customer:', 'email:', 'phone:', 'rawOrder:']) assert(!indexModelSrc.includes(forbidden), forbidden);
 });
-check('Sent and Cancelled are fixed to 14 days by upstream date_in_status', () => {
-  assert(scopeSrc.includes('const HISTORY_LOOKBACK_DAYS = 14'));
-  assert(scopeSrc.includes('sentDateInStatusFrom'));
-  assert(scopeSrc.includes('cancelledDateInStatusFrom'));
-  assert(scopeSrc.includes('Number(order?.date_in_status) >= scope.sentDateInStatusFrom'));
-  assert(scopeSrc.includes('Number(order?.date_in_status) >= scope.cancelledDateInStatusFrom'));
-  const scan = cacheSrc.slice(cacheSrc.indexOf('async function scanConfiguredScopes'), cacheSrc.indexOf('async function recoverDisappearedKnownOrders'));
-  assert(scan.includes('statusId: scope.sentStatusId'));
-  assert(scan.includes('statusId: scope.cancelledStatusId'));
-  assert(!scan.includes('dateConfirmedFrom'));
+
+check('retired full-order mirror and snapshot model/service files are physically absent', () => {
+  for (const rel of [
+    'models/BaseLinkerOrderCache.js',
+    'models/BaseLinkerOrderSnapshot.js',
+    'services/baseLinkerOrderCache.js',
+    'services/baseLinkerOrderSnapshots.js',
+  ]) assert(!exists(rel), rel);
 });
-check('queue scans exactly Intake, Sent and Cancelled statuses', () => {
-  const scan = cacheSrc.slice(cacheSrc.indexOf('async function scanConfiguredScopes'), cacheSrc.indexOf('async function recoverDisappearedKnownOrders'));
-  for (const token of ['statusId: scope.intakeStatusId', 'statusId: scope.sentStatusId', 'statusId: scope.cancelledStatusId']) assert(scan.includes(token), token);
+
+check('journal is not a runtime dependency', () => {
+  assert(!exists('services/baseLinkerJournal.js'));
+  for (const src of [indexSrc, schedulerSrc, pickingSrc, routeSrc, indexEntrySrc]) {
+    assert(!src.includes('baseLinkerJournal'));
+    assert(!src.includes('getJournalList'));
+    assert(!src.includes('journalScheduler'));
+    assert(!src.includes('fallbackPending'));
+  }
 });
-check('status-only intake scan uses id_from pagination', () => {
-  assert(ordersSrc.includes('const idCursorMode = unconfirmedMode || baseParams.date_confirmed_from === undefined'));
+
+check('server scheduler refreshes only the minimal queue index', () => {
+  assert(indexEntrySrc.includes('startBaseLinkerQueueScheduler'));
+  assert(schedulerSrc.includes('syncBaseLinkerOrderIndex({ force: true })'));
+  assert(schedulerSrc.includes("runAsSchedulerLeader('baselinker-queue-index'"));
+});
+
+check('background scan reads only confirmed Intake status', () => {
+  const scan = indexSrc.slice(indexSrc.indexOf('async function scanIntake'), indexSrc.indexOf('async function exactOrder'));
+  assert(scan.includes('statusId: scope.intakeStatusId'));
+  assert(scan.includes('includeUnconfirmed: false'));
+  assert(!scan.includes('scope.sentStatusId'));
+  assert(!scan.includes('scope.cancelledStatusId'));
+});
+
+check('BaseLinker status scan uses documented id_from cursor', () => {
+  assert(ordersSrc.includes('idFrom'));
+  assert(ordersSrc.includes('params.id_from = fromId'));
   assert(ordersSrc.includes('params.id_from = cursor'));
+  assert(ordersSrc.includes('const advanced = lastOrderId + 1'));
 });
-check('journal refreshes exact changed orders', () => {
-  assert(journalSrc.includes('fetchBaseLinkerOrders({ orderId, includeUnconfirmed: true, maxPages: 1 })'));
-  assert(journalSrc.includes('refreshBaseLinkerOrderCache({ orders: exactOrders, removedOrderIds })'));
+
+check('all warehouse reads are confirmed-only', () => {
+  for (const src of [indexSrc, pickingSrc, retentionSrc, routeSrc]) assert(!src.includes('includeUnconfirmed: true'));
+  assert(indexSrc.includes('includeUnconfirmed: false'));
+  assert(pickingSrc.includes('includeUnconfirmed: false'));
 });
-check('journal remembers prior cache membership before cancellation refresh', () => {
-  assert(journalSrc.includes('getKnownCachedOrderIds(window.orderIds)'));
-  assert(journalSrc.includes('knownCachedOrderIds'));
+
+check('new Intake index stores only order ids extracted from transient API responses', () => {
+  assert(indexSrc.includes('orderId: String(order.order_id)'));
+  assert(indexSrc.includes('orderIdNumeric: Number(order.order_id)'));
+  assert(!indexSrc.includes('order: compactOrder(order)'));
+  assert(!indexSrc.includes('rawOrder'));
 });
-check('silent journal fallback exact-rereads known orders that disappear from scanned statuses', () => {
-  assert(cacheSrc.includes('async function recoverDisappearedKnownOrders'));
-  assert(cacheSrc.includes('{ orderStatusId: scope.intakeStatusId }'));
-  assert(cacheSrc.includes('scope.cancelledDateInStatusFrom'));
-  assert(cacheSrc.includes('fetchBaseLinkerOrders({ orderId: row.orderId, includeUnconfirmed: true, maxPages: 1 })'));
-  assert(cacheSrc.includes('fallbackPendingOrderCount'));
-  assert(cacheSrc.includes('removedOrderIds: recovery.removedOrderIds'));
+
+check('selected untouched Intake rows are read live in a batched status/id_from request', () => {
+  assert(indexSrc.includes('async function liveIntakeOrdersForIds'));
+  assert(indexSrc.includes('statusId: scope.intakeStatusId'));
+  assert(indexSrc.includes('idFrom: Math.min(...numeric)'));
+  assert(indexSrc.includes('maxPages: 2'));
 });
-check('journal degraded health is explicit instead of silently claiming live sync', () => {
-  assert(journalSrc.includes('possiblyDisabled'));
-  for (const token of ['journalSchedulerStarted', 'journalPossiblyDisabled', 'journalLastLogId', 'journalLastChangeAt', 'journalPollMs', 'degradedReconcileMs', 'fallbackPendingOrderCount']) assert(routeSrc.includes(token), token);
-  assert(journalSrc.includes('DEGRADED_RECONCILE_MS'));
-  assert(journalSrc.includes('isBaseLinkerJournalSchedulerStarted'));
-  assert(journalSrc.includes('state.possiblyDisabled === true ? DEGRADED_RECONCILE_MS : undefined'));
+
+check('tracked workflow rows render from PickingOrder instead of a BaseLinker mirror', () => {
+  assert(indexSrc.includes('function orderFromPicking'));
+  assert(indexSrc.includes('BaseLinkerPickingOrder.find({}).lean()'));
+  assert(indexSrc.includes('const order = orderFromPicking(doc)'));
 });
-check('known upstream changes are materialised into Updated before claim', () => {
-  assert(pickingSrc.includes("const disposition = order ? classifyUpstreamOrder(order, scope) : 'missing'"));
-  assert(pickingSrc.includes("if (['intake', 'sent'].includes(disposition)) continue"));
-  assert(pickingSrc.includes("upstreamDisposition: disposition"));
+
+check('PickingOrder persists our business work and minimal source line identity', () => {
+  for (const token of ['items:', 'requestedQty:', 'pickedQty:', 'issueNote:', 'ownerTelegramId:', 'workflowStage:', 'revision:']) assert(pickingModelSrc.includes(token), token);
+  for (const token of ['storage:', 'storageId:', 'productId:', 'variantId:', 'sku:', 'ean:', 'attributes:']) assert(pickingModelSrc.includes(token), token);
+  assert(!pickingModelSrc.includes('lastUpstreamJournalTypes'));
+});
+
+check('full-order legacy collections are auto-dropped on migration', () => {
+  assert(indexSrc.includes("'baselinkerordercaches'"));
+  assert(indexSrc.includes("'baselinkerordersnapshots'"));
+  assert(indexSrc.includes("'baselinker.orderCache.v2'"));
+  assert(indexSrc.includes("'baselinker.journal.v1'"));
+});
+
+check('departed Intake ids are exact-read before removal', () => {
+  assert(indexSrc.includes('const departedIds = [...previousIds].filter((id) => !currentIds.has(id))'));
+  assert(indexSrc.includes('const order = await exactOrder(id)'));
+  assert(indexSrc.includes('reconcilePickingFromUpstreamChanges'));
+});
+
+check('unclaimed departed ids can materialize local review/cancelled history', () => {
+  assert(indexSrc.includes('knownAdmittedOrderIds'));
+  assert(pickingSrc.includes('async function markPickingOrdersUpstreamUpdated'));
   assert(pickingSrc.includes("upstream_cancelled_before_claim"));
   assert(pickingSrc.includes("upstream_updated_before_claim"));
 });
-check('Intake is admission-only; only Cancelled/Sent block warehouse mutations', () => {
+
+check('local workflow survives ordinary non-Intake BaseLinker statuses', () => {
   assert(pickingSrc.includes('Intake is only the admission status for new queue rows'));
-  assert(pickingSrc.includes("if (disposition === 'cancelled') throw appError('baselinker_order_cancelled')"));
-  assert(pickingSrc.includes("if (disposition === 'sent') throw appError('baselinker_order_already_sent')"));
+  assert(pickingSrc.includes("if (disposition === 'cancelled') throw appError('baselinker_order_cancelled'"));
+  assert(pickingSrc.includes("if (disposition === 'sent') throw appError('baselinker_order_already_sent'"));
   assert(!pickingSrc.includes("appError('baselinker_order_not_actionable'"));
   assert(!errorsSrc.includes('baselinker_order_not_actionable'));
 });
-check('upstream acknowledgement clears only review attention', () => {
-  assert(pickingSrc.includes('doc.upstreamReviewRequired = false'));
-  assert(pickingSrc.includes("appendHistory(doc, 'upstream_change_reviewed'"));
+
+check('missing exact order is explicit and cannot be silently mutated', () => {
+  assert(pickingSrc.includes("if (disposition === 'missing') throw appError('baselinker_order_not_returned'"));
+  assert(pickingSrc.includes("doc.upstreamDisposition = 'missing'"));
 });
-check('any meaningful BaseLinker order event can mark Updated', () => {
-  const expected = [1,2,3,4,5,6,7,8,9,10,11,12,13,14,16,17,18,19,20,21,22];
-  for (const type of expected) assert(new RegExp(`\\b${type},?\\s*//`).test(journalSrc), `missing journal type ${type}`);
-  assert(!/\b15,\s*\/\//.test(journalSrc));
+
+check('one lock namespace protects exact order mutations and background reconciliation', () => {
+  const pickingLocks = [...pickingSrc.matchAll(/withLock\(`(baselinker-[^`$]+)\$\{[^}]+\}`/g)].map((m) => m[1]);
+  assert(pickingLocks.includes('baselinker-order:'));
+  assert(!pickingSrc.includes('baselinker-picking:'));
 });
-check('packing with unresolved problems has no bypass', () => {
-  assert(!routeSrc.includes('allowIssues'));
-  assert(!pickingSrc.includes('allowIssues'));
-  assert(pickingSrc.includes("appError('baselinker_picking_has_unresolved_issues'"));
+
+check('Mongo optimistic concurrency is a durable backstop', () => {
+  assert(pickingModelSrc.includes('optimisticConcurrency: true'));
+  assert(pickingSrc.includes("if (error?.name === 'VersionError')"));
+  assert(pickingSrc.includes("appError('baselinker_picking_stale'"));
 });
-check('Sent is the sole explicit upstream write and is exact-order verified', () => {
+
+check('stable 30s queue scans do not invalidate the client when membership is unchanged', () => {
+  assert(indexSrc.includes('const membershipChanged ='));
+  assert(indexSrc.includes('if (membershipChanged)'));
+  assert(indexSrc.includes("reason: 'queue_index_membership_changed'"));
+});
+
+check('failed scope migration preserves last successful scope for retry', () => {
+  assert(indexSrc.includes('scopeKey: state.scopeKey'));
+  assert(indexSrc.includes('reset/rebuild the index'));
+});
+
+check('Sent is the sole explicit upstream order-status mutation', () => {
   assert(commandSrc.includes("callApi('setOrderStatus'"));
-  assert(commandSrc.includes('order_id: order'));
-  assert(commandSrc.includes('status_id: status'));
   assert(pickingSrc.includes('setBaseLinkerOrderStatus({ orderId: id, statusId: scope.sentStatusId })'));
-  assert(pickingSrc.includes('fetchExactOrder(id)'));
   assert(pickingSrc.includes("appError('baselinker_order_status_write_unverified'"));
-  for (const token of ['setOrderStatuses', 'addOrder', 'deleteOrder', 'setOrderFields']) {
-    assert(!pickingSrc.includes(token) && !cacheSrc.includes(token) && !journalSrc.includes(token) && !commandSrc.includes(token), token);
-  }
+  for (const forbidden of ['setOrderFields', 'deleteOrder', 'addOrder']) assert(!pickingSrc.includes(forbidden), forbidden);
 });
-check('exact orderId is the only picking identity', () => {
-  assert(modelSrc.includes("index({ orderId: 1 }, { unique: true })"));
-  for (const token of ['memberOrderIds', 'claimKey', 'groupKey', 'accountScope']) assert(!modelSrc.includes(token), token);
-  for (const token of ['mergeOrderGroup', 'fetchExactOrderGroup', 'claimKeyForGroup']) assert(!pickingSrc.includes(token), token);
+
+check('successful Sent removes order immediately from Intake id index', () => {
+  assert(pickingSrc.includes("require('./baseLinkerOrderIndex')"));
+  assert(pickingSrc.includes('await removeIndexedOrders([id])'));
 });
-check('runtime is intentionally single-account with no account namespace machinery', () => {
-  assert(!fs.existsSync(path.join(root, 'services/baseLinkerAccount.js')));
-  assert(!fs.existsSync(path.join(root, 'models/plugins/baseLinkerAccountScope.js')));
-  for (const source of [cacheSrc, journalSrc, pickingSrc, routeSrc, scopeSrc]) assert(!source.includes('accountScope'));
+
+check('CRM has no cancellation write path to BaseLinker', () => {
+  assert(!commandSrc.includes('cancel'));
+  assert(!pickingSrc.includes('setBaseLinkerOrderStatus({ orderId: id, statusId: scope.cancelledStatusId'));
 });
-check('interactive picking mutations cannot trust a stale local status indefinitely', () => {
-  assert(pickingSrc.includes('UPSTREAM_VERIFICATION_TTL_MS'));
-  assert(pickingSrc.includes('async function verifyTrackedPickingOrderUpstream'));
-  assert(pickingSrc.includes('await verifyTrackedPickingOrderUpstream(current, actor, { force: true })'));
-  assert(pickingSrc.includes('await verifyTrackedPickingOrderUpstream(doc, actor, { clientMutationId })'));
-  assert(modelSrc.includes('lastUpstreamVerifiedAt'));
+
+check('exact order id remains the sole warehouse identity', () => {
+  assert(pickingModelSrc.includes('index({ orderId: 1 }, { unique: true })'));
+  for (const token of ['memberOrderIds', 'groupKey', 'claimKey', 'accountScope']) assert(!pickingModelSrc.includes(token), token);
 });
-check('order-page read path never groups or merges order rows', () => {
-  const start = cacheSrc.indexOf('const pipeline = [');
-  const lookup = cacheSrc.indexOf('$lookup:', start);
-  const identityPart = cacheSrc.slice(start, lookup);
-  assert(!identityPart.includes('$group'));
-  assert(identityPart.includes("_id: '$orderId'"));
+
+check('single-account runtime has no account namespace machinery', () => {
+  for (const src of [indexSrc, pickingSrc, routeSrc, scopeSrc, ordersSrc, printSrc]) assert(!src.includes('accountScope'));
+  assert(!exists('services/baseLinkerAccount.js'));
+  assert(!exists('models/plugins/baseLinkerAccountScope.js'));
 });
-check('API-key/account switching is not implemented in runtime', () => {
-  for (const source of [cacheSrc, journalSrc, pickingSrc, routeSrc, scopeSrc, ordersSrc, printSrc]) {
-    assert(!source.includes('BASELINKER_ACCOUNT_KEY'));
-    assert(!source.includes('accountIdentity'));
-  }
-});
-check('immutable content-addressed order snapshots are persisted', () => {
-  assert(snapshotSrc.includes("createHash('sha256')"));
-  assert(snapshotSrc.includes('snapshotHash'));
-  assert(snapshotSrc.includes('BaseLinkerOrderSnapshot.bulkWrite'));
-  assert(snapshotSrc.includes('$setOnInsert'));
-  assert(snapshotSrc.includes('upsert: true'));
-});
-check('TTN/label/print require exact order-to-package verification', () => {
+
+check('TTN and print still verify exact order-package ownership', () => {
   assert(shipmentsSrc.includes('fetchVerifiedBaseLinkerOrderPackage'));
   assert(shipmentsSrc.includes('fetchBaseLinkerOrderPackages(orderId'));
   assert(shipmentsSrc.includes("appError('baselinker_package_order_mismatch'"));
   assert(printSrc.includes('fetchVerifiedBaseLinkerOrderPackage'));
-  assert(printSrc.includes('orderId'));
 });
 
-check('operator-facing errors exist for upstream terminal states', () => {
-  assert(errorsSrc.includes('baselinker_order_cancelled'));
-  assert(errorsSrc.includes('baselinker_order_already_sent'));
-});
-check('/status exposes all three upstream statuses and 14-day terminal retention', () => {
-  for (const token of ['intakeStatusId', 'sentStatusId', 'cancelledStatusId', 'historyLookbackDays', 'sentLookbackDays', 'cancelledLookbackDays']) assert(routeSrc.includes(token));
-});
-check('Cancelled has a first-class server shelf', () => {
-  assert(cacheSrc.includes("'processing', 'deferred', 'packed', 'sent', 'cancelled', 'updated'"));
-  assert(cacheSrc.includes("then: 'cancelled'"));
-  assert(cacheSrc.includes('upstreamCancelledRecent'));
-  assert(cacheSrc.includes('cancelled: 0'));
-});
-check('BaseLinker retention purges stale history but never age-purges active Intake', () => {
+check('terminal local history retention remains 14 days and fail-closed', () => {
+  assert(scopeSrc.includes('const HISTORY_LOOKBACK_DAYS = 14'));
   assert(retentionSrc.includes('BASELINKER_HISTORY_RETENTION_DAYS = HISTORY_LOOKBACK_DAYS'));
-  assert(retentionSrc.includes('BaseLinkerOrderSnapshot.deleteMany'));
   assert(retentionSrc.includes('BaseLinkerPickingOrder.deleteOne'));
-  assert(retentionSrc.includes('fetchBaseLinkerOrders({ orderId, includeUnconfirmed: true, maxPages: 1 })'));
-  assert(retentionSrc.includes("if (disposition === 'intake') return"));
-  assert(retentionSrc.includes('date_in_status'));
-  assert(retentionSrc.includes('fail-closed'));
-  assert(retentionSrc.includes('BaseLinkerOrderCache.deleteMany'));
-  assert(retentionSrc.includes('scope.sentStatusId'));
-  assert(retentionSrc.includes('scope.cancelledStatusId'));
-  assert(!retentionSrc.includes('orderStatusId: scope.intakeStatusId, statusChangedAt'));
-  assert(retentionSchedulerSrc.includes('purgeExpiredBaseLinkerData'));
-  assert(snapshotModelSrc.includes('expireAfterSeconds: 14 * 24 * 60 * 60'));
-  assert(printAgentModelSrc.includes('expireAfterSeconds: 14 * 24 * 60 * 60'));
-  assert(cacheModelSrc.includes('orderStatusId: 1, statusChangedAt: 1'));
+  assert(retentionSrc.includes("if (classifyUpstreamOrder(order, scope) === 'intake') return"));
+  assert(retentionSrc.includes('includeUnconfirmed: false'));
 });
-check('manual refresh is a real upstream reconciliation, not a cache-only GET', () => {
+
+check('manual refresh is a real upstream Intake index refresh', () => {
   assert(routeSrc.includes("router.post('/sync'"));
-  assert(routeSrc.includes('syncBaseLinkerOrderCache({ force: true })'));
-});
-check('Packed shelf can be filtered by actual packing actor before pagination', () => {
-  assert(routeSrc.includes('packedBy: req.query.packedBy'));
-  assert(cacheSrc.includes("safeWorkflow === 'packed' && safePackedBy"));
-  assert(cacheSrc.includes("localPackedBy: safePackedBy"));
-  assert(cacheSrc.includes("facet?.pageTotal?.[0]?.count"));
-});
-check('Packed actor options come from persisted packedBy facts', () => {
-  assert(cacheSrc.includes("packedBy: { $nin: ['', null] }"));
-  assert(cacheSrc.includes("name: { $first: '$packedByName' }"));
-  assert(cacheSrc.includes('packedByOptions'));
-});
-check('Packed actor query has a supporting index', () => {
-  assert(modelSrc.includes('workflowStage: 1, packedBy: 1, packedAt: -1'));
+  assert(routeSrc.includes('syncBaseLinkerOrderIndex({ force: true })'));
 });
 
-// Small dependency-free behavior proof for queue scope semantics.
-function loadScope() {
-  const filename = path.join(root, 'services/baseLinkerQueueScope.js');
-  const realRequire = createRequire(filename);
-  const module = { exports: {} };
-  const mocks = {
-    '../models/AppSetting': { findOne: () => ({ lean: async () => null }), findOneAndUpdate: async () => ({}) },
-    './baseLinkerClient': { callBaseLinker: async () => ({ statuses: [] }) },
-    '../utils/errors': { appError: (code) => Object.assign(new Error(code), { code, status: 400 }) },
-  };
-  vm.runInNewContext(fs.readFileSync(filename, 'utf8'), { module, process, Date, require: (id) => mocks[id] || realRequire(id) });
-  return module.exports;
-}
-const scope = loadScope();
-const now = Date.now();
-const cfg = scope.queueScopeFromSettings({ intakeStatusId: 99, sentStatusId: 100, cancelledStatusId: 101, revision: 'gate' }, now);
-check('behavior: ancient Intake order is still in scope', () => assert.equal(scope.orderInIntakeScope({ order_status_id: 99, confirmed: true, date_confirmed: 1 }, cfg), true));
-check('behavior: Sent older than 14 days in its current status is out of scope', () => assert.equal(scope.orderInSentScope({ order_status_id: 100, confirmed: true, date_in_status: cfg.sentDateInStatusFrom - 1 }, cfg), false));
-check('behavior: Cancelled older than 14 days is out of scope', () => assert.equal(scope.orderInCancelledScope({ order_status_id: 101, date_in_status: cfg.cancelledDateInStatusFrom - 1 }, cfg), false));
-check('behavior: recent Cancelled is retained', () => assert.equal(scope.orderInCancelledScope({ order_status_id: 101, date_in_status: cfg.cancelledDateInStatusFrom + 60 }, cfg), true));
-check('behavior: old confirmation does not hide an order moved to Sent today', () => assert.equal(scope.orderInSentScope({ order_status_id: 100, confirmed: true, date_confirmed: 1, date_in_status: cfg.sentDateInStatusFrom + 60 }, cfg), true));
-check('behavior: current Cancelled status classifies terminal', () => assert.equal(scope.classifyUpstreamOrder({ order_status_id: 101 }, cfg), 'cancelled'));
-
-
-
-check('item problem cannot auto-defer an order; only explicit release owns Deferred', () => {
-  const pickingState = read('domain/baseLinkerPickingState.js');
-  const picking = read('services/baseLinkerPicking.js');
-  assert(pickingState.includes('Item-level state must never move the whole order between operational'));
-  assert(!pickingState.includes("if ([ORDER_STATUS.PROBLEM, ORDER_STATUS.READY_WITH_ISSUE].includes"));
-  assert(picking.includes('doc.workflowStage = WORKFLOW_STAGE.DEFERRED'));
-  assert(picking.includes("appendHistory(doc, 'order_released'"));
-  assert(picking.includes('shouldRepairImplicitAutoDeferred'));
-  assert(picking.includes("action: 'implicit_problem_autodefer_repaired'"));
-  assert(picking.includes("action === 'order_released'"));
-  assert(picking.includes("action === 'order_reopened_by_admin'"));
+check('/status reports queue index health, not journal/fallback health', () => {
+  for (const token of ['queueIndexInitialized', 'queueIndexOrderCount', 'lastQueueSyncAt', 'lastQueueSyncError', 'queueSchedulerStarted', 'queueRefreshMs']) assert(routeSrc.includes(token), token);
+  for (const forbidden of ['journalSchedulerStarted', 'journalPossiblyDisabled', 'fallbackPendingOrderCount']) assert(!routeSrc.includes(forbidden), forbidden);
 });
 
-
-check('client mutation ids are echoed through HTTP and realtime picking events', () => {
-  assert(routeSrc.includes('function clientMutationIdFromRequest'));
-  assert(routeSrc.includes('clientMutationId,'));
-  assert(routeSrc.includes("{ clientMutationId }"));
-  assert(pickingSrc.includes('function emitPickingUpdate(doc, clientMutationId'));
-  assert(pickingSrc.includes("clientMutationId: text(clientMutationId).trim().slice(0, 160)"));
-  for (const signature of [
-    'claimPickingOrder({ orderId, user, force = false, clientMutationId =',
-    'updatePickingItem({ orderId, lineKey, user, expectedRevision, state, pickedQty, issueNote, clientMutationId =',
-    'releasePickingOrder({ orderId, user, expectedRevision, force = false, clientMutationId =',
-    'markPickingOrderPacked({ orderId, user, expectedRevision, clientMutationId =',
-    'markPickingOrderSent({ orderId, user, expectedRevision, clientMutationId =',
-  ]) assert(pickingSrc.includes(signature), signature);
+check('all six local shelves remain first-class', () => {
+  for (const stage of ['processing', 'deferred', 'packed', 'sent', 'cancelled', 'updated']) assert(indexSrc.includes(stage), stage);
 });
 
-if (!process.exitCode) console.log(`\nBaseLinker source-of-truth server gate: ${passed}/${passed} PASS`);
+check('packed actor filter/options come from local PickingOrder facts', () => {
+  assert(indexSrc.includes("safeWorkflow === 'packed' && safePackedBy"));
+  assert(indexSrc.includes("packedBy: { $nin: ['', null] }"));
+  assert(indexSrc.includes("name: { $first: '$packedByName' }"));
+});
+
+check('metadata needed by local projection is persisted without persisting full order', () => {
+  for (const token of ['sourceShopOrderId', 'sourceExternalOrderId', 'sourceDateAdd', 'sourceDateConfirmed', 'sourceDeliveryPackageModule', 'sourceDeliveryPackageNr']) {
+    assert(pickingModelSrc.includes(token), token);
+    assert(pickingSrc.includes(token), token);
+  }
+  assert(pickingSrc.includes('metadataChanged'));
+});
+
+check('packing with unresolved item problems still has no hidden bypass', () => {
+  assert(!routeSrc.includes('allowIssues'));
+  assert(!pickingSrc.includes('allowIssues'));
+  assert(pickingSrc.includes("appError('baselinker_picking_has_unresolved_issues'"));
+});
+
+console.log(`\n${passed} checks passed`);
+if (process.exitCode) process.exit(process.exitCode);

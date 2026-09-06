@@ -30,7 +30,7 @@ const { startSupplementScheduler } = require('./services/supplementScheduler');
 const { startOrderingOpenScheduler } = require('./services/orderingOpenScheduler');
 const { startPickingMaintenanceScheduler } = require('./services/pickingMaintenanceScheduler');
 const { startTelegramDeliveryScheduler } = require('./services/telegramDeliveryScheduler');
-const { startBaseLinkerJournalScheduler } = require('./services/baseLinkerJournal');
+const { startBaseLinkerQueueScheduler } = require('./services/baseLinkerQueueScheduler');
 const { enterMaintenance, isMaintenanceActive } = require('./services/maintenanceState');
 
 let httpServer = null;
@@ -294,7 +294,7 @@ async function startServer() {
       startOrderingOpenScheduler();
       startTelegramDeliveryScheduler();
       startPickingMaintenanceScheduler();
-      startBaseLinkerJournalScheduler();
+      startBaseLinkerQueueScheduler();
     }
 
     server.on('error', (err) => {

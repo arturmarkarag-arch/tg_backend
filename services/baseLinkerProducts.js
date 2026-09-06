@@ -206,10 +206,9 @@ async function tryDirectInventoryRefs(refs, productCatalog, unresolved, warnings
 }
 
 /**
- * Enriches order lines with product-catalog data without changing the raw
- * getOrders payload. getOrders is the immutable order snapshot (quantity,
- * price, chosen variant, etc.); this catalog is supplementary current product
- * data used for photos, features and packing context.
+ * Enriches the order lines returned by the current getOrders read without
+ * changing/persisting that upstream payload. The catalog is supplementary
+ * current product data used for photos, features and packing context.
  */
 async function fetchBaseLinkerProductCatalog(orders, callApi = callBaseLinker) {
   const refs = collectOrderProductRefs(orders);
