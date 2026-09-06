@@ -72,7 +72,7 @@ const PickingTaskSchema = new mongoose.Schema(
     completedByName: { type: String, default: '' },
     // Retention: completed tasks are dead weight once their cycle is long over
     // (the shift board reads only the current session, the orphan sweep only the
-    // most recent). Stamped = now + 90d at finalisation (real pick OR system
+    // most recent). Stamped = now + 14d at finalisation (real pick OR system
     // archive) so a TTL index reaps them automatically. Stays null for pending/
     // locked tasks, which the TTL ignores (null/missing is never expired).
     completedExpireAt: { type: Date, default: null },
@@ -82,9 +82,9 @@ const PickingTaskSchema = new mongoose.Schema(
 
 // Shift-board ranking: "completed tasks of THIS session, grouped by picker".
 PickingTaskSchema.index({ orderingSessionId: 1, status: 1, completedBy: 1 });
-// TTL: auto-purge completed tasks 90 days after finalisation. expireAfterSeconds:0
+// TTL: auto-purge completed tasks 14 days after finalisation. expireAfterSeconds:0
 // means "delete once completedExpireAt is in the past"; the date already carries
-// the +90d offset. pending/locked tasks have completedExpireAt:null → never reaped.
+// the +14d offset. pending/locked tasks have completedExpireAt:null → never reaped.
 PickingTaskSchema.index({ completedExpireAt: 1 }, { expireAfterSeconds: 0 });
 
 PickingTaskSchema.index({ status: 1, blockId: 1, positionIndex: 1 });

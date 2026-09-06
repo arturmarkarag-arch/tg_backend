@@ -5,22 +5,24 @@ const PickingTask = require('../models/PickingTask');
 const Product = require('../models/Product');
 const ShopProduct = require('../models/ShopProduct');
 const ProductVector = require('../models/ProductVector');
+const TelegramNotificationEvent = require('../models/TelegramNotificationEvent');
+const TelegramNotificationDelivery = require('../models/TelegramNotificationDelivery');
 const { runAsSchedulerLeader } = require('./schedulerLeader');
 const { purgeExpiredBaseLinkerData } = require('./baseLinkerRetention');
+const {
+  DAY_MS,
+  OPERATIONAL_HISTORY_RETENTION_DAYS,
+} = require('../utils/retentionPolicy');
 
 // A warehouse product that has stayed archived this long is treated as "no longer the
 // warehouse's concern, but still worth keeping in the shop catalogue" — see
 // convertStaleArchivedToShop. Restoring it within the window cancels the conversion.
 const ARCHIVE_TO_SHOP_DAYS = 30;
 
-// Completed picking tasks are deliberately KEPT after a session ends (so the
-// session's "зібрано N" summary survives), but only the CURRENT session is ever
-// counted on the board — tasks from sessions weeks in the past are pure dead
-// weight. A TTL index can't express "status === 'completed' AND old" (TTL indexes
-// cannot be partial), so this is swept on a schedule instead of by the engine.
-const COMPLETED_PICKING_RETENTION_DAYS = 90;
-
-const DAY_MS = 24 * 60 * 60 * 1000;
+// Frozen OrderingSession.finalSummary preserves historical counters, while the
+// detailed task graph is useful only around the current operational cycle.
+const COMPLETED_PICKING_RETENTION_DAYS = OPERATIONAL_HISTORY_RETENTION_DAYS;
+const TELEGRAM_LEDGER_RETENTION_DAYS = OPERATIONAL_HISTORY_RETENTION_DAYS;
 
 async function purgeOldCompletedPickingTasks(now = Date.now()) {
   const cutoff = new Date(now - COMPLETED_PICKING_RETENTION_DAYS * DAY_MS);
@@ -29,6 +31,33 @@ async function purgeOldCompletedPickingTasks(now = Date.now()) {
     updatedAt: { $lt: cutoff },
   });
   return deletedCount || 0;
+}
+
+// Delete only fully completed Telegram events. Deliveries belonging to pending
+// or delivering events stay intact regardless of age, so retention can never
+// discard a retryable/unsent notification. Child deliveries go first to avoid
+// leaving permanent orphans if the process stops between the two operations.
+async function purgeOldTelegramDeliveryLedger(now = Date.now()) {
+  const cutoff = new Date(now - TELEGRAM_LEDGER_RETENTION_DAYS * DAY_MS);
+  const oldCompleted = await TelegramNotificationEvent.find({
+    status: 'completed',
+    $or: [
+      { completedAt: { $lt: cutoff } },
+      { completedAt: null, updatedAt: { $lt: cutoff } },
+    ],
+  }, '_id').lean();
+  const eventIds = oldCompleted.map((event) => event._id);
+  if (!eventIds.length) return { deliveries: 0, events: 0 };
+
+  const deliveryResult = await TelegramNotificationDelivery.deleteMany({ eventId: { $in: eventIds } });
+  const eventResult = await TelegramNotificationEvent.deleteMany({
+    _id: { $in: eventIds },
+    status: 'completed',
+  });
+  return {
+    deliveries: deliveryResult.deletedCount || 0,
+    events: eventResult.deletedCount || 0,
+  };
 }
 
 // Build the shop-OWNED field set from a warehouse product (same shape upsertShopProduct
@@ -139,6 +168,10 @@ function startRetentionScheduler() {
     } catch (err) {
     }
     try {
+      await purgeOldTelegramDeliveryLedger();
+    } catch (err) {
+    }
+    try {
       const c = await convertStaleArchivedToShop();
     } catch (err) {
     }
@@ -155,9 +188,11 @@ function startRetentionScheduler() {
 
 module.exports = {
   purgeOldCompletedPickingTasks,
+  purgeOldTelegramDeliveryLedger,
   convertStaleArchivedToShop,
   startRetentionScheduler,
   COMPLETED_PICKING_RETENTION_DAYS,
+  TELEGRAM_LEDGER_RETENTION_DAYS,
   ARCHIVE_TO_SHOP_DAYS,
   purgeExpiredBaseLinkerData,
 };

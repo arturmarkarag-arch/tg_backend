@@ -15,12 +15,13 @@ const { getIO } = require('../socket');
 const { withLock } = require('../utils/lock');
 const { transitionPickingStatus, maybeCompleteSession } = require('../utils/sessionStatus');
 const { buildUnreconciledOosTaskFilter } = require('../utils/pickingOosRecovery');
+const { OPERATIONAL_HISTORY_RETENTION_MS } = require('../utils/retentionPolicy');
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
 const LOCK_TIMEOUT_MS      = 5 * 60 * 1000;             // 5 min — stale worker lock
 const FORCE_CLAIM_AFTER_MS = LOCK_TIMEOUT_MS;            // one lease boundary everywhere
-const COMPLETED_TTL_MS     = 90 * 24 * 60 * 60 * 1000;  // 90 days — completed-task retention (TTL)
+const COMPLETED_TTL_MS     = OPERATIONAL_HISTORY_RETENTION_MS;
 
 // ── Retry helpers ────────────────────────────────────────────────────────────
 
@@ -587,7 +588,7 @@ async function completePickingTask({ taskId, userTelegramId, userFirstName = '',
     // about to be cleared, so this is the only surviving record of who picked it).
     task.completedBy     = String(userTelegramId);
     task.completedByName  = actor.byName;
-    task.completedExpireAt = new Date(Date.now() + COMPLETED_TTL_MS); // TTL reap after 90d
+    task.completedExpireAt = new Date(Date.now() + COMPLETED_TTL_MS); // TTL reap after 14d
 
     await task.save({ session });
     await markOrderItemsPacked(task.items, task.productId, actor, session);
@@ -731,7 +732,7 @@ async function outOfStockPickingTask({ taskId, userTelegramId, userFirstName = '
     // Out-of-stock is still a picker action — credit it on the shift board.
     fresh.completedBy     = String(userTelegramId);
     fresh.completedByName  = actor.byName;
-    fresh.completedExpireAt = new Date(Date.now() + COMPLETED_TTL_MS); // TTL reap after 90d
+    fresh.completedExpireAt = new Date(Date.now() + COMPLETED_TTL_MS); // TTL reap after 14d
     await fresh.save({ session });
     await markOrderItemsPacked(fresh.items, fresh.productId, actor, session);
     task = fresh; // keep downstream block/product lookups consistent

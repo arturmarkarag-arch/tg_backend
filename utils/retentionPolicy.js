@@ -1,0 +1,15 @@
+'use strict';
+
+// Short-lived operational history that is useful around the current business
+// cycle but must not accumulate indefinitely.
+const OPERATIONAL_HISTORY_RETENTION_DAYS = 14;
+const DAY_MS = 24 * 60 * 60 * 1000;
+const OPERATIONAL_HISTORY_RETENTION_MS = OPERATIONAL_HISTORY_RETENTION_DAYS * DAY_MS;
+const OPERATIONAL_HISTORY_RETENTION_SECONDS = OPERATIONAL_HISTORY_RETENTION_MS / 1000;
+
+module.exports = {
+  DAY_MS,
+  OPERATIONAL_HISTORY_RETENTION_DAYS,
+  OPERATIONAL_HISTORY_RETENTION_MS,
+  OPERATIONAL_HISTORY_RETENTION_SECONDS,
+};

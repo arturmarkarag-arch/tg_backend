@@ -17,6 +17,7 @@ const SupplementRequest = require('../models/SupplementRequest');
 const { isOrderingOpen } = require('../utils/orderingSchedule');
 const { resolveOrderStatusAfterCancel } = require('../utils/orderStatus');
 const { buildUnreconciledOosTaskFilter } = require('../utils/pickingOosRecovery');
+const { OPERATIONAL_HISTORY_RETENTION_MS } = require('../utils/retentionPolicy');
 const { detachProductFromAllBlocks } = require('./blockMembershipPrimitives');
 const {
   ACTIVE_ITEM_STATUSES,
@@ -277,7 +278,7 @@ async function archiveProductInSession(productOrId, {
         completionReason: 'system_archive',
         lockedBy: null,
         lockedAt: null,
-        completedExpireAt: new Date(now.getTime() + 90 * 24 * 60 * 60 * 1000),
+        completedExpireAt: new Date(now.getTime() + OPERATIONAL_HISTORY_RETENTION_MS),
       },
     },
     { session },

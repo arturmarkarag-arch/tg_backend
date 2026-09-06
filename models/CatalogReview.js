@@ -1,5 +1,6 @@
 'use strict';
 const mongoose = require('mongoose');
+const { OPERATIONAL_HISTORY_RETENTION_SECONDS } = require('../utils/retentionPolicy');
 
 // A seller's self-declared "я переглянув усі товари" for one ordering session.
 // Purely informational: the warehouse wants to know, before picking starts, which
@@ -46,8 +47,8 @@ const CatalogReviewSchema = new mongoose.Schema({
 CatalogReviewSchema.index({ sessionId: 1, telegramId: 1 }, { unique: true });
 // Board lookup: all marks of one session (shop-status, shift-board).
 CatalogReviewSchema.index({ groupId: 1, sessionId: 1 });
-// Retention: 180 days, same horizon as ShopAuditLog. Rows are tiny but there is
-// no reason to keep a "переглянув каталог" flag from half a year ago.
-CatalogReviewSchema.index({ at: 1 }, { expireAfterSeconds: 180 * 24 * 60 * 60 });
+// A review mark matters only around its ordering cycle. Bound old, UI-invisible
+// session marks to the shared 14-day operational-history window.
+CatalogReviewSchema.index({ at: 1 }, { expireAfterSeconds: OPERATIONAL_HISTORY_RETENTION_SECONDS });
 
 module.exports = mongoose.model('CatalogReview', CatalogReviewSchema);

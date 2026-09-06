@@ -31,5 +31,8 @@ const TelegramNotificationEventSchema = new mongoose.Schema({
 
 TelegramNotificationEventSchema.index({ sourceType: 1, sourceId: 1, kind: 1, sourceRevision: 1 });
 TelegramNotificationEventSchema.index({ deliveryGroupId: 1, preparedAt: -1 });
+// Supports the paired 14-day purge in services/retention without applying a
+// blind age-only TTL to pending or retryable notification work.
+TelegramNotificationEventSchema.index({ status: 1, completedAt: 1 });
 
 module.exports = mongoose.model('TelegramNotificationEvent', TelegramNotificationEventSchema);

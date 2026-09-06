@@ -1,6 +1,7 @@
 'use strict';
 
 const mongoose = require('mongoose');
+const { OPERATIONAL_HISTORY_RETENTION_SECONDS } = require('../utils/retentionPolicy');
 
 const TelegramPublicationEventSchema = new mongoose.Schema({
   publicationId: { type: mongoose.Schema.Types.ObjectId, ref: 'TelegramPublication', default: null },
@@ -26,5 +27,11 @@ TelegramPublicationEventSchema.index({ publicationId: 1, createdAt: -1 });
 TelegramPublicationEventSchema.index({ sourceType: 1, sourceId: 1, createdAt: -1 });
 TelegramPublicationEventSchema.index({ destinationKey: 1, eventType: 1, createdAt: -1 });
 TelegramPublicationEventSchema.index({ chatId: 1, messageId: 1, createdAt: -1 });
+// Publication current state lives in TelegramPublication/Binding. These event
+// breadcrumbs are diagnostic history only and expire after 14 days.
+TelegramPublicationEventSchema.index(
+  { createdAt: 1 },
+  { expireAfterSeconds: OPERATIONAL_HISTORY_RETENTION_SECONDS },
+);
 
 module.exports = mongoose.model('TelegramPublicationEvent', TelegramPublicationEventSchema);
