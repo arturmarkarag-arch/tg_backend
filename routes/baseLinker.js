@@ -80,6 +80,7 @@ router.post('/sync', asyncHandler(async (req, res) => {
 
 router.get('/meta', asyncHandler(async (req, res) => {
   if (!isBaseLinkerConfigured()) throw appError('baselinker_not_configured');
+  res.set('Cache-Control', 'no-store');
   const meta = await fetchBaseLinkerOrderMeta();
   res.json(meta);
 }));

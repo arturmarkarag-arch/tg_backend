@@ -34,6 +34,7 @@ router.get('/baselinker-settings', telegramAuth, requireTelegramRole('admin'), a
 
 router.get('/baselinker-settings/statuses', telegramAuth, requireTelegramRole('admin'), asyncHandler(async (req, res) => {
   const { getQueueStatusOptions } = require('../services/baseLinkerQueueScope');
+  res.set('Cache-Control', 'no-store');
   res.json({ statuses: await getQueueStatusOptions() });
 }));
 

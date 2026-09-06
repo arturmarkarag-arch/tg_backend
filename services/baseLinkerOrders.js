@@ -145,35 +145,29 @@ async function fetchBaseLinkerOrders(options = {}, callApi = callBaseLinker) {
   return { orders, pageCount: Math.min(pageCount + (truncated ? 0 : 1), maxPages), truncated, nextDateConfirmedFrom, nextIdFrom };
 }
 
-let metaCache = null;
 let metaInFlight = null;
 
 async function fetchBaseLinkerOrderMeta(callApi = callBaseLinker) {
-  const now = Date.now();
-  const cached = metaCache;
-  if (callApi === callBaseLinker && cached && now < cached.expiresAt) return cached.value;
-  if (callApi === callBaseLinker && metaInFlight) return metaInFlight;
-
+  // Statuses are tiny mutable BaseLinker configuration. Do not cache them in
+  // our process: a newly created/renamed status must be visible immediately.
+  // Keep only in-flight coalescing so concurrent page loads do not duplicate
+  // the same upstream request.
   const load = async () => {
     const [statusesPayload, sourcesPayload] = await Promise.all([
       callApi('getOrderStatusList', {}),
       callApi('getOrderSources', {}),
     ]);
 
-    const result = {
+    return {
       statuses: Array.isArray(statusesPayload.statuses) ? statusesPayload.statuses : [],
       sources: sourcesPayload.sources && typeof sourcesPayload.sources === 'object'
         ? sourcesPayload.sources
         : {},
     };
-
-    if (callApi === callBaseLinker) {
-      metaCache = { value: result, expiresAt: Date.now() + (5 * 60 * 1000) };
-    }
-    return result;
   };
 
   if (callApi !== callBaseLinker) return load();
+  if (metaInFlight) return metaInFlight;
   const inFlight = load();
   metaInFlight = inFlight;
   try {
