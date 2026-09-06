@@ -235,7 +235,7 @@ async function runBaseLinkerJournalTick() {
       const exactOrders = [];
       const removedOrderIds = [];
       for (const orderId of window.orderIds) {
-        const exact = await fetchBaseLinkerOrders({ orderId, includeUnconfirmed: true, maxPages: 1 });
+        const exact = await fetchBaseLinkerOrders({ orderId, includeUnconfirmed: false, maxPages: 1 });
         const order = (exact.orders || []).find((candidate) => String(candidate?.order_id) === String(orderId));
         if (order) exactOrders.push(order);
         else removedOrderIds.push(String(orderId));

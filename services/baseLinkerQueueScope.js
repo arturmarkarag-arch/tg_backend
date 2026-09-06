@@ -40,7 +40,7 @@ function queueScopeFromSettings(value = {}, now = Date.now()) {
     sentDateInStatusFrom,
     cancelledDateInStatusFrom,
     scopeKey: configured
-      ? `${intakeStatusId}:all|${sentStatusId}:${SENT_LOOKBACK_DAYS}|${cancelledStatusId}:${CANCELLED_LOOKBACK_DAYS}|${value.revision || 'settings-v3'}`
+      ? `${intakeStatusId}:confirmed|${sentStatusId}:${SENT_LOOKBACK_DAYS}|${cancelledStatusId}:${CANCELLED_LOOKBACK_DAYS}|${value.revision || 'settings-v3'}`
       : null,
   };
 }
@@ -56,17 +56,20 @@ function orderIsConfirmed(order) {
 
 function orderInIntakeScope(order, scope) {
   return scope.configured
+    && orderIsConfirmed(order)
     && Number(order?.order_status_id) === scope.intakeStatusId;
 }
 
 function orderInSentScope(order, scope) {
   return scope.configured
+    && orderIsConfirmed(order)
     && Number(order?.order_status_id) === scope.sentStatusId
     && Number(order?.date_in_status) >= scope.sentDateInStatusFrom;
 }
 
 function orderInCancelledScope(order, scope) {
   return scope.configured
+    && orderIsConfirmed(order)
     && Number(order?.order_status_id) === scope.cancelledStatusId
     && Number(order?.date_in_status) >= scope.cancelledDateInStatusFrom;
 }

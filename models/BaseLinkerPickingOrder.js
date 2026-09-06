@@ -103,7 +103,7 @@ const BaseLinkerPickingOrderSchema = new mongoose.Schema({
   },
 
   history: { type: [PickingHistoryEntrySchema], default: [] },
-}, { timestamps: true });
+}, { timestamps: true, optimisticConcurrency: true });
 
 BaseLinkerPickingOrderSchema.index({ orderId: 1 }, { unique: true });
 BaseLinkerPickingOrderSchema.index({ status: 1, updatedAt: -1 });

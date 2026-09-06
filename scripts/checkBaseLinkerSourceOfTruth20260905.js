@@ -86,16 +86,19 @@ check('journal degraded health is explicit instead of silently claiming live syn
   assert(journalSrc.includes('isBaseLinkerJournalSchedulerStarted'));
   assert(journalSrc.includes('state.possiblyDisabled === true ? DEGRADED_RECONCILE_MS : undefined'));
 });
-check('known non-actionable order is materialised into Updated before claim', () => {
+check('known upstream changes are materialised into Updated before claim', () => {
   assert(pickingSrc.includes("const disposition = order ? classifyUpstreamOrder(order, scope) : 'missing'"));
   assert(pickingSrc.includes("if (['intake', 'sent'].includes(disposition)) continue"));
   assert(pickingSrc.includes("upstreamDisposition: disposition"));
   assert(pickingSrc.includes("upstream_cancelled_before_claim"));
-  assert(pickingSrc.includes("upstream_non_actionable_before_claim"));
+  assert(pickingSrc.includes("upstream_updated_before_claim"));
 });
-check('cancelled/sent upstream states block warehouse mutations', () => {
+check('Intake is admission-only; only Cancelled/Sent block warehouse mutations', () => {
+  assert(pickingSrc.includes('Intake is only the admission status for new queue rows'));
   assert(pickingSrc.includes("if (disposition === 'cancelled') throw appError('baselinker_order_cancelled')"));
   assert(pickingSrc.includes("if (disposition === 'sent') throw appError('baselinker_order_already_sent')"));
+  assert(!pickingSrc.includes("appError('baselinker_order_not_actionable'"));
+  assert(!errorsSrc.includes('baselinker_order_not_actionable'));
 });
 check('upstream acknowledgement clears only review attention', () => {
   assert(pickingSrc.includes('doc.upstreamReviewRequired = false'));

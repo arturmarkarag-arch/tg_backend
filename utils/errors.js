@@ -167,7 +167,6 @@ const ERRORS = {
   baselinker_order_changed: { status: 409, message: 'Замовлення змінилося в BaseLinker під час роботи. Змінені позиції скинуто на перевірку — перегляньте їх ще раз.' },
   baselinker_order_cancelled: { status: 409, message: 'Замовлення анульовано в BaseLinker. Складські зміни для нього заблоковано.' },
   baselinker_order_already_sent: { status: 409, message: 'Замовлення вже має вихідний статус BaseLinker. Складські зміни для нього заблоковано.' },
-  baselinker_order_not_actionable: { status: 409, message: 'Замовлення більше не перебуває у налаштованому робочому Intake-статусі BaseLinker. Складські зміни заблоковано до перевірки.' },
   baselinker_order_status_write_unverified: { status: 502, message: 'BaseLinker не підтвердив зміну точного order_id на налаштований статус «Відправлено». Локальний Sent не записано.' },
   baselinker_upstream_review_required: { status: 409, message: 'Замовлення оновилось у BaseLinker після початку збирання. Перевірте актуальні дані та підтвердьте перевірку.' },
   baselinker_picking_has_unresolved_issues: { status: 409, message: 'Замовлення має невирішені проблемні позиції. Його не можна запакувати, доки проблеми не буде закрито.' },

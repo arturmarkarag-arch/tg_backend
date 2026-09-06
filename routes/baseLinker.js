@@ -96,7 +96,7 @@ router.get('/orders', asyncHandler(async (req, res) => {
     // BaseLinker truth and must never be satisfied only from the UI cache.
     result = await fetchBaseLinkerOrders({
       orderId: exactOrderId,
-      includeUnconfirmed: req.query.includeUnconfirmed === '1' || req.query.includeUnconfirmed === 'true',
+      includeUnconfirmed: false,
       maxPages: 1,
     });
   } else {

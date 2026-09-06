@@ -79,7 +79,7 @@ BaseLinker history is bounded so MongoDB cannot grow without limit:
 - active Intake cache/picking is not age-purged while BaseLinker still keeps the order in the configured Intake status;
 - Sent and Cancelled cache rows leave the mirror after 14 days by BaseLinker `date_in_status`;
 - immutable raw order snapshots have a 14-day Mongo TTL and an application-side purge;
-- terminal/non-actionable local `BaseLinkerPickingOrder` rows are purged after 14 days;
+- terminal BaseLinker Sent/Cancelled local `BaseLinkerPickingOrder` rows are purged after 14 days;
 - print jobs already use a stricter 7-day TTL; ephemeral Print Agent registrations use a 14-day TTL;
 - the existing retention scheduler runs once on server start and then daily, with a scheduler-leader lock so multiple workers do not duplicate the sweep.
 
@@ -142,7 +142,7 @@ Each line stores requested quantity, locally picked quantity, optional issue not
 
 A worker may own at most one active BaseLinker order at once. Claiming an order performs an exact `getOrders(order_id)` read first and synchronizes line composition before ownership is granted.
 
-Tracked work also has `lastUpstreamVerifiedAt`. Interactive warehouse mutations refuse known non-Intake states and periodically reverify the exact `order_id` (15-second freshness window by default); heartbeat performs a forced exact check. This prevents a silent journal/cache lag from allowing continued picking after BaseLinker has already cancelled/sent/moved the order.
+Tracked work also has `lastUpstreamVerifiedAt`. Interactive warehouse mutations periodically reverify the exact `order_id` (15-second freshness window by default); heartbeat performs a forced exact check. Intake is an admission filter for new work, not a global lock on already tracked work. Ordinary BaseLinker status changes are surfaced through **Оновлені** while the local workflow continues; only explicit configured Sent/Cancelled states block warehouse mutations.
 
 A claim has `lastActivityAt`; the client sends a heartbeat every minute. The default stale timeout is ten minutes (`BASELINKER_PICKING_CLAIM_STALE_MS` can override it, minimum two minutes).
 
@@ -190,7 +190,7 @@ A packed order stores the local packed summary/audit only. Historical schema val
 
 A manual status change to Sent in BaseLinker is also reconciled into local Sent. If BaseLinker later moves the order back to Intake, local Sent is reverted to the appropriate packed/working state instead of surviving as stale truth. Courier TTN/label remains read from BaseLinker.
 
-Admin reopen is still audited, but upstream status remains authoritative and blocked states cannot be locally forced into actionable Intake.
+Admin reopen is still audited. Local warehouse workflow remains authoritative for already admitted orders; configured BaseLinker Sent/Cancelled remain explicit terminal shelves and cannot be locally overridden without changing the upstream business state.
 
 ## Operator UI
 

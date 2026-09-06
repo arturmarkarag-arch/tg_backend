@@ -115,9 +115,12 @@ ${router}`).not.toMatch(/callBaseLinker\(['"](?:addOrder|deleteOrder|setOrderFie
     expect(picking).toContain('packedSummary');
   });
 
-  it('exact claim/pack re-reads include unconfirmed orders instead of producing a fake not-found', () => {
+  it('admits and exact-rereads confirmed BaseLinker orders only', () => {
     const picking = read('services/baseLinkerPicking.js');
-    expect(picking).toMatch(/orderId:\s*id,[\s\S]{0,200}includeUnconfirmed:\s*true,[\s\S]{0,100}maxPages:\s*1/);
+    const router = read('routes/baseLinker.js');
+    expect(picking).toMatch(/orderId:\s*id,[\s\S]{0,200}includeUnconfirmed:\s*false,[\s\S]{0,100}maxPages:\s*1/);
+    expect(router).toContain('includeUnconfirmed: false');
+    expect(router).not.toContain("req.query.includeUnconfirmed === '1'");
     expect(picking).toContain("appError('baselinker_order_not_returned'");
   });
 
@@ -212,6 +215,24 @@ ${router}`).not.toMatch(/callBaseLinker\(['"](?:addOrder|deleteOrder|setOrderFie
     expect(domain).toContain("const CURRENT_ISSUE_STATES = Object.freeze(['shortage', 'not_found'])");
     expect(domain).toContain("const LEGACY_ISSUE_STATES = Object.freeze(['damaged', 'other'])");
     expect(picking).toContain('WRITABLE_ITEM_STATES.has(nextState)');
+  });
+
+
+  it('serializes every BaseLinker PickingOrder mutation by the same exact order lock and adds DB optimistic concurrency', () => {
+    const picking = read('services/baseLinkerPicking.js');
+    const model = read('models/BaseLinkerPickingOrder.js');
+    expect(picking).not.toContain('baselinker-picking:');
+    expect(picking).toContain('withLock(`baselinker-order:${id}`');
+    expect(picking).toContain('withLock(`baselinker-order:${requestedId}`');
+    expect(picking).toContain('async function savePickingDoc(doc)');
+    expect(picking).toContain("error?.name === 'VersionError'");
+    expect(model).toContain('optimisticConcurrency: true');
+  });
+
+  it('never rewrites a real upstream status to Intake merely because the order was packed locally', () => {
+    const picking = read('services/baseLinkerPicking.js');
+    expect(picking).not.toContain("doc.upstreamDisposition = 'intake'");
+    expect(picking).toContain('applyUpstreamDisposition(doc, order, scope, actor)');
   });
 
 });

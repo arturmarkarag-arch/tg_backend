@@ -25,7 +25,7 @@ const CACHE_BOOTSTRAP_MAX_PAGES = Math.min(90, Math.max(1, Number(process.env.BA
 const CACHE_REFRESH_MS = 5 * 60_000;
 // Full queue scans can tell us that a previously known order disappeared from
 // Intake/Sent/Cancelled, but only an exact getOrders(order_id) may tell us WHERE it went.
-// Bound the recovery batch so a degraded journal cannot create an API storm.
+// Bound each recovery batch so a silent journal cannot create an API storm; unchecked rows are retained for the next pass.
 const FALLBACK_EXACT_REFRESH_LIMIT = Math.min(30, Math.max(1, Number(process.env.BASELINKER_FALLBACK_EXACT_REFRESH_LIMIT) || 20));
 const PAGE_SIZE_VALUES = new Set([10, 20, 50]);
 const HISTORY_RETENTION_MS = HISTORY_LOOKBACK_DAYS * 24 * 60 * 60 * 1000;
@@ -123,24 +123,24 @@ async function removeCachedOrders(orderIds) {
 function retainedPickingFilter(now = new Date()) {
   const historyCutoff = new Date(now.getTime() - HISTORY_RETENTION_MS);
   return {
-    $and: [
-      // Terminal upstream facts are retained only inside the same 14-day
-      // history window. Intake remains unbounded while BaseLinker keeps it actionable.
+    $or: [
+      // Any locally active workflow survives independently of an ordinary
+      // BaseLinker status. Intake is admission-only; Other/Missing must never
+      // make an in-progress/deferred/packed local order disappear from the UI.
       {
-        $or: [
-          { upstreamDisposition: { $in: ['', 'intake'] } },
-          { upstreamReviewRequired: true, lastUpstreamChangeAt: { $gte: historyCutoff } },
-          { sentAt: { $gte: historyCutoff } },
+        $and: [
+          { upstreamDisposition: { $nin: ['sent', 'cancelled'] } },
+          {
+            $or: [
+              { workflowStage: { $in: ['processing', 'deferred', 'packed'] } },
+              { status: { $in: ['in_progress', 'paused', 'problem', 'ready_to_pack', 'ready_to_pack_with_issue', 'packed'] } },
+            ],
+          },
         ],
       },
-      {
-        $or: [
-          { workflowStage: { $in: ['processing', 'deferred', 'packed'] } },
-          { status: { $in: ['in_progress', 'paused', 'problem', 'ready_to_pack', 'ready_to_pack_with_issue', 'packed'] } },
-          { sentAt: { $gte: historyCutoff } },
-          { upstreamReviewRequired: true, lastUpstreamChangeAt: { $gte: historyCutoff } },
-        ],
-      },
+      // Terminal/history rows are bounded to the common 14-day retention window.
+      { sentAt: { $gte: historyCutoff } },
+      { upstreamReviewRequired: true, lastUpstreamChangeAt: { $gte: historyCutoff } },
     ],
   };
 }
@@ -180,10 +180,9 @@ async function saveCacheState(value) {
 async function scanConfiguredScopes(scope) {
   const intake = await fetchBaseLinkerOrders({
     statusId: scope.intakeStatusId,
-    // The selected Intake status is the operator's source of truth. BaseLinker
-    // can keep an order in that status with confirmed=false, and it must not
-    // disappear merely because date_confirmed is still empty.
-    includeUnconfirmed: true,
+    // Warehouse admission is confirmed-only. BaseLinker documents that
+    // unconfirmed orders may be incomplete and still change.
+    includeUnconfirmed: false,
     maxPages: CACHE_BOOTSTRAP_MAX_PAGES,
   });
   if (intake.truncated) {
@@ -198,7 +197,7 @@ async function scanConfiguredScopes(scope) {
     // BaseLinker has no date_in_status filter. To make the 14-day Sent shelf
     // correct even for an old order moved to Sent today, scan this exact status
     // and apply the documented date_in_status field locally.
-    includeUnconfirmed: true,
+    includeUnconfirmed: false,
     maxPages: CACHE_BOOTSTRAP_MAX_PAGES,
   });
   if (sent.truncated) {
@@ -212,7 +211,7 @@ async function scanConfiguredScopes(scope) {
     statusId: scope.cancelledStatusId,
     // Same contract as Sent: BaseLinker cannot filter by date_in_status, so scan
     // the exact Cancelled status and keep only rows that entered it in 14 days.
-    includeUnconfirmed: true,
+    includeUnconfirmed: false,
     maxPages: CACHE_BOOTSTRAP_MAX_PAGES,
   });
   if (cancelled.truncated) {
@@ -230,7 +229,7 @@ async function scanConfiguredScopes(scope) {
 }
 
 async function recoverDisappearedKnownOrders(scope, scannedOrders, { enabled = false } = {}) {
-  if (!enabled) return { orders: [], removedOrderIds: [], pendingOrderCount: 0, checkedOrderCount: 0 };
+  if (!enabled) return { orders: [], removedOrderIds: [], pendingOrderIds: [], pendingOrderCount: 0, checkedOrderCount: 0 };
 
   const scannedIds = new Set((scannedOrders || []).map((order) => String(order?.order_id || '')).filter(Boolean));
   // Only rows that PREVIOUSLY belonged to a currently retained scanned shelf
@@ -252,7 +251,7 @@ async function recoverDisappearedKnownOrders(scope, scannedOrders, { enabled = f
   const recovered = [];
   const removedOrderIds = [];
   for (const row of selected) {
-    const exact = await fetchBaseLinkerOrders({ orderId: row.orderId, includeUnconfirmed: true, maxPages: 1 });
+    const exact = await fetchBaseLinkerOrders({ orderId: row.orderId, includeUnconfirmed: false, maxPages: 1 });
     const order = (exact.orders || []).find((candidate) => String(candidate?.order_id) === row.orderId);
     if (order) recovered.push({ order, previousStatusId: row.previousStatusId });
     else removedOrderIds.push(row.orderId);
@@ -261,6 +260,7 @@ async function recoverDisappearedKnownOrders(scope, scannedOrders, { enabled = f
   return {
     orders: recovered,
     removedOrderIds,
+    pendingOrderIds: disappeared.slice(selected.length).map((row) => row.orderId),
     checkedOrderCount: selected.length,
     pendingOrderCount: Math.max(0, disappeared.length - selected.length),
   };
@@ -327,7 +327,10 @@ async function bootstrapCacheUnlocked(previousState = null) {
   ));
   await upsertCachedOrders([...scannedOrders, ...cacheableRecovered], { syncToken, source: 'full_sync' });
 
-  const retainedIds = [...retainedIdsSet];
+  const retainedIds = [...new Set([
+    ...retainedIdsSet,
+    ...(recovery.pendingOrderIds || []),
+  ])];
   const sweep = { syncToken: { $ne: syncToken } };
   if (retainedIds.length) sweep.orderId = { $nin: retainedIds };
   await BaseLinkerOrderCache.deleteMany(sweep);
@@ -544,13 +547,12 @@ async function getCachedOrderPage({ workflowFilter = 'processing', packedBy = ''
         normalEligible: {
           $switch: {
             branches: [
-              // Exact reconciliation can establish a non-actionable state even
-              // when the retained cache row is an older Intake snapshot (e.g.
-              // BaseLinker stopped returning the order). Never let that stale
-              // cache status put the card back into Processing after review.
+              // Sent/Cancelled are explicit BaseLinker shelves. Other/missing/
+              // unverified dispositions do not override our local workflow once an
+              // order has already been admitted into the CRM; they are surfaced via
+              // Updated until acknowledged.
               { case: { $eq: ['$upstreamCancelled', 1] }, then: { $eq: ['$upstreamCancelledRecent', 1] } },
               { case: { $eq: ['$upstreamSent', 1] }, then: { $eq: ['$upstreamSentRecent', 1] } },
-              { case: { $in: ['$localUpstreamDisposition', ['other', 'missing', 'unverified']] }, then: false },
               // Fresh unclaimed intake order.
               { case: { $eq: ['$hasPickingDoc', false] }, then: { $eq: ['$intakeEligible', 1] } },
             ],
@@ -595,7 +597,7 @@ async function getCachedOrderPage({ workflowFilter = 'processing', packedBy = ''
       {
         $match: {
                 packedBy: { $nin: ['', null] },
-          upstreamDisposition: { $in: ['', 'intake'] },
+          upstreamDisposition: { $nin: ['sent', 'cancelled'] },
           $or: [{ workflowStage: 'packed' }, { status: 'packed' }],
         },
       },

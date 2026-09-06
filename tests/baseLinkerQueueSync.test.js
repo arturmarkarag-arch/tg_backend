@@ -129,16 +129,16 @@ describe('scoped BaseLinker queue', () => {
 
     expect(h.fetch).toHaveBeenNthCalledWith(1, expect.objectContaining({
       statusId: 99,
-      includeUnconfirmed: true,
+      includeUnconfirmed: false,
       maxPages: expect.any(Number),
     }));
     expect(h.fetch.mock.calls[0][0]).not.toHaveProperty('dateConfirmedFrom');
     expect(h.fetch).toHaveBeenNthCalledWith(2, expect.objectContaining({
       statusId: 100,
-      includeUnconfirmed: true,
+      includeUnconfirmed: false,
     }));
     expect(h.fetch.mock.calls[1][0]).not.toHaveProperty('dateConfirmedFrom');
-    expect(h.fetch).toHaveBeenNthCalledWith(3, expect.objectContaining({ statusId: 101, includeUnconfirmed: true }));
+    expect(h.fetch).toHaveBeenNthCalledWith(3, expect.objectContaining({ statusId: 101, includeUnconfirmed: false }));
     expect(h.fetch.mock.calls[2][0]).not.toHaveProperty('dateConfirmedFrom');
     expect(h.reconcile).toHaveBeenCalledWith({ orders: [intake, sentRecent, cancelledRecent], removedOrderIds: [] });
     expect(h.model.bulkWrite.mock.calls[0][0]).toHaveLength(3);
@@ -168,7 +168,7 @@ describe('scoped BaseLinker queue', () => {
 
     await h.service.syncBaseLinkerOrderCache({ force: true });
 
-    expect(h.fetch).toHaveBeenCalledWith(expect.objectContaining({ orderId: '123', includeUnconfirmed: true, maxPages: 1 }));
+    expect(h.fetch).toHaveBeenCalledWith(expect.objectContaining({ orderId: '123', includeUnconfirmed: false, maxPages: 1 }));
     expect(h.reconcile).toHaveBeenCalledWith({ orders: [cancelled], removedOrderIds: [] });
     expect(h.markUpdated).toHaveBeenCalledWith(expect.objectContaining({
       orderIds: ['123'],
@@ -190,7 +190,7 @@ describe('scoped BaseLinker queue', () => {
     expect(orderInCancelledScope(cancelledAtBoundary, scope)).toBe(true);
     expect(orderInCancelledScope({ ...cancelledAtBoundary, date_in_status: scope.cancelledDateInStatusFrom - 1 }, scope)).toBe(false);
     expect(orderInQueueScope(cancelledAtBoundary, scope)).toBe(true);
-    expect(orderInQueueScope({ ...ancientIntake, confirmed: false }, scope)).toBe(true);
+    expect(orderInQueueScope({ ...ancientIntake, confirmed: false }, scope)).toBe(false);
   });
 
   it('does not sweep or publish a truncated intake snapshot', async () => {
@@ -256,4 +256,17 @@ describe('scoped BaseLinker queue', () => {
     expect(retryDelayMs(new Error(), 2)).toBe(60_000);
     expect(retryDelayMs(new Error(), 30)).toBe(900_000);
   });
+
+  it('retains unchecked disappeared ids for the next exact recovery pass instead of sweeping them', () => {
+    const source = fs.readFileSync(path.join(__dirname, '..', 'services/baseLinkerOrderCache.js'), 'utf8');
+    expect(source).toContain('pendingOrderIds: disappeared.slice(selected.length)');
+    expect(source).toContain('...(recovery.pendingOrderIds || [])');
+  });
+
+  it('retains active local workflow independently of ordinary upstream status', () => {
+    const source = fs.readFileSync(path.join(__dirname, '..', 'services/baseLinkerOrderCache.js'), 'utf8');
+    expect(source).toContain("upstreamDisposition: { $nin: ['sent', 'cancelled'] }");
+    expect(source).toContain("workflowStage: { $in: ['processing', 'deferred', 'packed'] }");
+  });
+
 });

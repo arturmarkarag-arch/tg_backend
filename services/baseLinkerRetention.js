@@ -24,7 +24,7 @@ function terminalPickingCandidateFilter(cutoffDate) {
       { status: 'sent', sentAt: { $lt: cutoffDate } },
       { upstreamDisposition: 'sent', lastUpstreamChangeAt: { $lt: cutoffDate } },
       {
-        upstreamDisposition: { $in: ['cancelled', 'other', 'missing', 'unverified'] },
+        upstreamDisposition: 'cancelled',
         lastUpstreamChangeAt: { $lt: cutoffDate },
       },
     ],
@@ -59,17 +59,20 @@ async function purgeVerifiedTerminalPicking(scope, cutoffDate, cutoffSeconds) {
         }).lean();
         if (!current) return;
 
-        const exact = await fetchBaseLinkerOrders({ orderId, includeUnconfirmed: true, maxPages: 1 });
+        const exact = await fetchBaseLinkerOrders({ orderId, includeUnconfirmed: false, maxPages: 1 });
         const order = (exact.orders || []).find((row) => String(row?.order_id || '') === orderId) || null;
         checked += 1;
 
         if (order) {
           const disposition = classifyUpstreamOrder(order, scope);
-          // Never age-purge an order that BaseLinker currently says is actionable.
+          // Never age-purge an order that BaseLinker has returned to ordinary
+          // local work. Intake is the normal admission state; any non-terminal
+          // status likewise fails closed here unless the persisted candidate is
+          // still old enough by the current upstream status clock.
           if (disposition === 'intake') return;
 
-          // For every still-existing non-Intake order, BaseLinker's current
-          // date_in_status is the retention clock. Missing/invalid timestamps
+          // For every still-existing order, BaseLinker's current date_in_status
+          // is the retention clock. Missing/invalid timestamps
           // fail closed: keep the local audit state rather than guessing.
           const changedAt = Number(order?.date_in_status || 0);
           if (!Number.isFinite(changedAt) || changedAt <= 0 || changedAt >= cutoffSeconds) return;
@@ -104,7 +107,7 @@ async function purgeVerifiedTerminalPicking(scope, cutoffDate, cutoffSeconds) {
  *   - Intake is live operational state and is NEVER deleted merely because it is old.
  *   - Sent / Cancelled are bounded history shelves (14 days by date_in_status).
  *   - Immutable raw snapshots are forensic history, also bounded to 14 days.
- *   - Terminal/non-actionable local picking rows are bounded to 14 days, but are
+ *   - Terminal Sent/Cancelled local picking rows are bounded to 14 days, but are
  *     exact-verified against BaseLinker before deletion to protect state restoration.
  *   - Print jobs already have a stricter 7-day TTL. Print-agent registrations are
  *     ephemeral and are also capped at 14 days.
