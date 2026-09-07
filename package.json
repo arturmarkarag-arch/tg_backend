@@ -71,7 +71,9 @@
     "cleanup:baselinker:test": "node -r ../dev-use-test-db.js scripts/cleanupBaseLinkerDb.TEST.js",
     "cleanup:baselinker:prod": "node scripts/cleanupBaseLinkerDb.PROD.js",
     "test:baselinker:architecture": "node scripts/checkBaseLinkerMultiAccountContract20260906.js",
-    "test:baselinker:collisions": "node scripts/checkBaseLinkerCollisions20260906.js"
+    "test:baselinker:collisions": "node scripts/checkBaseLinkerCollisions20260906.js",
+    "test:baselinker:lifecycle": "node scripts/checkBaseLinkerProductionLifecycle20260907.js",
+    "test:baselinker:lifecycle-matrix": "node scripts/probeBaseLinkerProductionLifecycleMatrix20260907.js"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1030.0",

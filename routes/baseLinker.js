@@ -33,6 +33,7 @@ const {
   heartbeatPickingOrder,
   updatePickingItem,
   releasePickingOrder,
+  assertBaseLinkerPrintAllowed,
   markPickingOrderPacked,
   markPickingOrderSent,
   reopenPickingOrder,
@@ -209,6 +210,12 @@ async function packageDetailsHandler(req, res) {
 }
 async function labelHandler(req, res) {
   const accountId = await resolveAccountId(req, { requireEnabled: true });
+  await assertBaseLinkerPrintAllowed({
+    baseLinkerAccountId: accountId,
+    orderId: req.params.orderId,
+    confirmTerminalTtn: String(req.query.confirmTerminalTtn || '') === '1',
+    confirmedDisposition: req.query.confirmedDisposition,
+  });
   const label = await fetchVerifiedBaseLinkerOrderLabel({
     orderId: req.params.orderId,
     packageId: req.params.packageId,
@@ -233,6 +240,8 @@ async function printHandler(req, res) {
     orderId: req.params.orderId,
     packageId: req.params.packageId,
     courierCode: req.body?.courierCode,
+    confirmTerminalTtn: req.body?.confirmTerminalTtn === true,
+    confirmedDisposition: req.body?.confirmedDisposition,
     user: req.telegramUser,
   });
   res.status(202).json({ job });

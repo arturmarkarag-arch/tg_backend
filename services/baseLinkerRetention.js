@@ -17,9 +17,22 @@ function terminalPickingCandidateFilter(cutoffDate, baseLinkerAccountId = '') {
   return {
     ...(baseLinkerAccountId ? { baseLinkerAccountId } : {}),
     ownerTelegramId: { $in: ['', null] },
+    upstreamReviewRequired: { $ne: true },
     $or: [
-      { status: 'sent', sentAt: { $lt: cutoffDate } },
-      { upstreamDisposition: 'sent', lastUpstreamChangeAt: { $lt: cutoffDate } },
+      // Local Sent is a physical warehouse fact and may be retained after the
+      // current BaseLinker status changes, once any conflict has been reviewed.
+      // A newer upstream status/product event restarts the 14-day history age;
+      // old sentAt alone must never erase a recently resolved conflict.
+      {
+        status: 'sent',
+        sentAt: { $lt: cutoffDate },
+        $or: [
+          { lastUpstreamChangeAt: { $in: [null] } },
+          { lastUpstreamChangeAt: { $lt: cutoffDate } },
+        ],
+      },
+      // Cancellation can become terminal without any local Sent/Packed fact
+      // after the warehouse explicitly reviews the upstream cancellation.
       { upstreamDisposition: 'cancelled', lastUpstreamChangeAt: { $lt: cutoffDate } },
     ],
   };

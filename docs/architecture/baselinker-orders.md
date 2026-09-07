@@ -257,13 +257,17 @@ When an order that was previously in Intake is absent from a fresh Intake scan, 
 
 For each exact reread:
 
-- Intake again -> keep/restore the queue row;
-- configured Sent -> persist local Sent classification/history;
-- configured Cancelled -> persist local Cancelled classification/history;
-- another status -> persist the exact upstream disposition required by current workflow;
-- missing/unavailable/failed verification -> do not guess and do not delete based only on uncertainty.
+- Intake again -> keep/restore production eligibility;
+- configured Sent -> materialize the terminal local `Sent` outcome; this status means the order is already packed/shipped;
+- configured Cancelled -> move the order to the Cancelled outcome; if warehouse work had already happened, keep that history and raise an Updated/problem flag;
+- another status -> record the exact upstream disposition and block production;
+- missing/unavailable/failed verification -> do not guess; block production fail-closed.
+
+The configured statuses are the production contract: Intake is the only actionable status, Sent is a terminal shipped outcome, and Cancelled is a terminal cancellation outcome. Local packing/picking progress remains a separate audit trail and is never erased by later status changes.
 
 Only **verified** departures are removed from the current Intake index. If more departures exist than the per-sync verification allowance, the remainder stays indexed and is retried on later synchronization. This is deliberate fail-closed eventual consistency.
+
+Tracked orders continue bounded exact reconciliation even after they leave Intake. This is required to observe transitions such as `Other -> Cancelled`, `Other -> Sent`, or `Sent -> Cancelled` after the Intake index row has already been removed. Selected UI reads also run a small TTL-protected re-verification batch so visible local cards do not remain stale between scheduler ticks.
 
 Selected UI pages may hydrate only the current 10/20 visible order identities. Concrete fallback reads are exact `(accountId, orderId)` requests and remain within the same per-token request budget.
 
@@ -319,21 +323,41 @@ journal event
 
 Periodic/status-based reconciliation and exact reads remain the correctness path. No local business state is considered authoritative merely because a journal event was or was not observed.
 
-## 14. Disabled account lifecycle
+## 14. Account lifecycle: disable, token rotation and queue-status edits
 
-`enabled=false` means **zero ordinary BaseLinker runtime traffic for that account**.
+`enabled=false` means **zero ordinary BaseLinker runtime traffic for that account**, but disabling is not a casual pause button.
+
+The server must refuse disable while the account has any unfinished production lifecycle work, including:
+
+- any current Intake queue row;
+- any local picking order that is not resolved local Sent or reviewed upstream Cancelled;
+- any unresolved upstream review/problem;
+- any active owner/claim;
+- any pending/claimed/printing print job.
+
+Before disable, the server forces a fresh Intake synchronization **and** bounded exact reconciliation of tracked orders under the same account lifecycle lock used by new claims. If BaseLinker cannot be verified, or the bounded pass still has unverified departures/tracked rows, disable fails closed and must be retried after reconciliation. This prevents stale-queue disable, stale post-Intake status decisions, and the race:
+
+```text
+disable checks empty
+-> worker claims
+-> account becomes disabled
+```
+
+Changing the configured Intake/Sent/Cancelled status IDs uses the same lifecycle boundary, requires complete fresh reconciliation, and is forbidden while unfinished production work exists. Display name and color remain editable.
+
+API token rotation is intentionally different. A broken/deleted BaseLinker token must be replaceable even while unfinished orders exist. Rotation preserves our immutable `accountId`, local orders, progress and history.
 
 Disabled accounts:
 
 - are excluded from background synchronization;
 - are excluded from normal metadata refresh;
-- cannot execute ordinary exact order/package/picking API operations;
+- cannot execute ordinary production BaseLinker operations;
 - keep local history and snapshots;
 - are not purged merely because upstream cannot be queried.
 
-Explicit administrator maintenance is the only exception. An admin may deliberately test/refresh the token or rotate it while the account is disabled.
+Explicit administrator maintenance is the only exception. An admin may deliberately validate/refresh/rotate credentials while disabled.
 
-Disabling never deletes the account UUID or historical identity.
+Hard delete is intentionally not implemented. Disabling never deletes the account UUID or historical identity.
 
 ## 15. Picking identity and ownership
 
@@ -369,7 +393,63 @@ Packing writes only the current full-packing contract. There is no legacy `parti
 
 A line problem (`shortage` / `not_found`) is explicit local work. All lines may be handled while unresolved issues still exist; however final packing is blocked until unresolved problems are resolved under the current picking contract.
 
-## 17. Packages, labels and printing
+## 17. Production eligibility and immutable warehouse facts
+
+The configured Intake status is the **only** upstream state in which warehouse production may advance.
+
+```text
+actual BaseLinker order_status_id == account.queue.intakeStatusId
+  -> production eligible
+
+anything else: Sent / Cancelled / other / missing / unverified
+  -> production blocked
+```
+
+Critical production transitions (`claim`, `Packed`, `Sent`) use exact account-scoped BaseLinker verification. Item edits may use the short verification TTL plus background reconciliation, but the final physical transitions never trust a stale page.
+
+When an exact/background observation leaves Intake:
+
+- current ownership is released so a worker cannot deadlock;
+- picked quantities, item problems and history are preserved;
+- pre-fulfilment workflow becomes blocked/deferred;
+- the card reports the actual upstream status and allowed Intake status;
+- `Release/Відкласти` remains a local operation and never depends on BaseLinker availability/status.
+
+Two truths are stored separately:
+
+1. **Local fulfilment/audit truth** — picking/packing progress and the terminal Sent outcome observed by our system.
+2. **Current BaseLinker truth** — the latest exact upstream status/order data.
+
+The configured BaseLinker `Sent` status materializes the terminal local `Sent` outcome because, for this workflow, `Wysłane` means the order is already packed and shipped. If the warehouse itself performs the Send action, that action writes the same terminal outcome and moves BaseLinker to the configured Sent status when necessary.
+
+Once `Packed` or `Sent` has been recorded, that fulfilment snapshot is immutable. Later BaseLinker product/status changes do not erase the packed item snapshot or the recorded Sent fact. They may create an upstream review/problem instead.
+
+Examples:
+
+```text
+Warehouse Sent + BaseLinker Cancelled
+  -> physical Sent remains
+  -> current upstream = Cancelled
+  -> visible in Cancelled
+  -> also visible in Updated while review is required
+
+Warehouse Packed + BaseLinker other status
+  -> physical Packed remains
+  -> production cannot advance until upstream is resolved/returns to Intake
+  -> Updated while review is required
+
+Not yet Packed/Sent + BaseLinker Cancelled
+  -> blocked Cancelled + Updated
+  -> after explicit review acknowledgement, cancellation is lifecycle-terminal
+```
+
+`Updated` is therefore an orthogonal attention flag (`upstreamReviewRequired`), not a replacement for the main shelf. A card may be both Cancelled and Updated.
+
+Acknowledging a review never fabricates a physical warehouse action and never makes a non-Intake order production-eligible.
+
+Admin reopen cannot erase a recorded physical Packed/Sent fact.
+
+## 18. Packages, labels and printing
 
 Every package/label operation carries both account and order identity and uses the caller bound to that account token.
 
@@ -379,15 +459,19 @@ Print jobs persist `baseLinkerAccountId`; package deduplication is never global 
 
 Frontend package query keys are account/order scoped so socket invalidation for Account A cannot stale or replace Account B with the same numeric order/package IDs.
 
-## 18. Retention is fail-closed
+## 19. Retention is fail-closed
 
 Local bounded BaseLinker history may be cleaned only when the retention contract positively proves the row is eligible.
 
 A failed API call, disabled account, authentication failure, timeout or unknown upstream state is **not proof that a row may be deleted**.
 
+`upstreamReviewRequired=true` is an absolute retention blocker. An unresolved post-pack/post-send conflict must never disappear merely because 14 days elapsed.
+
+The configured BaseLinker `Sent` status materializes the canonical local `Sent` outcome, so it is retention-terminal once its 14-day age is satisfied and no unresolved review exists. Reviewed upstream cancellations are also terminal candidates. Every candidate is exact-verified fail-closed before deletion, and a newer upstream change restarts the 14-day age.
+
 Disabled accounts therefore retain local history until explicitly re-enabled/verified or separately administered.
 
-## 19. Socket contract
+## 20. Socket contract
 
 Every BaseLinker order/picking realtime event that refers to a concrete order must carry:
 
@@ -400,7 +484,7 @@ The client derives its own composite key and rejects a state whose embedded acco
 
 Events and cache invalidation must never key only by `orderId`, `packageId`, source name or any other BaseLinker-local identifier.
 
-## 20. UI contract
+## 21. UI contract
 
 The combined warehouse queue may display all enabled BaseLinker accounts together, but every order must visibly retain provenance:
 
@@ -428,7 +512,7 @@ Account management UI provides:
 
 Tokens are never displayed after submission.
 
-## 21. Greenfield schema policy
+## 22. Greenfield schema policy
 
 There is deliberately **no BaseLinker data migration layer** and **no legacy support**.
 
@@ -447,7 +531,7 @@ The database is expected to start with the current BaseLinker schema. Documents 
 
 Schema/index initialization for the **current** collections is allowed and required; that is not a migration.
 
-## 22. Release collision gate
+## 23. Release collision gate
 
 Before release, tests must explicitly cover at least these collisions:
 

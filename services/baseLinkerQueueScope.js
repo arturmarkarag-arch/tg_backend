@@ -92,18 +92,35 @@ async function getQueueStatusOptions(accountId) {
 async function saveQueueSettings(accountId, { intakeStatusId, sentStatusId, cancelledStatusId } = {}) {
   const id = String(accountId || '').trim();
   if (!id) throw appError('baselinker_account_id_required');
-  // Queue changes are rare admin operations. Refresh all API-derived metadata so
-  // the selected status IDs and future source/inventory labels share one snapshot.
-  const { refreshBaseLinkerAccountMetadata } = require('./baseLinkerAccountValidation');
-  const validation = await refreshBaseLinkerAccountMetadata(id);
-  await saveAccountQueue(id, {
-    intakeStatusId,
-    sentStatusId,
-    cancelledStatusId,
-    statuses: validation.metadata.statuses,
+  const nextIds = [intakeStatusId, sentStatusId, cancelledStatusId].map((value) => Number(value));
+  const { withBaseLinkerAccountLifecycleLock, assertBaseLinkerAccountLifecycleIdle, refreshBaseLinkerLifecycleTruth } = require('./baseLinkerAccountLifecycle');
+
+  return withBaseLinkerAccountLifecycleLock(id, async () => {
+    const current = await getBaseLinkerAccount(id, { requireEnabled: true, lean: true });
+    const currentIds = [
+      Number(current?.queue?.intakeStatusId),
+      Number(current?.queue?.sentStatusId),
+      Number(current?.queue?.cancelledStatusId),
+    ];
+    const changed = nextIds.some((value, index) => value !== currentIds[index]);
+    if (changed) {
+      await refreshBaseLinkerLifecycleTruth(id);
+      await assertBaseLinkerAccountLifecycleIdle(id, 'queue');
+    }
+
+    // Queue changes are rare admin operations. Refresh all API-derived metadata so
+    // the selected status IDs and future source/inventory labels share one snapshot.
+    const { refreshBaseLinkerAccountMetadata } = require('./baseLinkerAccountValidation');
+    const validation = await refreshBaseLinkerAccountMetadata(id);
+    await saveAccountQueue(id, {
+      intakeStatusId,
+      sentStatusId,
+      cancelledStatusId,
+      statuses: validation.metadata.statuses,
+    });
+    const updated = await getBaseLinkerAccount(id, { lean: true });
+    return queueScopeFromSettings(updated.queue || {}, Date.now(), updated);
   });
-  const updated = await getBaseLinkerAccount(id, { lean: true });
-  return queueScopeFromSettings(updated.queue || {}, Date.now(), updated);
 }
 
 module.exports = {

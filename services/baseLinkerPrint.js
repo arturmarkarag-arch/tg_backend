@@ -7,6 +7,7 @@ const {
 } = require('./baseLinkerShipments');
 const { getIO } = require('../socket');
 const { makeBaseLinkerAccountCaller } = require('./baseLinkerClient');
+const { assertBaseLinkerPrintAllowed } = require('./baseLinkerPicking');
 const { getBaseLinkerAccount } = require('./baseLinkerAccounts');
 const { appError } = require('../utils/errors');
 
@@ -141,7 +142,7 @@ function emitJob(job) {
   }
 }
 
-async function queuePrintJob({ baseLinkerAccountId, orderId, packageId, courierCode, user }) {
+async function queuePrintJob({ baseLinkerAccountId, orderId, packageId, courierCode, confirmTerminalTtn = false, confirmedDisposition = '', user }) {
   const accountId = text(baseLinkerAccountId);
   if (!accountId) throw appError('baselinker_account_id_required');
   await getBaseLinkerAccount(accountId, { requireEnabled: true });
@@ -151,6 +152,15 @@ async function queuePrintJob({ baseLinkerAccountId, orderId, packageId, courierC
   const requestedCode = courierCodeOf(courierCode);
   const actor = actorOf(user);
   if (!actor.telegramId) throw appError('auth_required');
+
+  // Service-level authorization: callers cannot bypass the terminal-status
+  // confirmation contract by invoking the print service outside this route.
+  await assertBaseLinkerPrintAllowed({
+    baseLinkerAccountId: accountId,
+    orderId: order,
+    confirmTerminalTtn,
+    confirmedDisposition,
+  });
 
   // Queue only an authoritative order/package pair. Browser state is not proof
   // that a package belongs to this order.

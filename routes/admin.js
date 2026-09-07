@@ -25,9 +25,15 @@ const ORDERING_SCHEDULE_DEFAULTS = { openHour: 16, openMinute: 0, closeHour: 7, 
 
 router.get('/baselinker-settings', telegramAuth, requireTelegramRole('admin'), asyncHandler(async (req, res) => {
   const { listBaseLinkerAccounts, MASTER_KEY_ENV } = require('../services/baseLinkerAccounts');
+  const { getBaseLinkerAccountLifecycleBlockers } = require('../services/baseLinkerAccountLifecycle');
+  const accounts = await listBaseLinkerAccounts({ includeDisabled: true });
+  const withLifecycle = await Promise.all(accounts.map(async (account) => ({
+    ...account,
+    lifecycle: await getBaseLinkerAccountLifecycleBlockers(account.accountId),
+  })));
   res.set('Cache-Control', 'no-store');
   res.json({
-    accounts: await listBaseLinkerAccounts({ includeDisabled: true }),
+    accounts: withLifecycle,
     tokenEncryptionConfigured: Boolean(String(process.env[MASTER_KEY_ENV] || '').trim()),
   });
 }));
@@ -61,17 +67,32 @@ router.post('/baselinker-settings/accounts', telegramAuth, requireTelegramRole('
 }));
 
 router.patch('/baselinker-settings/accounts/:accountId', telegramAuth, requireTelegramRole('admin'), asyncHandler(async (req, res) => {
-  const { updateBaseLinkerAccount, getBaseLinkerAccount, buildValidatedQueue } = require('../services/baseLinkerAccounts');
+  const { updateBaseLinkerAccount, getBaseLinkerAccount, buildValidatedQueue, publicAccount } = require('../services/baseLinkerAccounts');
+  const { disableBaseLinkerAccount } = require('../services/baseLinkerAccountLifecycle');
   const current = await getBaseLinkerAccount(req.params.accountId, { lean: true });
-  if (req.body?.enabled === true && current.enabled !== true) {
-    // Re-enable is an explicit admin operation, so probing a disabled token is
-    // allowed here. Fail closed if the token or the configured status IDs are no
-    // longer valid; ordinary disabled runtime never performs this traffic.
-    const { refreshBaseLinkerAccountMetadata } = require('../services/baseLinkerAccountValidation');
-    const validation = await refreshBaseLinkerAccountMetadata(req.params.accountId, { allowDisabled: true });
-    buildValidatedQueue(current.queue || {}, validation.metadata.statuses);
+  let account;
+
+  if (req.body?.enabled === false && current.enabled === true) {
+    // Name/color are harmless metadata and may be edited independently, but the
+    // lifecycle transition itself is guarded by unfinished orders/print work.
+    const metadataPatch = {
+      ...(req.body?.name !== undefined ? { name: req.body.name } : {}),
+      ...(req.body?.color !== undefined ? { color: req.body.color } : {}),
+    };
+    if (Object.keys(metadataPatch).length) await updateBaseLinkerAccount(req.params.accountId, metadataPatch);
+    account = publicAccount(await disableBaseLinkerAccount(req.params.accountId));
+  } else {
+    if (req.body?.enabled === true && current.enabled !== true) {
+      // Re-enable is an explicit admin operation, so probing a disabled token is
+      // allowed here. Fail closed if the token or the configured status IDs are no
+      // longer valid; ordinary disabled runtime never performs this traffic.
+      const { refreshBaseLinkerAccountMetadata } = require('../services/baseLinkerAccountValidation');
+      const validation = await refreshBaseLinkerAccountMetadata(req.params.accountId, { allowDisabled: true });
+      buildValidatedQueue(current.queue || {}, validation.metadata.statuses);
+    }
+    account = await updateBaseLinkerAccount(req.params.accountId, req.body || {}, { allowEnable: req.body?.enabled === true });
   }
-  const account = await updateBaseLinkerAccount(req.params.accountId, req.body || {}, { allowEnable: req.body?.enabled === true });
+
   try {
     getIO()?.to('baselinker_staff').emit('baselinker_orders_changed', { resync: true, reason: account.enabled ? 'account_updated' : 'account_disabled', baseLinkerAccountId: account.accountId });
   } catch (_) { /* durable account wins */ }

@@ -24,6 +24,11 @@ const ERRORS = {
   baselinker_queue_settings_invalid: { status: 400, message: 'Оберіть три різні статуси BaseLinker: вхідні, вислано та анульовано.' },
   baselinker_queue_status_unknown: { status: 400, message: 'Цього статусу більше немає в BaseLinker. Оновіть список і оберіть інший.' },
   baselinker_queue_not_configured: { status: 503, message: 'Робоча черга очікує налаштування трьох статусів BaseLinker.' },
+  baselinker_account_disable_has_active_work: { status: 409, message: ({ intakeOrders = 0, unfinishedPicking = 0, activePrintJobs = 0 } = {}) =>
+                                `Не можна вимкнути BaseLinker-акаунт: робочий цикл ще не завершений (у вхідній черзі: ${Number(intakeOrders) || 0}, незавершених локальних замовлень: ${Number(unfinishedPicking) || 0}, активних завдань друку: ${Number(activePrintJobs) || 0}). Спочатку завершіть або анулюйте всі замовлення.` },
+  baselinker_lifecycle_reconciliation_incomplete: { status: 409, message: ({ departureVerificationPending = 0, trackedReverifyPending = 0 } = {}) => `Не вдалося повністю перевірити стан BaseLinker перед зміною налаштувань. Неперевірених виходів з Intake: ${departureVerificationPending}; tracked orders: ${trackedReverifyPending}. Повторіть синхронізацію.` },
+  baselinker_queue_change_has_active_work: { status: 409, message: ({ intakeOrders = 0, unfinishedPicking = 0, activePrintJobs = 0 } = {}) =>
+                                `Не можна змінити робочі статуси BaseLinker, поки триває виробничий цикл (у вхідній черзі: ${Number(intakeOrders) || 0}, незавершених локальних замовлень: ${Number(unfinishedPicking) || 0}, активних завдань друку: ${Number(activePrintJobs) || 0}).` },
   baselinker_queue_warming: { status: 503, message: 'Робоча черга оновлюється у фоні. Спробуйте знову трохи пізніше.' },
   // ── Generic ────────────────────────────────────────────────────────────────
   internal_error:           { status: 500, message: 'Внутрішня помилка сервера' },
@@ -152,6 +157,9 @@ const ERRORS = {
   baselinker_courier_code_invalid: { status: 400, message: 'Не вказано коректний код курʼєра для ТТН.' },
   baselinker_package_order_mismatch: { status: 409, message: 'Ця ТТН не належить вказаному BaseLinker order_id. Друк заблоковано.' },
   baselinker_package_courier_mismatch: { status: 409, message: 'Код курʼєра не відповідає пакуванню цього BaseLinker замовлення. Друк заблоковано.' },
+  baselinker_terminal_ttn_confirmation_required: { status: 409, message: ({ disposition } = {}) => disposition === 'cancelled'
+                                ? 'Замовлення анульовано в BaseLinker. Для перегляду або друку ТТН потрібне явне підтвердження користувача.'
+                                : 'Замовлення вже має статус «Відправлено» в BaseLinker. Для перегляду або друку ТТН потрібне явне підтвердження користувача.' },
   baselinker_status_id_invalid: { status: 400, message: 'Некоректний BaseLinker status_id.' },
   baselinker_label_invalid: { status: 502, message: 'BaseLinker повернув порожню або некоректну ТТН.' },
   baselinker_label_too_large: { status: 502, message: 'ТТН BaseLinker перевищує безпечний ліміт розміру.' },
@@ -178,6 +186,10 @@ const ERRORS = {
   baselinker_order_changed: { status: 409, message: 'Замовлення змінилося в BaseLinker під час роботи. Змінені позиції скинуто на перевірку — перегляньте їх ще раз.' },
   baselinker_order_cancelled: { status: 409, message: 'Замовлення анульовано в BaseLinker. Складські зміни для нього заблоковано.' },
   baselinker_order_already_sent: { status: 409, message: 'Замовлення вже має вихідний статус BaseLinker. Складські зміни для нього заблоковано.' },
+  baselinker_order_not_in_intake: { status: 409, message: ({ currentStatusId, intakeStatusId } = {}) =>
+                                `Замовлення більше не перебуває у виробничому статусі BaseLinker${currentStatusId ? ` (поточний ID: ${currentStatusId})` : ''}${intakeStatusId ? `. Дозволений ID: ${intakeStatusId}` : ''}. Складські дії заблоковано до повернення у робочий статус.` },
+  baselinker_order_status_unverified: { status: 409, message: 'Поточний статус замовлення в BaseLinker не підтверджено. Складські дії тимчасово заблоковано.' },
+  baselinker_physical_fulfillment_immutable: { status: 409, message: 'Факт пакування або відправлення вже зафіксований складом і не може бути відкочений.' },
   baselinker_order_status_write_unverified: { status: 502, message: 'BaseLinker не підтвердив зміну точного order_id на налаштований статус «Відправлено». Локальний Sent не записано.' },
   baselinker_upstream_review_required: { status: 409, message: 'Замовлення оновилось у BaseLinker після початку збирання. Перевірте актуальні дані та підтвердьте перевірку.' },
   baselinker_picking_has_unresolved_issues: { status: 409, message: 'Замовлення має невирішені проблемні позиції. Його не можна запакувати, доки проблеми не буде закрито.' },

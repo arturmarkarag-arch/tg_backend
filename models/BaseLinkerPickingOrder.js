@@ -59,6 +59,8 @@ const BaseLinkerPickingOrderSchema = new mongoose.Schema({
   baseLinkerAccountNameSnapshot: { type: String, default: '', trim: true, maxlength: 160 },
   orderId: { type: String, required: true },
   orderFingerprint: { type: String, default: '' },
+  // Last exact BaseLinker product fingerprint. After Packed/Sent, orderFingerprint/items remain the immutable warehouse snapshot while this field tracks later upstream changes.
+  lastUpstreamOrderFingerprint: { type: String, default: '' },
   // Minimal source metadata needed to render our own local workflow after the
   // order leaves Intake. This is not a BaseLinker order mirror.
   sourceShopOrderId: { type: String, default: '' },

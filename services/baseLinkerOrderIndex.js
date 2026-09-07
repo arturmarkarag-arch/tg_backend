@@ -31,6 +31,9 @@ const SAFE_INDEX_PAGES_PER_SCAN = Math.max(1, Math.floor((BASELINKER_REQUEST_BUD
 const REQUESTED_INDEX_MAX_PAGES = Math.max(1, Number(process.env.BASELINKER_QUEUE_MAX_PAGES) || SAFE_INDEX_PAGES_PER_SCAN);
 const INDEX_MAX_PAGES = Math.min(60, SAFE_INDEX_PAGES_PER_SCAN, REQUESTED_INDEX_MAX_PAGES);
 const DEPARTURE_VERIFY_LIMIT = Math.min(15, Math.max(1, Number(process.env.BASELINKER_DEPARTURE_VERIFY_LIMIT) || 10));
+const TRACKED_REVERIFY_LIMIT = Math.min(10, Math.max(1, Number(process.env.BASELINKER_TRACKED_REVERIFY_LIMIT) || 4));
+const TRACKED_REVERIFY_STALE_MS = Math.max(15_000, Number(process.env.BASELINKER_TRACKED_REVERIFY_MS) || INDEX_REFRESH_MS);
+const VISIBLE_TRACKED_REVERIFY_LIMIT = Math.min(4, Math.max(1, Number(process.env.BASELINKER_VISIBLE_REVERIFY_LIMIT) || 2));
 const PAGE_SIZE_VALUES = new Set([10, 20]);
 const HISTORY_RETENTION_MS = HISTORY_RETENTION_DAYS * 24 * 60 * 60 * 1000;
 let indexReadyPromise = null;
@@ -47,9 +50,13 @@ function rowKey(accountId, orderId) { return orderKey(accountIdString(accountId)
 
 function localDisplayStage(doc) {
   const disposition = String(doc?.upstreamDisposition || '');
+  // Configured Sent/Cancelled are terminal business outcomes. A later
+  // cancellation is shown on the Cancelled shelf while any previously recorded
+  // Sent/packing history remains available on the PickingOrder audit trail.
   if (disposition === 'cancelled') return 'cancelled';
-  if (disposition === 'sent' || String(doc?.status || '') === 'sent' || String(doc?.workflowStage || '') === 'sent') return 'sent';
+  if (String(doc?.status || '') === 'sent' || String(doc?.workflowStage || '') === 'sent') return 'sent';
   if (String(doc?.workflowStage || '') === 'packed' || String(doc?.status || '') === 'packed') return 'packed';
+  if (disposition && disposition !== 'intake') return 'deferred';
   if (String(doc?.workflowStage || '') === 'deferred' || ['paused', 'problem', 'ready_to_pack_with_issue'].includes(String(doc?.status || ''))) return 'deferred';
   return 'processing';
 }
@@ -161,6 +168,7 @@ async function loadIndexState(accountId, scope = null) {
     lastSyncAt: value.lastSyncAt || null,
     orderCount: Number(value.orderCount || 0),
     departureVerificationPending: Number(value.departureVerificationPending || 0),
+    trackedReverifyPending: Number(value.trackedReverifyPending || 0),
     lastError: value.lastError || null,
   };
 }
@@ -199,6 +207,63 @@ async function exactOrder(scope, orderId) {
     makeBaseLinkerAccountCaller(scope.baseLinkerAccountId),
   );
   return (result.orders || []).find((row) => String(row?.order_id || '') === String(orderId)) || null;
+}
+
+async function reconcileTrackedOrderStatuses(scope, { limit = TRACKED_REVERIFY_LIMIT, force = false, verifiedAfter = null } = {}) {
+  const accountId = String(scope?.baseLinkerAccountId || '').trim();
+  if (!accountId || !scope?.configured) return { checked: 0, changed: 0, released: 0, pending: 0 };
+
+  const staleBefore = new Date(Date.now() - TRACKED_REVERIFY_STALE_MS);
+  const historyCutoff = new Date(Date.now() - HISTORY_RETENTION_MS);
+  const trackedFilter = {
+    baseLinkerAccountId: accountId,
+    $or: [
+      { upstreamReviewRequired: true },
+      { workflowStage: { $in: ['processing', 'deferred', 'packed'] } },
+      { lastUpstreamChangeAt: { $gte: historyCutoff } },
+      { sentAt: { $gte: historyCutoff } },
+    ],
+  };
+  const verifiedBoundary = verifiedAfter instanceof Date && Number.isFinite(verifiedAfter.getTime())
+    ? verifiedAfter
+    : null;
+  if (verifiedBoundary) {
+    trackedFilter.$and = [
+      { $or: [{ lastUpstreamVerifiedAt: null }, { lastUpstreamVerifiedAt: { $lt: verifiedBoundary } }] },
+    ];
+  } else if (!force) {
+    trackedFilter.$and = [
+      { $or: [{ lastUpstreamVerifiedAt: null }, { lastUpstreamVerifiedAt: { $lt: staleBefore } }] },
+    ];
+  }
+  const total = await BaseLinkerPickingOrder.countDocuments(trackedFilter);
+  const rows = await BaseLinkerPickingOrder.find(trackedFilter)
+    .select('orderId lastUpstreamVerifiedAt')
+    .sort({ lastUpstreamVerifiedAt: 1, updatedAt: 1, _id: 1 })
+    .limit(Math.max(1, Number(limit) || TRACKED_REVERIFY_LIMIT))
+    .lean();
+
+  if (!rows.length) return { checked: 0, changed: 0, released: 0, pending: 0 };
+  const orders = [];
+  const missingIds = [];
+  for (const row of rows) {
+    const id = String(row?.orderId || '').trim();
+    if (!id) continue;
+    const order = await exactOrder(scope, id);
+    if (order) orders.push(order); else missingIds.push(id);
+  }
+  const result = await require('./baseLinkerPicking').reconcilePickingFromUpstreamChanges({
+    baseLinkerAccountId: accountId,
+    orders,
+    removedOrderIds: missingIds,
+  });
+  const checked = orders.length + missingIds.length;
+  return {
+    checked,
+    changed: Number(result?.changed || 0),
+    released: Number(result?.released || 0),
+    pending: Math.max(0, total - checked),
+  };
 }
 
 async function reconcileIndexTransition({ scope, currentOrders, currentIds, previousIds }) {
@@ -242,7 +307,7 @@ async function reconcileIndexTransition({ scope, currentOrders, currentIds, prev
 
 async function performIndexSync(scope, opts = {}) {
   const accountId = scope.baseLinkerAccountId;
-  const { resetIndex = false } = opts;
+  const { resetIndex = false, forceReverify = false, trackedVerifiedAfter = null } = opts;
   await ensureBaseLinkerOrderIndexReady();
 
   const syncToken = crypto.randomUUID();
@@ -284,6 +349,7 @@ async function performIndexSync(scope, opts = {}) {
   }
 
   const transition = await reconcileIndexTransition({ scope, currentOrders, currentIds, previousIds });
+  const trackedReconcile = await reconcileTrackedOrderStatuses(scope, { force: forceReverify, verifiedAfter: trackedVerifiedAfter });
   if (transition.restoredIntakeIds?.length) {
     await BaseLinkerOrderIndex.updateMany(
       { baseLinkerAccountId: accountId, orderId: { $in: transition.restoredIntakeIds } },
@@ -314,6 +380,7 @@ async function performIndexSync(scope, opts = {}) {
     lastSyncAt,
     orderCount,
     departureVerificationPending: Number(transition.pendingDeparted || 0),
+    trackedReverifyPending: Number(trackedReconcile?.pending || 0),
     lastError: null,
   });
   await recordAccountSync(accountId, null);
@@ -336,10 +403,13 @@ async function performIndexSync(scope, opts = {}) {
     departed: transition.departed,
     membershipChanged,
     departureVerificationPending: Number(transition.pendingDeparted || 0),
+    trackedReverified: Number(trackedReconcile?.checked || 0),
+    trackedReconcileChanged: Number(trackedReconcile?.changed || 0),
+    trackedReverifyPending: Number(trackedReconcile?.pending || 0),
   };
 }
 
-async function syncOneAccount(accountId, { force = false, maxAgeMs = INDEX_REFRESH_MS } = {}) {
+async function syncOneAccount(accountId, { force = false, maxAgeMs = INDEX_REFRESH_MS, trackedVerifiedAfter = null } = {}) {
   const id = accountIdString(accountId);
   const scope = await getQueueScope(id);
   if (scope.accountEnabled !== true) return { baseLinkerAccountId: id, skipped: true, reason: 'account_disabled' };
@@ -353,7 +423,7 @@ async function syncOneAccount(accountId, { force = false, maxAgeMs = INDEX_REFRE
   const resetIndex = Boolean(state.scopeKey && state.scopeKey !== scope.scopeKey);
   const promise = withLock(
     `baselinker-order-index-sync:${id}`,
-    () => performIndexSync(scope, { resetIndex }),
+    () => performIndexSync(scope, { resetIndex, forceReverify: force, trackedVerifiedAfter }),
     { ttlMs: 120_000, waitMs: 15_000 },
   ).catch(async (error) => {
     try {
@@ -363,6 +433,7 @@ async function syncOneAccount(accountId, { force = false, maxAgeMs = INDEX_REFRE
         lastSyncAt: state.lastSyncAt,
         orderCount: state.orderCount,
         departureVerificationPending: state.departureVerificationPending,
+        trackedReverifyPending: state.trackedReverifyPending,
         lastError: error?.code || error?.message || 'queue_index_sync_failed',
       });
       await recordAccountSync(id, error);
@@ -373,13 +444,13 @@ async function syncOneAccount(accountId, { force = false, maxAgeMs = INDEX_REFRE
   return promise;
 }
 
-async function syncBaseLinkerOrderIndex({ accountId = '', force = false, maxAgeMs = INDEX_REFRESH_MS } = {}) {
+async function syncBaseLinkerOrderIndex({ accountId = '', force = false, maxAgeMs = INDEX_REFRESH_MS, trackedVerifiedAfter = null } = {}) {
   await ensureBaseLinkerOrderIndexReady();
-  if (accountId) return syncOneAccount(accountId, { force, maxAgeMs });
+  if (accountId) return syncOneAccount(accountId, { force, maxAgeMs, trackedVerifiedAfter });
   const scopes = await getAllQueueScopes({ enabledOnly: true });
   const results = [];
   for (const scope of scopes) {
-    try { results.push(await syncOneAccount(scope.baseLinkerAccountId, { force, maxAgeMs })); }
+    try { results.push(await syncOneAccount(scope.baseLinkerAccountId, { force, maxAgeMs, trackedVerifiedAfter })); }
     catch (error) { results.push({ baseLinkerAccountId: scope.baseLinkerAccountId, error: error?.code || error?.message || 'sync_failed' }); }
   }
   return { accounts: results, synced: results.filter((row) => !row.skipped && !row.error).length, failed: results.filter((row) => row.error).length };
@@ -463,6 +534,20 @@ async function getIndexedOrderPage({ accountId = '', sourceAccountId = '', sourc
   if (selectedSourceId && (!selectedSourceType || !selectedSourceAccountId)) throw appError('baselinker_source_filter_invalid');
   if (selectedAccountId && selectedSourceAccountId && selectedAccountId !== selectedSourceAccountId) throw appError('baselinker_source_filter_invalid');
   const mongoFilter = selectedAccountId ? { baseLinkerAccountId: selectedAccountId } : {};
+
+  // Intake membership is cheap to scan, but a tracked order may keep changing
+  // after it has already left Intake (Other -> Cancelled/Sent, Sent -> Cancelled,
+  // etc.). Light exact re-verification on page reads keeps visible local cards
+  // current even between full scheduler ticks. Persisted verification timestamps
+  // prevent every browser refresh from repeating the same upstream request.
+  const visibleScopes = selectedAccountId
+    ? [await getQueueScope(selectedAccountId)]
+    : await getAllQueueScopes({ enabledOnly: true });
+  for (const scope of visibleScopes) {
+    if (scope.accountEnabled === true && scope.configured) {
+      await reconcileTrackedOrderStatuses(scope, { limit: VISIBLE_TRACKED_REVERIFY_LIMIT });
+    }
+  }
 
   const accounts = await listBaseLinkerAccounts({ includeDisabled: true });
   const accountById = new Map(accounts.map((row) => [row.accountId, row]));
@@ -615,7 +700,7 @@ async function getLocalOrderProjection(baseLinkerAccountId, orderId) {
 }
 
 module.exports = {
-  INDEX_STATE_KEY, INDEX_REFRESH_MS, INDEX_MAX_PAGES, DEPARTURE_VERIFY_LIMIT, SAFE_INDEX_PAGES_PER_SCAN,
-  ensureBaseLinkerOrderIndexReady, loadIndexState, syncBaseLinkerOrderIndex, syncOneAccount,
+  INDEX_STATE_KEY, INDEX_REFRESH_MS, INDEX_MAX_PAGES, DEPARTURE_VERIFY_LIMIT, TRACKED_REVERIFY_LIMIT, TRACKED_REVERIFY_STALE_MS, VISIBLE_TRACKED_REVERIFY_LIMIT, SAFE_INDEX_PAGES_PER_SCAN,
+  ensureBaseLinkerOrderIndexReady, loadIndexState, syncBaseLinkerOrderIndex, syncOneAccount, reconcileTrackedOrderStatuses,
   removeIndexedOrders, getIndexedOrderPage, orderFromPicking, scanIntake, getLocalOrderProjection,
 };
