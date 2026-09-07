@@ -93,7 +93,7 @@ describe('BaseLinker product catalog enrichment', () => {
   });
 
   it('keeps identical BaseLinker product ids from two accounts in separate cache keys', async () => {
-    const calls = { A: 0, B: 0 };
+    const calls = { 'account-A': 0, 'account-B': 0 };
     const makeCaller = (accountId) => async (method) => {
       calls[accountId] += 1;
       expect(method).toBe('getInventoryProductsData');
@@ -106,17 +106,17 @@ describe('BaseLinker product catalog enrichment', () => {
     };
 
     const resultA = await fetchBaseLinkerProductCatalog([{
-      baseLinkerAccountId: 'A',
+      baseLinkerAccountId: 'account-A',
       products: [{ storage: 'db', storage_id: 307, product_id: 2685 }],
-    }], makeCaller('A'));
+    }], makeCaller('account-A'));
     const resultB = await fetchBaseLinkerProductCatalog([{
-      baseLinkerAccountId: 'B',
+      baseLinkerAccountId: 'account-B',
       products: [{ storage: 'db', storage_id: 307, product_id: 2685 }],
-    }], makeCaller('B'));
+    }], makeCaller('account-B'));
 
-    expect(resultA.productCatalog['A:db:307:2685'].images).toEqual(['https://cdn/A.jpg']);
-    expect(resultB.productCatalog['B:db:307:2685'].images).toEqual(['https://cdn/B.jpg']);
-    expect(resultA.productCatalog['B:db:307:2685']).toBeUndefined();
-    expect(resultB.productCatalog['A:db:307:2685']).toBeUndefined();
+    expect(resultA.productCatalog['account-A:db:307:2685'].images).toEqual(['https://cdn/account-A.jpg']);
+    expect(resultB.productCatalog['account-B:db:307:2685'].images).toEqual(['https://cdn/account-B.jpg']);
+    expect(resultA.productCatalog['account-B:db:307:2685']).toBeUndefined();
+    expect(resultB.productCatalog['account-A:db:307:2685']).toBeUndefined();
   });
 });

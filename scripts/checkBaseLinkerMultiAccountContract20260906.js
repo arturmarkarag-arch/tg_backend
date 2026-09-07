@@ -91,7 +91,7 @@ check('ordinary metadata refresh is enabled-only; disabled probing is explicit a
 
 check('API caller is account-bound and budgeted per account', () => {
   assert(files.client.includes("'X-BLToken': secret"));
-  assert(files.client.includes('reserveApiBudget(id)'));
+  assert(files.client.includes('reserveApiBudget(id, { method: upstreamMethod, usageStage })'));
   assert(files.client.includes('BASELINKER_REQUEST_BUDGET_PER_MINUTE'));
   assert(files.client.includes('getTokenForAccount(id'));
   assert(files.client.includes('makeBaseLinkerAccountCaller'));
@@ -132,7 +132,7 @@ check('global multi-account ordering uses timestamps rather than comparing order
 check('picking locks and all concrete picking queries are account-scoped', () => {
   assert(files.picking.includes('`baselinker-order:${accountId}:${id}`'));
   assert(files.picking.includes('{ baseLinkerAccountId: accountId, orderId: id }'));
-  assert(files.picking.includes('makeBaseLinkerAccountCaller(accountId)'));
+  assert(files.picking.includes('makeBaseLinkerAccountCaller(accountId,'));
 });
 
 check('one-worker active-order rule remains global by worker identity', () => {
@@ -182,16 +182,16 @@ check('current picking schema has no BaseLinker legacy line/workflow/packing fal
   assert(!files.pickingModel.includes("'with_issue'"));
 });
 
-check('journal is not required by the current runtime correctness path', () => {
-  assert(!exists('services/baseLinkerJournal.js'));
-  for (const src of [files.index, files.picking, files.scheduler, files.routes]) {
-    assert(!src.includes('getJournalList'));
-    assert(!src.includes('baseLinkerJournal'));
-  }
+check('journal accelerates current changes while periodic full status reconcile remains the safety net', () => {
+  assert(files.index.includes("getJournalList"));
+  assert(files.index.includes('FULL_RECONCILE_MS'));
+  assert(files.index.includes('primeJournalCursor'));
+  assert(files.scheduler.includes('syncBaseLinkerJournalDelta'));
+  assert(files.scheduler.includes('FULL_RECONCILE_MS'));
 });
 
 check('Sent mutation is bound to the same account and removes only that account/order index row', () => {
-  assert(files.picking.includes('setBaseLinkerOrderStatus({ orderId: id, statusId: scope.sentStatusId }, makeBaseLinkerAccountCaller(accountId))'));
+  assert(files.picking.includes("setBaseLinkerOrderStatus({ orderId: id, statusId: scope.sentStatusId }, makeBaseLinkerAccountCaller(accountId, { usageStage: 'picking_status_write' }))"));
   assert(files.picking.includes('await removeIndexedOrders(accountId, [id])'));
 });
 

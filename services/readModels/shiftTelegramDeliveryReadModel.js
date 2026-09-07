@@ -5,7 +5,7 @@ const TelegramNotificationDelivery = require('../../models/TelegramNotificationD
 
 const ORDERING_KINDS = ['ordering_open', 'ordering_reminder'];
 
-async function buildShiftTelegramDeliveryReadModel({ orderingSessionId, deliveryGroupId }) {
+async function buildShiftTelegramDeliveryReadModel({ orderingSessionId, deliveryGroupId, recipientId = '' }) {
   const sessionId = String(orderingSessionId || '');
   const groupId = String(deliveryGroupId || '');
   if (!sessionId || !groupId) return { byRecipient: new Map(), recipientSnapshots: [] };
@@ -19,10 +19,12 @@ async function buildShiftTelegramDeliveryReadModel({ orderingSessionId, delivery
   if (!events.length) return { byRecipient: new Map(), recipientSnapshots: [] };
 
   const eventById = new Map(events.map((event) => [String(event._id), event]));
-  const deliveries = await TelegramNotificationDelivery.find({
+  const deliveryFilter = {
     eventId: { $in: events.map((event) => event._id) },
     channel: 'private',
-  }, 'eventId eventKey recipientId recipientName recipientShopId recipientShopName status attempts sentAt telegramMessageId telegramDate possibleDuplicate skipReason lastError').sort({ createdAt: 1 }).lean();
+  };
+  if (String(recipientId || '').trim()) deliveryFilter.recipientId = String(recipientId).trim();
+  const deliveries = await TelegramNotificationDelivery.find(deliveryFilter, 'eventId eventKey recipientId recipientName recipientShopId recipientShopName status attempts sentAt telegramMessageId telegramDate possibleDuplicate skipReason lastError').sort({ createdAt: 1 }).lean();
 
   const byRecipient = new Map();
   const snapshotByRecipient = new Map();

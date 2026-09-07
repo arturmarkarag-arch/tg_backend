@@ -90,7 +90,7 @@ check('concrete HTTP identity cannot omit accountId', () => {
 check('API caller token lookup is account-bound', () => {
   const client = read('services/baseLinkerClient.js');
   assert(client.includes('getTokenForAccount(id'));
-  assert(client.includes('reserveApiBudget(id)'));
+  assert(client.includes('reserveApiBudget(id, { method: upstreamMethod, usageStage })'));
   assert(client.includes("'X-BLToken': secret"));
 });
 

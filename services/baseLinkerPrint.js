@@ -146,7 +146,7 @@ async function queuePrintJob({ baseLinkerAccountId, orderId, packageId, courierC
   const accountId = text(baseLinkerAccountId);
   if (!accountId) throw appError('baselinker_account_id_required');
   await getBaseLinkerAccount(accountId, { requireEnabled: true });
-  const callApi = makeBaseLinkerAccountCaller(accountId);
+  const callApi = makeBaseLinkerAccountCaller(accountId, { usageStage: 'shipment_read' });
   const order = positiveInt(orderId, 'baselinker_order_id_invalid');
   const id = positiveInt(packageId, 'baselinker_package_id_invalid');
   const requestedCode = courierCodeOf(courierCode);
@@ -304,7 +304,7 @@ async function getPrintJobPayload({ jobId, agentId }) {
       orderId: job.orderId,
       packageId: job.packageId,
       courierCode: job.courierCode,
-    }, makeBaseLinkerAccountCaller(accountId));
+    }, makeBaseLinkerAccountCaller(accountId, { usageStage: 'shipment_read' }));
     job.labelExtension = label.extension;
     job.leaseUntil = new Date(Date.now() + JOB_LEASE_MS);
     await job.save();

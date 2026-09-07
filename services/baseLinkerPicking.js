@@ -236,12 +236,13 @@ async function fetchExactOrder(baseLinkerAccountId, orderId) {
   if (!Number.isSafeInteger(id) || id <= 0) throw appError('baselinker_order_id_invalid');
 
   // Warehouse admission is controlled by the configured Intake status.
-  // Include unconfirmed orders as well because BaseLinker confirmed is not our business-ready gate.
+  // BaseLinker recommends confirmed-only reads: unconfirmed orders can contain
+  // incomplete/changing product lists and are not safe for warehouse admission.
   const result = await fetchBaseLinkerOrders({
     orderId: id,
-    includeUnconfirmed: true,
+    includeUnconfirmed: false,
     maxPages: 1,
-  }, makeBaseLinkerAccountCaller(baseLinkerAccountId));
+  }, makeBaseLinkerAccountCaller(baseLinkerAccountId, { usageStage: 'picking_exact_verify' }));
   const order = (result.orders || []).find((candidate) => String(candidate?.order_id) === String(id));
   if (!order) throw appError('baselinker_order_not_returned', { orderId: id, upstreamMethod: 'getOrders' });
   if (!Array.isArray(order.products) || order.products.length === 0) throw appError('baselinker_order_has_no_products', { orderId: id });
@@ -1384,7 +1385,7 @@ async function markPickingOrderSent({ baseLinkerAccountId, orderId, user, expect
     // If a manager already put it in Sent, do not rewrite anything upstream;
     // the warehouse click below is what creates our local physical Sent fact.
     if (disposition === 'intake') {
-      await setBaseLinkerOrderStatus({ orderId: id, statusId: scope.sentStatusId }, makeBaseLinkerAccountCaller(accountId));
+      await setBaseLinkerOrderStatus({ orderId: id, statusId: scope.sentStatusId }, makeBaseLinkerAccountCaller(accountId, { usageStage: 'picking_status_write' }));
       order = decorate(await fetchExactOrder(accountId, id));
       disposition = classifyUpstreamOrder(order, scope);
     }
@@ -1475,9 +1476,9 @@ async function fetchOptionalExactOrder(baseLinkerAccountId, orderId) {
   if (!Number.isSafeInteger(id) || id <= 0) return null;
   const result = await fetchBaseLinkerOrders({
     orderId: id,
-    includeUnconfirmed: true,
+    includeUnconfirmed: false,
     maxPages: 1,
-  }, makeBaseLinkerAccountCaller(baseLinkerAccountId));
+  }, makeBaseLinkerAccountCaller(baseLinkerAccountId, { usageStage: 'picking_exact_verify' }));
   const order = (result.orders || []).find((candidate) => String(candidate?.order_id) === String(id)) || null;
   return order;
 }

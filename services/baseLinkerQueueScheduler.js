@@ -1,7 +1,13 @@
 'use strict';
 
 const { getAllQueueScopes } = require('./baseLinkerQueueScope');
-const { syncBaseLinkerOrderIndex, INDEX_REFRESH_MS } = require('./baseLinkerOrderIndex');
+const {
+  syncBaseLinkerOrderIndex,
+  syncBaseLinkerJournalDelta,
+  loadIndexState,
+  INDEX_REFRESH_MS,
+  FULL_RECONCILE_MS,
+} = require('./baseLinkerOrderIndex');
 const { runAsSchedulerLeader } = require('./schedulerLeader');
 
 let timer = null;
@@ -13,6 +19,33 @@ const ERROR_BACKOFF_MS = Math.min(
   30 * 60_000,
   Math.max(60_000, Number(process.env.BASELINKER_QUEUE_ERROR_BACKOFF_MS) || (10 * 60_000)),
 );
+
+async function runAccountTick(scope) {
+  const accountId = String(scope.baseLinkerAccountId || '');
+  const state = await loadIndexState(accountId, scope);
+  const fullAgeMs = state.lastSyncAt ? Date.now() - Date.parse(state.lastSyncAt) : Number.POSITIVE_INFINITY;
+  const needsFull = !state.initialized || !Number.isFinite(fullAgeMs) || fullAgeMs >= FULL_RECONCILE_MS;
+
+  if (needsFull) {
+    return runAsSchedulerLeader(
+      `baselinker-queue-full:${accountId}`,
+      () => syncBaseLinkerOrderIndex({ accountId, force: true, maxAgeMs: FULL_RECONCILE_MS }),
+      { ttlMs: Math.max(120_000, FULL_RECONCILE_MS) },
+    );
+  }
+
+  // If journal could not be primed (disabled account feature or simply no logs
+  // in its 3-day window), do NOT hit it every 30 seconds forever. The next full
+  // reconcile will retry priming while preserving queue correctness.
+  if (!state.journalReady || !(state.journalLastLogId > 0)) {
+    return { baseLinkerAccountId: accountId, skipped: true, reason: 'journal_not_ready_wait_full_reconcile' };
+  }
+  return runAsSchedulerLeader(
+    `baselinker-queue-journal:${accountId}`,
+    () => syncBaseLinkerJournalDelta(accountId),
+    { ttlMs: Math.max(60_000, INDEX_REFRESH_MS * 2) },
+  );
+}
 
 async function runBaseLinkerQueueTick() {
   const scopes = await getAllQueueScopes({ enabledOnly: true });
@@ -37,11 +70,7 @@ async function runBaseLinkerQueueTick() {
       continue;
     }
     try {
-      const result = await runAsSchedulerLeader(
-        `baselinker-queue-index:${accountId}`,
-        () => syncBaseLinkerOrderIndex({ accountId, force: true }),
-        { ttlMs: Math.max(60_000, INDEX_REFRESH_MS * 3) },
-      );
+      const result = await runAccountTick(scope);
       retryAfterByAccount.delete(accountId);
       accounts.push(result);
     } catch (error) {

@@ -14,11 +14,13 @@ const BaseLinkerOrderIndex = require('../models/BaseLinkerOrderIndex');
 const BaseLinkerPickingOrder = require('../models/BaseLinkerPickingOrder');
 const BaseLinkerPrintAgent = require('../models/BaseLinkerPrintAgent');
 const BaseLinkerPrintJob = require('../models/BaseLinkerPrintJob');
+const BaseLinkerProductImageCache = require('../models/BaseLinkerProductImageCache');
 const AppSetting = require('../models/AppSetting');
 
 const SETTINGS_KEYS = Object.freeze([
   'baselinker.queueSettings.v1',
   'baselinker.orderIndex.v1',
+  'baselinker.orderIndex.v3',
   // Retired state keys are included so this script can clean a deployment that
   // is upgrading from the old full-order mirror/journal architecture.
   'baselinker.orderCache.v2',
@@ -30,6 +32,7 @@ const MODELS = Object.freeze([
   ['BaseLinkerPickingOrder', BaseLinkerPickingOrder, 'warehouse picking/local workflow'],
   ['BaseLinkerPrintJob', BaseLinkerPrintJob, 'queued/finished BaseLinker label jobs'],
   ['BaseLinkerPrintAgent', BaseLinkerPrintAgent, 'ephemeral Print Agent registrations'],
+  ['BaseLinkerProductImageCache', BaseLinkerProductImageCache, 'non-PII worker product image cache'],
 ]);
 
 const LEGACY_COLLECTIONS = Object.freeze([
@@ -137,7 +140,7 @@ async function printPlan(mode, db, existing) {
   console.log(`\nAppSetting rows to clear: ${settingsCount}`);
   for (const key of SETTINGS_KEYS) console.log(`  - ${key}`);
 
-  console.log('\nAfter wipe, indexes are synchronized against the current SINGLE-ACCOUNT ID-INDEX schemas.');
+  console.log('\nAfter wipe, indexes are synchronized against the current account-scoped BaseLinker schemas.');
   console.log('BaseLinker queue statuses must be configured again after cleanup.');
 }
 
@@ -210,7 +213,7 @@ async function runCleanup(mode) {
     console.log('\n✅ BaseLinker cleanup complete and verified.');
     for (const [name, count] of Object.entries(result.deleted)) console.log(`  deleted ${String(count).padStart(8)}  ${name}`);
     console.log(`  deleted ${String(result.deletedSettings).padStart(8)}  BaseLinker AppSetting rows`);
-    console.log('  indexes synchronized to current single-account ID-index schemas');
+    console.log('  indexes synchronized to current account-scoped BaseLinker schemas');
   } finally {
     await mongoose.disconnect().catch(() => {});
   }

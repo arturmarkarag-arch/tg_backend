@@ -1,10 +1,23 @@
 const { makeBaseLinkerAccountCaller } = require('./baseLinkerClient');
 const { appError } = require('../utils/errors');
 const { productKey } = require('./baseLinkerIdentity');
+const BaseLinkerProductImageCache = require('../models/BaseLinkerProductImageCache');
 
-const PRODUCT_CACHE_TTL_MS = 5 * 60 * 1000;
+const PRODUCT_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+const PERSISTED_PRODUCT_CACHE_TTL_MS = Math.max(PRODUCT_CACHE_TTL_MS, Number(process.env.BASELINKER_PRODUCT_CACHE_TTL_MS) || (24 * 60 * 60 * 1000));
 const LOOKUP_CHUNK_SIZE = 100;
 const productCache = new Map();
+let productImageCacheReadyPromise = null;
+
+async function ensureProductImageCacheReady() {
+  if (!productImageCacheReadyPromise) {
+    productImageCacheReadyPromise = BaseLinkerProductImageCache.createIndexes().catch((error) => {
+      productImageCacheReadyPromise = null;
+      throw error;
+    });
+  }
+  return productImageCacheReadyPromise;
+}
 
 function cleanId(value) {
   if (value === undefined || value === null) return '';
@@ -212,7 +225,13 @@ async function tryDirectInventoryRefs(refs, productCatalog, unresolved, warnings
  * changing/persisting that upstream payload. The catalog is supplementary
  * current product data used for photos, features and packing context.
  */
-async function fetchBaseLinkerProductCatalogSingle(orders, callApi) {
+async function fetchBaseLinkerProductCatalogSingle(orders, callApi, { maxRequests = Number.POSITIVE_INFINITY } = {}) {
+  let requestCount = 0;
+  const budgetedCallApi = async (method, parameters) => {
+    if (requestCount >= maxRequests) throw appError('baselinker_catalog_request_budget_exhausted');
+    requestCount += 1;
+    return callApi(method, parameters);
+  };
   const refs = collectOrderProductRefs(orders);
   const productCatalog = {};
   const warnings = [];
@@ -221,10 +240,10 @@ async function fetchBaseLinkerProductCatalogSingle(orders, callApi) {
   const externalRefs = refs.filter((ref) => ref.storage === 'shop' || ref.storage === 'warehouse');
   const unsupportedRefs = refs.filter((ref) => !['db', 'shop', 'warehouse'].includes(ref.storage));
 
-  await resolveExternalRefs(externalRefs, productCatalog, warnings, callApi);
+  await resolveExternalRefs(externalRefs, productCatalog, warnings, budgetedCallApi);
 
   const unresolvedInternal = [];
-  await tryDirectInventoryRefs(internalRefs, productCatalog, unresolvedInternal, warnings, callApi);
+  await tryDirectInventoryRefs(internalRefs, productCatalog, unresolvedInternal, warnings, budgetedCallApi);
   // Never guess an inventory by scanning all inventories for a product_id.
   // Without an exact storage_id from the ordered line there is no authoritative
   // catalog binding, so fail closed and show no enriched image.
@@ -246,9 +265,79 @@ async function fetchBaseLinkerProductCatalogSingle(orders, callApi) {
       warnings: warnings.length,
     },
     productCatalogWarnings: warnings,
+    requestCount,
   };
 }
 
+async function getCachedBaseLinkerProductCatalog(orders) {
+  await ensureProductImageCacheReady();
+  const refs = collectOrderProductRefs(orders);
+  if (!refs.length) return {
+    productCatalog: {},
+    productCatalogStats: { requested: 0, resolved: 0, unresolved: 0, warnings: 0 },
+    productCatalogWarnings: [],
+  };
+  const rows = await BaseLinkerProductImageCache.find({ productKey: { $in: refs.map((ref) => ref.key) } })
+    .select('productKey state imageUrl refreshedAt').lean();
+  const byKey = new Map(rows.map((row) => [String(row.productKey), row]));
+  const productCatalog = {};
+  let resolved = 0;
+  for (const ref of refs) {
+    const row = byKey.get(ref.key);
+    if (!row) continue;
+    const image = String(row.imageUrl || '').trim();
+    productCatalog[ref.key] = { state: String(row.state || 'unresolved'), images: image ? [image] : [] };
+    if (String(row.state || '') === 'resolved') resolved += 1;
+  }
+  return {
+    productCatalog,
+    productCatalogStats: { requested: refs.length, resolved, unresolved: Math.max(0, refs.length - resolved), warnings: 0 },
+    productCatalogWarnings: [],
+  };
+}
+
+async function warmBaseLinkerProductCatalog(orders, callApi, { maxRequests = 5 } = {}) {
+  await ensureProductImageCacheReady();
+  const list = Array.isArray(orders) ? orders : [];
+  const refs = collectOrderProductRefs(list);
+  if (!refs.length || typeof callApi !== 'function' || maxRequests <= 0) return getCachedBaseLinkerProductCatalog(list);
+  const cutoff = new Date(Date.now() - PERSISTED_PRODUCT_CACHE_TTL_MS);
+  const freshRows = await BaseLinkerProductImageCache.find({
+    productKey: { $in: refs.map((ref) => ref.key) },
+    refreshedAt: { $gte: cutoff },
+  }).select('productKey').lean();
+  const fresh = new Set(freshRows.map((row) => String(row.productKey)));
+  const staleKeys = new Set(refs.filter((ref) => !fresh.has(ref.key)).map((ref) => ref.key));
+  if (!staleKeys.size) return getCachedBaseLinkerProductCatalog(list);
+
+  const missingOnlyOrders = list.map((order) => ({
+    ...order,
+    products: (Array.isArray(order?.products) ? order.products : []).filter((product) => {
+      const key = catalogKeyForOrderProduct(product, order?.baseLinkerAccountId);
+      return key && staleKeys.has(key);
+    }),
+  })).filter((order) => order.products.length);
+
+  const freshResult = await fetchBaseLinkerProductCatalogSingle(missingOnlyOrders, callApi, { maxRequests });
+  const now = new Date();
+  const writes = [];
+  for (const [key, entry] of Object.entries(freshResult.productCatalog || {})) {
+    const state = String(entry?.state || 'unresolved');
+    // Transport/API errors are represented as warnings rather than entries, so
+    // only deterministic results reach this cache. A transient failure is never
+    // cached as a 24h successful lookup.
+    const imageUrl = normalizeImageUrls(entry?.images)[0] || '';
+    const accountId = String(key).split(':', 1)[0] || '';
+    if (!accountId) continue;
+    writes.push({ updateOne: {
+      filter: { baseLinkerAccountId: accountId, productKey: key },
+      update: { $set: { baseLinkerAccountId: accountId, productKey: key, state, imageUrl, refreshedAt: now } },
+      upsert: true,
+    } });
+  }
+  if (writes.length) await BaseLinkerProductImageCache.bulkWrite(writes, { ordered: false });
+  return getCachedBaseLinkerProductCatalog(list);
+}
 
 async function fetchBaseLinkerProductCatalog(orders, callApi = null) {
   const list = Array.isArray(orders) ? orders : [];
@@ -287,4 +376,6 @@ module.exports = {
   normalizeImageUrls,
   collectOrderProductRefs,
   fetchBaseLinkerProductCatalog,
+  getCachedBaseLinkerProductCatalog,
+  warmBaseLinkerProductCatalog,
 };

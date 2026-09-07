@@ -1,5 +1,6 @@
 const fs = require('node:fs');
 const path = require('node:path');
+const { indexOrThrow } = require('./helpers/sourceContract');
 
 describe('BaseLinker Print Agent contract', () => {
   const root = path.join(__dirname, '..');
@@ -20,10 +21,9 @@ describe('BaseLinker Print Agent contract', () => {
     expect(service).toContain('claimNextPrintJob');
     expect(service).toContain('getPrintJobPayload');
     expect(service).toContain('fetchVerifiedBaseLinkerOrderLabel');
-    const queueStart = service.indexOf('async function queuePrintJob');
-    const payloadStart = service.indexOf('async function getPrintJobPayload');
-    const labelCall = service.indexOf('await fetchVerifiedBaseLinkerOrderLabel', payloadStart);
-    expect(queueStart).toBeGreaterThan(-1);
+    const queueStart = indexOrThrow(service, 'async function queuePrintJob');
+    const payloadStart = indexOrThrow(service, 'async function getPrintJobPayload', { from: queueStart });
+    const labelCall = indexOrThrow(service, 'await fetchVerifiedBaseLinkerOrderLabel', { from: payloadStart });
     expect(payloadStart).toBeGreaterThan(queueStart);
     expect(labelCall).toBeGreaterThan(payloadStart);
   });

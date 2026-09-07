@@ -18,7 +18,7 @@ const { getQueueScope } = require('../services/baseLinkerQueueScope');
 const { fetchBaseLinkerProductCatalog } = require('../services/baseLinkerProducts');
 const { compactOrders, compactProductCatalog } = require('../services/baseLinkerPublicDto');
 const { annotateOrder, orderKey } = require('../services/baseLinkerIdentity');
-const { makeBaseLinkerAccountCaller } = require('../services/baseLinkerClient');
+const { makeBaseLinkerAccountCaller, getBaseLinkerApiUsage } = require('../services/baseLinkerClient');
 const { listBaseLinkerAccounts, getBaseLinkerAccount } = require('../services/baseLinkerAccounts');
 const { ensureBaseLinkerAccountMetadataFresh } = require('../services/baseLinkerAccountValidation');
 const {
@@ -50,8 +50,8 @@ async function resolveAccountId(req, { requireEnabled = false } = {}) {
   return accountId;
 }
 
-function callerFor(accountId, { requireEnabled = true } = {}) {
-  return makeBaseLinkerAccountCaller(accountId, { requireEnabled });
+function callerFor(accountId, { requireEnabled = true, usageStage = 'other' } = {}) {
+  return makeBaseLinkerAccountCaller(accountId, { requireEnabled, usageStage });
 }
 
 async function publicAccountRuntime(account) {
@@ -85,6 +85,17 @@ router.get('/status', asyncHandler(async (_req, res) => {
     accounts: runtime,
     queueSchedulerStarted: isBaseLinkerQueueSchedulerStarted(),
     queueRefreshMs: INDEX_REFRESH_MS,
+  });
+}));
+
+router.get('/api-usage', requireTelegramRole('admin'), asyncHandler(async (_req, res) => {
+  const accounts = await listBaseLinkerAccounts({ includeDisabled: true });
+  const usage = await getBaseLinkerApiUsage(accounts.map((account) => account.accountId));
+  const nameById = new Map(accounts.map((account) => [String(account.accountId), String(account.name || account.accountId)]));
+  res.set('Cache-Control', 'no-store');
+  res.json({
+    ...usage,
+    accounts: usage.accounts.map((row) => ({ ...row, accountName: nameById.get(String(row.baseLinkerAccountId)) || row.baseLinkerAccountId })),
   });
 }));
 
@@ -127,17 +138,19 @@ router.get('/meta', asyncHandler(async (_req, res) => {
   res.json({ accounts: result, fetchedAt: new Date().toISOString() });
 }));
 
-async function sendOrdersPayload(res, result) {
+async function sendOrdersPayload(res, result, { allowUpstreamCatalog = false } = {}) {
   let catalog = {
-    productCatalog: {},
-    productCatalogStats: { requested: 0, resolved: 0, unresolved: 0, warnings: 0 },
-    productCatalogWarnings: [],
+    productCatalog: result.productCatalog || {},
+    productCatalogStats: result.productCatalogStats || { requested: 0, resolved: 0, unresolved: 0, warnings: 0 },
+    productCatalogWarnings: result.productCatalogWarnings || [],
   };
-  try {
-    catalog = await fetchBaseLinkerProductCatalog(result.orders || []);
-  } catch (error) {
-    catalog.productCatalogWarnings = [{ scope: 'catalog', code: error?.code || error?.message || 'catalog_lookup_failed' }];
-    catalog.productCatalogStats.warnings = 1;
+  if (allowUpstreamCatalog) {
+    try {
+      catalog = await fetchBaseLinkerProductCatalog(result.orders || []);
+    } catch (error) {
+      catalog.productCatalogWarnings = [{ scope: 'catalog', code: error?.code || error?.message || 'catalog_lookup_failed' }];
+      catalog.productCatalogStats.warnings = 1;
+    }
   }
 
   const refs = (result.orders || []).map((order) => ({
@@ -180,15 +193,15 @@ async function exactOrderHandler(req, res) {
   const exactOrderId = String(req.params.orderId || '').trim();
   const account = await getBaseLinkerAccount(accountId, { requireEnabled: true, lean: true });
   let result = await fetchBaseLinkerOrders(
-    { orderId: exactOrderId, includeUnconfirmed: true, maxPages: 1 },
-    callerFor(accountId),
+    { orderId: exactOrderId, includeUnconfirmed: false, maxPages: 1 },
+    callerFor(accountId, { usageStage: 'picking_exact_read' }),
   );
   result.orders = (result.orders || []).map((order) => annotateOrder(order, account, account.metadataSnapshot?.sources));
   if (!result.orders.length) {
     const localOrder = await getLocalOrderProjection(accountId, exactOrderId);
     if (localOrder) result = { ...result, orders: [localOrder] };
   }
-  return sendOrdersPayload(res, result);
+  return sendOrdersPayload(res, result, { allowUpstreamCatalog: true });
 }
 
 router.get('/orders', asyncHandler(ordersHandler));
@@ -196,7 +209,7 @@ router.get('/accounts/:accountId/orders/:orderId', asyncHandler(exactOrderHandle
 
 async function packagesHandler(req, res) {
   const accountId = await resolveAccountId(req, { requireEnabled: true });
-  const result = await fetchBaseLinkerOrderPackages(req.params.orderId, callerFor(accountId));
+  const result = await fetchBaseLinkerOrderPackages(req.params.orderId, callerFor(accountId, { usageStage: 'shipment_read' }));
   res.json({ ...result, baseLinkerAccountId: accountId, fetchedAt: new Date().toISOString() });
 }
 async function packageDetailsHandler(req, res) {
@@ -205,7 +218,7 @@ async function packageDetailsHandler(req, res) {
     orderId: req.params.orderId,
     packageId: req.params.packageId,
     courierCode: req.query.courierCode,
-  }, callerFor(accountId));
+  }, callerFor(accountId, { usageStage: 'shipment_read' }));
   res.json({ ...result, baseLinkerAccountId: accountId, fetchedAt: new Date().toISOString() });
 }
 async function labelHandler(req, res) {
@@ -220,7 +233,7 @@ async function labelHandler(req, res) {
     orderId: req.params.orderId,
     packageId: req.params.packageId,
     courierCode: req.query.courierCode,
-  }, callerFor(accountId));
+  }, callerFor(accountId, { usageStage: 'shipment_read' }));
   const safeExtension = /^[a-z0-9]{1,8}$/.test(label.extension) ? label.extension : 'bin';
   res.set({
     'Content-Type': label.contentType,

@@ -1,5 +1,6 @@
 const fs = require('fs');
 const path = require('path');
+const { sliceBetweenOrThrow } = require('./helpers/sourceContract');
 
 const root = path.join(__dirname, '..');
 const read = (rel) => fs.readFileSync(path.join(root, rel), 'utf8');
@@ -9,9 +10,11 @@ describe('BaseLinker production lifecycle contract', () => {
     const picking = read('services/baseLinkerPicking.js');
     expect(picking).toContain("if (disposition === 'intake') return disposition");
     expect(picking).toContain("appError('baselinker_order_not_in_intake'");
-    const release = picking.slice(
-      picking.indexOf('async function releasePickingOrder'),
-      picking.indexOf('async function markPickingOrderPacked'),
+    const release = sliceBetweenOrThrow(
+      picking,
+      'async function releasePickingOrder',
+      'async function assertBaseLinkerPrintAllowed',
+      { label: 'releasePickingOrder implementation' },
     );
     expect(release).not.toContain('verifyTrackedPickingOrderUpstream');
     expect(release).not.toContain('requireAccountEnabled');
@@ -61,9 +64,11 @@ describe('BaseLinker production lifecycle contract', () => {
     const retention = read('services/baseLinkerRetention.js');
     expect(retention).toContain("upstreamReviewRequired: { $ne: true }");
     expect(retention).toContain("lastUpstreamChangeAt: { $lt: cutoffDate }");
-    const filter = retention.slice(
-      retention.indexOf('function terminalPickingCandidateFilter'),
-      retention.indexOf('async function purgeVerifiedTerminalPickingForAccount'),
+    const filter = sliceBetweenOrThrow(
+      retention,
+      'function terminalPickingCandidateFilter',
+      'async function purgeVerifiedTerminalPickingForAccount',
+      { label: 'terminalPickingCandidateFilter implementation' },
     );
     expect(filter).toContain("status: 'sent'");
     expect(filter).toContain("{ upstreamDisposition: 'cancelled'");

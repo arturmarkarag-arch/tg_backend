@@ -17,6 +17,11 @@ const BaseLinkerOrderIndexSchema = new mongoose.Schema({
   // Non-PII source identity for truthful server-side filtering/pagination.
   sourceType: { type: String, default: '', trim: true, lowercase: true, maxlength: 80, index: true },
   sourceId: { type: String, default: '', trim: true, maxlength: 120, index: true },
+  // Sanitized worker-only projection. compactOrder() strips customer/address/payment
+  // fields before persistence; this exists so ordinary list/search/pagination reads
+  // never need a BaseLinker HTTP call.
+  preview: { type: mongoose.Schema.Types.Mixed, default: null },
+  searchText: { type: String, default: '', maxlength: 4096 },
   syncToken: { type: String, default: '', index: true },
   seenAt: { type: Date, default: Date.now },
 }, { timestamps: true });

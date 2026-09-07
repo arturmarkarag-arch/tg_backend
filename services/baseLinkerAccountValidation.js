@@ -56,14 +56,14 @@ async function validateBaseLinkerToken(token) {
   // Fingerprint is HMACed with the server encryption secret: validation cannot
   // proceed on a server that would be unable to store the token securely.
   const validationKey = `validation-${tokenFingerprint(raw).slice(0, 24)}`;
-  return loadMetadata((method, parameters) => callBaseLinkerWithToken(method, parameters, raw, { accountId: validationKey }));
+  return loadMetadata((method, parameters) => callBaseLinkerWithToken(method, parameters, raw, { accountId: validationKey, usageStage: 'metadata_validation' }));
 }
 
 async function refreshBaseLinkerAccountMetadata(accountId, { allowDisabled = false } = {}) {
   const requireEnabled = allowDisabled !== true;
   const { account } = await getTokenForAccount(accountId, { requireEnabled });
   try {
-    const result = await loadMetadata(makeBaseLinkerAccountCaller(accountId, { requireEnabled }));
+    const result = await loadMetadata(makeBaseLinkerAccountCaller(accountId, { requireEnabled, usageStage: 'metadata_refresh' }));
     await recordAccountMetadata(account.accountId, result.metadata, { connectionError: '' });
     return result;
   } catch (error) {

@@ -1785,22 +1785,17 @@ router.get('/shift-board', requireTelegramRoles(['admin']), async (req, res, nex
           ).lean()
           : [];
 
-        const [marks, deliveryLog] = await Promise.all([
-          CatalogReview.find(
-            { groupId: dgId, sessionId }, 'telegramId userName shopId shopName at',
-          ).lean(),
-          buildShiftTelegramDeliveryReadModel({ orderingSessionId: sessionId, deliveryGroupId: dgId }),
-        ]);
-        const notificationSnapshots = deliveryLog.recipientSnapshots || [];
+        const marks = await CatalogReview.find(
+          { groupId: dgId, sessionId }, 'telegramId userName shopId shopName at',
+        ).lean();
         const reviewUsernameMap = await getTelegramUsernameMap([
           ...staff.map((u) => u.telegramId),
           ...marks.map((m) => m.telegramId),
-          ...notificationSnapshots.map((row) => row.telegramId),
         ]);
 
-        // Union of immutable marks + current assignment + Telegram recipient
-        // snapshots. A seller who was notified and then unassigned/moved must not
-        // vanish from the current session's delivery audit.
+        // Main 15-second board is intentionally small: current assignments plus
+        // immutable review marks only. Telegram delivery history is a separate
+        // lazy admin read and is never embedded in this polling payload.
         const sellerByTelegramId = new Map();
         for (const m of marks) {
           const tgId = String(m.telegramId);
@@ -1813,7 +1808,6 @@ router.get('/shift-board', requireTelegramRoles(['admin']), async (req, res, nex
             shopName: shop?.name || m.shopName || '—',
             shopCity: shop?.cityId?.name || '',
             at: m.at,
-            notifications: deliveryLog.byRecipient.get(tgId) || [],
           });
         }
 
@@ -1822,7 +1816,6 @@ router.get('/shift-board', requireTelegramRoles(['admin']), async (req, res, nex
           if (sellerByTelegramId.has(tgId)) {
             const existing = sellerByTelegramId.get(tgId);
             existing.username = existing.username || reviewUsernameMap.get(tgId) || '';
-            existing.notifications = deliveryLog.byRecipient.get(tgId) || existing.notifications || [];
             continue;
           }
           const shop = shopById.get(String(u.shopId));
@@ -1834,25 +1827,9 @@ router.get('/shift-board', requireTelegramRoles(['admin']), async (req, res, nex
             shopName: shop?.name || '—',
             shopCity: shop?.cityId?.name || '',
             at: null,
-            notifications: deliveryLog.byRecipient.get(tgId) || [],
           });
         }
 
-        for (const snapshot of notificationSnapshots) {
-          const tgId = String(snapshot.telegramId || '');
-          if (!tgId || sellerByTelegramId.has(tgId)) continue;
-          const shop = shopById.get(String(snapshot.shopId || ''));
-          sellerByTelegramId.set(tgId, {
-            telegramId: tgId,
-            name: snapshot.name || tgId,
-            username: reviewUsernameMap.get(tgId) || '',
-            shopId: String(snapshot.shopId || ''),
-            shopName: shop?.name || snapshot.shopName || '—',
-            shopCity: shop?.cityId?.name || '',
-            at: null,
-            notifications: deliveryLog.byRecipient.get(tgId) || [],
-          });
-        }
 
         const sellers = [...sellerByTelegramId.values()];
         sellers.sort((a, b) => {
@@ -1866,7 +1843,6 @@ router.get('/shift-board', requireTelegramRoles(['admin']), async (req, res, nex
           reviewedCount: sellers.filter((s) => s.at).length,
           totalCount: sellers.length,
           sellers,
-          notificationKinds: ['ordering_open', 'ordering_reminder'],
         };
       }
     } catch (e) {
@@ -1878,6 +1854,34 @@ router.get('/shift-board', requireTelegramRoles(['admin']), async (req, res, nex
     next(appError('picking_next_failed'));
   }
  });
+
+// ---------------------------------------------------------------------------
+// GET /api/picking/shift-board/seller-notifications
+// Lazy Telegram delivery audit for ONE seller in the current session.
+// ---------------------------------------------------------------------------
+router.get('/shift-board/seller-notifications', requireTelegramRoles(['admin']), async (req, res, next) => {
+  try {
+    const deliveryGroupId = String(req.query.deliveryGroupId || '');
+    const telegramId = String(req.query.telegramId || '');
+    if (!deliveryGroupId || !telegramId) {
+      return res.status(400).json({ error: 'invalid_request', message: 'Потрібні deliveryGroupId і telegramId.' });
+    }
+    const group = await DeliveryGroup.findById(deliveryGroupId, 'orderingSchedule').lean();
+    if (!group) return res.json({ notifications: [] });
+    const sessionId = await findCurrentSessionId(deliveryGroupId, group.orderingSchedule);
+    if (!sessionId) return res.json({ notifications: [] });
+    const deliveryLog = await buildShiftTelegramDeliveryReadModel({
+      orderingSessionId: sessionId,
+      deliveryGroupId,
+      recipientId: telegramId,
+    });
+    res.set('Cache-Control', 'no-store');
+    return res.json({ notifications: deliveryLog.byRecipient.get(telegramId) || [] });
+  } catch (err) {
+    if (err && (err.name === 'AppError' || err.name === 'CastError' || isTransientTx(err))) return next(err);
+    return next(appError('picking_next_failed'));
+  }
+});
 
 // ---------------------------------------------------------------------------
 // GET /api/picking/shift-board/worker-history

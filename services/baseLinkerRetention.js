@@ -66,7 +66,7 @@ async function purgeVerifiedTerminalPickingForAccount(accountId, scope, cutoffDa
         }).lean();
         if (!current) return;
 
-        const exact = await fetchBaseLinkerOrders({ orderId, includeUnconfirmed: true, maxPages: 1 }, callApi);
+        const exact = await fetchBaseLinkerOrders({ orderId, includeUnconfirmed: false, maxPages: 1 }, callApi);
         const order = (exact.orders || []).find((row) => String(row?.order_id || '') === orderId) || null;
         checked += 1;
         if (order) {

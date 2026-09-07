@@ -83,7 +83,7 @@ function classifyUpstreamOrder(order, scope) {
 async function getQueueStatusOptions(accountId) {
   const id = String(accountId || '').trim();
   if (!id) throw appError('baselinker_account_id_required');
-  const payload = await makeBaseLinkerAccountCaller(id)('getOrderStatusList', {});
+  const payload = await makeBaseLinkerAccountCaller(id, { usageStage: 'queue_settings' })('getOrderStatusList', {});
   if (!Array.isArray(payload.statuses)) throw appError('baselinker_invalid_response', { upstreamMethod: 'getOrderStatusList' });
   return payload.statuses.map((status) => ({ id: Number(status.id), name: String(status.name || ''), color: String(status.color || '') }))
     .filter((status) => Number.isSafeInteger(status.id) && status.id > 0);

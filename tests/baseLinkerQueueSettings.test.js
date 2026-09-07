@@ -57,6 +57,9 @@ function harness(accounts = {}) {
     row.metadataSnapshot = { statuses: STATUSES, sources: {}, inventories: [] };
     return { metadata: row.metadataSnapshot };
   });
+  const withBaseLinkerAccountLifecycleLock = vi.fn(async (_accountId, work) => work());
+  const assertBaseLinkerAccountLifecycleIdle = vi.fn(async () => undefined);
+  const refreshBaseLinkerLifecycleTruth = vi.fn(async () => ({ complete: true }));
 
   function load() {
     const filename = path.join(__dirname, '../services/baseLinkerQueueScope.js');
@@ -66,6 +69,11 @@ function harness(accounts = {}) {
       './baseLinkerAccounts': { listBaseLinkerAccounts, getBaseLinkerAccount, saveAccountQueue },
       './baseLinkerClient': { makeBaseLinkerAccountCaller },
       './baseLinkerAccountValidation': { refreshBaseLinkerAccountMetadata },
+      './baseLinkerAccountLifecycle': {
+        withBaseLinkerAccountLifecycleLock,
+        assertBaseLinkerAccountLifecycleIdle,
+        refreshBaseLinkerLifecycleTruth,
+      },
       '../utils/errors': {
         appError: (code) => Object.assign(new Error(code), { code, status: 400 }),
       },
@@ -83,6 +91,9 @@ function harness(accounts = {}) {
     saveAccountQueue,
     savedQueues,
     refreshBaseLinkerAccountMetadata,
+    withBaseLinkerAccountLifecycleLock,
+    assertBaseLinkerAccountLifecycleIdle,
+    refreshBaseLinkerLifecycleTruth,
   };
 }
 
@@ -132,6 +143,9 @@ describe('BaseLinker per-account queue settings', () => {
       cancelledStatusId: 101,
     });
     expect(h.refreshBaseLinkerAccountMetadata).toHaveBeenCalledWith('B');
+    expect(h.withBaseLinkerAccountLifecycleLock).toHaveBeenCalledWith('B', expect.any(Function));
+    expect(h.refreshBaseLinkerLifecycleTruth).toHaveBeenCalledWith('B');
+    expect(h.assertBaseLinkerAccountLifecycleIdle).toHaveBeenCalledWith('B', 'queue');
     expect(h.saveAccountQueue).toHaveBeenCalledTimes(1);
     expect(h.saveAccountQueue.mock.calls[0][0]).toBe('B');
     expect(h.saveAccountQueue.mock.calls[0][1]).toMatchObject({

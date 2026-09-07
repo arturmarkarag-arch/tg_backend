@@ -12,9 +12,9 @@ const checks = [
   ['added and removed product lines get human-readable detail records', picking.includes("kind: 'added'") && picking.includes("kind: 'removed'")],
   ['public DTO exposes compact change details', picking.includes('lastUpstreamChangeDetails: (Array.isArray(plain.lastUpstreamChangeDetails)')],
   ['changed source lines reset only that line for explicit re-review', picking.includes('details.push(...upstreamLineChangeDetails(old, source))') && picking.includes("state: 'pending'")],
-  ['visible tracked Intake rows are compared against transient live BaseLinker payload', index.includes('trackedFoundRows') && index.includes('reconcilePickingFromUpstreamChanges({ orders: trackedOrders')],
-  ['page read live-fetches all selected Intake ids, not only untouched rows', index.includes('const selectedIntakeIds = selectedIds.filter((id) => indexSet.has(id))')],
-  ['live BaseLinker payload is not persisted by the index', !read('models/BaseLinkerOrderIndex.js').includes('order:')],
+  ['tracked orders are reconciled by scheduler/exact verification, never by page reads', index.includes('reconcileTrackedOrderStatuses(scope') && index.includes("usageStage = 'queue_exact_verify'")],
+  ['page read uses persisted sanitized preview and cached images without BaseLinker HTTP', index.includes('READ PATH CONTRACT') && index.includes('row?.preview') && index.includes('getCachedBaseLinkerProductCatalog(selectedOrders)')],
+  ['raw/customer BaseLinker payload is not persisted by the index', !read('models/BaseLinkerOrderIndex.js').includes('delivery_fullname') && !read('models/BaseLinkerOrderIndex.js').includes('phone:') && !read('models/BaseLinkerOrderIndex.js').includes('email:') && read('models/BaseLinkerOrderIndex.js').includes('preview:')],
 ];
 let pass = 0;
 for (const [name, ok] of checks) {
