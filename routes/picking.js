@@ -34,6 +34,7 @@ const { getTelegramUsernameMap } = require('../utils/telegramUsername');
 const { buildShiftTelegramDeliveryReadModel } = require('../services/readModels/shiftTelegramDeliveryReadModel');
 const { ITEM_RELATION_STATUS, ACTIVE_ITEM_STATUSES, revisionOf } = require('../utils/supplementState');
 const { buildLiveActiveOrderFilter } = require('../utils/orderStatus');
+const { buildPickingQueueStatsReadModel } = require('../services/readModels/pickingQueueStatsReadModel');
 
 const {
   findAndLockNext,
@@ -73,41 +74,6 @@ function isTransientTx(err) {
 // ---------------------------------------------------------------------------
 // Local helpers (route-layer only — not business logic)
 // ---------------------------------------------------------------------------
-
-// Distinct products ordered in a group's CURRENT ordering session (active orders).
-// Counts product "positions" (one per productId, matching task granularity), not
-// units. Read-only: resolves the session via getOpenDateWarsaw + a findOne (no
-// upsert) so a polling GET never mutates. Best-effort — returns 0 on any failure.
-async function countOrderedPositions(deliveryGroupId) {
-  try {
-    const group = await DeliveryGroup.findById(deliveryGroupId, 'dayOfWeek orderingSchedule').lean();
-    if (!group) return 0;
-    const openDate = getOpenDateWarsaw(group.orderingSchedule);
-    const session = await OrderingSession.findOne(
-      { groupId: String(deliveryGroupId), openDate },
-      '_id',
-    ).lean();
-    if (!session) return 0;
-    const orders = await Order.find(
-      {
-        'buyerSnapshot.deliveryGroupId': String(deliveryGroupId),
-        status: { $in: ['new', 'in_progress'] },
-        orderingSessionId: String(session._id),
-      },
-      'items.productId items.packed items.cancelled items.skipped items.voided',
-    ).lean();
-    const products = new Set();
-    for (const o of orders) {
-      for (const it of o.items || []) {
-        if (it.packed || it.cancelled || it.skipped || it.voided || !it.productId) continue;
-        products.add(String(it.productId));
-      }
-    }
-    return products.size;
-  } catch (err) {
-    return 0;
-  }
-}
 
 // Resolve the CURRENT ordering session for operational picking reads. Old sessions
 // are deliberately never used as fallback: their tasks/orders are history/repair
@@ -1055,115 +1021,16 @@ router.get('/blocks-overview', requireTelegramRoles(['warehouse', 'admin']), asy
 // ---------------------------------------------------------------------------
 router.get('/queue-stats', requireTelegramRoles(['warehouse', 'admin']), async (req, res, next) => {
   try {
-    const user = req.telegramUser;
     const deliveryGroupId = req.query.deliveryGroupId || null;
-
     if (!deliveryGroupId) {
       return res.json({ pendingCount: 0, lockedByMeCount: 0, lockedByOtherCount: 0, activeCount: 0 });
     }
 
-    const { sessionId: currentSessionId } = await resolveCurrentPickingSession(deliveryGroupId);
-
-    // Pure read. Stale/duplicate leases are cleaned by the server maintenance
-    // scheduler so a five-second UI poll cannot mutate warehouse state.
-
-    const base = currentSessionId
-      ? { deliveryGroupId: String(deliveryGroupId), orderingSessionId: String(currentSessionId) }
-      : { deliveryGroupId: '__no_current_session__' };
-
-    const [pendingCount, lockedByMeCount, lockedByOtherCount] = await Promise.all([
-      PickingTask.countDocuments({ ...base, status: 'pending' }),
-      PickingTask.countDocuments({ ...base, status: 'locked', lockedBy: String(user.telegramId) }),
-      PickingTask.countDocuments({ ...base, status: 'locked', lockedBy: { $ne: String(user.telegramId) } }),
-    ]);
-
-    const activeCount = pendingCount + lockedByMeCount + lockedByOtherCount;
-    // orderedPositions = distinct products ordered in the CURRENT session (from Orders),
-    // not built tasks. This is what the pre-start "Сумарно замовлено" banner shows: it
-    // is meaningful before picking starts (tasks aren't built yet) and stays stable as
-    // workers pack (pendingCount shrinks). Best-effort: never break queue polling.
-    const orderedPositions = await countOrderedPositions(deliveryGroupId);
-
-    // Live pickingStatus + last events so the SessionStatusHeader chip and
-    // timeline refresh on the same 5-second poll the rest of the UI uses.
-    // Without this the header is frozen on whatever /start-session returned at
-    // mount: after the last task is packed and maybeCompleteSession flips the
-    // session to 'completed', the chip would still read "Очікує підтвердження".
-    let pickingStatus = null;
-    let events = [];
-    let phase = null;
-    let sessionSummary = null;
-    let groupDayOfWeek = null;
-    let presentationMode = null;
-    let nextOrderingOpenAt = null;
-    let windowOpen = false;
-    let windowCloseAt = null;
-    let windowMessage = '';
-    let serverNow = new Date().toISOString();
-    let pickingReadyAt = null;
-    let pickingReady = false;
-    let pickingReadyInMs = null;
-    // Modern supplement rows are counted only for this exact current session.
-    const supplementCount = await countActiveOffersForGroup(deliveryGroupId, { orderingSessionId: currentSessionId });
-    try {
-      const groupDoc = await DeliveryGroup.findById(deliveryGroupId, 'dayOfWeek orderingSchedule').lean();
-      if (groupDoc) {
-        groupDayOfWeek = groupDoc.dayOfWeek;
-        const statusNow = new Date();
-        const windowState = isOrderingOpen(groupDoc.orderingSchedule, statusNow);
-        const readiness = getPickingReadiness(groupDoc.orderingSchedule, statusNow);
-        serverNow = readiness.serverNow.toISOString();
-        pickingReadyAt = readiness.pickingReadyAt.toISOString();
-        pickingReady = readiness.pickingReady;
-        pickingReadyInMs = readiness.pickingReadyInMs;
-        windowOpen = !!windowState.isOpen;
-        windowMessage = windowState.message || '';
-        windowCloseAt = windowOpen
-          ? getOrderingWindowCloseAt(groupDoc.orderingSchedule, statusNow).toISOString()
-          : null;
-        nextOrderingOpenAt = getNextOrderingWindowOpenAt(groupDoc.orderingSchedule, statusNow).toISOString();
-            // findCurrentSessionId, НЕ getOrCreate: це опитування раз на 5 секунд для
-        // ПОКАЗУ сторінки. Створювати сесію тут означало, що достатньо відкрити
-        // «Збирання» на групі з ще відкритим вікном замовлень — і в базі
-        // з'являлась порожня OrderingSession, яку ніхто не просив (сам
-        // /start-session у цьому стані виходить раніше й нічого не створює).
-        // Немає сесії — немає й статусу: клієнт просто не малює чип, а вхід у
-        // віртуальний блок дозамовлень від сесії не залежить.
-        const sessionId = await findCurrentSessionId(String(deliveryGroupId), groupDoc.orderingSchedule);
-        const sessionDoc = sessionId
-          ? await OrderingSession.findById(sessionId, 'pickingStatus events seq openDate finalSummary').lean()
-          : null;
-        if (sessionDoc) {
-          pickingStatus = sessionDoc.pickingStatus || 'pending';
-          events = (sessionDoc.events || []).slice(-10);
-          phase = await computeSessionPhase({
-            deliveryGroupId,
-            sessionId,
-            pickingStatus,
-            orderingSchedule: groupDoc.orderingSchedule,
-          });
-          sessionSummary = await buildSessionSummary(phase, {
-            deliveryGroupId, sessionId, session: sessionDoc,
-          });
-        } else {
-          phase = windowOpen ? 'ordering_open' : 'idle';
-        }
-        presentationMode = deriveSessionPresentationMode({
-          phase,
-          nextOrderingOpenAt,
-        });
-      }
-    } catch (e) {
-    }
-
-    res.json({
-      pendingCount, lockedByMeCount, lockedByOtherCount, activeCount,
-      orderingSessionId: currentSessionId ? String(currentSessionId) : null,
-      orderedPositions, pickingStatus, events, phase, sessionSummary, groupDayOfWeek,
-      presentationMode, nextOrderingOpenAt, windowOpen, windowCloseAt, windowMessage,
-      serverNow, pickingReadyAt, pickingReady, pickingReadyInMs,
-      supplementCount,
+    const snapshot = await buildPickingQueueStatsReadModel({
+      deliveryGroupId,
+      telegramId: req.telegramUser?.telegramId,
     });
+    res.json(snapshot);
   } catch (err) {
     if (err && (err.name === 'AppError' || err.name === 'CastError' || isTransientTx(err))) return next(err);
     next(appError('picking_next_failed'));
@@ -1671,101 +1538,10 @@ router.get('/shift-board', requireTelegramRoles(['admin']), async (req, res, nex
       || b.supplementPackedCount - a.supplementPackedCount
       || (b.isActive ? 1 : 0) - (a.isActive ? 1 : 0));
 
-    // ── Order-level "не завершено" aggregation (read-only data for the Зміна card) ──
-    // Three views the operator wants visibility into, NO actions attached:
-    //   A. currentSession — active orders of THIS session with unpacked positions
-    //      (honest before picking starts, when no PickingTasks exist yet).
-    //   B. stale          — active orders of the group NOT in the current session
-    //      (stranded from a prior cycle / after a reschedule). Mirrors the
-    //      shop-status guard: only reported when the ordering window is CLOSED, to
-    //      avoid the false positives that occur while the window is still open.
-    //   C. abandonedSessions — OrderingSession docs left confirmed/in_progress that
-    //      are NOT the current one (a cycle that never reached completed).
-    // Best-effort: a failure here must never break the shift board.
-    let unfinished = null;
-    try {
-      if (group && sessionId) {
-            const { isOpen } = isOrderingOpen(group.orderingSchedule);
-        const sessionMeta = await OrderingSession.findById(sessionId, 'seq openDate pickingStatus').lean();
-
-        const positionsLeft = (o) => (o.items || []).filter((i) => !i.cancelled && !i.packed && !i.skipped && !i.voided).length;
-        const mapOrder = (o) => ({
-          orderId: String(o._id),
-          orderNumber: o.orderNumber,
-          shopName: o.buyerSnapshot?.shopName || '—',
-          shopCity: o.buyerSnapshot?.shopCity || '',
-          positionCount: positionsLeft(o),
-        });
-
-        // A. Незібране в поточній сесії
-        const currentOrders = await Order.find(
-          { 'buyerSnapshot.deliveryGroupId': dgId, status: { $in: ['new', 'in_progress'] }, orderingSessionId: sessionId },
-          'orderNumber buyerSnapshot items',
-        ).lean();
-        const currentUnfinished = currentOrders
-          .map(mapOrder)
-          .filter((o) => o.positionCount > 0)
-          .sort((a, b) => (a.orderNumber || 0) - (b.orderNumber || 0));
-        const currentPositionCount = currentUnfinished.reduce((s, o) => s + o.positionCount, 0);
-
-        // B. Застрягле поза сесією (тільки коли вікно закрите)
-        let staleList = [];
-        if (!isOpen) {
-          const staleOrders = await Order.find(
-            { 'buyerSnapshot.deliveryGroupId': dgId, status: { $in: ['new', 'in_progress'] }, orderingSessionId: { $ne: sessionId } },
-            'orderNumber buyerSnapshot items',
-          ).lean();
-          staleList = staleOrders
-            .map(mapOrder)
-            .sort((a, b) => (a.orderNumber || 0) - (b.orderNumber || 0));
-        }
-        const stalePositionCount = staleList.reduce((s, o) => s + o.positionCount, 0);
-
-        // C. Завислі попередні сесії
-        const abandonedDocs = await OrderingSession.find(
-          { groupId: dgId, _id: { $ne: sessionId }, pickingStatus: { $in: ['confirmed', 'in_progress'] } },
-          'seq openDate pickingStatus',
-        ).sort({ openDate: -1 }).limit(10).lean();
-
-        unfinished = {
-          currentSession: {
-            seq: sessionMeta?.seq ?? null,
-            openDate: sessionMeta?.openDate ?? null,
-            pickingStatus: sessionMeta?.pickingStatus ?? 'pending',
-            orderCount: currentUnfinished.length,
-            positionCount: currentPositionCount,
-            orders: currentUnfinished,
-          },
-          stale: {
-            windowOpen: isOpen,
-            orderCount: staleList.length,
-            positionCount: stalePositionCount,
-            orders: staleList,
-          },
-          abandonedSessions: abandonedDocs.map((s) => ({
-            sessionId: String(s._id),
-            seq: s.seq ?? null,
-            openDate: s.openDate || null,
-            pickingStatus: s.pickingStatus,
-          })),
-        };
-      }
-    } catch (e) {
-    }
-
-    // Canonical session integrity. HARD blockers are current-session only;
-    // old/foreign orders/tasks are warnings, so last week's debris can be shown
-    // without ever stopping today's workers. Best-effort for this dashboard.
-    let sessionClosure = null;
-    try {
-      if (sessionId) {
-        sessionClosure = await auditSessionClosure({
-          deliveryGroupId: dgId,
-          orderingSessionId: sessionId,
-        });
-      }
-    } catch (e) {
-    }
+    // Shift board is intentionally an operational summary only. Session closure
+    // integrity remains enforced by the dedicated server-side closure/finalization
+    // paths and /session-closure diagnostic endpoint; heavy closure/order details
+    // are never computed or embedded in this polling response.
 
     // ── "Переглянули каталог" — who pressed «Я переглянув усі товари» this session ──
     // Roster of every seller/admin assigned to a shop of this group, each with the
@@ -1848,7 +1624,7 @@ router.get('/shift-board', requireTelegramRoles(['admin']), async (req, res, nex
     } catch (e) {
     }
 
-    res.json({ groupName, sessionStart, lastActivity, workers, totalCompleted, totalPending, totalSupplementPacked, unfinished, sessionClosure, catalogReview });
+    res.json({ groupName, sessionStart, lastActivity, workers, totalCompleted, totalPending, totalSupplementPacked, catalogReview });
   } catch (err) {
     if (err && (err.name === 'AppError' || err.name === 'CastError' || isTransientTx(err))) return next(err);
     next(appError('picking_next_failed'));
