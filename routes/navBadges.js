@@ -72,19 +72,10 @@ async function countNewProducts() {
 // checks happen only from the Groups admin page; navigation polling must never
 // fan out hundreds of getChatMember calls.
 async function countUnregisteredGroupMembers() {
-  const { getMembersWithStatus } = require('../services/groupMemberSync');
+  const { countUnregisteredPresentMembers } = require('../services/groupMemberSync');
   const { getAllowedGroupIds } = require('./admin');
   const groupIds = await getAllowedGroupIds();
-  const results = await Promise.all(groupIds.map((id) => getMembersWithStatus(id)));
-  const present = new Set(['member', 'administrator', 'creator', 'restricted']);
-  return results.flat().filter((r) => {
-    if (r.isRegistered) return false;
-    const status = r.member?.telegramStatus || '';
-    if (present.has(status)) return true;
-    // Legacy rows created before live statuses existed: keep the old badge
-    // behaviour until the first audit tells us something more precise.
-    return !status && r.member?.left === false;
-  }).length;
+  return countUnregisteredPresentMembers(groupIds);
 }
 
 // Resolves to the count, or to 0 if the source throws. Never rejects.
