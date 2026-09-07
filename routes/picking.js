@@ -1538,11 +1538,6 @@ router.get('/shift-board', requireTelegramRoles(['admin']), async (req, res, nex
       || b.supplementPackedCount - a.supplementPackedCount
       || (b.isActive ? 1 : 0) - (a.isActive ? 1 : 0));
 
-    // Shift board is intentionally an operational summary only. Session closure
-    // integrity remains enforced by the dedicated server-side closure/finalization
-    // paths and /session-closure diagnostic endpoint; heavy closure/order details
-    // are never computed or embedded in this polling response.
-
     // ── "Переглянули каталог" — who pressed «Я переглянув усі товари» this session ──
     // Roster of every seller/admin assigned to a shop of this group, each with the
     // timestamp of their mark (or null). Purely informational, so it is built
