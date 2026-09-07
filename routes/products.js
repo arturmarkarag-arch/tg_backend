@@ -19,8 +19,6 @@ const SupplementOffer = require('../models/SupplementOffer');
 const { getSupplementExcludedProductIds } = require('../services/supplementSessionExclusion');
 const SupplementRequest = require('../models/SupplementRequest');
 const { REQUEST_STATUS } = require('../utils/supplementState');
-const Shop = require('../models/Shop');
-const DeliveryGroup = require('../models/DeliveryGroup');
 const SearchProduct = require('../models/SearchProduct');
 const { requireTelegramRoles } = require('../middleware/telegramAuth');
 const { appError, asyncHandler } = require('../utils/errors');
@@ -32,6 +30,7 @@ const { normalizeDeliveryGroup } = require('../utils/deliveryGroupHelpers');
 const { getOrderingWindowOpenAt } = require('../utils/orderingSchedule');
 const { warsawDateKeyToUtcRange } = require('../utils/warsawDateTime');
 const cache = require('../utils/cache');
+const { getShop, getDeliveryGroup } = require('../utils/modelCache');
 const { buildWarehouseStockEstimate } = require('../utils/warehouseStockEstimate');
 const { appendProductsToBlockDocument } = require('../services/blockMembershipPrimitives');
 const { hasReceiptCommercialMutation, syncReceiptItemCommercialMetadataFromProduct } = require('../services/receiptCommercialMetadataCommand');
@@ -50,11 +49,11 @@ async function getSellerCatalogCycleContext(req) {
   if (req.telegramUser?.role !== 'seller' || !req.telegramUser?.shopId) {
     return { cutoff: null, deliveryGroupId: null, orderingSessionId: null };
   }
-  const shop = await Shop.findById(req.telegramUser.shopId, 'deliveryGroupId').lean();
+  const shop = await getShop(req.telegramUser.shopId);
   if (!shop?.deliveryGroupId) {
     return { cutoff: null, deliveryGroupId: null, orderingSessionId: null };
   }
-  const group = normalizeDeliveryGroup(await DeliveryGroup.findById(shop.deliveryGroupId).lean());
+  const group = normalizeDeliveryGroup(await getDeliveryGroup(shop.deliveryGroupId));
   if (!group?.orderingSchedule) {
     return {
       cutoff: null,
@@ -712,9 +711,6 @@ router.get('/', async (req, res) => {
       { $match: { '_block.0': { $exists: true } } },
     ];
 
-    const [countResult] = await Product.aggregate([...basePipeline, { $count: 'total' }]);
-    const total = countResult?.total ?? 0;
-
     // Vectors now live in the productvectors collection, so a catalogue doc is ~0.8 KB.
     // A plain sort/skip/limit is safe: the old sort-keys→self-$lookup "hydrate dance"
     // existed only to keep the blocking in-memory sort under Mongo's 32 MB limit when
@@ -735,13 +731,26 @@ router.get('/', async (req, res) => {
         ]
       : [{ $sort: { orderNumber: 1, createdAt: -1, _id: 1 } }];
 
-    const products = await Product.aggregate([
+    // Count + page share the expensive shelf-membership $lookup. Previously the
+    // same basePipeline ran twice (once for $count, once for the page), doubling
+    // the hottest seller/warehouse catalogue join. $facet keeps one authoritative
+    // filter/join pass while preserving the exact response contract.
+    const [pageResult = {}] = await Product.aggregate([
       ...basePipeline,
-      { $project: { _block: 0 } },
-      ...sortStages,
-      { $skip: offset },
-      { $limit: limit },
+      {
+        $facet: {
+          meta: [{ $count: 'total' }],
+          items: [
+            { $project: { _block: 0 } },
+            ...sortStages,
+            { $skip: offset },
+            { $limit: limit },
+          ],
+        },
+      },
     ]);
+    const total = Number(pageResult?.meta?.[0]?.total || 0);
+    const products = Array.isArray(pageResult?.items) ? pageResult.items : [];
 
     // Shelf location ({ blockId, position, total }) is opt-in via ?withLocation=1
     // — only the Товари Складу page needs it (card display + "Показати в блоці").

@@ -23,6 +23,7 @@ const { requireTelegramRoles } = require('../middleware/telegramAuth');
 const { appError, asyncHandler } = require('../utils/errors');
 const { findCurrentSessionId } = require('../utils/getOrCreateSession');
 const { isOrderingOpen } = require('../utils/orderingSchedule');
+const { getShop, getDeliveryGroup } = require('../utils/modelCache');
 const { assignLateShopNumber, buildShopNumberLookup } = require('../utils/shopNumbering');
 const { ITEM_STATUS, ITEM_RELATION_STATUS, REQUEST_STATUS, ACTIVE_ITEM_STATUSES, revisionOf, sellerMayRestoreRequest } = require('../utils/supplementState');
 const { offerSnapshotForRequestRevision } = require('../services/supplementRevisionProjection');
@@ -79,12 +80,12 @@ function emit(event, payload) {
 
 async function sellerContext(user) {
   if (!user?.shopId) throw appError('no_shop');
-  const shop = await Shop.findById(user.shopId).lean();
+  const shop = await getShop(user.shopId);
   if (!shop) throw appError('shop_not_found');
   if (shop.isActive === false) throw appError('shop_inactive');
   if (!shop.deliveryGroupId) throw appError('no_delivery_group');
 
-  const group = await DeliveryGroup.findById(shop.deliveryGroupId, 'name dayOfWeek orderingSchedule').lean();
+  const group = await getDeliveryGroup(shop.deliveryGroupId);
   if (!group) throw appError('delivery_group_not_found');
   let orderingSessionId = null;
   try { orderingSessionId = await findCurrentSessionId(str(group._id), group.orderingSchedule); } catch (_) {}

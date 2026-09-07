@@ -52,16 +52,22 @@ async function reconcileSupplementForArchivedProduct(product, {
   const sessionIds = new Set();
   let cancelledRequestCount = 0;
 
+  const activeRequests = await SupplementRequest.find({
+    $or: offers.map((offer) => ({ offerId: offer._id, revision: revisionOf(offer) })),
+    status: REQUEST_STATUS.ACTIVE,
+  }, '_id offerId revision').session(session).lean();
+  const requestsByOfferRevision = new Map();
+  for (const request of activeRequests) {
+    const key = `${String(request.offerId)}:${Number(request.revision || 1)}`;
+    if (!requestsByOfferRevision.has(key)) requestsByOfferRevision.set(key, []);
+    requestsByOfferRevision.get(key).push(request._id);
+  }
+
   for (const offer of offers) {
     const revision = revisionOf(offer);
-    const requests = await SupplementRequest.find({
-      offerId: offer._id,
-      revision,
-      status: REQUEST_STATUS.ACTIVE,
-    }, '_id').session(session).lean();
+    const requestIds = requestsByOfferRevision.get(`${String(offer._id)}:${revision}`) || [];
 
-    if (requests.length) {
-      const requestIds = requests.map((row) => row._id);
+    if (requestIds.length) {
       const write = await SupplementRequest.updateMany(
         { _id: { $in: requestIds }, revision, status: REQUEST_STATUS.ACTIVE },
         {
@@ -177,28 +183,31 @@ async function archiveProductInSession(productOrId, {
   const groupOpenCache = new Map();
   let cancelledCount = 0;
 
-  const isGroupOrderingOpen = async (deliveryGroupId) => {
-    const key = String(deliveryGroupId || '');
-    if (!key) return false;
-    if (groupOpenCache.has(key)) return groupOpenCache.get(key);
-
-    const group = await DeliveryGroup.findById(key, 'orderingSchedule').session(session).lean();
-    if (!group) {
-      groupOpenCache.set(key, true);
-      return true;
-    }
-    let isOpen = true;
-    try { isOpen = isOrderingOpen(group.orderingSchedule, now).isOpen; } catch { isOpen = true; }
-    groupOpenCache.set(key, isOpen);
-    return isOpen;
-  };
-
   // 1. Reconcile unpacked ordinary OrderItems. Already packed/voided/skipped facts
   // are immutable and remain in their original historical records.
   const activeOrders = await Order.find({
     status: { $in: ['new', 'in_progress'] },
     'items.productId': product._id,
   }).session(session);
+
+  const activeGroupIds = [...new Set(activeOrders
+    .map((order) => String(order.buyerSnapshot?.deliveryGroupId || ''))
+    .filter(Boolean))];
+  if (activeGroupIds.length) {
+    const groups = await DeliveryGroup.find(
+      { _id: { $in: activeGroupIds } },
+      'orderingSchedule',
+    ).session(session).lean();
+    for (const group of groups) {
+      let isOpen = true;
+      try { isOpen = isOrderingOpen(group.orderingSchedule, now).isOpen; } catch { isOpen = true; }
+      groupOpenCache.set(String(group._id), isOpen);
+    }
+    // Preserve the previous fail-open behaviour for a missing group document.
+    for (const groupId of activeGroupIds) {
+      if (!groupOpenCache.has(groupId)) groupOpenCache.set(groupId, true);
+    }
+  }
 
   for (const order of activeOrders) {
     const matchingItems = order.items.filter(
@@ -231,7 +240,7 @@ async function archiveProductInSession(productOrId, {
       },
     });
 
-    const orderingOpenNow = await isGroupOrderingOpen(order.buyerSnapshot?.deliveryGroupId);
+    const orderingOpenNow = groupOpenCache.get(String(order.buyerSnapshot?.deliveryGroupId || '')) ?? false;
     order.status = resolveOrderStatusAfterCancel(order, orderingOpenNow);
     await order.save({ session });
 

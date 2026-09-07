@@ -7,8 +7,6 @@
  * current-session facts and historical presentation, but it never materialises
  * an OrderingSession and never changes Orders/PickingTasks/User/Shop.
  */
-const Shop = require('../../models/Shop');
-const DeliveryGroup = require('../../models/DeliveryGroup');
 const Order = require('../../models/Order');
 const PickingTask = require('../../models/PickingTask');
 const CatalogReview = require('../../models/CatalogReview');
@@ -21,6 +19,7 @@ const {
 } = require('../../utils/orderingSchedule');
 const { findCurrentSessionId } = require('../../utils/getOrCreateSession');
 const { normalizeDeliveryGroup } = require('../../utils/deliveryGroupHelpers');
+const { getShop, getDeliveryGroup } = require('../../utils/modelCache');
 const { PHASE_VOCAB } = require('../../utils/sessionVocab');
 const { computeSessionPhase } = require('../sessionPresentation');
 
@@ -125,18 +124,30 @@ async function buildSellerClosedDashboard({ user, shop, group, sessionId, catalo
     'seq openDate pickingStatus pickingConfirmedAt pickingStartedAt pickingCompletedAt shopNumbers',
   ).lean();
 
-  const [orders, totalTasks, completedTasks, lockedTasks] = await Promise.all([
+  const [orders, taskRows] = await Promise.all([
     Order.find({
       buyerTelegramId: String(user.telegramId),
       orderingSessionId: String(sessionId),
       status: { $ne: 'expired' },
       $or: [{ orderType: 'manual' }, { orderType: { $exists: false } }],
     }).select('orderNumber status createdAt updatedAt items').lean(),
-    PickingTask.countDocuments({ orderingSessionId: String(sessionId) }),
-    PickingTask.countDocuments({ orderingSessionId: String(sessionId), status: 'completed' }),
-    PickingTask.countDocuments({ orderingSessionId: String(sessionId), status: 'locked' }),
+    PickingTask.aggregate([
+      { $match: { orderingSessionId: String(sessionId) } },
+      {
+        $group: {
+          _id: null,
+          totalTasks: { $sum: 1 },
+          completedTasks: { $sum: { $cond: [{ $eq: ['$status', 'completed'] }, 1, 0] } },
+          lockedTasks: { $sum: { $cond: [{ $eq: ['$status', 'locked'] }, 1, 0] } },
+        },
+      },
+    ]),
   ]);
 
+  const taskStats = taskRows[0] || {};
+  const totalTasks = Number(taskStats.totalTasks || 0);
+  const completedTasks = Number(taskStats.completedTasks || 0);
+  const lockedTasks = Number(taskStats.lockedTasks || 0);
   const order = summarizeSellerOrders(orders);
   const pickingStatus = session?.pickingStatus || 'pending';
   const phase = await computeSessionPhase({
@@ -245,7 +256,7 @@ async function buildSellerOrderingStatusReadModel(user) {
     };
   }
 
-  const shop = await Shop.findById(user.shopId).populate('cityId', 'name').lean();
+  const shop = await getShop(user.shopId);
   if (shop?.isActive === false) {
     return {
       isOpen: false,
@@ -261,7 +272,7 @@ async function buildSellerOrderingStatusReadModel(user) {
     };
   }
 
-  const group = normalizeDeliveryGroup(await DeliveryGroup.findById(shop.deliveryGroupId).lean());
+  const group = normalizeDeliveryGroup(await getDeliveryGroup(shop.deliveryGroupId));
   if (!group) {
     return {
       isOpen: false,

@@ -16,7 +16,12 @@ const OrderingSession = require('../models/OrderingSession');
 const Shop = require('../models/Shop');
 const SupplementOffer = require('../models/SupplementOffer');
 const { findCurrentSessionId } = require('../utils/getOrCreateSession');
-const { isOrderingOpen, DAY_FULL_UK } = require('../utils/orderingSchedule');
+const {
+  isOrderingOpen,
+  DAY_FULL_UK,
+  getOpenDateWarsaw,
+  normalizeOrderingSchedule,
+} = require('../utils/orderingSchedule');
 const { appError } = require('../utils/errors');
 const {
   ITEM_STATUS,
@@ -78,19 +83,9 @@ function titleForState(state) {
   return 'Наступна сесія ще не почалася';
 }
 
-async function describeGroup(group, now = new Date()) {
+function buildGroupDescription(group, { session = null, reopenableSupplement = false, shopCount = 0, now = new Date() } = {}) {
   const groupId = str(group?._id);
-  let sessionId = null;
-  try { sessionId = await findCurrentSessionId(groupId, group.orderingSchedule); } catch (_) {}
-  const session = sessionId
-    ? await OrderingSession.findById(sessionId, '_id seq openDate openAt closeAt pickingStatus').lean()
-    : null;
-
-  const reopenableSupplement = session?.pickingStatus === 'completed'
-    ? await hasReopenableSupplementCancellation(session._id)
-    : false;
   const state = stateForSession(session, group, now, { reopenableSupplement });
-  const shopCount = await Shop.countDocuments({ deliveryGroupId: groupId, isActive: true });
   const selectable = !!session
     && state !== 'completed'
     && state !== 'upcoming_not_started'
@@ -135,15 +130,97 @@ async function describeGroup(group, now = new Date()) {
   };
 }
 
+async function describeGroup(group, now = new Date()) {
+  const groupId = str(group?._id);
+  let sessionId = null;
+  try { sessionId = await findCurrentSessionId(groupId, group.orderingSchedule); } catch (_) {}
+  const session = sessionId
+    ? await OrderingSession.findById(sessionId, '_id seq openDate openAt closeAt pickingStatus').lean()
+    : null;
+  const [reopenableSupplement, shopCount] = await Promise.all([
+    session?.pickingStatus === 'completed'
+      ? hasReopenableSupplementCancellation(session._id)
+      : false,
+    Shop.countDocuments({ deliveryGroupId: groupId, isActive: true }),
+  ]);
+  return buildGroupDescription(group, { session, reopenableSupplement, shopCount, now });
+}
+
+async function loadReopenableSupplementSessions(sessionIds = []) {
+  const ids = [...new Set((sessionIds || []).map(str).filter(Boolean))];
+  if (!ids.length) return new Set();
+
+  const cancelled = await SupplementOffer.find({
+    orderingSessionId: { $in: ids },
+    waveId: { $ne: null },
+    status: ITEM_STATUS.CANCELLED,
+  }, 'orderingSessionId receiptItemId status itemStatus frozenAt completedAt revisionHistory').lean();
+  const correctable = cancelled.filter((offer) => !blocksGenericRepublish(offer));
+  if (!correctable.length) return new Set();
+
+  const receiptItemIds = [...new Set(correctable.map((offer) => str(offer.receiptItemId)).filter(Boolean))];
+  const publications = receiptItemIds.length
+    ? await SupplementOffer.find({
+        receiptItemId: { $in: receiptItemIds },
+        waveId: { $ne: null },
+      }, 'receiptItemId status itemStatus frozenAt completedAt revisionHistory').lean()
+    : [];
+  const blockedItemIds = new Set(
+    publications.filter(blocksGenericRepublish).map((offer) => str(offer.receiptItemId)),
+  );
+  return new Set(
+    correctable
+      .filter((offer) => !blockedItemIds.has(str(offer.receiptItemId)))
+      .map((offer) => str(offer.orderingSessionId)),
+  );
+}
+
 async function describeSupplementTargets(now = new Date()) {
-  const groups = await DeliveryGroup.find({}, 'name dayOfWeek orderingSchedule')
+  const groups = (await DeliveryGroup.find({}, 'name dayOfWeek orderingSchedule')
     .sort({ dayOfWeek: 1, name: 1 })
-    .lean();
-  const described = [];
-  for (const group of groups) {
-    if (!Number.isInteger(group.dayOfWeek) || !group.orderingSchedule) continue;
-    described.push(await describeGroup(group, now));
-  }
+    .lean())
+    .filter((group) => Number.isInteger(group.dayOfWeek) && group.orderingSchedule);
+  if (!groups.length) return { groups: [], serverTime: now.toISOString() };
+
+  // Read-only batch: session identity remains the exact canonical {groupId, openDate}.
+  // Query count is bounded and no longer grows by 3-5 reads per delivery group.
+  const identities = groups.map((group) => ({
+    group,
+    groupId: str(group._id),
+    openDate: getOpenDateWarsaw(normalizeOrderingSchedule(group.orderingSchedule)),
+  }));
+  const clauses = identities.map(({ groupId, openDate }) => ({ groupId, openDate }));
+
+  const [sessions, shopCounts] = await Promise.all([
+    OrderingSession.find(
+      { $or: clauses },
+      '_id groupId seq openDate openAt closeAt pickingStatus',
+    ).lean(),
+    Shop.aggregate([
+      { $match: { deliveryGroupId: { $in: identities.map(({ groupId }) => groupId) }, isActive: true } },
+      { $group: { _id: '$deliveryGroupId', count: { $sum: 1 } } },
+    ]),
+  ]);
+
+  const sessionByIdentity = new Map(sessions.map((session) => [
+    `${str(session.groupId)}|${str(session.openDate)}`,
+    session,
+  ]));
+  const shopCountByGroup = new Map(shopCounts.map((row) => [str(row._id), Number(row.count || 0)]));
+  const completedSessionIds = sessions
+    .filter((session) => session.pickingStatus === 'completed')
+    .map((session) => str(session._id));
+  const reopenableSessionIds = await loadReopenableSupplementSessions(completedSessionIds);
+
+  const described = identities.map(({ group, groupId, openDate }) => {
+    const session = sessionByIdentity.get(`${groupId}|${openDate}`) || null;
+    return buildGroupDescription(group, {
+      session,
+      reopenableSupplement: Boolean(session && reopenableSessionIds.has(str(session._id))),
+      shopCount: shopCountByGroup.get(groupId) || 0,
+      now,
+    });
+  });
   return { groups: described, serverTime: now.toISOString() };
 }
 

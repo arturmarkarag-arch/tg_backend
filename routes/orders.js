@@ -183,7 +183,7 @@ async function requireOrderingWindowOpen(req, res, next) {
       });
     }
 
-    const shop = await Shop.findById(user.shopId).lean();
+    const shop = await getShop(user.shopId);
     if (shop?.isActive === false) throw appError('shop_inactive');
     if (!shop || !shop.deliveryGroupId) {
       return res.status(403).json({
@@ -192,7 +192,7 @@ async function requireOrderingWindowOpen(req, res, next) {
       });
     }
 
-    const group = normalizeDeliveryGroup(await DeliveryGroup.findById(shop.deliveryGroupId).lean());
+    const group = normalizeDeliveryGroup(await getDeliveryGroup(shop.deliveryGroupId));
     if (!group) {
       return res.status(403).json({
         error: 'delivery_group_not_found',
