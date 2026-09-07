@@ -634,7 +634,13 @@ router.get('/telegram-groups/:groupId/members', telegramAuth, requireTelegramRol
   const allowedIds = await getAllowedGroupIds();
   if (!allowedIds.includes(groupId)) return res.status(403).json({ error: 'Група не авторизована' });
 
-  const members = await getMembersWithStatus(groupId);
+  const members = await getMembersWithStatus(groupId, {
+    page: req.query.page,
+    pageSize: req.query.pageSize,
+    q: req.query.q,
+    filter: req.query.filter,
+    activity: req.query.activity,
+  });
   res.json(members);
 }));
 
