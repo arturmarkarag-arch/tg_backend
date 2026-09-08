@@ -1122,7 +1122,21 @@ function pickLastOpenedGroup(groups = [], now = new Date()) {
   let best = null;
   let bestAt = -Infinity;
   for (const group of groups) {
-    const openedAt = getOrderingWindowOpenAt(group.orderingSchedule, now).getTime();
+    // This is a staff READ path. A legacy/corrupt DeliveryGroup must not make the
+    // whole "Хто замовив?" disclosure fail with HTTP 500. Schedule validation
+    // remains strict everywhere else; here we simply exclude an unusable group
+    // from live-cycle selection instead of inventing a fallback schedule.
+    let openedAt;
+    try {
+      openedAt = getOrderingWindowOpenAt(group?.orderingSchedule, now).getTime();
+    } catch (err) {
+      console.warn('[who-ordered] ignoring delivery group with invalid orderingSchedule', {
+        groupId: String(group?._id || ''),
+        groupName: group?.name || '',
+        error: err?.message || String(err),
+      });
+      continue;
+    }
     if (!Number.isFinite(openedAt) || openedAt <= bestAt) continue;
     bestAt = openedAt;
     best = group;
@@ -1134,6 +1148,10 @@ function pickLastOpenedGroup(groups = [], now = new Date()) {
 // Exact mode: ?orderingSessionId=<id> returns only that session.
 // Global staff catalogue: the one live cycle — see pickLastOpenedGroup.
 router.get('/:id/who-ordered', staffOnly, asyncHandler(async (req, res) => {
+  if (!mongoose.isValidObjectId(req.params.id)) {
+    throw appError('validation_failed', { field: 'productId' });
+  }
+
   const requestedSessionId = String(req.query.orderingSessionId || '').trim();
   const allGroups = await getActiveDeliveryGroups();
 

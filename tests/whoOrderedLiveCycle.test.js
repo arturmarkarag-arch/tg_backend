@@ -73,7 +73,26 @@ describe('who-ordered live cycle', () => {
     }
   });
 
-  it('returns null only when there are no groups at all', () => {
+  it('ignores a malformed legacy group instead of crashing the staff disclosure', () => {
+    const malformed = {
+      _id: 'legacy',
+      name: 'Legacy broken group',
+      orderingSchedule: null,
+    };
+    const live = pickLastOpenedGroup(
+      [malformed, MONDAY_GROUP],
+      warsaw('2026-08-25T08:00:00Z'),
+    );
+    expect(live).toBe(MONDAY_GROUP);
+  });
+
+  it('returns null when no group has a usable schedule', () => {
+    expect(pickLastOpenedGroup([
+      { _id: 'legacy', orderingSchedule: null },
+    ], new Date('2026-08-25T08:00:00Z'))).toBeNull();
+  });
+
+  it('returns null only when there are no usable groups at all', () => {
     expect(pickLastOpenedGroup([], new Date('2026-08-25T08:00:00Z'))).toBeNull();
   });
 });
