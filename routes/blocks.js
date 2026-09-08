@@ -21,7 +21,7 @@ const { withLock } = require('../utils/lock');
 // storeLinks, … — is dead weight here, and a single block can hold 200+
 // products, so populating full docs ships hundreds of KB per board read for
 // nothing. Project just what ProductImage + the card need. (`_id` is implicit.)
-const BLOCK_PRODUCT_FIELDS = 'imageUrls localImageUrl originalImageUrl receiptItemId';
+const BLOCK_PRODUCT_FIELDS = 'imageUrls localImageUrl receiptItemId';
 
 // Product.receiptItemId is canonical for current rows. Older receipt-created
 // products can have only the reverse ReceiptItem.createdProductId link, so board
@@ -54,6 +54,33 @@ async function attachBlockReceiptItemLinks(blocks = []) {
   return blocks;
 }
 
+// Read DTO for the "Полки" board. The board only needs one canonical image
+// path per product; ProductImage already resolves that path to /thumbs/<file>
+// client-side and falls back to the full image once for legacy rows whose thumb
+// is missing. Never expose raw image arrays / clean originals / empty legacy
+// localImageUrl fields on this hot read path.
+function shelfProductDto(product) {
+  if (!product || typeof product !== 'object') return product;
+  const imageUrl = (Array.isArray(product.imageUrls) && product.imageUrls.find(Boolean))
+    || product.localImageUrl
+    || '';
+  return {
+    _id: product._id,
+    imageUrl,
+    receiptItemId: product.receiptItemId || null,
+  };
+}
+
+function shelfBlockDto(block) {
+  if (!block || typeof block !== 'object') return block;
+  return {
+    _id: block._id,
+    blockId: block.blockId,
+    version: block.version,
+    productIds: (block.productIds || []).map(shelfProductDto),
+  };
+}
+
 function slimBlock(block) {
   return {
     blockId: block.blockId,
@@ -68,7 +95,7 @@ const staffOnly = requireTelegramRoles(['admin', 'warehouse']);
 router.get('/', asyncHandler(async (req, res) => {
   const limit = req.query.limit ? Number(req.query.limit) : undefined;
   const offset = req.query.offset ? Number(req.query.offset) : 0;
-  const query = Block.find().sort('blockId');
+  const query = Block.find().select('_id blockId version productIds').sort('blockId');
 
   if (limit !== undefined) {
     query.skip(offset).limit(limit);
@@ -84,10 +111,10 @@ router.get('/', asyncHandler(async (req, res) => {
       Block.countDocuments(),
       Block.findOne({}, 'blockId').sort({ blockId: -1 }).lean(),
     ]);
-    return res.json({ items: blocks, total, maxBlockId: maxDoc?.blockId ?? 0 });
+    return res.json({ items: blocks.map(shelfBlockDto), total, maxBlockId: maxDoc?.blockId ?? 0 });
   }
 
-  res.json(blocks);
+  res.json(blocks.map(shelfBlockDto));
 }));
 
 async function getNextBlockId() {
@@ -186,7 +213,7 @@ router.get('/incoming/products', asyncHandler(async (req, res) => {
     .sort('-createdAt')
     .lean();
   await attachReceiptItemLinks(products);
-  res.json(products);
+  res.json(products.map(shelfProductDto));
 }));
 
 // GET /api/blocks/search/products?q=term — search products across all blocks
@@ -213,11 +240,12 @@ router.get('/:number', asyncHandler(async (req, res) => {
   await repairBlockMissingProducts(num);
 
   const block = await Block.findOne({ blockId: num })
+    .select('_id blockId version productIds')
     .populate({ path: 'productIds', match: { status: { $in: ['active', 'pending'] } }, select: BLOCK_PRODUCT_FIELDS })
     .lean();
   if (!block) throw appError('block_not_found');
   await attachBlockReceiptItemLinks([block]);
-  res.json(block);
+  res.json(shelfBlockDto(block));
 }));
 
 // POST /api/blocks/move — move product between blocks
