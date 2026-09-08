@@ -2,6 +2,7 @@ const {
   catalogKeyForOrderProduct,
   normalizeImageUrls,
   fetchBaseLinkerProductCatalog,
+  fetchBaseLinkerProductCatalogSingle,
 } = require('../services/baseLinkerProducts');
 
 describe('BaseLinker product catalog enrichment', () => {
@@ -74,8 +75,81 @@ describe('BaseLinker product catalog enrichment', () => {
 
     expect(calls[0].method).toBe('getInventoryProductsData');
     expect(calls[0].params.inventory_id).toBe(307);
-    expect(calls[0].params.include_channels_media).toBe(false);
+    expect(calls[0].params.include_channels_media).toBe(true);
     expect(result.productCatalog['A:db:307:2685'].images).toEqual(['https://cdn/base.jpg']);
+  });
+
+
+  it('uses channel-only inventory media when the default gallery is empty', async () => {
+    const calls = [];
+    const callApi = async (method, params) => {
+      calls.push({ method, params });
+      if (method === 'getInventoryProductsData') {
+        return {
+          status: 'SUCCESS',
+          products: {
+            2685: {
+              images: {
+                '1|allegro_123': 'https://cdn/channel-only.jpg',
+              },
+              media_options: { allegro_123: 1 },
+            },
+          },
+        };
+      }
+      throw new Error(`unexpected ${method}`);
+    };
+
+    const result = await fetchBaseLinkerProductCatalog([{
+      baseLinkerAccountId: 'CHANNEL',
+      order_source: 'allegro',
+      order_source_id: 123,
+      products: [{ storage: 'db', storage_id: 307, product_id: 2685 }],
+    }], callApi);
+
+    expect(calls[0].params.include_channels_media).toBe(true);
+    expect(result.productCatalog['CHANNEL:db:307:2685']).toEqual({
+      state: 'resolved',
+      images: ['https://cdn/channel-only.jpg'],
+    });
+    expect(result.productCatalogStats.resolved).toBe(1);
+    expect(result.productCatalogStats.unresolved).toBe(0);
+  });
+
+  it('does not count a catalog hit with no usable image as resolved', async () => {
+    const callApi = async (method) => {
+      if (method === 'getInventoryProductsData') {
+        return { status: 'SUCCESS', products: { 2685: { images: {} } } };
+      }
+      throw new Error(`unexpected ${method}`);
+    };
+
+    const result = await fetchBaseLinkerProductCatalog([{
+      baseLinkerAccountId: 'EMPTY',
+      products: [{ storage: 'db', storage_id: 307, product_id: 2685 }],
+    }], callApi);
+
+    expect(result.productCatalog['EMPTY:db:307:2685']).toEqual({ state: 'no_image', images: [] });
+    expect(result.productCatalogStats.resolved).toBe(0);
+    expect(result.productCatalogStats.unresolved).toBe(1);
+  });
+
+
+  it('does not turn a request-budget failure into a cached exact-source miss', async () => {
+    const callApi = vi.fn(async () => {
+      throw new Error('must not be called when budget is zero');
+    });
+
+    const result = await fetchBaseLinkerProductCatalogSingle([{
+      baseLinkerAccountId: 'BUDGET',
+      products: [{ storage: 'db', storage_id: 307, product_id: 2685 }],
+    }], async (method, params) => callApi(method, params), { maxRequests: 0 });
+
+    expect(callApi).not.toHaveBeenCalled();
+    expect(result.productCatalog['BUDGET:db:307:2685']).toBeUndefined();
+    expect(result.productCatalogStats.unresolved).toBe(1);
+    expect(result.productCatalogWarnings).toHaveLength(1);
+    expect(result.productCatalogWarnings[0].code).toBe('baselinker_catalog_request_budget_exhausted');
   });
 
   it('fails closed when an ordered Base product has no exact inventory id instead of scanning inventories heuristically', async () => {
@@ -93,7 +167,7 @@ describe('BaseLinker product catalog enrichment', () => {
   });
 
   it('keeps identical BaseLinker product ids from two accounts in separate cache keys', async () => {
-    const calls = { 'account-A': 0, 'account-B': 0 };
+    const calls = { A: 0, B: 0 };
     const makeCaller = (accountId) => async (method) => {
       calls[accountId] += 1;
       expect(method).toBe('getInventoryProductsData');
@@ -106,17 +180,17 @@ describe('BaseLinker product catalog enrichment', () => {
     };
 
     const resultA = await fetchBaseLinkerProductCatalog([{
-      baseLinkerAccountId: 'account-A',
+      baseLinkerAccountId: 'A',
       products: [{ storage: 'db', storage_id: 307, product_id: 2685 }],
-    }], makeCaller('account-A'));
+    }], makeCaller('A'));
     const resultB = await fetchBaseLinkerProductCatalog([{
-      baseLinkerAccountId: 'account-B',
+      baseLinkerAccountId: 'B',
       products: [{ storage: 'db', storage_id: 307, product_id: 2685 }],
-    }], makeCaller('account-B'));
+    }], makeCaller('B'));
 
-    expect(resultA.productCatalog['account-A:db:307:2685'].images).toEqual(['https://cdn/account-A.jpg']);
-    expect(resultB.productCatalog['account-B:db:307:2685'].images).toEqual(['https://cdn/account-B.jpg']);
-    expect(resultA.productCatalog['account-B:db:307:2685']).toBeUndefined();
-    expect(resultB.productCatalog['account-A:db:307:2685']).toBeUndefined();
+    expect(resultA.productCatalog['A:db:307:2685'].images).toEqual(['https://cdn/A.jpg']);
+    expect(resultB.productCatalog['B:db:307:2685'].images).toEqual(['https://cdn/B.jpg']);
+    expect(resultA.productCatalog['B:db:307:2685']).toBeUndefined();
+    expect(resultB.productCatalog['A:db:307:2685']).toBeUndefined();
   });
 });

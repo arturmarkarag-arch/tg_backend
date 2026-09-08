@@ -6,6 +6,7 @@ const BaseLinkerProductImageCache = require('../models/BaseLinkerProductImageCac
 const PRODUCT_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const PERSISTED_PRODUCT_CACHE_TTL_MS = Math.max(PRODUCT_CACHE_TTL_MS, Number(process.env.BASELINKER_PRODUCT_CACHE_TTL_MS) || (24 * 60 * 60 * 1000));
 const LOOKUP_CHUNK_SIZE = 100;
+const PRODUCT_IMAGE_RESOLVER_VERSION = 2;
 const productCache = new Map();
 let productImageCacheReadyPromise = null;
 
@@ -90,17 +91,17 @@ function setCached(key, value) {
   });
 }
 
-function compactImageEntry(state, images) {
+function compactImageEntry(images) {
   const first = normalizeImageUrls(images)[0] || '';
-  return { state, images: first ? [first] : [] };
+  return { state: first ? 'resolved' : 'no_image', images: first ? [first] : [] };
 }
 
 function inventoryEntry(product) {
-  return compactImageEntry('resolved', product?.images);
+  return compactImageEntry(product?.images);
 }
 
 function externalEntry(product) {
-  return compactImageEntry('resolved', product?.images);
+  return compactImageEntry(product?.images);
 }
 
 function collectOrderProductRefs(orders) {
@@ -186,21 +187,27 @@ async function tryDirectInventoryRefs(refs, productCatalog, unresolved, warnings
 
   for (const [inventoryId, groupRefs] of groups.entries()) {
     const byProductId = new Map(groupRefs.map((ref) => [ref.productId, ref]));
-    const found = new Set();
+    const authoritativeMissing = new Set();
 
     for (const ids of chunk(Array.from(byProductId.keys()))) {
       try {
         const payload = await callApi('getInventoryProductsData', {
           inventory_id: inventoryId,
           products: ids.map((id) => Number.isSafeInteger(Number(id)) ? Number(id) : id),
-          include_channels_media: false,
+          include_channels_media: true,
         });
         const products = payload?.products && typeof payload.products === 'object' ? payload.products : {};
         for (const productId of ids) {
           const ref = byProductId.get(String(productId));
           const product = products[productId] ?? products[String(productId)];
-          if (!ref || !product) continue;
-          found.add(ref.key);
+          if (!ref) continue;
+          if (!product) {
+            // A successful exact inventory response that omits this product is
+            // authoritative. Transport/rate-budget failures never reach here
+            // and therefore must not become a cached negative result.
+            authoritativeMissing.add(ref.key);
+            continue;
+          }
           const entry = inventoryEntry(product);
           productCatalog[ref.key] = entry;
           setCached(ref.key, entry);
@@ -215,7 +222,7 @@ async function tryDirectInventoryRefs(refs, productCatalog, unresolved, warnings
     }
 
     for (const ref of groupRefs) {
-      if (!found.has(ref.key)) unresolved.push(ref);
+      if (authoritativeMissing.has(ref.key)) unresolved.push(ref);
     }
   }
 }
@@ -304,6 +311,7 @@ async function warmBaseLinkerProductCatalog(orders, callApi, { maxRequests = 5 }
   const cutoff = new Date(Date.now() - PERSISTED_PRODUCT_CACHE_TTL_MS);
   const freshRows = await BaseLinkerProductImageCache.find({
     productKey: { $in: refs.map((ref) => ref.key) },
+    resolverVersion: PRODUCT_IMAGE_RESOLVER_VERSION,
     refreshedAt: { $gte: cutoff },
   }).select('productKey').lean();
   const fresh = new Set(freshRows.map((row) => String(row.productKey)));
@@ -331,7 +339,7 @@ async function warmBaseLinkerProductCatalog(orders, callApi, { maxRequests = 5 }
     if (!accountId) continue;
     writes.push({ updateOne: {
       filter: { baseLinkerAccountId: accountId, productKey: key },
-      update: { $set: { baseLinkerAccountId: accountId, productKey: key, state, imageUrl, refreshedAt: now } },
+      update: { $set: { baseLinkerAccountId: accountId, productKey: key, state, imageUrl, resolverVersion: PRODUCT_IMAGE_RESOLVER_VERSION, refreshedAt: now } },
       upsert: true,
     } });
   }
@@ -376,6 +384,8 @@ module.exports = {
   normalizeImageUrls,
   collectOrderProductRefs,
   fetchBaseLinkerProductCatalog,
+  fetchBaseLinkerProductCatalogSingle,
   getCachedBaseLinkerProductCatalog,
   warmBaseLinkerProductCatalog,
+  PRODUCT_IMAGE_RESOLVER_VERSION,
 };

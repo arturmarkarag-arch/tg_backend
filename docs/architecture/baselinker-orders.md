@@ -1,6 +1,6 @@
 # BaseLinker multi-account fulfilment contract
 
-Status: **Greenfield, account-scoped contract with no legacy BaseLinker support**. The production design has no legacy credentials, fallback identities, single-account fallback routes, or raw-order mirrors.
+Status: **Greenfield, account-scoped contract**. There is **no legacy** BaseLinker credential path, fallback identity, single-account fallback route, or raw-order mirror in the production design.
 
 ## 1. Authorities and domain boundary
 
@@ -47,10 +47,10 @@ The queue is defined by the configured **Intake BaseLinker status**, not by a bu
 
 Synchronization has two layers:
 
-1. **Full confirmed Intake reconcile** — periodically scans the configured Intake status and repairs the complete local membership/index. This is the correctness safety-net and bootstrap path. The `getOrders` scan uses `status_id` plus the ascending `id_from` cursor to paginate through every confirmed order in that status. `id_from` is only transport-level pagination for bootstrap/full reconcile; it is not a date, period, or business-membership filter. Authoritative queue membership remains the configured Intake status.
+1. **Full confirmed Intake reconcile** — periodically scans the configured Intake status and repairs the complete local membership/index. Transport pagination advances with ascending `id_from`; `id_from` is not a date/period/business filter. Intake status remains the authoritative queue-membership rule. This is the correctness safety-net and bootstrap path.
 2. **Journal delta** — between full reconciles, `getJournalList` detects recently changed orders. Only the affected order IDs are exact-read and refreshed/removed from the local index.
 
-The journal is an accelerator, never the sole source of correctness. Its cursor tracks upstream change-log progress independently of the `id_from` order-pagination cursor. If the journal is disabled, unavailable, empty, or its cursor cannot be established, the system remains correct through the next full reconcile and does not hammer `getJournalList` every scheduler tick.
+The journal is an accelerator, never the sole source of correctness. If it is disabled, unavailable, empty, or its cursor cannot be established, the system remains correct through the next full reconcile and does not hammer `getJournalList` every scheduler tick.
 
 Warehouse fulfilment reads use confirmed orders only (`get_unconfirmed_orders=false`). Unconfirmed BaseLinker orders are not eligible for the picking/packing flow because their data may still be incomplete.
 
@@ -66,9 +66,9 @@ Worker cards may use a persistent non-PII product-image cache keyed by:
 
 `baseLinkerAccountId + exact BaseLinker product identity`
 
-Only resolution state, first image URL and refresh timestamps are persisted. Catalog warming runs in the background with a strict per-cycle request cap so media enrichment cannot consume the whole BaseLinker API allowance.
+Only resolution state, first image URL, resolver version and refresh timestamps are persisted. Base inventory lookups request BaseLinker's channel-specific media so a channel-only gallery can provide a thumbnail when the default gallery is empty. Catalog warming runs in the background with a strict per-cycle request cap so media enrichment cannot consume the whole BaseLinker API allowance.
 
-Transient transport/API lookup failures are not cached as a successful 24-hour result.
+Transient transport/API/rate-budget lookup failures are not cached as an authoritative miss. Resolver-version changes invalidate freshness so older empty results are rechecked without a destructive cache migration.
 
 ## 7. API budget and observability
 
