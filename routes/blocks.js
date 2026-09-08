@@ -54,19 +54,28 @@ async function attachBlockReceiptItemLinks(blocks = []) {
   return blocks;
 }
 
-// Read DTO for the "Полки" board. The board only needs one canonical image
-// path per product; ProductImage already resolves that path to /thumbs/<file>
-// client-side and falls back to the full image once for legacy rows whose thumb
-// is missing. Never expose raw image arrays / clean originals / empty legacy
-// localImageUrl fields on this hot read path.
+// Read DTO for the "Полки" board. This hot path must never ship a full-size
+// product/original URL just so the client can derive the thumbnail from it.
+// Return the exact /thumbs/ URL that the tile will request. For a pathological
+// legacy path that cannot be mapped to the thumbnail namespace, return an empty
+// string and let the tile render its placeholder rather than silently download
+// the expensive full image.
+function toShelfThumbnailUrl(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  if (/\/thumbs\//.test(raw)) return raw;
+  const thumb = raw.replace(/\/(products|originals|defects)\//, '/thumbs/');
+  return thumb === raw ? '' : thumb;
+}
+
 function shelfProductDto(product) {
   if (!product || typeof product !== 'object') return product;
-  const imageUrl = (Array.isArray(product.imageUrls) && product.imageUrls.find(Boolean))
+  const sourceImage = (Array.isArray(product.imageUrls) && product.imageUrls.find(Boolean))
     || product.localImageUrl
     || '';
   return {
     _id: product._id,
-    imageUrl,
+    thumbnailUrl: toShelfThumbnailUrl(sourceImage),
     receiptItemId: product.receiptItemId || null,
   };
 }
