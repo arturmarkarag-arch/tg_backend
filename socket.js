@@ -7,6 +7,7 @@ const { validateTelegramInitData } = require('./utils/validateTelegramInitData')
 const { verifySession } = require('./utils/jwt');
 const { pubClient, subClient, isEnabled: redisEnabled } = require('./utils/redis');
 const { hasBaseLinkerPickingAccess } = require('./utils/baseLinkerAccess');
+const { expressCorsOptions } = require('./utils/corsOptions');
 const { createAdapter } = require('@socket.io/redis-adapter');
 
 let io = null;
@@ -60,9 +61,8 @@ const LOCK_TIMEOUT_MS = 60_000;
 function initSocket(httpServer) {
   io = new Server(httpServer, {
     cors: {
-      origin: require('./utils/corsOptions').corsOrigin,
+      ...expressCorsOptions,
       methods: ['GET', 'POST'],
-      credentials: true,
     },
   });
 

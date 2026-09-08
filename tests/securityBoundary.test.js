@@ -55,6 +55,15 @@ describe('security boundaries', () => {
     });
   });
 
+  it('advertises a 24-hour cache lifetime for successful CORS preflights', () => {
+    vi.resetModules();
+    const { expressCorsOptions } = require('../utils/corsOptions');
+    expect(expressCorsOptions.maxAge).toBe(86_400);
+
+    const socketSource = require('fs').readFileSync(path.join(__dirname, '..', 'socket.js'), 'utf8');
+    expect(socketSource).toContain('...expressCorsOptions');
+  });
+
   it('warehouse test API is opt-in and never part of the public API allowlist', () => {
     const source = require('fs').readFileSync(path.join(__dirname, '..', 'app.js'), 'utf8');
     expect(source).toContain("process.env.ENABLE_TEST_API === 'true'");
