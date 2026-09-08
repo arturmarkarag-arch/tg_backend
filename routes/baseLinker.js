@@ -184,7 +184,6 @@ async function ordersHandler(req, res) {
     sourceType: req.query.sourceType,
     sourceId: req.query.sourceId,
     workflowFilter: req.query.workflowFilter,
-    packedBy: req.query.packedBy,
     sentBy: req.query.sentBy,
     search: req.query.search,
     page: req.query.page,

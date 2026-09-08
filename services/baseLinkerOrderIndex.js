@@ -568,8 +568,6 @@ function pickingIsRecentHistory(doc, now = Date.now()) {
   if (localDisplayStage(doc) === 'cancelled') return new Date(doc.lastUpstreamChangeAt || doc.updatedAt || 0).getTime() >= cutoff;
   return true;
 }
-function matchesPackedBy(doc, packedBy) { return !packedBy || String(doc?.packedBy || '') === String(packedBy); }
-
 function compareRows(a, b) {
   const ad = Number(a.orderSortDate || 0), bd = Number(b.orderSortDate || 0);
   if (bd !== ad) return bd - ad;
@@ -578,7 +576,7 @@ function compareRows(a, b) {
   return String(a.baseLinkerAccountId).localeCompare(String(b.baseLinkerAccountId));
 }
 
-async function getIndexedOrderPage({ accountId = '', sourceAccountId = '', sourceType = '', sourceId = '', workflowFilter = 'processing', packedBy = '', sentBy = '', search = '', page = 1, pageSize: pageSizeInput = 10 } = {}) {
+async function getIndexedOrderPage({ accountId = '', sourceAccountId = '', sourceType = '', sourceId = '', workflowFilter = 'processing', sentBy = '', search = '', page = 1, pageSize: pageSizeInput = 10 } = {}) {
   await ensureBaseLinkerOrderIndexReady();
   // READ PATH CONTRACT: list/search/pagination is Mongo-only. Scheduler/manual
   // sync owns BaseLinker I/O; opening or paging the UI must never consume token budget.
@@ -586,7 +584,6 @@ async function getIndexedOrderPage({ accountId = '', sourceAccountId = '', sourc
   const requestedPage = normalizePage(page);
   const safePageSize = pageSize(pageSizeInput);
   const normalizedSearch = String(search || '').trim().toLowerCase().slice(0, 160);
-  const safePackedBy = safeWorkflow === 'sent' ? String(packedBy || '').trim().slice(0, 120) : '';
   const safeSentBy = safeWorkflow === 'sent' ? String(sentBy || '').trim().slice(0, 120) : '';
   const selectedAccountId = accountIdString(accountId);
   const selectedSourceAccountId = accountIdString(sourceAccountId);
@@ -673,7 +670,6 @@ async function getIndexedOrderPage({ accountId = '', sourceAccountId = '', sourc
       });
     }
   }
-  if (safeWorkflow === 'sent' && safePackedBy) rowKeysByStage.sent = rowKeysByStage.sent.filter((key) => matchesPackedBy(pickingByKey.get(key), safePackedBy));
   if (safeWorkflow === 'sent' && safeSentBy) rowKeysByStage.sent = rowKeysByStage.sent.filter((key) => String(pickingByKey.get(key)?.sentBy || '') === safeSentBy);
   for (const stage of Object.keys(workflowCounts)) workflowCounts[stage] = rowKeysByStage[stage].length;
   const allKeys = rowKeysByStage[safeWorkflow] || [];
@@ -698,15 +694,9 @@ async function getIndexedOrderPage({ accountId = '', sourceAccountId = '', sourc
     if (account && !order.sourceName) order.sourceName = resolveSourceName(account.metadataSnapshot?.sources, order.order_source, order.order_source_id);
   }
 
-  const packedMatch = selectedAccountId ? { baseLinkerAccountId: selectedAccountId } : {};
-  const packedByRows = await BaseLinkerPickingOrder.aggregate([
-    { $match: { ...packedMatch, packedBy: { $nin: ['', null] }, $or: [{ workflowStage: 'sent' }, { status: 'sent' }] } },
-    { $sort: { packedAt: -1, _id: -1 } },
-    { $group: { _id: '$packedBy', name: { $first: '$packedByName' }, count: { $sum: 1 }, lastPackedAt: { $first: '$packedAt' } } },
-    { $sort: { name: 1, _id: 1 } },
-  ]);
+  const sentMatch = selectedAccountId ? { baseLinkerAccountId: selectedAccountId } : {};
   const sentByRows = await BaseLinkerPickingOrder.aggregate([
-    { $match: { ...packedMatch, sentBy: { $nin: ['', null] }, $or: [{ workflowStage: 'sent' }, { status: 'sent' }] } },
+    { $match: { ...sentMatch, sentBy: { $nin: ['', null] }, $or: [{ workflowStage: 'sent' }, { status: 'sent' }] } },
     { $sort: { sentAt: -1, _id: -1 } },
     { $group: { _id: '$sentBy', name: { $first: '$sentByName' }, count: { $sum: 1 }, lastSentAt: { $first: '$sentAt' } } },
     { $sort: { name: 1, _id: 1 } },
@@ -717,9 +707,8 @@ async function getIndexedOrderPage({ accountId = '', sourceAccountId = '', sourc
   return {
     orders: selectedOrders,
     page: actualPage, pageSize: safePageSize, pageCount, total, workflowCounts,
-    packedByOptions: packedByRows.map((row) => ({ value: String(row._id || ''), label: String(row.name || row._id || ''), count: Number(row.count || 0) })).filter((row) => row.value),
     sentByOptions: sentByRows.map((row) => ({ value: String(row._id || ''), label: String(row.name || row._id || ''), count: Number(row.count || 0) })).filter((row) => row.value),
-    activePackedBy: safePackedBy, activeSentBy: safeSentBy, activeBaseLinkerAccountId: selectedAccountId, activeSourceAccountId: selectedSourceAccountId, activeSourceType: selectedSourceType, activeSourceId: selectedSourceId,
+    activeSentBy: safeSentBy, activeBaseLinkerAccountId: selectedAccountId, activeSourceAccountId: selectedSourceAccountId, activeSourceType: selectedSourceType, activeSourceId: selectedSourceId,
     historyRetentionDays: HISTORY_RETENTION_DAYS, sentRetentionDays: HISTORY_RETENTION_DAYS, cancelledRetentionDays: HISTORY_RETENTION_DAYS,
   };
 }
