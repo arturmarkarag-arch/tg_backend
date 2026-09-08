@@ -1,0 +1,24 @@
+'use strict';
+const fs = require('node:fs');
+const path = require('node:path');
+const root = path.resolve(__dirname, '..');
+const read = (rel) => fs.readFileSync(path.join(root, rel), 'utf8');
+const checks = [];
+function check(name, ok) { checks.push({ name, ok: Boolean(ok) }); }
+const route = read('routes/navBadges.js');
+const svc = read('services/groupMemberSync.js');
+const start = svc.indexOf('async function countUnregisteredPresentMembers');
+const end = svc.indexOf('/**\n * Full admin view for one Telegram group.', start);
+const block = start >= 0 && end > start ? svc.slice(start, end) : '';
+check('batched badge delegate', route.includes('countUnregisteredPresentMembers(groupIds)'));
+check('no per-group full admin view', !route.includes('groupIds.map((id) => getMembersWithStatus(id))'));
+check('one GroupMember.find', (block.match(/GroupMember\.find\(/g) || []).length === 1);
+check('one User.find', (block.match(/User\.find\(/g) || []).length === 1);
+check('no Shop read in badge projection', !block.includes('Shop.find('));
+check('no RegistrationRequest read in badge projection', !block.includes('RegistrationRequest.find('));
+check('legacy presence preserved', block.includes('!status && member.left === false'));
+check('removed users are not registered', block.includes("accountState: { $ne: 'removed' }"));
+for (const row of checks) console.log(`${row.ok ? 'PASS' : 'FAIL'} ${row.name}`);
+const failed = checks.filter((row) => !row.ok);
+console.log(`\n${checks.length - failed.length}/${checks.length} PASS`);
+if (failed.length) process.exit(1);

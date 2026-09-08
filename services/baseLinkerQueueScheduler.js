@@ -3,10 +3,9 @@
 const { getAllQueueScopes } = require('./baseLinkerQueueScope');
 const {
   syncBaseLinkerOrderIndex,
-  syncBaseLinkerJournalDelta,
   loadIndexState,
   INDEX_REFRESH_MS,
-  FULL_RECONCILE_MS,
+  POLL_FRESHNESS_MS,
 } = require('./baseLinkerOrderIndex');
 const { runAsSchedulerLeader } = require('./schedulerLeader');
 
@@ -22,27 +21,23 @@ const ERROR_BACKOFF_MS = Math.min(
 
 async function runAccountTick(scope) {
   const accountId = String(scope.baseLinkerAccountId || '');
-  const state = await loadIndexState(accountId, scope);
-  const fullAgeMs = state.lastSyncAt ? Date.now() - Date.parse(state.lastSyncAt) : Number.POSITIVE_INFINITY;
-  const needsFull = !state.initialized || !Number.isFinite(fullAgeMs) || fullAgeMs >= FULL_RECONCILE_MS;
+  if (!accountId) return { skipped: true, reason: 'account_id_missing' };
 
-  if (needsFull) {
-    return runAsSchedulerLeader(
-      `baselinker-queue-full:${accountId}`,
-      () => syncBaseLinkerOrderIndex({ accountId, force: true, maxAgeMs: FULL_RECONCILE_MS }),
-      { ttlMs: Math.max(120_000, FULL_RECONCILE_MS) },
-    );
-  }
-
-  // If journal could not be primed (disabled account feature or simply no logs
-  // in its 3-day window), do NOT hit it every 30 seconds forever. The next full
-  // reconcile will retry priming while preserving queue correctness.
-  if (!state.journalReady || !(state.journalLastLogId > 0)) {
-    return { baseLinkerAccountId: accountId, skipped: true, reason: 'journal_not_ready_wait_full_reconcile' };
-  }
+  // One elected backend process owns the periodic Intake read for this account.
+  // Re-read freshness inside the distributed lock so multiple backend processes
+  // cannot run the same getOrders scan back-to-back.
   return runAsSchedulerLeader(
-    `baselinker-queue-journal:${accountId}`,
-    () => syncBaseLinkerJournalDelta(accountId),
+    `baselinker-queue-poll:${accountId}`,
+    async () => {
+      const freshState = await loadIndexState(accountId, scope);
+      const ageMs = freshState.lastSyncAt
+        ? Date.now() - Date.parse(freshState.lastSyncAt)
+        : Number.POSITIVE_INFINITY;
+      if (freshState.initialized && Number.isFinite(ageMs) && ageMs < POLL_FRESHNESS_MS) {
+        return { baseLinkerAccountId: accountId, skipped: true, reason: 'queue_poll_fresh', lastSyncAt: freshState.lastSyncAt };
+      }
+      return syncBaseLinkerOrderIndex({ accountId, force: false, maxAgeMs: POLL_FRESHNESS_MS });
+    },
     { ttlMs: Math.max(60_000, INDEX_REFRESH_MS * 2) },
   );
 }

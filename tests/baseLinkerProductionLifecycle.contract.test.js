@@ -74,14 +74,14 @@ describe('BaseLinker production lifecycle contract', () => {
     expect(filter).toContain("{ upstreamDisposition: 'cancelled'");
   });
 
-  it('keeps exact reconciliation running for tracked orders after Intake departure', () => {
+  it('keeps periodic queue polling cheap while explicit lifecycle checks may exact-verify active tracked work', () => {
     const index = read('services/baseLinkerOrderIndex.js');
     expect(index).toContain('async function reconcileTrackedOrderStatuses');
     expect(index).toContain('TRACKED_REVERIFY_LIMIT');
-    expect(index).toContain('VISIBLE_TRACKED_REVERIFY_LIMIT');
-    expect(index).toContain('reconcileTrackedOrderStatuses(scope, { force: forceReverify, verifiedAfter: trackedVerifiedAfter })');
-    expect(index).toContain('forceReverify: force, trackedVerifiedAfter');
-    expect(index).toContain('verifiedAfter: trackedVerifiedAfter');
+    expect(index).toContain("workflowStage: { $in: ['processing', 'deferred', 'packed'] }");
+    expect(index).not.toContain("{ sentAt: { $gte: historyCutoff } }");
+    expect(index).toContain('shouldReverifyTracked');
+    expect(index).toContain('trackedVerifiedAfter instanceof Date');
   });
 
   it('keeps token rotation available and intentionally has no hard delete', () => {

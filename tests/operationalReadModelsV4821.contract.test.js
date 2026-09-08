@@ -15,6 +15,7 @@ const READ_MODEL_FILES = [
   'services/readModels/currentSessionShopProductsReadModel.js',
   'services/readModels/deliveryGroupCatalogReadModel.js',
   'services/readModels/deliveryGroupSessionSummaryReadModel.js',
+  'services/readModels/pickingQueueStatsReadModel.js',
 ];
 
 describe('V48.21 operational read-model architecture contract', () => {
@@ -33,6 +34,18 @@ describe('V48.21 operational read-model architecture contract', () => {
       expect(block).toContain(delegate);
       expect(block).not.toMatch(/\b(?:User|Order|Shop|Product|PickingTask|CatalogReview|OrderingSession)\.(?:find|findOne|aggregate|countDocuments|exists)\(/);
     }
+  });
+
+  it('picking queue-stats is a transport-only facade over one bounded read model', () => {
+    const source = read('routes/picking.js');
+    const block = sliceBetweenOrThrow(
+      source,
+      "router.get('/queue-stats'",
+      '// ---------------------------------------------------------------------------\n// POST /api/picking/tasks/:taskId/complete',
+      { label: 'picking queue-stats facade' },
+    );
+    expect(block).toContain('buildPickingQueueStatsReadModel({');
+    expect(block).not.toMatch(/\b(?:DeliveryGroup|OrderingSession|PickingTask|Order|SupplementOffer)\.(?:find|findById|aggregate|countDocuments|exists)\(/);
   });
 
   it('read-model modules cannot perform domain writes or materialise sessions', () => {
@@ -90,7 +103,7 @@ describe('V48.21 operational read-model architecture contract', () => {
 
   it('group selector/list presentation delegates phase to sessionPresentation', () => {
     const source = read('services/readModels/deliveryGroupCatalogReadModel.js');
-    expect(source).toContain('getCurrentGroupPresentation(group, { now })');
+    expect(source).toContain('getCurrentGroupPresentations(groups, { now })');
     expect(source).toContain('presentationMode: presentations[index]?.presentationMode');
     expect(source).toContain('phase: presentations[index]?.phase');
     expect(source).not.toContain('deriveSessionPhase(');

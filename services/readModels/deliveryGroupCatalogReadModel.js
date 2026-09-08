@@ -14,7 +14,7 @@ const cache = require('../../utils/cache');
 const { normalizeDeliveryGroup } = require('../../utils/deliveryGroupHelpers');
 const { isOrderingOpen, getNextOrderingWindowOpenAt } = require('../../utils/orderingSchedule');
 const { PHASE_VOCAB } = require('../../utils/sessionVocab');
-const { getCurrentGroupPresentation } = require('../sessionPresentation');
+const { getCurrentGroupPresentations } = require('../sessionPresentation');
 
 function deliveryDaySort(a, b) {
   const aDay = Number(a?.dayOfWeek) === 0 ? 7 : Number(a?.dayOfWeek);
@@ -79,22 +79,16 @@ async function buildDeliveryGroupListReadModel({ now = new Date() } = {}) {
     .filter((group) => !isOrderingOpen(group.orderingSchedule, now).isOpen)
     .map((group) => String(group._id));
 
-  const [counts, ordersInClosedGroups, presentations] = await Promise.all([
+  const [counts, problematicGroupIds, presentations] = await Promise.all([
     loadShopAndSellerCounts(),
-    closedGroupIds.length ? Order.find({
+    closedGroupIds.length ? Order.distinct('buyerSnapshot.deliveryGroupId', {
       'buyerSnapshot.deliveryGroupId': { $in: closedGroupIds },
       status: { $in: ['new', 'in_progress'] },
-    }).select('buyerSnapshot.deliveryGroupId').lean() : [],
-    Promise.all(groups.map((group) => getCurrentGroupPresentation(group, { now }))),
+    }) : [],
+    getCurrentGroupPresentations(groups, { now }),
   ]);
 
-  const problematicByGroup = {};
-  for (const order of ordersInClosedGroups) {
-    const groupId = order?.buyerSnapshot?.deliveryGroupId
-      ? String(order.buyerSnapshot.deliveryGroupId)
-      : '';
-    if (groupId) problematicByGroup[groupId] = true;
-  }
+  const problematicByGroup = new Set((problematicGroupIds || []).map(String));
 
   return groups.map((group, index) => ({
     ...group,
@@ -102,7 +96,7 @@ async function buildDeliveryGroupListReadModel({ now = new Date() } = {}) {
     shopCount: counts.shopCountMap[String(group._id)] || 0,
     sellerCount: counts.sellerCountMap[String(group._id)] || 0,
     // Compatibility/debug only: stale active orders are not session phase.
-    hasRelocatedOrders: Boolean(problematicByGroup[String(group._id)]),
+    hasRelocatedOrders: problematicByGroup.has(String(group._id)),
     pickingStatus: presentations[index]?.pickingStatus ?? null,
     phase: presentations[index]?.phase ?? null,
     phaseLabel: presentations[index]?.phase

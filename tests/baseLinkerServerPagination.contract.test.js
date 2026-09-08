@@ -16,12 +16,14 @@ describe('BaseLinker ID-index pagination contract', () => {
     expect(index).toContain('rowIdsByStage');
   });
 
-  it('reads untouched visible Intake rows live instead of persisting payloads', () => {
+  it('reads visible Intake rows from the shared sanitized server projection with zero worker-side BaseLinker I/O', () => {
     const index = read('services/baseLinkerOrderIndex.js');
-    expect(index).toContain('liveIntakeOrdersForIds');
+    const model = read('models/BaseLinkerOrderIndex.js');
+    expect(index).toContain('row?.preview');
+    expect(index).toContain('READ PATH CONTRACT');
     expect(index).toContain('statusId: scope.intakeStatusId');
-    expect(index).toContain('idFrom: Math.min(...numeric)');
-    expect(index).toContain('includeUnconfirmed: true');
+    expect(model).toContain('preview:');
+    expect(index).not.toContain('async function liveIntakeOrdersForIds');
   });
 
   it('renders already-tracked shelves from the local PickingOrder business state', () => {

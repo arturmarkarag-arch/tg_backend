@@ -58,16 +58,17 @@ check('warehouse BaseLinker reads are confirmed-only', () => {
   assert(index.includes('includeUnconfirmed: false'));
   assert(picking.includes('includeUnconfirmed: false'));
 });
-check('journal is delta accelerator and full reconcile is periodic fallback', () => {
-  assert(index.includes("getJournalList"));
-  assert(index.includes('JOURNAL_MAX_EXACT_PER_TICK'));
-  assert(scheduler.includes('syncBaseLinkerJournalDelta'));
-  assert(scheduler.includes('FULL_RECONCILE_MS'));
-  assert(scheduler.includes("journal_not_ready_wait_full_reconcile"));
+check('one centralized Intake poll replaces Journal and worker-side discovery', () => {
+  assert(index.includes('statusId: scope.intakeStatusId'));
+  assert(scheduler.includes('syncBaseLinkerOrderIndex'));
+  assert(scheduler.includes('INDEX_REFRESH_MS'));
+  assert(scheduler.includes('queue_poll_fresh'));
+  assert(!index.includes('getJournalList'));
+  assert(!scheduler.includes('syncBaseLinkerJournalDelta'));
+  assert(!scheduler.includes('FULL_RECONCILE_MS'));
 });
 check('catalog warming has explicit bounded BaseLinker request budgets', () => {
   assert(index.includes('FULL_SCAN_PRODUCT_WARM_REQUESTS'));
-  assert(index.includes('DELTA_PRODUCT_WARM_REQUESTS'));
   assert(read('services/baseLinkerProducts.js').includes('baselinker_catalog_request_budget_exhausted'));
 });
 check('request meter endpoint is admin-only and does not call BaseLinker', () => {

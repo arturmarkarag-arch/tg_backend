@@ -1,7 +1,38 @@
-Base: server-20260902-shop-switch-session-context-fixed.zip
-Changed files:
-- routes/shopTransfer.js
-- routes/v1/telegram.js
-- services/shopAssignmentCommand.js
-- utils/errors.js
-- docs/changes/2026-09-02-shop-switch-duplicate-skeleton-recovery.md
+ERP READ-PATH LOCAL-GATE — 2026-09-07
+Base: BaseLinker LOCAL-GATE candidate from the same 2026-09-07 source set.
+BaseLinker implementation is intentionally unchanged by this patch.
+
+Runtime changes:
+- routes/navBadges.js
+- services/groupMemberSync.js
+- routes/picking.js
+- services/readModels/pickingQueueStatsReadModel.js
+- services/sessionPresentation.js
+- services/readModels/deliveryGroupCatalogReadModel.js
+- routes/products.js
+
+Frontend runtime change:
+- src/routes/SettingsPage.jsx (in frontend archive)
+
+Tests/gates added or updated:
+- tests/groupMemberBadgeProjection.test.js
+- tests/lightReadPathEfficiency20260907.contract.test.js
+- tests/deliveryGroupBatchPresentation.contract.test.js
+- tests/operationalReadModelsV4821.contract.test.js
+- scripts/checkLightReadPathEfficiency20260907.js
+- scripts/checkPickingQueueStatsEfficiency20260907.js
+- scripts/checkDeliveryGroupReadEfficiency20260907.js
+- scripts/checkSellerCatalogReadEfficiency20260907.js
+- scripts/checkOperationalReadModelsV48_21.js
+- package.json test scripts
+
+Dependency-free gates in this environment:
+- light badge/settings backend 8/8 PASS
+- picking queue efficiency 11/11 PASS
+- delivery-group efficiency 7/7 PASS
+- seller/warehouse v1 catalogue efficiency 5/5 PASS
+- operational read models 27/27 PASS
+- full backend static: same pre-existing baseline 2/33 failures; no new failures
+- full frontend static: same pre-existing baseline 15/22 failures; no new failures
+
+NOT PROD FINAL until npm ci + Vitest/build/runtime gate passes locally.

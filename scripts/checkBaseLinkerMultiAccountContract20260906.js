@@ -182,12 +182,13 @@ check('current picking schema has no BaseLinker legacy line/workflow/packing fal
   assert(!files.pickingModel.includes("'with_issue'"));
 });
 
-check('journal accelerates current changes while periodic full status reconcile remains the safety net', () => {
-  assert(files.index.includes("getJournalList"));
-  assert(files.index.includes('FULL_RECONCILE_MS'));
-  assert(files.index.includes('primeJournalCursor'));
-  assert(files.scheduler.includes('syncBaseLinkerJournalDelta'));
-  assert(files.scheduler.includes('FULL_RECONCILE_MS'));
+check('one account-scoped Intake poll is the only periodic queue discovery path', () => {
+  assert(files.index.includes('statusId: scope.intakeStatusId'));
+  assert(files.scheduler.includes('baselinker-queue-poll:'));
+  assert(files.scheduler.includes('queue_poll_fresh'));
+  assert(!files.index.includes('getJournalList'));
+  assert(!files.index.includes('primeJournalCursor'));
+  assert(!files.scheduler.includes('syncBaseLinkerJournalDelta'));
 });
 
 check('Sent mutation is bound to the same account and removes only that account/order index row', () => {
@@ -213,13 +214,14 @@ check('queue reads are intake-only status scans with id_from and no date/period 
   assert(!files.index.includes('statusId: scope.cancelledStatusId'));
 });
 
-check('departure reconciliation is exact, bounded and fail-closed', () => {
-  assert(files.index.includes('const DEPARTURE_VERIFY_LIMIT'));
-  assert(files.index.includes('const verifyIds = departedIds.slice(0, DEPARTURE_VERIFY_LIMIT)'));
-  assert(files.index.includes('const order = await exactOrder(scope, id)'));
-  assert(files.index.includes('pendingDeparted: Math.max(0, departedIds.length - verifyIds.length)'));
-  assert(files.index.includes('orderId: { $in: transition.verifiedDepartedIds }'));
-  assert(!files.index.includes("deleteMany({ baseLinkerAccountId: accountId, syncToken: { $ne: syncToken } });\n  } else {\n    await"));
+check('departure reconciliation uses the complete Intake scan and spends zero extra API requests', () => {
+  const start = files.index.indexOf('async function reconcileIndexTransition');
+  const end = files.index.indexOf('async function performIndexSync', start);
+  const transition = files.index.slice(start, end);
+  assert(transition.includes('const departedIds = [...previousIds].filter((id) => !currentIds.has(id))'));
+  assert(transition.includes('removedOrderIds: trackedDepartedIds'));
+  assert(!transition.includes('await exactOrder('));
+  assert(files.index.includes('orderId: { $in: transition.removedOrderIds }'));
 });
 
 check('API budget determines safe queue scan depth instead of allowing an unbounded status mirror', () => {

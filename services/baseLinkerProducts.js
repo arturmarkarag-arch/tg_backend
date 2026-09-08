@@ -7,7 +7,7 @@ const PRODUCT_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const NEGATIVE_PRODUCT_CACHE_TTL_MS = Math.max(5 * 60 * 1000, Number(process.env.BASELINKER_PRODUCT_NEGATIVE_CACHE_TTL_MS) || (60 * 60 * 1000));
 const PERSISTED_PRODUCT_CACHE_TTL_MS = Math.max(PRODUCT_CACHE_TTL_MS, Number(process.env.BASELINKER_PRODUCT_CACHE_TTL_MS) || (24 * 60 * 60 * 1000));
 const LOOKUP_CHUNK_SIZE = 100;
-const IMAGE_RESOLVER_VERSION = 3;
+const IMAGE_RESOLVER_VERSION = 4;
 const ALLEGRO_OFFER_TIMEOUT_MS = Math.min(15000, Math.max(2000, Number(process.env.BASELINKER_ALLEGRO_IMAGE_TIMEOUT_MS) || 6000));
 const ALLEGRO_OFFER_MAX_PER_RUN = Math.min(20, Math.max(1, Number(process.env.BASELINKER_ALLEGRO_IMAGE_MAX_PER_RUN) || 8));
 const UNLINKED_INVENTORY_MAX_PER_RUN = Math.min(10, Math.max(1, Number(process.env.BASELINKER_UNLINKED_INVENTORY_MAX_PER_RUN) || 4));
@@ -353,10 +353,11 @@ async function resolveUnlinkedInventoryRefs(refs, productCatalog, warnings, call
     try {
       const payload = await callApi('getInventoryProductsList', params);
       let match = exactUnlinkedMatch(inventoryListRows(payload), ref, strategy);
-      // BaseLinker's filter_name is order-sensitive. If the order line and the
-      // inventory product contain exactly the same normalized words in another
-      // order, search by a distinctive token and still accept only one exact
-      // token-set match inside the known inventory.
+
+      // BaseLinker's filter_name can be order-sensitive. Keep this fallback
+      // deterministic: search only inside the already-known inventory by up to
+      // three distinctive words, then accept only one row whose complete
+      // normalized token multiset is exactly equal to the order-line name.
       if (!match && strategy === 'name') {
         for (const filterName of distinctiveNameFilters(ref.name)) {
           const fallbackPayload = await callApi('getInventoryProductsList', {
@@ -368,6 +369,7 @@ async function resolveUnlinkedInventoryRefs(refs, productCatalog, warnings, call
           if (match) break;
         }
       }
+
       if (!match) {
         if (!productCatalog[ref.key]) productCatalog[ref.key] = { state: 'unlinked_inventory_not_unique', images: [] };
         continue;

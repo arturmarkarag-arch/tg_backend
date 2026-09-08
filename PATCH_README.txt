@@ -1,42 +1,25 @@
-USER DIRECTORY — 2026-09-05
+WHO_ORDERED_500_BACKEND_PATCH_20260908
 
-Виправлення поверх наданих client(20260905-single-problem-badge)(1).zip
-та server(20260905-workflow-stage-cache-fix)(1).zip.
+Manual replacement patch for the backend repository root.
 
-Повні архіви: client-20260905-user-directory.zip, server-20260905-user-directory.zip.
-Патч: patch-20260905-user-directory.zip — ЛИШЕ для ручної заміни змінених файлів.
-Папки client/ і server/ у патчі відповідають кореням ваших проєктів.
+Replace/add these files preserving paths:
+- routes/products.js
+- tests/whoOrderedLiveCycle.test.js
+- docs/changes/2026-09-08-who-ordered-read-hardening.md
 
-Спочатку оновіть і перезапустіть сервер, потім зберіть клієнт (npm run build)
-із чинними змінними оточення. Залежності та lock-файли не оновлені.
+What is fixed:
+- GET /api/v1/products/:id/who-ordered no longer crashes the whole request when one DeliveryGroup has a missing/invalid orderingSchedule.
+- The read path skips only that invalid group; it does not invent a fallback schedule.
+- Malformed productId is rejected as validation_failed instead of falling into a Mongoose CastError/HTTP 500.
+- The endpoint remains read-only: it resolves an existing session with findCurrentSessionId and does not materialize/create sessions.
+- Legacy cartState is not used as current-order truth.
 
-Глобальний список 500 продавців прибрано; призначені й кандидати розділені.
-Старе фіктивне відновлення ClearedCart вимкнено, історію збережено.
-Фізичне очищення бази не виконувалося та не потрібне для роботи нових DTO.
+No DB migration. No frontend changes required.
 
-Повний опис: docs/changes/2026-09-05-user-directory.md.
-Перевірки: нові 32/32; build і runtime safety PASS.
-Старі регресійні набори мають падіння, відтворені також у вихідних архівах.
-Віддалені Mongo/live-gate перевірки не запускалися.
+Validation performed on this patch:
+- node --check routes/products.js: PASS
+- node --check tests/whoOrderedLiveCycle.test.js: PASS
+- direct runtime probe of pickLastOpenedGroup with real orderingSchedule helper: PASS
+- route static contract: no cartState, no getOrCreateSessionId, findCurrentSessionId present, productId guard present: PASS
 
-RELEASE-TAIL FOLLOW-UP — 05.09.2026
-
-Цей архів ЗАМІНЮЄ попередній patch-20260905-user-directory.zip і так само
-накладається поверх початкових client(20260905-single-problem-badge)(1).zip та
-server(20260905-workflow-stage-cache-fix)(1).zip. Окремо старий патч перед ним
-накладати не потрібно.
-
-Додатково закрито хвости нового cartState/transfer контракту:
-- wipeOrderCycle.js і preprodWipe.js більше не створюють orderItems,
-  orderItemIds, lastOrderPositions, lastViewedOrderNumber або currentPage;
-- liveOrderPickingE2E.js перевіряє сумісність старого payload без повернення
-  legacy полів у канонічний cartState і без прихованого physical cleanup;
-- warehouseTest.js більше не створює retired cart/displacement snapshot fields;
-- checkOrderCycleLeftovers.js показує старі cartState поля саме як legacy residue;
-- прибрано невикористаний transfer_cart_decision_required;
-- додано read-only static gate: node scripts/checkUserDirectoryReleaseTails20260905.js.
-
-Локально follow-up: static gate 44/44 PASS, node --check PASS. Повний Vitest
-follow-up повторно не зараховано: встановлення залежностей у цьому середовищі
-було перервано лімітом виконання. TEST Atlas/live gate не запускався.
-
+Full Vitest suite was not executed in the isolated archive because node_modules are not included.

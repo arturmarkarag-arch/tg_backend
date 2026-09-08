@@ -4,7 +4,7 @@ const Order = require('../models/Order');
 const PickingTask = require('../models/PickingTask');
 const Product = require('../models/Product');
 const OrderingSession = require('../models/OrderingSession');
-const { isOrderingOpen, getNextOrderingWindowOpenAt } = require('../utils/orderingSchedule');
+const { isOrderingOpen, getNextOrderingWindowOpenAt, getOpenDateWarsaw, normalizeOrderingSchedule } = require('../utils/orderingSchedule');
 const { findCurrentSessionId } = require('../utils/getOrCreateSession');
 const { deriveSessionPhase } = require('../utils/sessionVocab');
 const { ACTIVE_ORDER_STATUSES, TERMINAL_ORDER_STATUSES, summarizeSessionRows } = require('../utils/sessionSummaryMath');
@@ -72,7 +72,14 @@ async function loadSessionSummaryStats(sessionId) {
  * This prevents the page header and the group selector from deriving two
  * different labels for the same OrderingSession.
  */
-async function computeSessionPhase({ deliveryGroupId, sessionId, pickingStatus, orderingSchedule }) {
+async function computeSessionPhase({
+  deliveryGroupId,
+  sessionId,
+  pickingStatus,
+  orderingSchedule,
+  session = null,
+  activeOrderExists = null,
+}) {
   const windowOpen = isOrderingOpen(orderingSchedule).isOpen;
   let hasWork = false;
 
@@ -82,7 +89,7 @@ async function computeSessionPhase({ deliveryGroupId, sessionId, pickingStatus, 
       // summary so an old non-empty cycle remains `completed` even after its
       // detailed PickingTasks are purged. Empty completed cycles intentionally
       // remain `idle` (finalSummary.totalProductCount === 0).
-      const sessionSummary = await OrderingSession.findById(
+      const sessionSummary = session || await OrderingSession.findById(
         sessionId,
         'finalSummary.finalizedAt finalSummary.totalProductCount',
       ).lean();
@@ -94,6 +101,8 @@ async function computeSessionPhase({ deliveryGroupId, sessionId, pickingStatus, 
           status: 'completed',
         })) > 0;
       }
+    } else if (typeof activeOrderExists === 'boolean') {
+      hasWork = activeOrderExists;
     } else {
       hasWork = !!(await Order.exists({
         'buyerSnapshot.deliveryGroupId': String(deliveryGroupId),
@@ -149,6 +158,132 @@ async function buildSessionSummary(phase, { deliveryGroupId, sessionId, session 
     completedOrderCount: Number(stats.completedOrderCount || 0),
     totalOrderCount: Number(stats.totalOrderCount || 0),
   };
+}
+
+
+/**
+ * Batch form of getCurrentGroupPresentation() for the delivery-group selector.
+ * Session identity is still the canonical {groupId, openDate}; the only change
+ * is query shape: one session read + bounded grouped work reads, independent of
+ * the number of delivery groups.
+ */
+async function getCurrentGroupPresentations(groups, { now = new Date() } = {}) {
+  const rows = Array.isArray(groups) ? groups : [];
+  if (!rows.length) return [];
+
+  const identities = rows.map((group) => {
+    const groupId = String(group?._id || '');
+    const schedule = normalizeOrderingSchedule(group?.orderingSchedule);
+    return {
+      group,
+      groupId,
+      schedule,
+      openDate: groupId ? getOpenDateWarsaw(schedule) : null,
+    };
+  });
+
+  const clauses = identities
+    .filter((row) => row.groupId && row.openDate)
+    .map((row) => ({ groupId: row.groupId, openDate: row.openDate }));
+
+  const sessions = clauses.length
+    ? await OrderingSession.find(
+        { $or: clauses },
+        'groupId openDate pickingStatus finalSummary',
+      ).lean()
+    : [];
+
+  const sessionByIdentity = new Map(sessions.map((session) => [
+    `${String(session.groupId)}|${String(session.openDate)}`,
+    session,
+  ]));
+
+  const activeSessionIds = sessions
+    .filter((session) => session.pickingStatus !== 'completed')
+    .map((session) => String(session._id));
+  const legacyCompletedSessionIds = sessions
+    .filter((session) => session.pickingStatus === 'completed' && !session.finalSummary?.finalizedAt)
+    .map((session) => String(session._id));
+
+  const [activeOrderSessions, completedTaskSessions] = await Promise.all([
+    activeSessionIds.length
+      ? Order.aggregate([
+          { $match: { orderingSessionId: { $in: activeSessionIds }, status: { $in: ACTIVE_ORDER_STATUSES } } },
+          {
+            $group: {
+              _id: {
+                orderingSessionId: '$orderingSessionId',
+                deliveryGroupId: '$buyerSnapshot.deliveryGroupId',
+              },
+            },
+          },
+        ])
+      : [],
+    legacyCompletedSessionIds.length
+      ? PickingTask.aggregate([
+          { $match: { orderingSessionId: { $in: legacyCompletedSessionIds }, status: 'completed' } },
+          { $group: { _id: '$orderingSessionId' } },
+        ])
+      : [],
+  ]);
+
+  const activeOrderSessionIds = new Set(activeOrderSessions.map((row) => (
+    `${String(row?._id?.orderingSessionId || '')}|${String(row?._id?.deliveryGroupId || '')}`
+  )));
+  const completedTaskSessionIds = new Set(completedTaskSessions.map((row) => String(row._id || '')));
+
+  return identities.map(({ group, groupId, schedule, openDate }) => {
+    const nextOrderingOpenAt = group?.orderingSchedule
+      ? getNextOrderingWindowOpenAt(group.orderingSchedule, now).toISOString()
+      : null;
+
+    if (!groupId) {
+      const phase = 'idle';
+      return {
+        pickingStatus: null,
+        phase,
+        presentationMode: deriveSessionPresentationMode({ phase, nextOrderingOpenAt, now }),
+        nextOrderingOpenAt,
+      };
+    }
+
+    const session = sessionByIdentity.get(`${groupId}|${String(openDate)}`) || null;
+    if (!session) {
+      const phase = deriveSessionPhase({
+        pickingStatus: 'pending',
+        windowOpen: isOrderingOpen(schedule, now).isOpen,
+        hasWork: false,
+      });
+      return {
+        pickingStatus: null,
+        phase,
+        presentationMode: deriveSessionPresentationMode({ phase, nextOrderingOpenAt, now }),
+        nextOrderingOpenAt,
+      };
+    }
+
+    const pickingStatus = session.pickingStatus || 'pending';
+    const sessionId = String(session._id);
+    let hasWork = false;
+    if (pickingStatus === 'completed') {
+      hasWork = session.finalSummary?.finalizedAt
+        ? Number(session.finalSummary.totalProductCount || 0) > 0
+        : completedTaskSessionIds.has(sessionId);
+    } else {
+      hasWork = activeOrderSessionIds.has(`${sessionId}|${groupId}`);
+    }
+    const phase = deriveSessionPhase({
+      pickingStatus,
+      windowOpen: isOrderingOpen(schedule, now).isOpen,
+      hasWork,
+    });
+    return {
+      pickingStatus,
+      phase,
+      presentationMode: deriveSessionPresentationMode({ phase, nextOrderingOpenAt, now }),
+      nextOrderingOpenAt,
+    };
+  });
 }
 
 /**
@@ -220,6 +355,7 @@ module.exports = {
   computeSessionPhase,
   buildSessionSummary,
   getCurrentGroupPresentation,
+  getCurrentGroupPresentations,
   UPCOMING_PREFLIGHT_MS,
   isUpcomingPreflightWindow,
   isUpcomingPreflightTerminalPhase,

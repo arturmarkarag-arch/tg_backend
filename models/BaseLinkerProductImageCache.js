@@ -8,9 +8,11 @@ const mongoose = require('mongoose');
 const BaseLinkerProductImageCacheSchema = new mongoose.Schema({
   baseLinkerAccountId: { type: String, required: true, trim: true, maxlength: 64, index: true },
   productKey: { type: String, required: true, trim: true, maxlength: 512 },
+  // Bump when image-resolution semantics change. Old negative rows must not
+  // suppress newly available sources after deploy.
+  resolverVersion: { type: Number, default: 0, index: true },
   state: { type: String, default: 'unresolved', trim: true, maxlength: 80 },
   imageUrl: { type: String, default: '', maxlength: 4096 },
-  resolverVersion: { type: Number, default: 1, min: 1, index: true },
   refreshedAt: { type: Date, default: Date.now, index: true },
 }, { timestamps: true });
 

@@ -47,12 +47,11 @@ The index stores only the minimum worker projection required by the UI: technica
 
 The queue is defined by the configured **Intake BaseLinker status**, not by a business date window.
 
-Synchronization has two layers:
+There is exactly one periodic upstream discovery path: the backend scans the configured Intake status with `getOrders(status_id=Intake, get_unconfirmed_orders=false)` every `BASELINKER_QUEUE_REFRESH_MS` (30 seconds by default). If Intake contains up to 100 orders this costs one BaseLinker request per account per poll; larger queues use `id_from` pagination and therefore require additional pages.
 
-1. **Full confirmed Intake reconcile** — periodically scans the configured Intake status using `status_id` plus ascending `id_from` transport pagination and repairs the complete local membership/index. `id_from` is transport pagination only, not a date/period/business filter. This is the correctness safety-net and bootstrap path.
-2. **Journal delta** — between full reconciles, `getJournalList` detects recently changed orders. Only the affected order IDs are exact-read and refreshed/removed from the local index.
+The backend writes the sanitized worker projection to MongoDB and emits `baselinker_orders_changed` only when Intake membership or visible order data changed. Every connected worker then reads the shared backend/Mongo read-model. Worker count therefore does not multiply BaseLinker reads.
 
-The journal is an accelerator, never the sole source of correctness. If it is disabled, unavailable, empty, or its cursor cannot be established, the system remains correct through the next full reconcile and does not hammer `getJournalList` every scheduler tick.
+There is no Journal polling path. Orders that disappear from the complete Intake scan are immediately removed from the actionable index. If a locally tracked order disappears, it is marked for upstream review without spending another exact BaseLinker request merely to classify the new terminal/non-Intake status.
 
 Warehouse fulfilment reads use confirmed orders only (`get_unconfirmed_orders=false`). Unconfirmed BaseLinker orders are not eligible for the picking/packing flow because their data may still be incomplete.
 
@@ -78,7 +77,7 @@ Every real outgoing BaseLinker HTTP call passes through the central client and i
 
 - BaseLinker account;
 - API method;
-- usage stage (for example `queue_journal`, `queue_full_scan`, `picking_exact_verify`, `product_catalog_sync`).
+- usage stage (for example `queue_full_scan`, `picking_exact_verify`, `product_catalog_sync`).
 
 The limiter is account-scoped and Redis-backed/atomic when Redis is available, with a local fallback for single-process operation. The application budget is intentionally kept below BaseLinker's published account API ceiling to leave safety headroom.
 
@@ -110,7 +109,7 @@ A release must preserve all of the following:
 - no list/search/pagination BaseLinker I/O;
 - no speculative adjacent-page BaseLinker prefetch;
 - confirmed-only fulfilment reads;
-- journal + periodic full-reconcile safety-net;
+- one centralized confirmed Intake `getOrders` poll per account;
 - exact upstream verification before critical mutations;
 - bounded catalog warming;
 - account-scoped rolling-60s limiter/meter;
@@ -121,4 +120,3 @@ Official API references used for the upstream contract:
 
 - https://api.baselinker.com/
 - https://api.baselinker.com/?method=getOrders
-- https://api.baselinker.com/?method=getJournalList

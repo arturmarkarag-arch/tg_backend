@@ -19,6 +19,8 @@ const orderingStatus = read('services/readModels/sellerOrderingStatusReadModel.j
 const shopProducts = read('services/readModels/currentSessionShopProductsReadModel.js');
 const groupCatalog = read('services/readModels/deliveryGroupCatalogReadModel.js');
 const sessionSummary = read('services/readModels/deliveryGroupSessionSummaryReadModel.js');
+const pickingQueueStats = read('services/readModels/pickingQueueStatsReadModel.js');
+const pickingRoute = read('routes/picking.js');
 
 const readModels = {
   'currentShopTopologyReadModel.js': readiness,
@@ -28,6 +30,7 @@ const readModels = {
   'currentSessionShopProductsReadModel.js': shopProducts,
   'deliveryGroupCatalogReadModel.js': groupCatalog,
   'deliveryGroupSessionSummaryReadModel.js': sessionSummary,
+  'pickingQueueStatsReadModel.js': pickingQueueStats,
 };
 const forbiddenWrite = /\.(?:findOneAndUpdate|updateOne|updateMany|deleteOne|deleteMany|create|save)\s*\(|startSession\(|withTransaction\(|getOrCreateSessionId\(/;
 
@@ -46,6 +49,14 @@ check('deliveryGroups route delegates session summary read',
   route.includes('buildDeliveryGroupSessionSummariesReadModel()'));
 check('deliveryGroups controller is substantially reduced from pre-V48.21 aggregate size',
   route.split(/\r?\n/).length < 700);
+check('picking queue-stats delegates to bounded read model',
+  pickingRoute.includes('buildPickingQueueStatsReadModel({')
+  && !pickingRoute.includes('const orderedPositions = await countOrderedPositions(deliveryGroupId)'));
+check('picking queue-stats read model batches task and order work',
+  (pickingQueueStats.match(/PickingTask\.aggregate\(/g) || []).length === 1
+  && (pickingQueueStats.match(/Order\.aggregate\(/g) || []).length === 1
+  && pickingQueueStats.includes('$facet')
+  && !pickingQueueStats.includes('PickingTask.countDocuments({ ...base'));
 
 for (const [name, source] of Object.entries(readModels)) {
   check(`${name} contains no domain-write/session-materialisation primitive`, !forbiddenWrite.test(source));
@@ -71,7 +82,7 @@ check('snapshot-only and top-level Order shop identity use one resolver',
 check('seller ordering-status uses read-only session lookup',
   orderingStatus.includes('findCurrentSessionId(String(group._id), group.orderingSchedule)'));
 check('delivery-group selector phase remains owned by sessionPresentation',
-  groupCatalog.includes('getCurrentGroupPresentation(group, { now })')
+  groupCatalog.includes('getCurrentGroupPresentations(groups, { now })')
   && !groupCatalog.includes('deriveSessionPhase('));
 check('ordered-products disclosure reuses liveItem from current-session projection',
   shopProducts.includes("require('./currentSessionShopStatusReadModel')")

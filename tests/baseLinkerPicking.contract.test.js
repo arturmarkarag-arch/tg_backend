@@ -36,9 +36,9 @@ describe('BaseLinker local picking workflow', () => {
     expect(picking).toContain('setBaseLinkerOrderStatus');
     expect(commands).toContain("callApi('setOrderStatus'");
     expect(commands).toContain("if (typeof callApi !== 'function') throw appError('baselinker_account_id_required')");
-    expect(commands).toContain('order_id: order');
+    expect(commands).toContain('order_id: id');
     expect(commands).toContain('status_id: status');
-    expect(router).toContain("case 'sent': payload = await markPickingOrderSent(common)");
+    expect(router).toContain('sole upstream mutation is "Sent"');
     expect(`${picking}
 ${commands}
 ${router}`).not.toMatch(/(?:callBaseLinker|callApi)\(['"](?:addOrder|deleteOrder|setOrderFields|setOrderPayment)/i);
@@ -116,11 +116,11 @@ ${router}`).not.toMatch(/(?:callBaseLinker|callApi)\(['"](?:addOrder|deleteOrder
     expect(picking).toContain('packedSummary');
   });
 
-  it('uses Intake status as the warehouse admission gate and exact-rereads confirmed orders only', () => {
+  it('uses Intake status as the warehouse admission gate and exact-rereads unconfirmed orders too', () => {
     const picking = read('services/baseLinkerPicking.js');
     const router = read('routes/baseLinker.js');
-    expect(picking).toMatch(/orderId:\s*id,[\s\S]{0,200}includeUnconfirmed:\s*false,[\s\S]{0,100}maxPages:\s*1/);
-    expect(router).toContain('includeUnconfirmed: false');
+    expect(picking).toMatch(/orderId:\s*id,[\s\S]{0,200}includeUnconfirmed:\s*true,[\s\S]{0,100}maxPages:\s*1/);
+    expect(router).toContain('includeUnconfirmed: true');
     expect(router).not.toContain("req.query.includeUnconfirmed === '1'");
     expect(picking).toContain("appError('baselinker_order_not_returned'");
   });

@@ -35,13 +35,13 @@ describe('BaseLinker minimal Intake index contract', () => {
     expect(orders).not.toContain('date_from');
   });
 
-  it('exact-checks only ids that depart Intake and keeps tracked local work/history', () => {
+  it('removes departed Intake ids without a second API request and keeps tracked work for explicit review', () => {
     const service = read('services/baseLinkerOrderIndex.js');
-    expect(service).toContain('const departedIds = [...previousIds].filter((id) => !currentIds.has(id))');
-    expect(service).toContain('const order = await exactOrder(scope, id)');
-    expect(service).toContain('reconcilePickingFromUpstreamChanges');
-    expect(service).toContain('knownAdmittedOrderIds: untrackedDeparted');
-    expect(service).toContain('BaseLinkerPickingOrder');
+    const transition = sliceBetweenOrThrow(service, 'async function reconcileIndexTransition', 'async function performIndexSync', { label: 'reconcileIndexTransition' });
+    expect(transition).toContain('const departedIds = [...previousIds].filter((id) => !currentIds.has(id))');
+    expect(transition).toContain('removedOrderIds: trackedDepartedIds');
+    expect(transition).not.toContain('await exactOrder(');
+    expect(transition).toContain('BaseLinkerPickingOrder');
   });
 
   it('leaves per-token request-budget headroom and fails closed if Intake is too large', () => {

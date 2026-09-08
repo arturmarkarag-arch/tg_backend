@@ -114,19 +114,17 @@ check('materialized Sent and reviewed Cancelled are retention terminal candidate
   assert(body.includes("status: 'sent'"));
   assert(body.includes("{ upstreamDisposition: 'cancelled'"));
 });
-check('tracked orders keep exact status reconciliation after leaving Intake', () => {
+check('periodic queue poll exact-reconciles only active Intake payload and never terminal Sent history', () => {
   assert(index.includes('async function reconcileTrackedOrderStatuses'));
   assert(index.includes('TRACKED_REVERIFY_LIMIT'));
-  assert(index.includes('lastUpstreamVerifiedAt'));
-  assert(index.includes('reconcileTrackedOrderStatuses(scope, { force: forceReverify, verifiedAfter: trackedVerifiedAfter })'));
-  assert(index.includes('forceReverify: force, trackedVerifiedAfter'));
-  assert(index.includes('if (verifiedBoundary)'));
-  assert(index.includes('VISIBLE_TRACKED_REVERIFY_LIMIT'));
+  assert(index.includes("workflowStage: { $in: ['processing', 'deferred', 'packed'] }"));
+  assert(!index.includes("{ sentAt: { $gte: historyCutoff } }"));
+  assert(index.includes('shouldReverifyTracked'));
 });
 
-check('manual force sync bypasses tracked verification TTL so status changes are observable immediately', () => {
-  assert(index.includes('forceReverify: force, trackedVerifiedAfter'));
-  assert(index.includes('reconcileTrackedOrderStatuses(scope, { force: forceReverify, verifiedAfter: trackedVerifiedAfter })'));
+check('explicit lifecycle reconciliation can request bounded exact tracked verification', () => {
+  assert(index.includes('trackedVerifiedAfter instanceof Date'));
+  assert(index.includes('reconcileTrackedOrderStatuses(scope, { verifiedAfter: trackedVerifiedAfter })'));
 });
 check('lifecycle reconciliation makes bounded forward progress instead of rechecking the same rows forever', () => {
   assert(lifecycle.includes('LIFECYCLE_TRACKED_FRESH_MS'));
