@@ -1,9 +1,9 @@
 const fs = require('fs');
 const path = require('path');
-const { sliceBetweenOrThrow } = require('./helpers/sourceContract');
 
 const root = path.join(__dirname, '..');
 const read = (rel) => fs.readFileSync(path.join(root, rel), 'utf8');
+const { sliceBetweenOrThrow } = require('./helpers/sourceContract');
 
 describe('BaseLinker production lifecycle contract', () => {
   it('allows production only in configured Intake and keeps Release local', () => {
@@ -13,8 +13,8 @@ describe('BaseLinker production lifecycle contract', () => {
     const release = sliceBetweenOrThrow(
       picking,
       'async function releasePickingOrder',
-      'async function assertBaseLinkerPrintAllowed',
-      { label: 'releasePickingOrder implementation' },
+      'async function markPickingOrderPacked',
+      { label: 'releasePickingOrder' },
     );
     expect(release).not.toContain('verifyTrackedPickingOrderUpstream');
     expect(release).not.toContain('requireAccountEnabled');
@@ -68,7 +68,7 @@ describe('BaseLinker production lifecycle contract', () => {
       retention,
       'function terminalPickingCandidateFilter',
       'async function purgeVerifiedTerminalPickingForAccount',
-      { label: 'terminalPickingCandidateFilter implementation' },
+      { label: 'terminalPickingCandidateFilter' },
     );
     expect(filter).toContain("status: 'sent'");
     expect(filter).toContain("{ upstreamDisposition: 'cancelled'");

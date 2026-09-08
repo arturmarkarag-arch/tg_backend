@@ -17,6 +17,7 @@ describe('BaseLinker compact worker payload', () => {
       confirmed: true,
       date_confirmed: 100,
       date_add: 90,
+      delivery_method: 'InPost Paczkomaty',
       delivery_package_module: 'inpost',
       delivery_package_nr: '620100045678901234',
       phone: '+48123456789',
@@ -54,6 +55,7 @@ describe('BaseLinker compact worker payload', () => {
       confirmed: true,
       date_confirmed: 100,
       date_add: 90,
+      delivery_method: 'InPost Paczkomaty',
       delivery_package_module: 'inpost',
       delivery_package_nr: '620100045678901234',
       products: [{

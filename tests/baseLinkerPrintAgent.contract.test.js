@@ -20,12 +20,14 @@ describe('BaseLinker Print Agent contract', () => {
     expect(service).toContain('queuePrintJob');
     expect(service).toContain('claimNextPrintJob');
     expect(service).toContain('getPrintJobPayload');
-    expect(service).toContain('fetchVerifiedBaseLinkerOrderLabel');
-    const queueStart = indexOrThrow(service, 'async function queuePrintJob');
-    const payloadStart = indexOrThrow(service, 'async function getPrintJobPayload', { from: queueStart });
-    const labelCall = indexOrThrow(service, 'await fetchVerifiedBaseLinkerOrderLabel', { from: payloadStart });
+    expect(service).toContain('fetchBaseLinkerLabel');
+    expect(service).toContain('packageNumber');
+    expect(service).toContain("packageNumber: job.packageNumber");
+    const queueStart = indexOrThrow(service, 'async function queuePrintJob', { label: 'queuePrintJob' });
+    const payloadStart = indexOrThrow(service, 'async function getPrintJobPayload', { from: queueStart, label: 'getPrintJobPayload' });
+    const directLabelCall = indexOrThrow(service, 'await fetchBaseLinkerLabel({ packageNumber: job.packageNumber', { from: payloadStart, label: 'package-number getLabel' });
     expect(payloadStart).toBeGreaterThan(queueStart);
-    expect(labelCall).toBeGreaterThan(payloadStart);
+    expect(directLabelCall).toBeGreaterThan(payloadStart);
   });
 
   it('has durable job state, lease, expiry and a single atomic claim', () => {
@@ -59,6 +61,7 @@ describe('BaseLinker Print Agent contract', () => {
   it('keeps the user-facing print request inside the protected BaseLinker router', () => {
     const route = read('routes/baseLinker.js');
     expect(route).toContain("router.use(requireBaseLinkerPickingAccess)");
-    expect(route).toContain("router.post('/accounts/:accountId/orders/:orderId/packages/:packageId/print'");
+    expect(route).toContain("router.post('/accounts/:accountId/orders/:orderId/shipment/print'");
+    expect(route).toContain('assertBaseLinkerPrintAllowedCached');
   });
 });

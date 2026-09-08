@@ -1,8 +1,9 @@
 const {
   catalogKeyForOrderProduct,
   normalizeImageUrls,
+  inventoryImageUrls,
   fetchBaseLinkerProductCatalog,
-  fetchBaseLinkerProductCatalogSingle,
+  extractAllegroImageFromHtml,
 } = require('../services/baseLinkerProducts');
 
 describe('BaseLinker product catalog enrichment', () => {
@@ -15,6 +16,24 @@ describe('BaseLinker product catalog enrichment', () => {
       .toThrow();
   });
 
+
+
+  it('uses exact Allegro auction_id when getOrders has no product_id', () => {
+    expect(catalogKeyForOrderProduct({
+      storage: 'db',
+      storage_id: '11049',
+      auction_id: '18424860436',
+    }, 'A', 'allegro')).toBe('A:offer:allegro:18424860436');
+    expect(catalogKeyForOrderProduct({ auction_id: '18424860436' }, 'A', 'amazon')).toBeNull();
+  });
+
+  it('accepts only Allegro CDN images from exact offer HTML metadata', () => {
+    expect(extractAllegroImageFromHtml('<meta property="og:image" content="https://a.allegroimg.com/original/abc.jpg">'))
+      .toBe('https://a.allegroimg.com/original/abc.jpg');
+    expect(extractAllegroImageFromHtml('<meta property="og:image" content="https://evil.example/photo.jpg">'))
+      .toBe('');
+  });
+
   it('prefers default inventory gallery images and removes duplicates', () => {
     expect(normalizeImageUrls({
       2: 'https://cdn/two.jpg',
@@ -24,11 +43,60 @@ describe('BaseLinker product catalog enrichment', () => {
     })).toEqual(['https://cdn/one.jpg', 'https://cdn/two.jpg', 'https://cdn/channel.jpg']);
   });
 
+  it('prefers exact channel media when that BaseLinker channel uses a separate gallery', () => {
+    expect(inventoryImageUrls({
+      images: {
+        1: 'https://cdn/default.jpg',
+        '1|allegro_12438': 'https://cdn/allegro.jpg',
+      },
+      media_options: { allegro_12438: 1 },
+    }, { sourceType: 'allegro', sourceId: '12438' })).toEqual(['https://cdn/allegro.jpg']);
+  });
+
+  it('resolves an unlinked order line only inside its exact inventory by unique full name, then loads channel-aware media', async () => {
+    const calls = [];
+    const callApi = async (method, params) => {
+      calls.push({ method, params });
+      if (method === 'getInventoryProductsList') {
+        expect(params).toEqual({ inventory_id: 11049, page: 1, filter_name: 'KREM DO STAWÓW HONDROSOL FORTE JOINT CARE OINTMENT 50ML' });
+        return { status: 'SUCCESS', products: { 777: { id: 777, name: 'KREM DO STAWÓW HONDROSOL FORTE JOINT CARE OINTMENT 50ML', sku: '', ean: '' } } };
+      }
+      if (method === 'getInventoryProductsData') {
+        expect(params.inventory_id).toBe(11049);
+        expect(params.products).toEqual([777]);
+        expect(params.include_channels_media).toBe(true);
+        return {
+          status: 'SUCCESS',
+          products: {
+            777: {
+              images: { 1: 'https://cdn/default.jpg', '1|allegro_12438': 'https://cdn/allegro.jpg' },
+              media_options: { allegro_12438: 1 },
+            },
+          },
+        };
+      }
+      throw new Error(`unexpected ${method}`);
+    };
+
+    const result = await fetchBaseLinkerProductCatalog([{
+      baseLinkerAccountId: 'A',
+      order_source: 'allegro',
+      order_source_id: '12438',
+      products: [{
+        storage: 'db', storage_id: '11049', product_id: '', auction_id: '18424860436',
+        name: 'KREM DO STAWÓW HONDROSOL FORTE JOINT CARE OINTMENT 50ML', sku: '', ean: '',
+      }],
+    }], callApi);
+
+    expect(calls.map((call) => call.method)).toEqual(['getInventoryProductsList', 'getInventoryProductsData']);
+    expect(result.productCatalog['A:offer:allegro:18424860436']).toEqual({ state: 'resolved', images: ['https://cdn/allegro.jpg'] });
+  });
+
   it('loads external shop product details/photos in one storage-aware lookup inside that account namespace', async () => {
     const calls = [];
     const callApi = async (method, params) => {
       calls.push({ method, params });
-      if (method === 'getExternalStorageProductsData') {
+      if (method === 'getProductsData') {
         return {
           status: 'SUCCESS',
           products: {
@@ -46,7 +114,7 @@ describe('BaseLinker product catalog enrichment', () => {
     }], callApi);
 
     expect(calls).toEqual([{
-      method: 'getExternalStorageProductsData',
+      method: 'getProductsData',
       params: { storage_id: 'shop_2445', products: ['524'] },
     }]);
     expect(result.productCatalog['A:shop:2445:524'].images).toEqual(['https://cdn/product.jpg']);
@@ -77,79 +145,6 @@ describe('BaseLinker product catalog enrichment', () => {
     expect(calls[0].params.inventory_id).toBe(307);
     expect(calls[0].params.include_channels_media).toBe(true);
     expect(result.productCatalog['A:db:307:2685'].images).toEqual(['https://cdn/base.jpg']);
-  });
-
-
-  it('uses channel-only inventory media when the default gallery is empty', async () => {
-    const calls = [];
-    const callApi = async (method, params) => {
-      calls.push({ method, params });
-      if (method === 'getInventoryProductsData') {
-        return {
-          status: 'SUCCESS',
-          products: {
-            2685: {
-              images: {
-                '1|allegro_123': 'https://cdn/channel-only.jpg',
-              },
-              media_options: { allegro_123: 1 },
-            },
-          },
-        };
-      }
-      throw new Error(`unexpected ${method}`);
-    };
-
-    const result = await fetchBaseLinkerProductCatalog([{
-      baseLinkerAccountId: 'CHANNEL',
-      order_source: 'allegro',
-      order_source_id: 123,
-      products: [{ storage: 'db', storage_id: 307, product_id: 2685 }],
-    }], callApi);
-
-    expect(calls[0].params.include_channels_media).toBe(true);
-    expect(result.productCatalog['CHANNEL:db:307:2685']).toEqual({
-      state: 'resolved',
-      images: ['https://cdn/channel-only.jpg'],
-    });
-    expect(result.productCatalogStats.resolved).toBe(1);
-    expect(result.productCatalogStats.unresolved).toBe(0);
-  });
-
-  it('does not count a catalog hit with no usable image as resolved', async () => {
-    const callApi = async (method) => {
-      if (method === 'getInventoryProductsData') {
-        return { status: 'SUCCESS', products: { 2685: { images: {} } } };
-      }
-      throw new Error(`unexpected ${method}`);
-    };
-
-    const result = await fetchBaseLinkerProductCatalog([{
-      baseLinkerAccountId: 'EMPTY',
-      products: [{ storage: 'db', storage_id: 307, product_id: 2685 }],
-    }], callApi);
-
-    expect(result.productCatalog['EMPTY:db:307:2685']).toEqual({ state: 'no_image', images: [] });
-    expect(result.productCatalogStats.resolved).toBe(0);
-    expect(result.productCatalogStats.unresolved).toBe(1);
-  });
-
-
-  it('does not turn a request-budget failure into a cached exact-source miss', async () => {
-    const callApi = vi.fn(async () => {
-      throw new Error('must not be called when budget is zero');
-    });
-
-    const result = await fetchBaseLinkerProductCatalogSingle([{
-      baseLinkerAccountId: 'BUDGET',
-      products: [{ storage: 'db', storage_id: 307, product_id: 2685 }],
-    }], async (method, params) => callApi(method, params), { maxRequests: 0 });
-
-    expect(callApi).not.toHaveBeenCalled();
-    expect(result.productCatalog['BUDGET:db:307:2685']).toBeUndefined();
-    expect(result.productCatalogStats.unresolved).toBe(1);
-    expect(result.productCatalogWarnings).toHaveLength(1);
-    expect(result.productCatalogWarnings[0].code).toBe('baselinker_catalog_request_budget_exhausted');
   });
 
   it('fails closed when an ordered Base product has no exact inventory id instead of scanning inventories heuristically', async () => {

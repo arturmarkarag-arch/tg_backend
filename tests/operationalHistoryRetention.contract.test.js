@@ -2,10 +2,10 @@
 
 const fs = require('fs');
 const path = require('path');
-const { indexOrThrow } = require('./helpers/sourceContract');
 
 const root = path.resolve(__dirname, '..');
 const read = (rel) => fs.readFileSync(path.join(root, rel), 'utf8');
+const { indexOrThrow } = require('./helpers/sourceContract');
 
 describe('14-day operational history retention contract', () => {
   it('owns one shared 14-day duration', () => {
@@ -31,8 +31,8 @@ describe('14-day operational history retention contract', () => {
 
   it('purges only completed Telegram events and removes child deliveries first', () => {
     const retention = read('services/retention.js');
-    const deliveryDelete = indexOrThrow(retention, 'TelegramNotificationDelivery.deleteMany');
-    const eventDelete = indexOrThrow(retention, 'TelegramNotificationEvent.deleteMany', { from: deliveryDelete });
+    const deliveryDelete = indexOrThrow(retention, 'TelegramNotificationDelivery.deleteMany', { label: 'Telegram delivery delete' });
+    const eventDelete = indexOrThrow(retention, 'TelegramNotificationEvent.deleteMany', { from: deliveryDelete, label: 'Telegram event delete' });
     expect(retention).toContain("status: 'completed'");
     expect(retention).toContain('completedAt: { $lt: cutoff }');
     expect(eventDelete).toBeGreaterThan(deliveryDelete);

@@ -1,9 +1,9 @@
 const fs = require('fs');
 const path = require('path');
-const { sliceBetweenOrThrow } = require('./helpers/sourceContract');
 
 const root = path.join(__dirname, '..');
 const read = (rel) => fs.readFileSync(path.join(root, rel), 'utf8');
+const { sliceBetweenOrThrow } = require('./helpers/sourceContract');
 
 describe('BaseLinker minimal Intake index contract', () => {
   it('persists only queue identity/filter metadata, never a BaseLinker order payload', () => {
@@ -19,20 +19,13 @@ describe('BaseLinker minimal Intake index contract', () => {
     expect(model).not.toContain('upstreamDisposition:');
     expect(model).not.toContain('dateInStatus:');
     expect(model).not.toMatch(/\border\s*:/);
-    for (const forbiddenField of ['products', 'customer', 'delivery_address', 'email', 'phone']) {
-      expect(model).not.toMatch(new RegExp(`\\b${forbiddenField}\\s*:`));
-    }
+    for (const forbidden of ['products:', 'customer', 'delivery_address', 'email:', 'phone:']) expect(model).not.toContain(forbidden);
   });
 
   it('scans only the configured Intake status using status_id + id_from pagination', () => {
     const service = read('services/baseLinkerOrderIndex.js');
     const orders = read('services/baseLinkerOrders.js');
-    const scan = sliceBetweenOrThrow(
-      service,
-      'async function scanIntake',
-      'async function exactOrder',
-      { label: 'scanIntake implementation' },
-    );
+    const scan = sliceBetweenOrThrow(service, 'async function scanIntake', 'async function exactOrder', { label: 'scanIntake' });
     expect(scan).toContain('statusId: scope.intakeStatusId');
     expect(scan).toContain('includeUnconfirmed: false');
     expect(scan).not.toContain('scope.sentStatusId');

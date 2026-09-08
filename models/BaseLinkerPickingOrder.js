@@ -72,6 +72,7 @@ const BaseLinkerPickingOrderSchema = new mongoose.Schema({
   sourceResolvedAt: { type: Date, default: null },
   sourceDateAdd: { type: Number, default: 0 },
   sourceDateConfirmed: { type: Number, default: 0 },
+  sourceDeliveryMethod: { type: String, default: '', trim: true, maxlength: 160 },
   sourceDeliveryPackageModule: { type: String, default: '' },
   sourceDeliveryPackageNr: { type: String, default: '' },
   status: {

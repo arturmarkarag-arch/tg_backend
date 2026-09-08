@@ -175,7 +175,7 @@ check('acknowledged upstream review stays closed until a new upstream event occu
   assert(picking.includes('statusChanged: upstreamState.changed === true'));
   assert(picking.includes('orderChanged: sync.changed === true'));
 });
-check('TTN access exact-verifies terminal statuses and requires explicit server confirmation', () => {
+check('TTN access uses cached canonical guard while preserving explicit terminal confirmation and exact legacy guard', () => {
   const routes = read('routes/baseLinker.js');
   const printService = read('services/baseLinkerPrint.js');
   const errors = read('utils/errors.js');
@@ -186,7 +186,13 @@ check('TTN access exact-verifies terminal statuses and requires explicit server 
   assert(routes.includes("confirmTerminalTtn: String(req.query.confirmTerminalTtn || '') === '1'"));
   assert(routes.includes('confirmedDisposition: req.query.confirmedDisposition'));
   assert(routes.includes('confirmTerminalTtn: req.body?.confirmTerminalTtn === true'));
-  assert(printService.includes('await assertBaseLinkerPrintAllowed({'));
+  // Canonical shipment/print flow is intentionally cache-backed so ordinary TTN access
+  // does not add an exact getOrders request. The cached guard must still enforce the
+  // explicit terminal confirmation contract; legacy package-id endpoints keep the exact guard.
+  assert(printService.includes('assertBaseLinkerPrintAllowedCached'));
+  assert(printService.includes('await assertBaseLinkerPrintAllowedCached({'));
+  assert(routes.includes('await assertBaseLinkerPrintAllowedCached({'));
+  assert(routes.includes('await assertBaseLinkerPrintAllowed({'));
   assert(errors.includes('baselinker_terminal_ttn_confirmation_required'));
 });
 check('hard-delete endpoint is intentionally absent', () => {

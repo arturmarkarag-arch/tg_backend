@@ -45,6 +45,7 @@ function compactOrder(order = {}) {
   // worker payload so the client does not render a misleading TTN action (or
   // create one getOrderPackages request per visible card) when no shipment
   // number has been assigned yet.
+  setIfDefined(out, 'delivery_method', order.delivery_method);
   setIfDefined(out, 'delivery_package_module', order.delivery_package_module);
   setIfDefined(out, 'delivery_package_nr', order.delivery_package_nr);
   out.products = (Array.isArray(order.products) ? order.products : []).map(compactOrderProduct);

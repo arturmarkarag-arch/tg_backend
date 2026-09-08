@@ -5,7 +5,6 @@ const { requireTelegramRole } = require('../middleware/telegramAuth');
 const { requireBaseLinkerPickingAccess } = require('../utils/baseLinkerAccess');
 const { asyncHandler, appError } = require('../utils/errors');
 const { getPrintAgentStatus, queuePrintJob } = require('../services/baseLinkerPrint');
-const { fetchBaseLinkerOrders } = require('../services/baseLinkerOrders');
 const {
   getIndexedOrderPage,
   getLocalOrderProjection,
@@ -17,10 +16,9 @@ const { isBaseLinkerQueueSchedulerStarted } = require('../services/baseLinkerQue
 const { getQueueScope } = require('../services/baseLinkerQueueScope');
 const { fetchBaseLinkerProductCatalog } = require('../services/baseLinkerProducts');
 const { compactOrders, compactProductCatalog } = require('../services/baseLinkerPublicDto');
-const { annotateOrder, orderKey } = require('../services/baseLinkerIdentity');
+const { orderKey } = require('../services/baseLinkerIdentity');
 const { makeBaseLinkerAccountCaller, getBaseLinkerApiUsage } = require('../services/baseLinkerClient');
 const { listBaseLinkerAccounts, getBaseLinkerAccount } = require('../services/baseLinkerAccounts');
-const { ensureBaseLinkerAccountMetadataFresh } = require('../services/baseLinkerAccountValidation');
 const {
   fetchBaseLinkerOrderPackages,
   fetchVerifiedBaseLinkerOrderPackage,
@@ -34,6 +32,7 @@ const {
   updatePickingItem,
   releasePickingOrder,
   assertBaseLinkerPrintAllowed,
+  assertBaseLinkerPrintAllowedCached,
   markPickingOrderPacked,
   markPickingOrderSent,
   reopenPickingOrder,
@@ -99,7 +98,7 @@ router.get('/api-usage', requireTelegramRole('admin'), asyncHandler(async (_req,
   });
 }));
 
-router.post('/sync', asyncHandler(async (req, res) => {
+router.post('/sync', requireTelegramRole('admin'), asyncHandler(async (req, res) => {
   const accountId = String(req.body?.accountId || req.body?.baseLinkerAccountId || '').trim();
   if (accountId) await getBaseLinkerAccount(accountId, { requireEnabled: true, lean: true });
   const result = await syncBaseLinkerOrderIndex({ accountId, force: true });
@@ -110,18 +109,10 @@ router.get('/meta', asyncHandler(async (_req, res) => {
   const accounts = await listBaseLinkerAccounts({ includeDisabled: true });
   const result = [];
   for (const account of accounts) {
-    let metadata = account.metadataSnapshot || {};
-    let metadataError = '';
-    if (account.enabled) {
-      try {
-        const refreshed = await ensureBaseLinkerAccountMetadataFresh(account.accountId);
-        metadata = refreshed.metadata || metadata;
-      } catch (error) {
-        // Metadata is auxiliary for labels/filters. Queue reads stay isolated and
-        // must not disappear just because getOrderSources/getInventories failed.
-        metadataError = String(error?.code || error?.message || 'metadata_refresh_failed');
-      }
-    }
+    // Ordinary worker reads never refresh BaseLinker metadata. Admin settings
+    // owns explicit metadata refresh; every worker only reads the durable snapshot.
+    const metadata = account.metadataSnapshot || {};
+    const metadataError = String(account.connectionError || '');
     result.push({
       accountId: account.accountId,
       name: account.name,
@@ -181,6 +172,7 @@ async function ordersHandler(req, res) {
     sourceId: req.query.sourceId,
     workflowFilter: req.query.workflowFilter,
     packedBy: req.query.packedBy,
+    sentBy: req.query.sentBy,
     search: req.query.search,
     page: req.query.page,
     pageSize: req.query.pageSize,
@@ -191,21 +183,64 @@ async function ordersHandler(req, res) {
 async function exactOrderHandler(req, res) {
   const accountId = await resolveAccountId(req, { requireEnabled: true });
   const exactOrderId = String(req.params.orderId || '').trim();
-  const account = await getBaseLinkerAccount(accountId, { requireEnabled: true, lean: true });
-  let result = await fetchBaseLinkerOrders(
-    { orderId: exactOrderId, includeUnconfirmed: false, maxPages: 1 },
-    callerFor(accountId, { usageStage: 'picking_exact_read' }),
-  );
-  result.orders = (result.orders || []).map((order) => annotateOrder(order, account, account.metadataSnapshot?.sources));
-  if (!result.orders.length) {
-    const localOrder = await getLocalOrderProjection(accountId, exactOrderId);
-    if (localOrder) result = { ...result, orders: [localOrder] };
-  }
-  return sendOrdersPayload(res, result, { allowUpstreamCatalog: true });
+  // Worker detail reads are Mongo-only. Critical mutations perform their own
+  // exact BaseLinker verification; opening an active order must consume zero
+  // upstream request budget even with hundreds of concurrent workers.
+  const localOrder = await getLocalOrderProjection(accountId, exactOrderId);
+  const result = { orders: localOrder ? [localOrder] : [] };
+  return sendOrdersPayload(res, result);
 }
 
 router.get('/orders', asyncHandler(ordersHandler));
 router.get('/accounts/:accountId/orders/:orderId', asyncHandler(exactOrderHandler));
+
+async function cachedShipmentForRequest(accountId, orderId) {
+  const order = await getLocalOrderProjection(accountId, orderId);
+  if (!order) throw appError('baselinker_order_status_unverified', { orderId: String(orderId || '') });
+  const packageNumber = String(order?.delivery_package_nr || '').trim();
+  const courierCode = String(order?.delivery_package_module || '').trim();
+  if (!packageNumber) throw appError('baselinker_package_number_invalid');
+  if (!courierCode) throw appError('baselinker_courier_code_invalid');
+  return { order, packageNumber, courierCode };
+}
+
+async function shipmentLabelHandler(req, res) {
+  const accountId = await resolveAccountId(req, { requireEnabled: true });
+  await assertBaseLinkerPrintAllowedCached({
+    baseLinkerAccountId: accountId,
+    orderId: req.params.orderId,
+    confirmTerminalTtn: String(req.query.confirmTerminalTtn || '') === '1',
+    confirmedDisposition: req.query.confirmedDisposition,
+  });
+  const shipment = await cachedShipmentForRequest(accountId, req.params.orderId);
+  const label = await require('../services/baseLinkerShipments').fetchBaseLinkerLabel({
+    packageNumber: shipment.packageNumber,
+    courierCode: shipment.courierCode,
+  }, callerFor(accountId, { usageStage: 'shipment_read' }));
+  const safeExtension = /^[a-z0-9]{1,8}$/.test(label.extension) ? label.extension : 'bin';
+  res.set({
+    'Content-Type': label.contentType,
+    'Content-Length': String(label.buffer.length),
+    'Content-Disposition': `inline; filename="baselinker-label-${accountId}-${shipment.packageNumber}.${safeExtension}"`,
+    'Cache-Control': 'private, no-store',
+    'X-Content-Type-Options': 'nosniff',
+    'X-BaseLinker-Account-Id': accountId,
+    'X-BaseLinker-Label-Extension': safeExtension,
+  });
+  res.send(label.buffer);
+}
+
+async function shipmentPrintHandler(req, res) {
+  const accountId = await resolveAccountId(req, { requireEnabled: true });
+  const job = await queuePrintJob({
+    baseLinkerAccountId: accountId,
+    orderId: req.params.orderId,
+    confirmTerminalTtn: req.body?.confirmTerminalTtn === true,
+    confirmedDisposition: req.body?.confirmedDisposition,
+    user: req.telegramUser,
+  });
+  res.status(202).json({ job });
+}
 
 async function packagesHandler(req, res) {
   const accountId = await resolveAccountId(req, { requireEnabled: true });
@@ -261,6 +296,8 @@ async function printHandler(req, res) {
 }
 
 // Canonical greenfield multi-account paths. accountId is mandatory.
+router.get('/accounts/:accountId/orders/:orderId/shipment/label', asyncHandler(shipmentLabelHandler));
+router.post('/accounts/:accountId/orders/:orderId/shipment/print', asyncHandler(shipmentPrintHandler));
 router.get('/accounts/:accountId/orders/:orderId/packages', asyncHandler(packagesHandler));
 router.get('/accounts/:accountId/orders/:orderId/packages/:packageId/details', asyncHandler(packageDetailsHandler));
 router.get('/accounts/:accountId/orders/:orderId/packages/:packageId/label', asyncHandler(labelHandler));

@@ -1,6 +1,6 @@
 # BaseLinker multi-account fulfilment contract
 
-Status: **Greenfield, account-scoped contract**. There is **no legacy** BaseLinker credential path, fallback identity, single-account fallback route, or raw-order mirror in the production design.
+Status: **Greenfield, account-scoped contract**. There are no BaseLinker legacy credentials, fallback identities, single-account fallback routes, or raw-order mirrors in the production design.
 
 ## 1. Authorities and domain boundary
 
@@ -18,6 +18,8 @@ MongoDB is authoritative only for our application state:
 BaseLinker orders are not copied into the seller/group/session `Order`, `OrderingSession`, `PickingTask` or delivery-group domains.
 
 The only intentional BaseLinker order-status write in this fulfilment flow is the operator **Відправив** action. It writes the configured Sent status for the same BaseLinker account and exact-rereads the order before local Sent is persisted.
+
+There is no legacy BaseLinker runtime or compatibility fallback in this greenfield flow; account-scoped current models and routes are authoritative.
 
 ## 2. Identity and account isolation
 
@@ -47,7 +49,7 @@ The queue is defined by the configured **Intake BaseLinker status**, not by a bu
 
 Synchronization has two layers:
 
-1. **Full confirmed Intake reconcile** — periodically scans the configured Intake status and repairs the complete local membership/index. Transport pagination advances with ascending `id_from`; `id_from` is not a date/period/business filter. Intake status remains the authoritative queue-membership rule. This is the correctness safety-net and bootstrap path.
+1. **Full confirmed Intake reconcile** — periodically scans the configured Intake status using `status_id` plus ascending `id_from` transport pagination and repairs the complete local membership/index. `id_from` is transport pagination only, not a date/period/business filter. This is the correctness safety-net and bootstrap path.
 2. **Journal delta** — between full reconciles, `getJournalList` detects recently changed orders. Only the affected order IDs are exact-read and refreshed/removed from the local index.
 
 The journal is an accelerator, never the sole source of correctness. If it is disabled, unavailable, empty, or its cursor cannot be established, the system remains correct through the next full reconcile and does not hammer `getJournalList` every scheduler tick.
@@ -66,9 +68,9 @@ Worker cards may use a persistent non-PII product-image cache keyed by:
 
 `baseLinkerAccountId + exact BaseLinker product identity`
 
-Only resolution state, first image URL, resolver version and refresh timestamps are persisted. Base inventory lookups request BaseLinker's channel-specific media so a channel-only gallery can provide a thumbnail when the default gallery is empty. Catalog warming runs in the background with a strict per-cycle request cap so media enrichment cannot consume the whole BaseLinker API allowance.
+Only resolution state, first image URL and refresh timestamps are persisted. Catalog warming runs in the background with a strict per-cycle request cap so media enrichment cannot consume the whole BaseLinker API allowance.
 
-Transient transport/API/rate-budget lookup failures are not cached as an authoritative miss. Resolver-version changes invalidate freshness so older empty results are rechecked without a destructive cache migration.
+Transient transport/API lookup failures are not cached as a successful 24-hour result.
 
 ## 7. API budget and observability
 

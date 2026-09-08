@@ -154,6 +154,7 @@ const ERRORS = {
   baselinker_cursor_invalid: { status: 502, message: 'BaseLinker повернув сторінку замовлень без безпечного курсора. Завантаження зупинено, щоб не дублювати запити.' },
   baselinker_order_id_invalid: { status: 400, message: 'Некоректний BaseLinker order_id.' },
   baselinker_package_id_invalid: { status: 400, message: 'Некоректний BaseLinker package_id.' },
+  baselinker_package_number_invalid: { status: 400, message: 'BaseLinker ще не повернув коректний номер ТТН для цього замовлення.' },
   baselinker_courier_code_invalid: { status: 400, message: 'Не вказано коректний код курʼєра для ТТН.' },
   baselinker_package_order_mismatch: { status: 409, message: 'Ця ТТН не належить вказаному BaseLinker order_id. Друк заблоковано.' },
   baselinker_package_courier_mismatch: { status: 409, message: 'Код курʼєра не відповідає пакуванню цього BaseLinker замовлення. Друк заблоковано.' },

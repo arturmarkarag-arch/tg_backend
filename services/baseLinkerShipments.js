@@ -17,6 +17,12 @@ function positiveInt(value, errorCode) {
   return parsed;
 }
 
+function packageNumber(value) {
+  const number = String(value || '').trim();
+  if (!number || number.length > 80) throw appError('baselinker_package_number_invalid');
+  return number;
+}
+
 function courierCode(value) {
   const code = String(value || '').trim();
   if (!code || code.length > 64) throw appError('baselinker_courier_code_invalid');
@@ -43,14 +49,16 @@ async function fetchBaseLinkerPackageDetails(packageId, callApi) {
   };
 }
 
-async function fetchBaseLinkerLabel({ packageId, courierCode: rawCourierCode }, callApi) {
+async function fetchBaseLinkerLabel({ packageId = null, packageNumber: rawPackageNumber = '', courierCode: rawCourierCode }, callApi) {
   if (typeof callApi !== 'function') throw appError('baselinker_account_id_required');
-  const id = positiveInt(packageId, 'baselinker_package_id_invalid');
   const code = courierCode(rawCourierCode);
-  const payload = await callApi('getLabel', {
-    courier_code: code,
-    package_id: id,
-  });
+  const hasPackageId = packageId !== undefined && packageId !== null && String(packageId).trim() !== '';
+  const id = hasPackageId ? positiveInt(packageId, 'baselinker_package_id_invalid') : null;
+  const number = id ? '' : packageNumber(rawPackageNumber);
+  const params = { courier_code: code };
+  if (id) params.package_id = id;
+  else params.package_number = number;
+  const payload = await callApi('getLabel', params);
 
   const extension = String(payload?.extension || '').trim().toLowerCase();
   const base64 = String(payload?.label || '').trim();
@@ -72,6 +80,7 @@ async function fetchBaseLinkerLabel({ packageId, courierCode: rawCourierCode }, 
 
   return {
     packageId: id,
+    packageNumber: number,
     courierCode: code,
     extension,
     contentType: LABEL_CONTENT_TYPES[extension] || 'application/octet-stream',

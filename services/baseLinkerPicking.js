@@ -1,5 +1,6 @@
 const crypto = require('crypto');
 const BaseLinkerPickingOrder = require('../models/BaseLinkerPickingOrder');
+const BaseLinkerOrderIndex = require('../models/BaseLinkerOrderIndex');
 const { fetchBaseLinkerOrders } = require('./baseLinkerOrders');
 const { makeBaseLinkerAccountCaller } = require('./baseLinkerClient');
 const { getBaseLinkerAccount } = require('./baseLinkerAccounts');
@@ -274,7 +275,10 @@ function assertOrderActionable(order, scope) {
   });
 }
 
-function applyUpstreamDisposition(doc, order, scope, actor) {
+function applyUpstreamDisposition(doc, order, scope, actor, {
+  materializeSent = true,
+  releaseOwnerOnSent = true,
+} = {}) {
   const nextDisposition = order ? classifyUpstreamOrder(order, scope) : 'missing';
   const nextStatusId = order && Number.isSafeInteger(Number(order?.order_status_id))
     ? Number(order.order_status_id)
@@ -295,7 +299,7 @@ function applyUpstreamDisposition(doc, order, scope, actor) {
   // Sent state even when the status was changed outside this UI. A later
   // Cancelled/Other transition may create an exception, but it never erases the
   // fact that Sent had already been observed.
-  if (nextDisposition === 'sent'
+  if (materializeSent && nextDisposition === 'sent'
       && String(doc.status || '') !== ORDER_STATUS.SENT
       && String(doc.workflowStage || '') !== WORKFLOW_STAGE.SENT) {
     const observedAt = new Date();
@@ -314,7 +318,9 @@ function applyUpstreamDisposition(doc, order, scope, actor) {
   // Production eligibility is strict: Intake is the only status in which a
   // worker may keep ownership. Any exact non-Intake observation releases the
   // worker immediately, while preserving picked quantities/issues/history.
-  if (productionDispositionBlocked(nextDisposition) && doc.ownerTelegramId) {
+  if (productionDispositionBlocked(nextDisposition)
+      && doc.ownerTelegramId
+      && !(nextDisposition === 'sent' && releaseOwnerOnSent === false)) {
     const previousOwnerTelegramId = doc.ownerTelegramId || '';
     const previousOwnerName = doc.ownerName || '';
     doc.ownerTelegramId = '';
@@ -384,6 +390,7 @@ function syncDocWithOrder(doc, order, actor) {
     sourceId: text(order?.order_source_id),
     sourceDateAdd: Number(order?.date_add || 0) || 0,
     sourceDateConfirmed: Number(order?.date_confirmed || 0) || 0,
+    sourceDeliveryMethod: text(order?.delivery_method),
     sourceDeliveryPackageModule: text(order?.delivery_package_module),
     sourceDeliveryPackageNr: text(order?.delivery_package_nr),
   };
@@ -591,6 +598,8 @@ async function verifyTrackedPickingOrderUpstream(doc, actor, {
   allowBlocked = false,
   clientMutationId = '',
   exactOrder = undefined,
+  materializeSent = true,
+  releaseOwnerOnSent = true,
 } = {}) {
   if (!doc) throw appError('baselinker_picking_not_started');
   if (!force && upstreamVerificationIsFresh(doc)) {
@@ -658,7 +667,7 @@ async function verifyTrackedPickingOrderUpstream(doc, actor, {
   const previousStatus = String(doc.status || '');
   const previousStage = workflowStageFor(doc);
   const physicalSnapshotLocked = hasPhysicalWarehouseSnapshot(doc);
-  const upstreamState = applyUpstreamDisposition(doc, order, scope, actor);
+  const upstreamState = applyUpstreamDisposition(doc, order, scope, actor, { materializeSent, releaseOwnerOnSent });
   const sync = syncDocWithOrder(doc, order, actor);
   const disposition = classifyUpstreamOrder(order, scope);
   let localTransitionChanged = false;
@@ -1153,6 +1162,40 @@ async function releasePickingOrder({ baseLinkerAccountId, orderId, user, expecte
   }, { ttlMs: 15_000, waitMs: 6_000 });
 }
 
+async function assertBaseLinkerPrintAllowedCached({
+  baseLinkerAccountId,
+  orderId,
+  confirmTerminalTtn = false,
+  confirmedDisposition = '',
+} = {}) {
+  const accountId = String(baseLinkerAccountId || '').trim();
+  const id = String(orderId || '').trim();
+  if (!accountId) throw appError('baselinker_account_id_required');
+  await requireAccountEnabled(accountId);
+  const scope = await getQueueScope(accountId);
+  if (!scope.configured) throw appError('baselinker_queue_not_configured');
+
+  const [doc, indexRow] = await Promise.all([
+    BaseLinkerPickingOrder.findOne({ baseLinkerAccountId: accountId, orderId: id }).lean(),
+    BaseLinkerOrderIndex.findOne({ baseLinkerAccountId: accountId, orderId: id }).select('preview').lean(),
+  ]);
+
+  let disposition = String(doc?.upstreamDisposition || '').trim().toLowerCase();
+  if (!disposition && indexRow?.preview) disposition = classifyUpstreamOrder(indexRow.preview, scope);
+  // Membership in BaseLinkerOrderIndex is authoritative cached proof of Intake.
+  if (!disposition && indexRow?.preview) disposition = 'intake';
+
+  if (disposition === 'sent' || disposition === 'cancelled') {
+    const confirmationMatches = confirmTerminalTtn === true
+      && String(confirmedDisposition || '').trim().toLowerCase() === disposition;
+    if (!confirmationMatches) throw appError('baselinker_terminal_ttn_confirmation_required', { orderId: id, disposition });
+    return { mode: `terminal_${disposition}`, disposition };
+  }
+  if (disposition === 'intake') return { mode: 'intake_cached', disposition };
+  if (doc && hasLocalWarehouseSent(doc)) return { mode: 'warehouse_sent_history_cached', disposition };
+  throw appError('baselinker_order_status_unverified', { orderId: id });
+}
+
 async function assertBaseLinkerPrintAllowed({
   baseLinkerAccountId,
   orderId,
@@ -1318,6 +1361,19 @@ async function markPickingOrderSent({ baseLinkerAccountId, orderId, user, expect
     const doc = await BaseLinkerPickingOrder.findOne({ baseLinkerAccountId: accountId, orderId: id });
     if (!doc) throw appError('baselinker_picking_not_started');
 
+    const startingStatus = String(doc.status || '');
+    const startingStage = workflowStageFor(doc);
+    const legacyPacked = startingStatus === ORDER_STATUS.PACKED || startingStage === WORKFLOW_STAGE.PACKED;
+
+    // New flow: the worker sends directly from Ready. Ownership is still the
+    // authority boundary, so another operator cannot finalize somebody else's
+    // in-progress order. Legacy Packed rows remain sendable after the UI shelf
+    // is removed and intentionally have no owner.
+    if (!legacyPacked) assertOwner(doc, actor);
+    // Validate the user's observed revision before an exact upstream read can
+    // legitimately advance our reconciliation revision.
+    assertRevision(doc, expectedRevision);
+
     let order = await fetchExactOrder(accountId, id);
     const accountMeta = await getBaseLinkerAccount(accountId, { lean: true });
     const decorate = (row) => {
@@ -1336,6 +1392,11 @@ async function markPickingOrderSent({ baseLinkerAccountId, orderId, user, expect
       allowBlocked: true,
       clientMutationId,
       exactOrder: order,
+      // During this explicit physical Send click, an already-Sent upstream
+      // status is an input to this operation, not a reason to pre-materialize
+      // system:baselinker as the warehouse actor or release the worker first.
+      materializeSent: false,
+      releaseOwnerOnSent: false,
     });
     let disposition = verification.disposition || classifyUpstreamOrder(order, scope);
 
@@ -1346,10 +1407,6 @@ async function markPickingOrderSent({ baseLinkerAccountId, orderId, user, expect
       return { state: publicState(doc), orders: compactOrders([order]) };
     }
 
-    assertRevision(doc, expectedRevision);
-    if (doc.status !== ORDER_STATUS.PACKED || workflowStageFor(doc) !== WORKFLOW_STAGE.PACKED) {
-      throw appError('baselinker_picking_not_packed');
-    }
     if (verification.syncChanged) {
       throw appError('baselinker_order_changed', {
         currentRevision: doc.revision,
@@ -1381,6 +1438,10 @@ async function markPickingOrderSent({ baseLinkerAccountId, orderId, user, expect
       });
     }
 
+    if (!legacyPacked && String(doc.status || '') !== ORDER_STATUS.READY) {
+      throw appError('baselinker_picking_not_ready_after_upstream_change', { status: String(doc.status || '') });
+    }
+
     // If BaseLinker is still Intake, move exactly this order to configured Sent.
     // If a manager already put it in Sent, do not rewrite anything upstream;
     // the warehouse click below is what creates our local physical Sent fact.
@@ -1393,10 +1454,34 @@ async function markPickingOrderSent({ baseLinkerAccountId, orderId, user, expect
       throw appError('baselinker_order_status_write_unverified', { orderId: id, statusId: scope.sentStatusId });
     }
 
-    // Packed snapshot is immutable. This only records a post-write discrepancy;
-    // it never rewrites the product list that the warehouse actually packed.
+    // Packed snapshot is immutable as a physical fact, but no longer a
+    // separate UI/business shelf. A direct Send records the packed audit at
+    // the same click. Legacy rows preserve their original packer/timestamp.
     const postWriteSync = syncDocWithOrder(doc, order, actor);
     const now = new Date();
+    if (!doc.packedAt) {
+      doc.packingMode = 'full';
+      doc.packedSummary = {
+        requestedQty: readiness.totalQty,
+        packedQty: readiness.pickedQty,
+        missingQty: readiness.missingQty,
+        problemLines: readiness.problemLines,
+      };
+      doc.packedAt = now;
+      doc.packedBy = actor.by;
+      doc.packedByName = actor.byName;
+      doc.lastUpstreamOrderFingerprint = doc.lastUpstreamOrderFingerprint || doc.orderFingerprint;
+      appendHistory(doc, 'order_packed', actor, {
+        orderId: id,
+        packingMode: 'full',
+        requestedQty: readiness.totalQty,
+        packedQty: readiness.pickedQty,
+        missingQty: readiness.missingQty,
+        problemLines: readiness.problemLines,
+        warehouseSnapshotFingerprint: doc.orderFingerprint || '',
+        combinedWithSend: true,
+      });
+    }
     doc.status = ORDER_STATUS.SENT;
     doc.workflowStage = WORKFLOW_STAGE.SENT;
     doc.upstreamDisposition = 'sent';
@@ -1760,6 +1845,7 @@ module.exports = {
   updatePickingItem,
   releasePickingOrder,
   assertBaseLinkerPrintAllowed,
+  assertBaseLinkerPrintAllowedCached,
   markPickingOrderPacked,
   markPickingOrderSent,
   reopenPickingOrder,

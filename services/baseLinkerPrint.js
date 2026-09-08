@@ -2,12 +2,13 @@ const crypto = require('crypto');
 const BaseLinkerPrintAgent = require('../models/BaseLinkerPrintAgent');
 const BaseLinkerPrintJob = require('../models/BaseLinkerPrintJob');
 const {
-  fetchVerifiedBaseLinkerOrderPackage,
+  fetchBaseLinkerLabel,
   fetchVerifiedBaseLinkerOrderLabel,
 } = require('./baseLinkerShipments');
 const { getIO } = require('../socket');
 const { makeBaseLinkerAccountCaller } = require('./baseLinkerClient');
-const { assertBaseLinkerPrintAllowed } = require('./baseLinkerPicking');
+const { assertBaseLinkerPrintAllowedCached } = require('./baseLinkerPicking');
+const { getLocalOrderProjection } = require('./baseLinkerOrderIndex');
 const { getBaseLinkerAccount } = require('./baseLinkerAccounts');
 const { appError } = require('../utils/errors');
 
@@ -44,6 +45,25 @@ function courierCodeOf(value) {
   const code = text(value);
   if (!code || code.length > 64) throw appError('baselinker_courier_code_invalid');
   return code;
+}
+
+function packageNumberOf(value) {
+  const number = text(value);
+  if (!number || number.length > 80) throw appError('baselinker_package_number_invalid');
+  return number;
+}
+
+async function cachedShipmentBinding(accountId, orderId) {
+  const order = await getLocalOrderProjection(accountId, orderId);
+  if (!order) throw appError('baselinker_order_status_unverified', { orderId: String(orderId || '') });
+  const packageNumber = packageNumberOf(order.delivery_package_nr);
+  const courierCode = courierCodeOf(order.delivery_package_module);
+  return {
+    order,
+    orderId: positiveInt(orderId, 'baselinker_order_id_invalid'),
+    packageNumber,
+    courierCode,
+  };
 }
 
 function configured() {
@@ -132,6 +152,7 @@ function emitJob(job) {
       baseLinkerAccountId: job.baseLinkerAccountId || '',
       orderId: job.orderId || '',
       packageId: job.packageId,
+      packageNumber: job.packageNumber || '',
       labelExtension: job.labelExtension || '',
       error: job.lastError || '',
       submittedAt: job.submittedAt || null,
@@ -142,41 +163,27 @@ function emitJob(job) {
   }
 }
 
-async function queuePrintJob({ baseLinkerAccountId, orderId, packageId, courierCode, confirmTerminalTtn = false, confirmedDisposition = '', user }) {
+async function queuePrintJob({ baseLinkerAccountId, orderId, confirmTerminalTtn = false, confirmedDisposition = '', user }) {
   const accountId = text(baseLinkerAccountId);
   if (!accountId) throw appError('baselinker_account_id_required');
   await getBaseLinkerAccount(accountId, { requireEnabled: true });
-  const callApi = makeBaseLinkerAccountCaller(accountId, { usageStage: 'shipment_read' });
   const order = positiveInt(orderId, 'baselinker_order_id_invalid');
-  const id = positiveInt(packageId, 'baselinker_package_id_invalid');
-  const requestedCode = courierCodeOf(courierCode);
   const actor = actorOf(user);
   if (!actor.telegramId) throw appError('auth_required');
 
-  // Service-level authorization: callers cannot bypass the terminal-status
-  // confirmation contract by invoking the print service outside this route.
-  await assertBaseLinkerPrintAllowed({
+  await assertBaseLinkerPrintAllowedCached({
     baseLinkerAccountId: accountId,
     orderId: order,
     confirmTerminalTtn,
     confirmedDisposition,
   });
-
-  // Queue only an authoritative order/package pair. Browser state is not proof
-  // that a package belongs to this order.
-  const binding = await fetchVerifiedBaseLinkerOrderPackage({
-    orderId: order,
-    packageId: id,
-    courierCode: requestedCode,
-  }, callApi);
-  const code = binding.courierCode;
-
+  const binding = await cachedShipmentBinding(accountId, order);
   const agent = await chooseOnlineAgent();
   const dedupeCutoff = new Date(Date.now() - DEDUPE_MS);
   const existing = await BaseLinkerPrintJob.findOne({
     baseLinkerAccountId: accountId,
     orderId: String(order),
-    packageId: id,
+    packageNumber: binding.packageNumber,
     targetAgentId: agent.agentId,
     status: { $in: ['pending', 'claimed', 'printing'] },
     createdAt: { $gte: dedupeCutoff },
@@ -197,8 +204,9 @@ async function queuePrintJob({ baseLinkerAccountId, orderId, packageId, courierC
     jobId: crypto.randomUUID(),
     baseLinkerAccountId: accountId,
     orderId: String(order),
-    packageId: id,
-    courierCode: code,
+    packageId: null,
+    packageNumber: binding.packageNumber,
+    courierCode: binding.courierCode,
     requestedByTelegramId: actor.telegramId,
     requestedByName: actor.name,
     targetAgentId: agent.agentId,
@@ -275,6 +283,7 @@ async function claimNextPrintJob({ agentId }) {
     baseLinkerAccountId: job.baseLinkerAccountId || '',
     orderId: job.orderId || '',
     packageId: job.packageId,
+    packageNumber: job.packageNumber || '',
     courierCode: job.courierCode,
     printerName: job.printerName || '',
     attempts: job.attempts,
@@ -300,11 +309,14 @@ async function getPrintJobPayload({ jobId, agentId }) {
     const accountId = text(job.baseLinkerAccountId);
     if (!accountId) throw appError('baselinker_account_id_required');
     await getBaseLinkerAccount(accountId, { requireEnabled: true });
-    const label = await fetchVerifiedBaseLinkerOrderLabel({
-      orderId: job.orderId,
-      packageId: job.packageId,
-      courierCode: job.courierCode,
-    }, makeBaseLinkerAccountCaller(accountId, { usageStage: 'shipment_read' }));
+    const callApi = makeBaseLinkerAccountCaller(accountId, { usageStage: 'shipment_read' });
+    const label = job.packageNumber
+      ? await fetchBaseLinkerLabel({ packageNumber: job.packageNumber, courierCode: job.courierCode }, callApi)
+      : await fetchVerifiedBaseLinkerOrderLabel({
+          orderId: job.orderId,
+          packageId: job.packageId,
+          courierCode: job.courierCode,
+        }, callApi);
     job.labelExtension = label.extension;
     job.leaseUntil = new Date(Date.now() + JOB_LEASE_MS);
     await job.save();

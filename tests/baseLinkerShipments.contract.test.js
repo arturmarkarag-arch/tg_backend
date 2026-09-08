@@ -48,4 +48,16 @@ describe('BaseLinker shipments read-only adapter', () => {
     expect(result.contentType).toBe('application/pdf');
     expect(result.buffer.toString()).toBe('%PDF-read-only-label');
   });
+  it('downloads a label directly by courier + package number without getOrderPackages', async () => {
+    const calls = [];
+    const callApi = async (method, params) => {
+      calls.push({ method, params });
+      return { status: 'SUCCESS', extension: 'pdf', label: Buffer.from('%PDF-number-label').toString('base64') };
+    };
+    const result = await fetchBaseLinkerLabel({ packageNumber: 'TTN123', courierCode: 'inpost' }, callApi);
+    expect(calls).toEqual([{ method: 'getLabel', params: { courier_code: 'inpost', package_number: 'TTN123' } }]);
+    expect(result.packageId).toBeNull();
+    expect(result.packageNumber).toBe('TTN123');
+  });
+
 });

@@ -4,7 +4,8 @@ const baseLinkerPrintJobSchema = new mongoose.Schema({
   jobId: { type: String, required: true, trim: true, maxlength: 96 },
   baseLinkerAccountId: { type: String, required: true, trim: true, maxlength: 64, index: true },
   orderId: { type: String, default: '', trim: true, maxlength: 64 },
-  packageId: { type: Number, required: true, min: 1 },
+  packageId: { type: Number, default: null, min: 1 },
+  packageNumber: { type: String, default: '', trim: true, maxlength: 80 },
   courierCode: { type: String, required: true, trim: true, maxlength: 64 },
 
   requestedByTelegramId: { type: String, required: true, trim: true, maxlength: 64 },
@@ -32,6 +33,7 @@ const baseLinkerPrintJobSchema = new mongoose.Schema({
 baseLinkerPrintJobSchema.index({ jobId: 1 }, { unique: true });
 baseLinkerPrintJobSchema.index({ targetAgentId: 1, status: 1, createdAt: 1 });
 baseLinkerPrintJobSchema.index({ baseLinkerAccountId: 1, packageId: 1, status: 1, createdAt: -1 });
+baseLinkerPrintJobSchema.index({ baseLinkerAccountId: 1, packageNumber: 1, status: 1, createdAt: -1 });
 baseLinkerPrintJobSchema.index({ createdAt: 1 }, { expireAfterSeconds: 7 * 24 * 60 * 60 });
 
 module.exports = mongoose.model('BaseLinkerPrintJob', baseLinkerPrintJobSchema);

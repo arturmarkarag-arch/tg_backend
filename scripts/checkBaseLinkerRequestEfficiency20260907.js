@@ -47,9 +47,16 @@ check('queue persists only sanitized worker preview/search fields, not customer 
   for (const forbidden of ['delivery_fullname', 'delivery_phone', 'phone:', 'email:', 'invoice_fullname']) assert(!model.includes(forbidden));
 });
 check('warehouse BaseLinker reads are confirmed-only', () => {
+  const orders = read('services/baseLinkerOrders.js');
+  const retention = read('services/baseLinkerRetention.js');
   assert(!index.includes('includeUnconfirmed: true'));
   assert(!picking.includes('includeUnconfirmed: true'));
-  assert(routes.includes('includeUnconfirmed: false'));
+  assert(!routes.includes('includeUnconfirmed: true'));
+  assert(!retention.includes('includeUnconfirmed: true'));
+  assert(orders.includes('includeUnconfirmed = false'));
+  assert(orders.includes('get_unconfirmed_orders: Boolean(includeUnconfirmed)'));
+  assert(index.includes('includeUnconfirmed: false'));
+  assert(picking.includes('includeUnconfirmed: false'));
 });
 check('journal is delta accelerator and full reconcile is periodic fallback', () => {
   assert(index.includes("getJournalList"));

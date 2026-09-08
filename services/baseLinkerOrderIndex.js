@@ -63,7 +63,10 @@ function localDisplayStage(doc) {
   // Sent/packing history remains available on the PickingOrder audit trail.
   if (disposition === 'cancelled') return 'cancelled';
   if (String(doc?.status || '') === 'sent' || String(doc?.workflowStage || '') === 'sent') return 'sent';
-  if (String(doc?.workflowStage || '') === 'packed' || String(doc?.status || '') === 'packed') return 'packed';
+  // Packed remains an internal/audit state for backwards compatibility, but
+  // it is no longer a user-facing shelf. Any old Packed rows are surfaced in
+  // Processing so an operator can finish them with the single Send action.
+  if (String(doc?.workflowStage || '') === 'packed' || String(doc?.status || '') === 'packed') return 'processing';
   if (disposition && disposition !== 'intake') return 'deferred';
   if (String(doc?.workflowStage || '') === 'deferred' || ['paused', 'problem', 'ready_to_pack_with_issue'].includes(String(doc?.status || ''))) return 'deferred';
   return 'processing';
@@ -138,6 +141,7 @@ function orderFromPicking(doc, account = null) {
     date_add: Number(doc.sourceDateAdd || 0),
     date_confirmed: Number(doc.sourceDateConfirmed || 0),
     confirmed: true,
+    delivery_method: doc.sourceDeliveryMethod || '',
     delivery_package_module: doc.sourceDeliveryPackageModule || '',
     delivery_package_nr: doc.sourceDeliveryPackageNr || '',
     products: (Array.isArray(doc.items) ? doc.items : []).map((item) => ({
@@ -310,6 +314,24 @@ async function reconcileTrackedOrderStatuses(scope, { limit = TRACKED_REVERIFY_L
     orders,
     removedOrderIds: missingIds,
   });
+  // Backfill photos for recent tracked Allegro orders that have no Base catalog
+  // product_id. This exact auction_id path performs zero BaseLinker API calls;
+  // it only populates our image cache for historical Sent/Deferred rows.
+  const offerOnlyOrders = orders.map((order) => ({
+    ...order,
+    products: (Array.isArray(order?.products) ? order.products : []).filter((product) => (
+      String(order?.order_source || '').trim().toLowerCase() === 'allegro'
+      && !String(product?.product_id || '').trim()
+      && /^\d{5,30}$/.test(String(product?.auction_id || '').trim())
+    )),
+  })).filter((order) => order.products.length);
+  if (offerOnlyOrders.length) {
+    try {
+      await warmBaseLinkerProductCatalog(offerOnlyOrders, async () => {
+        throw appError('baselinker_catalog_request_budget_exhausted');
+      }, { maxRequests: 0 });
+    } catch (_) { /* supplementary only */ }
+  }
   const checked = orders.length + missingIds.length;
   return {
     checked,
@@ -705,15 +727,16 @@ function compareRows(a, b) {
   return String(a.baseLinkerAccountId).localeCompare(String(b.baseLinkerAccountId));
 }
 
-async function getIndexedOrderPage({ accountId = '', sourceAccountId = '', sourceType = '', sourceId = '', workflowFilter = 'processing', packedBy = '', search = '', page = 1, pageSize: pageSizeInput = 10 } = {}) {
+async function getIndexedOrderPage({ accountId = '', sourceAccountId = '', sourceType = '', sourceId = '', workflowFilter = 'processing', packedBy = '', sentBy = '', search = '', page = 1, pageSize: pageSizeInput = 10 } = {}) {
   await ensureBaseLinkerOrderIndexReady();
   // READ PATH CONTRACT: list/search/pagination is Mongo-only. Scheduler/manual
   // sync owns BaseLinker I/O; opening or paging the UI must never consume token budget.
-  const safeWorkflow = ['processing', 'deferred', 'packed', 'sent', 'cancelled', 'updated'].includes(String(workflowFilter)) ? String(workflowFilter) : 'processing';
+  const safeWorkflow = ['processing', 'deferred', 'sent', 'cancelled', 'updated'].includes(String(workflowFilter)) ? String(workflowFilter) : 'processing';
   const requestedPage = normalizePage(page);
   const safePageSize = pageSize(pageSizeInput);
   const normalizedSearch = String(search || '').trim().toLowerCase().slice(0, 160);
-  const safePackedBy = safeWorkflow === 'packed' ? String(packedBy || '').trim().slice(0, 120) : '';
+  const safePackedBy = safeWorkflow === 'sent' ? String(packedBy || '').trim().slice(0, 120) : '';
+  const safeSentBy = safeWorkflow === 'sent' ? String(sentBy || '').trim().slice(0, 120) : '';
   const selectedAccountId = accountIdString(accountId);
   const selectedSourceAccountId = accountIdString(sourceAccountId);
   const selectedSourceType = String(sourceType || '').trim().toLowerCase().slice(0, 80);
@@ -733,8 +756,8 @@ async function getIndexedOrderPage({ accountId = '', sourceAccountId = '', sourc
   const indexKeys = indexRows.map((row) => rowKey(row.baseLinkerAccountId, row.orderId)).filter(Boolean);
   const indexSet = new Set(indexKeys);
   const indexByKey = new Map(indexRows.map((row) => [rowKey(row.baseLinkerAccountId, row.orderId), row]).filter(([key]) => key));
-  const workflowCounts = { processing: 0, deferred: 0, packed: 0, sent: 0, cancelled: 0, updated: 0 };
-  const rowKeysByStage = { processing: [], deferred: [], packed: [], sent: [], cancelled: [], updated: [] };
+  const workflowCounts = { processing: 0, deferred: 0, sent: 0, cancelled: 0, updated: 0 };
+  const rowKeysByStage = { processing: [], deferred: [], sent: [], cancelled: [], updated: [] };
 
   for (const key of indexKeys) {
     const row = indexByKey.get(key); const doc = pickingByKey.get(key);
@@ -799,7 +822,8 @@ async function getIndexedOrderPage({ accountId = '', sourceAccountId = '', sourc
       });
     }
   }
-  if (safeWorkflow === 'packed' && safePackedBy) rowKeysByStage.packed = rowKeysByStage.packed.filter((key) => matchesPackedBy(pickingByKey.get(key), safePackedBy));
+  if (safeWorkflow === 'sent' && safePackedBy) rowKeysByStage.sent = rowKeysByStage.sent.filter((key) => matchesPackedBy(pickingByKey.get(key), safePackedBy));
+  if (safeWorkflow === 'sent' && safeSentBy) rowKeysByStage.sent = rowKeysByStage.sent.filter((key) => String(pickingByKey.get(key)?.sentBy || '') === safeSentBy);
   for (const stage of Object.keys(workflowCounts)) workflowCounts[stage] = rowKeysByStage[stage].length;
   const allKeys = rowKeysByStage[safeWorkflow] || [];
   const total = allKeys.length; const pageCount = Math.max(1, Math.ceil(total / safePageSize)); const actualPage = Math.min(requestedPage, pageCount);
@@ -825,9 +849,15 @@ async function getIndexedOrderPage({ accountId = '', sourceAccountId = '', sourc
 
   const packedMatch = selectedAccountId ? { baseLinkerAccountId: selectedAccountId } : {};
   const packedByRows = await BaseLinkerPickingOrder.aggregate([
-    { $match: { ...packedMatch, packedBy: { $nin: ['', null] }, $or: [{ workflowStage: 'packed' }, { status: 'packed' }] } },
+    { $match: { ...packedMatch, packedBy: { $nin: ['', null] }, $or: [{ workflowStage: 'sent' }, { status: 'sent' }] } },
     { $sort: { packedAt: -1, _id: -1 } },
     { $group: { _id: '$packedBy', name: { $first: '$packedByName' }, count: { $sum: 1 }, lastPackedAt: { $first: '$packedAt' } } },
+    { $sort: { name: 1, _id: 1 } },
+  ]);
+  const sentByRows = await BaseLinkerPickingOrder.aggregate([
+    { $match: { ...packedMatch, sentBy: { $nin: ['', null] }, $or: [{ workflowStage: 'sent' }, { status: 'sent' }] } },
+    { $sort: { sentAt: -1, _id: -1 } },
+    { $group: { _id: '$sentBy', name: { $first: '$sentByName' }, count: { $sum: 1 }, lastSentAt: { $first: '$sentAt' } } },
     { $sort: { name: 1, _id: 1 } },
   ]);
 
@@ -841,7 +871,8 @@ async function getIndexedOrderPage({ accountId = '', sourceAccountId = '', sourc
     productCatalogWarnings: cachedCatalog.productCatalogWarnings,
     page: actualPage, pageSize: safePageSize, pageCount, total, workflowCounts,
     packedByOptions: packedByRows.map((row) => ({ value: String(row._id || ''), label: String(row.name || row._id || ''), count: Number(row.count || 0) })).filter((row) => row.value),
-    activePackedBy: safePackedBy, activeBaseLinkerAccountId: selectedAccountId, activeSourceAccountId: selectedSourceAccountId, activeSourceType: selectedSourceType, activeSourceId: selectedSourceId,
+    sentByOptions: sentByRows.map((row) => ({ value: String(row._id || ''), label: String(row.name || row._id || ''), count: Number(row.count || 0) })).filter((row) => row.value),
+    activePackedBy: safePackedBy, activeSentBy: safeSentBy, activeBaseLinkerAccountId: selectedAccountId, activeSourceAccountId: selectedSourceAccountId, activeSourceType: selectedSourceType, activeSourceId: selectedSourceId,
     historyRetentionDays: HISTORY_RETENTION_DAYS, sentRetentionDays: HISTORY_RETENTION_DAYS, cancelledRetentionDays: HISTORY_RETENTION_DAYS,
   };
 }
@@ -849,10 +880,12 @@ async function getIndexedOrderPage({ accountId = '', sourceAccountId = '', sourc
 async function getLocalOrderProjection(baseLinkerAccountId, orderId) {
   const accountId = accountIdString(baseLinkerAccountId); const id = orderIdString(orderId);
   if (!accountId || !id) return null;
-  const [doc, account] = await Promise.all([
+  const [indexRow, doc, account] = await Promise.all([
+    BaseLinkerOrderIndex.findOne({ baseLinkerAccountId: accountId, orderId: id }).select('preview').lean(),
     BaseLinkerPickingOrder.findOne({ baseLinkerAccountId: accountId, orderId: id }).lean(),
     getBaseLinkerAccount(accountId, { lean: true }).catch(() => null),
   ]);
+  if (indexRow?.preview && typeof indexRow.preview === 'object') return compactOrder(indexRow.preview);
   return orderFromPicking(doc, account);
 }
 
