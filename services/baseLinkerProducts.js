@@ -292,6 +292,24 @@ function exactText(value) {
   return String(value || '').trim().replace(/\s+/g, ' ').toLocaleLowerCase('pl-PL');
 }
 
+function normalizedNameTokens(value) {
+  return exactText(value)
+    .normalize('NFKD')
+    .replace(/\p{M}/gu, '')
+    .match(/[\p{L}\p{N}]+/gu) || [];
+}
+
+function canonicalNameSignature(value) {
+  return normalizedNameTokens(value).sort().join('|');
+}
+
+function distinctiveNameFilters(value) {
+  return [...new Set(normalizedNameTokens(value))]
+    .filter((token) => token.length >= 6)
+    .sort((left, right) => right.length - left.length || left.localeCompare(right, 'pl-PL'))
+    .slice(0, 3);
+}
+
 function inventoryListRows(payload) {
   const products = payload?.products && typeof payload.products === 'object' ? payload.products : {};
   return Object.entries(products).map(([id, row]) => ({ id: cleanId(row?.id || id), row })).filter((item) => item.id);
@@ -309,8 +327,8 @@ function exactUnlinkedMatch(rows, ref, strategy) {
     const matches = rows.filter(({ row }) => exactText(row?.sku) === wanted);
     return matches.length === 1 ? matches[0] : null;
   }
-  const wanted = exactText(ref.name);
-  const matches = rows.filter(({ row }) => exactText(row?.name) === wanted);
+  const wanted = canonicalNameSignature(ref.name);
+  const matches = rows.filter(({ row }) => canonicalNameSignature(row?.name) === wanted);
   return matches.length === 1 ? matches[0] : null;
 }
 
@@ -334,7 +352,22 @@ async function resolveUnlinkedInventoryRefs(refs, productCatalog, warnings, call
 
     try {
       const payload = await callApi('getInventoryProductsList', params);
-      const match = exactUnlinkedMatch(inventoryListRows(payload), ref, strategy);
+      let match = exactUnlinkedMatch(inventoryListRows(payload), ref, strategy);
+      // BaseLinker's filter_name is order-sensitive. If the order line and the
+      // inventory product contain exactly the same normalized words in another
+      // order, search by a distinctive token and still accept only one exact
+      // token-set match inside the known inventory.
+      if (!match && strategy === 'name') {
+        for (const filterName of distinctiveNameFilters(ref.name)) {
+          const fallbackPayload = await callApi('getInventoryProductsList', {
+            inventory_id: inventoryId,
+            page: 1,
+            filter_name: filterName,
+          });
+          match = exactUnlinkedMatch(inventoryListRows(fallbackPayload), ref, strategy);
+          if (match) break;
+        }
+      }
       if (!match) {
         if (!productCatalog[ref.key]) productCatalog[ref.key] = { state: 'unlinked_inventory_not_unique', images: [] };
         continue;

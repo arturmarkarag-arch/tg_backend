@@ -92,6 +92,43 @@ describe('BaseLinker product catalog enrichment', () => {
     expect(result.productCatalog['A:offer:allegro:18424860436']).toEqual({ state: 'resolved', images: ['https://cdn/allegro.jpg'] });
   });
 
+  it('resolves a unique inventory name when BaseLinker stores the same words in another order', async () => {
+    const calls = [];
+    const orderName = 'KREM NA STAWY ARTHROVIA NANO-POWERED JOINT RELIEF CREAM 50ML';
+    const inventoryName = 'ARTHROVIA KREM NA STAWY NANO-POWERED JOINT RELIEF CREAM 50ML';
+    const callApi = async (method, params) => {
+      calls.push({ method, params });
+      if (method === 'getInventoryProductsList' && params.filter_name === orderName) {
+        return { status: 'SUCCESS', products: {} };
+      }
+      if (method === 'getInventoryProductsList' && params.filter_name === 'arthrovia') {
+        return { status: 'SUCCESS', products: { 245743799: { id: 245743799, name: inventoryName } } };
+      }
+      if (method === 'getInventoryProductsData') {
+        expect(params).toEqual({ inventory_id: 11049, products: [245743799], include_channels_media: true });
+        return { status: 'SUCCESS', products: { 245743799: { images: { 1: 'https://cdn/arthrovia.jpg' } } } };
+      }
+      throw new Error(`unexpected ${method} ${JSON.stringify(params)}`);
+    };
+
+    const result = await fetchBaseLinkerProductCatalog([{
+      baseLinkerAccountId: 'A',
+      order_source: 'allegro',
+      products: [{
+        storage: 'db', storage_id: '11049', product_id: '', auction_id: '18380197931',
+        name: orderName, sku: '', ean: '',
+      }],
+    }], callApi);
+
+    expect(calls.map((call) => call.method)).toEqual([
+      'getInventoryProductsList',
+      'getInventoryProductsList',
+      'getInventoryProductsData',
+    ]);
+    expect(result.productCatalog['A:offer:allegro:18380197931'])
+      .toEqual({ state: 'resolved', images: ['https://cdn/arthrovia.jpg'] });
+  });
+
   it('loads external shop product details/photos in one storage-aware lookup inside that account namespace', async () => {
     const calls = [];
     const callApi = async (method, params) => {
