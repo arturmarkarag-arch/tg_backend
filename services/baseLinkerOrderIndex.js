@@ -6,7 +6,7 @@ const BaseLinkerOrderIndex = require('../models/BaseLinkerOrderIndex');
 const BaseLinkerPickingOrder = require('../models/BaseLinkerPickingOrder');
 const { fetchBaseLinkerOrders } = require('./baseLinkerOrders');
 const { compactOrder } = require('./baseLinkerPublicDto');
-const { getCachedBaseLinkerProductCatalog, warmBaseLinkerProductCatalog } = require('./baseLinkerProducts');
+const { warmBaseLinkerProductCatalog, getOrdersWithCachedProductImages } = require('./baseLinkerProducts');
 const { annotateOrder, orderKey, resolveSourceName } = require('./baseLinkerIdentity');
 const { makeBaseLinkerAccountCaller, BASELINKER_REQUEST_BUDGET_PER_MINUTE } = require('./baseLinkerClient');
 const { listBaseLinkerAccounts, getBaseLinkerAccount, recordAccountSync } = require('./baseLinkerAccounts');
@@ -293,7 +293,7 @@ async function reconcileTrackedOrderStatuses(scope, { limit = TRACKED_REVERIFY_L
     orders,
     removedOrderIds: missingIds,
   });
-  // Backfill photos for recent tracked Allegro orders that have no Base catalog
+  // Populate photos for recent tracked Allegro orders that have no Base catalog
   // product_id. This exact auction_id path performs zero BaseLinker API calls;
   // it only populates our image cache for historical Sent/Deferred rows.
   const offerOnlyOrders = orders.map((order) => ({
@@ -395,7 +395,22 @@ async function performIndexSync(scope, opts = {}) {
   const currentIds = new Set(rows.map((row) => row.orderId));
   const now = new Date();
 
+  try {
+    await warmBaseLinkerProductCatalog(
+      rows.map((row) => row.preview).filter(Boolean),
+      makeBaseLinkerAccountCaller(accountId, { usageStage: 'product_catalog_sync' }),
+      { maxRequests: FULL_SCAN_PRODUCT_WARM_REQUESTS, linkedOnly: true },
+    );
+  } catch (_) { /* product images are supplementary; queue truth must still sync */ }
+
+  // The durable queue preview itself carries the ready-to-render image URL.
+  // Clients never resolve product identities or join a separate catalog map.
   if (rows.length) {
+    try {
+      const imageState = await getOrdersWithCachedProductImages(rows.map((row) => row.preview));
+      imageState.orders.forEach((order, index) => { if (rows[index]) rows[index].preview = order; });
+    } catch (_) { /* cache join is supplementary */ }
+
     await BaseLinkerOrderIndex.bulkWrite(rows.map((row) => ({ updateOne: {
       filter: { baseLinkerAccountId: accountId, orderId: row.orderId },
       update: { $set: {
@@ -413,14 +428,6 @@ async function performIndexSync(scope, opts = {}) {
       upsert: true,
     } })), { ordered: false });
   }
-
-  try {
-    await warmBaseLinkerProductCatalog(
-      rows.map((row) => row.preview).filter(Boolean),
-      makeBaseLinkerAccountCaller(accountId, { usageStage: 'product_catalog_sync' }),
-      { maxRequests: FULL_SCAN_PRODUCT_WARM_REQUESTS },
-    );
-  } catch (_) { /* product images are supplementary; queue truth must still sync */ }
 
   const transition = await reconcileIndexTransition({ scope, currentOrders, currentIds, previousIds });
   const shouldReverifyTracked = trackedVerifiedAfter instanceof Date && Number.isFinite(trackedVerifiedAfter.getTime());
@@ -706,13 +713,9 @@ async function getIndexedOrderPage({ accountId = '', sourceAccountId = '', sourc
   ]);
 
   const selectedOrders = selectedKeys.map((key) => ordersByKey.get(key)).filter(Boolean).map(compactOrder);
-  const cachedCatalog = await getCachedBaseLinkerProductCatalog(selectedOrders);
 
   return {
     orders: selectedOrders,
-    productCatalog: cachedCatalog.productCatalog,
-    productCatalogStats: cachedCatalog.productCatalogStats,
-    productCatalogWarnings: cachedCatalog.productCatalogWarnings,
     page: actualPage, pageSize: safePageSize, pageCount, total, workflowCounts,
     packedByOptions: packedByRows.map((row) => ({ value: String(row._id || ''), label: String(row.name || row._id || ''), count: Number(row.count || 0) })).filter((row) => row.value),
     sentByOptions: sentByRows.map((row) => ({ value: String(row._id || ''), label: String(row.name || row._id || ''), count: Number(row.count || 0) })).filter((row) => row.value),

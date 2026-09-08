@@ -518,7 +518,7 @@ async function resolveAllegroOfferRefs(refs, productCatalog, warnings, imageLoad
  * changing/persisting that upstream payload. The catalog is supplementary
  * current product data used for photos, features and packing context.
  */
-async function fetchBaseLinkerProductCatalogSingle(orders, callApi, { maxRequests = Number.POSITIVE_INFINITY } = {}) {
+async function fetchBaseLinkerProductCatalogSingle(orders, callApi, { maxRequests = Number.POSITIVE_INFINITY, linkedOnly = false } = {}) {
   let requestCount = 0;
   const budgetedCallApi = async (method, parameters) => {
     if (requestCount >= maxRequests) throw appError('baselinker_catalog_request_budget_exhausted');
@@ -549,14 +549,16 @@ async function fetchBaseLinkerProductCatalogSingle(orders, callApi, { maxRequest
     productCatalog[ref.key] = { state: 'unsupported_storage', images: [] };
   }
 
-  // Official BaseLinker fallback for ordered lines where getOrders has no
-  // product_id. Resolve only inside the exact inventory_id and accept only one
-  // exact EAN/SKU/full-name match, then read its channel-aware media.
-  await resolveUnlinkedInventoryRefs(refs, productCatalog, warnings, budgetedCallApi);
+  if (!linkedOnly) {
+    // Compatibility image-resolution path only. The central queue poll intentionally
+    // does not spend extra BaseLinker requests trying to identify unlinked
+    // order lines. Its normal contract is getOrders -> product_id batch data.
+    await resolveUnlinkedInventoryRefs(refs, productCatalog, warnings, budgetedCallApi);
 
-  // Last exact fallback for Allegro-only rows that still have no catalog image.
-  // It is keyed strictly by auction_id and never guesses by product text.
-  await resolveAllegroOfferRefs(refs, productCatalog, warnings);
+    // Compatibility fallback for historical Allegro-only rows. This is not
+    // part of the central BaseLinker polling budget.
+    await resolveAllegroOfferRefs(refs, productCatalog, warnings);
+  }
 
   for (const ref of refs) {
     if (!productCatalog[ref.key]) productCatalog[ref.key] = { state: 'unresolved_exact_source', images: [] };
@@ -603,14 +605,38 @@ async function getCachedBaseLinkerProductCatalog(orders) {
   };
 }
 
-async function warmBaseLinkerProductCatalog(orders, callApi, { maxRequests = 5 } = {}) {
+function attachProductImagesToOrders(orders, productCatalog = {}) {
+  return (Array.isArray(orders) ? orders : []).map((order) => ({
+    ...order,
+    products: (Array.isArray(order?.products) ? order.products : []).map((product) => {
+      const key = catalogKeyForOrderProduct(product, order?.baseLinkerAccountId, order?.order_source);
+      const imageUrl = key ? (normalizeImageUrls(productCatalog?.[key]?.images)[0] || '') : '';
+      if (!imageUrl) return { ...product };
+      return { ...product, image_url: imageUrl };
+    }),
+  }));
+}
+
+async function getOrdersWithCachedProductImages(orders) {
+  const list = Array.isArray(orders) ? orders : [];
+  const catalog = await getCachedBaseLinkerProductCatalog(list);
+  return {
+    orders: attachProductImagesToOrders(list, catalog.productCatalog),
+    productCatalog: catalog.productCatalog,
+    productCatalogStats: catalog.productCatalogStats,
+    productCatalogWarnings: catalog.productCatalogWarnings,
+  };
+}
+
+async function warmBaseLinkerProductCatalog(orders, callApi, { maxRequests = 5, linkedOnly = false } = {}) {
   await ensureProductImageCacheReady();
   const list = Array.isArray(orders) ? orders : [];
   const refs = collectOrderProductRefs(list);
-  if (!refs.length || typeof callApi !== 'function') return getCachedBaseLinkerProductCatalog(list);
+  const warmRefs = linkedOnly ? refs.filter((ref) => ref.productId) : refs;
+  if (!warmRefs.length || typeof callApi !== 'function' || maxRequests <= 0) return getCachedBaseLinkerProductCatalog(list);
   const nowMs = Date.now();
   const freshRows = await BaseLinkerProductImageCache.find({
-    productKey: { $in: refs.map((ref) => ref.key) },
+    productKey: { $in: warmRefs.map((ref) => ref.key) },
     resolverVersion: IMAGE_RESOLVER_VERSION,
   }).select('productKey state imageUrl refreshedAt resolverVersion').lean();
   const fresh = new Set(freshRows.filter((row) => {
@@ -619,18 +645,18 @@ async function warmBaseLinkerProductCatalog(orders, callApi, { maxRequests = 5 }
     const ttl = hasImage ? PERSISTED_PRODUCT_CACHE_TTL_MS : NEGATIVE_PRODUCT_CACHE_TTL_MS;
     return refreshedAt > 0 && (nowMs - refreshedAt) < ttl;
   }).map((row) => String(row.productKey)));
-  const staleKeys = new Set(refs.filter((ref) => !fresh.has(ref.key)).map((ref) => ref.key));
+  const staleKeys = new Set(warmRefs.filter((ref) => !fresh.has(ref.key)).map((ref) => ref.key));
   if (!staleKeys.size) return getCachedBaseLinkerProductCatalog(list);
 
   const missingOnlyOrders = list.map((order) => ({
     ...order,
     products: (Array.isArray(order?.products) ? order.products : []).filter((product) => {
       const key = catalogKeyForOrderProduct(product, order?.baseLinkerAccountId, order?.order_source);
-      return key && staleKeys.has(key);
+      return key && staleKeys.has(key) && (!linkedOnly || Boolean(String(product?.product_id || '').trim()));
     }),
   })).filter((order) => order.products.length);
 
-  const freshResult = await fetchBaseLinkerProductCatalogSingle(missingOnlyOrders, callApi, { maxRequests });
+  const freshResult = await fetchBaseLinkerProductCatalogSingle(missingOnlyOrders, callApi, { maxRequests, linkedOnly });
   const now = new Date();
   const writes = [];
   for (const [key, entry] of Object.entries(freshResult.productCatalog || {})) {
@@ -693,5 +719,7 @@ module.exports = {
   collectOrderProductRefs,
   fetchBaseLinkerProductCatalog,
   getCachedBaseLinkerProductCatalog,
+  attachProductImagesToOrders,
+  getOrdersWithCachedProductImages,
   warmBaseLinkerProductCatalog,
 };

@@ -20,6 +20,7 @@ function compactOrderProduct(product = {}) {
   setIfDefined(out, 'sku', product.sku);
   setIfDefined(out, 'ean', product.ean);
   setIfDefined(out, 'auction_id', product.auction_id);
+  setIfDefined(out, 'image_url', product.image_url);
   out.quantity = Number(product.quantity || 0);
   return out;
 }

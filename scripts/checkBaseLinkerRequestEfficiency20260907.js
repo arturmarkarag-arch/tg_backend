@@ -36,7 +36,7 @@ check('ordinary order list/search/pagination is Mongo-only', () => {
   const block = sliceBetweenOrThrow(index, 'async function getIndexedOrderPage', 'async function getLocalOrderProjection');
   assert(block.includes('READ PATH CONTRACT'));
   assert(block.includes('row?.preview'));
-  assert(block.includes('getCachedBaseLinkerProductCatalog(selectedOrders)'));
+  assert(index.includes('getOrdersWithCachedProductImages(rows.map((row) => row.preview))'));
   assert(!block.includes('fetchBaseLinkerOrders('));
   assert(!block.includes('makeBaseLinkerAccountCaller('));
   assert(!block.includes('syncBaseLinkerOrderIndex('));

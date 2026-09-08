@@ -13,7 +13,7 @@ const checks = [
   ['public DTO exposes compact change details', picking.includes('lastUpstreamChangeDetails: (Array.isArray(plain.lastUpstreamChangeDetails)')],
   ['changed source lines reset only that line for explicit re-review', picking.includes('details.push(...upstreamLineChangeDetails(old, source))') && picking.includes("state: 'pending'")],
   ['tracked Intake orders are reconciled from the shared poll and explicit review remains exact, never page-read driven', index.includes('trackedCurrentOrders') && index.includes("usageStage = 'queue_exact_verify'")],
-  ['page read uses persisted sanitized preview and cached images without BaseLinker HTTP', index.includes('READ PATH CONTRACT') && index.includes('row?.preview') && index.includes('getCachedBaseLinkerProductCatalog(selectedOrders)')],
+  ['page read uses persisted sanitized preview and cached images without BaseLinker HTTP', index.includes('READ PATH CONTRACT') && index.includes('row?.preview') && index.includes('getOrdersWithCachedProductImages(rows.map((row) => row.preview))')],
   ['raw/customer BaseLinker payload is not persisted by the index', !read('models/BaseLinkerOrderIndex.js').includes('delivery_fullname') && !read('models/BaseLinkerOrderIndex.js').includes('phone:') && !read('models/BaseLinkerOrderIndex.js').includes('email:') && read('models/BaseLinkerOrderIndex.js').includes('preview:')],
 ];
 let pass = 0;

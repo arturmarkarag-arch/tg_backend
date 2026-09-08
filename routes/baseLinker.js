@@ -14,8 +14,8 @@ const {
 } = require('../services/baseLinkerOrderIndex');
 const { isBaseLinkerQueueSchedulerStarted } = require('../services/baseLinkerQueueScheduler');
 const { getQueueScope } = require('../services/baseLinkerQueueScope');
-const { fetchBaseLinkerProductCatalog } = require('../services/baseLinkerProducts');
-const { compactOrders, compactProductCatalog } = require('../services/baseLinkerPublicDto');
+const { fetchBaseLinkerProductCatalog, getOrdersWithCachedProductImages, attachProductImagesToOrders } = require('../services/baseLinkerProducts');
+const { compactOrders } = require('../services/baseLinkerPublicDto');
 const { orderKey } = require('../services/baseLinkerIdentity');
 const { makeBaseLinkerAccountCaller, getBaseLinkerApiUsage } = require('../services/baseLinkerClient');
 const { listBaseLinkerAccounts, getBaseLinkerAccount } = require('../services/baseLinkerAccounts');
@@ -130,32 +130,45 @@ router.get('/meta', asyncHandler(async (_req, res) => {
 }));
 
 async function sendOrdersPayload(res, result, { allowUpstreamCatalog = false } = {}) {
-  let catalog = {
-    productCatalog: result.productCatalog || {},
-    productCatalogStats: result.productCatalogStats || { requested: 0, resolved: 0, unresolved: 0, warnings: 0 },
-    productCatalogWarnings: result.productCatalogWarnings || [],
-  };
+  const inputOrders = Array.isArray(result?.orders) ? result.orders : [];
+  let imageState;
+
   if (allowUpstreamCatalog) {
     try {
-      catalog = await fetchBaseLinkerProductCatalog(result.orders || []);
+      const catalog = await fetchBaseLinkerProductCatalog(inputOrders);
+      imageState = {
+        orders: attachProductImagesToOrders(inputOrders, catalog.productCatalog || {}),
+        productCatalogStats: catalog.productCatalogStats,
+        productCatalogWarnings: catalog.productCatalogWarnings || [],
+      };
     } catch (error) {
-      catalog.productCatalogWarnings = [{ scope: 'catalog', code: error?.code || error?.message || 'catalog_lookup_failed' }];
-      catalog.productCatalogStats.warnings = 1;
+      imageState = {
+        orders: inputOrders,
+        productCatalogStats: { requested: 0, resolved: 0, unresolved: 0, warnings: 1 },
+        productCatalogWarnings: [{ scope: 'catalog', code: error?.code || error?.message || 'catalog_lookup_failed' }],
+      };
     }
+  } else {
+    imageState = await getOrdersWithCachedProductImages(inputOrders);
   }
 
-  const refs = (result.orders || []).map((order) => ({
+  const refs = imageState.orders.map((order) => ({
     baseLinkerAccountId: order?.baseLinkerAccountId,
     orderId: order?.order_id,
   }));
   const pickingStates = await getPickingStates(refs);
+  const {
+    productCatalog: _legacyCatalog,
+    productCatalogStats: _legacyCatalogStats,
+    productCatalogWarnings: _legacyCatalogWarnings,
+    ...publicResult
+  } = result || {};
 
   res.json({
-    ...result,
-    orders: compactOrders(result.orders || []),
-    productCatalog: compactProductCatalog(catalog.productCatalog || {}),
-    productCatalogStats: catalog.productCatalogStats,
-    productCatalogWarnings: catalog.productCatalogWarnings || [],
+    ...publicResult,
+    orders: compactOrders(imageState.orders),
+    productCatalogStats: imageState.productCatalogStats || { requested: 0, resolved: 0, unresolved: 0, warnings: 0 },
+    productCatalogWarnings: imageState.productCatalogWarnings || [],
     pickingStates,
     fetchedAt: new Date().toISOString(),
   });
