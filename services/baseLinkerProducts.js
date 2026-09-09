@@ -647,7 +647,7 @@ async function getCachedBaseLinkerProductCatalog(orders) {
   const refs = collectOrderProductRefs(orders);
   if (!refs.length) return {
     productCatalog: {},
-    productCatalogStats: { requested: 0, resolved: 0, unresolved: 0, warnings: 0 },
+    productCatalogStats: { requested: 0, resolved: 0, unresolved: 0, warnings: 0, byState: {} },
     productCatalogWarnings: [],
   };
   const rows = await BaseLinkerProductImageCache.find({
@@ -785,7 +785,7 @@ async function fetchBaseLinkerProductCatalog(orders, callApi = null) {
 
   const merged = {
     productCatalog: {},
-    productCatalogStats: { requested: 0, resolved: 0, unresolved: 0, warnings: 0 },
+    productCatalogStats: { requested: 0, resolved: 0, unresolved: 0, warnings: 0, byState: {} },
     productCatalogWarnings: [],
   };
   for (const [accountId, groupOrders] of groups) {

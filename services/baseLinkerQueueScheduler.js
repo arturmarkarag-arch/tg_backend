@@ -7,6 +7,7 @@ const {
   INDEX_REFRESH_MS,
   POLL_FRESHNESS_MS,
 } = require('./baseLinkerOrderIndex');
+const { sweepTrackedProductImages } = require('./baseLinkerProductImageSweep');
 const { runAsSchedulerLeader } = require('./schedulerLeader');
 
 let timer = null;
@@ -33,10 +34,25 @@ async function runAccountTick(scope) {
       const ageMs = freshState.lastSyncAt
         ? Date.now() - Date.parse(freshState.lastSyncAt)
         : Number.POSITIVE_INFINITY;
-      if (freshState.initialized && Number.isFinite(ageMs) && ageMs < POLL_FRESHNESS_MS) {
-        return { baseLinkerAccountId: accountId, skipped: true, reason: 'queue_poll_fresh', lastSyncAt: freshState.lastSyncAt };
+      const result = freshState.initialized && Number.isFinite(ageMs) && ageMs < POLL_FRESHNESS_MS
+        ? { baseLinkerAccountId: accountId, skipped: true, reason: 'queue_poll_fresh', lastSyncAt: freshState.lastSyncAt }
+        : await syncBaseLinkerOrderIndex({ accountId, force: false, maxAgeMs: POLL_FRESHNESS_MS });
+
+      // Cache-only worker reads stay cheap, while this bounded rotating sweep
+      // also covers old Sent/Deferred orders that are absent from Intake scans.
+      try {
+        const trackedProductImageSweep = await sweepTrackedProductImages(accountId);
+        return { ...result, trackedProductImageSweep };
+      } catch (error) {
+        console.error('[baselinker-product-image-sweep]', JSON.stringify({
+          baseLinkerAccountId: accountId,
+          code: error?.code || error?.message || 'tracked_image_sweep_failed',
+        }));
+        return {
+          ...result,
+          trackedProductImageSweep: { error: error?.code || error?.message || 'tracked_image_sweep_failed' },
+        };
       }
-      return syncBaseLinkerOrderIndex({ accountId, force: false, maxAgeMs: POLL_FRESHNESS_MS });
     },
     { ttlMs: Math.max(60_000, INDEX_REFRESH_MS * 2) },
   );
