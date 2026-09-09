@@ -3,7 +3,6 @@ const {
   normalizeImageUrls,
   inventoryImageUrls,
   fetchBaseLinkerProductCatalog,
-  extractAllegroImageFromHtml,
 } = require('../services/baseLinkerProducts');
 
 describe('BaseLinker product catalog enrichment', () => {
@@ -25,13 +24,6 @@ describe('BaseLinker product catalog enrichment', () => {
       auction_id: '18424860436',
     }, 'A', 'allegro')).toBe('A:offer:allegro:18424860436');
     expect(catalogKeyForOrderProduct({ auction_id: '18424860436' }, 'A', 'amazon')).toBeNull();
-  });
-
-  it('accepts only Allegro CDN images from exact offer HTML metadata', () => {
-    expect(extractAllegroImageFromHtml('<meta property="og:image" content="https://a.allegroimg.com/original/abc.jpg">'))
-      .toBe('https://a.allegroimg.com/original/abc.jpg');
-    expect(extractAllegroImageFromHtml('<meta property="og:image" content="https://evil.example/photo.jpg">'))
-      .toBe('');
   });
 
   it('prefers default inventory gallery images and removes duplicates', () => {
@@ -129,6 +121,61 @@ describe('BaseLinker product catalog enrichment', () => {
       .toEqual({ state: 'resolved', images: ['https://cdn/arthrovia.jpg'] });
   });
 
+  it('resolves a large unlinked backlog with one documented inventory list scan and batched product data', async () => {
+    const calls = [];
+    const products = Array.from({ length: 12 }, (_, index) => ({
+      storage: 'db',
+      storage_id: 55,
+      product_id: '',
+      order_product_id: 1000 + index,
+      auction_id: String(18000000000 + index),
+      name: `Exact catalog product ${index}`,
+      sku: `BULK-${index}`,
+      ean: '',
+    }));
+    const callApi = async (method, params) => {
+      calls.push({ method, params });
+      if (method === 'getInventoryProductsList') {
+        expect(params).toEqual({ inventory_id: 55, page: 1, include_variants: true, filter_sort: 'id ASC' });
+        return {
+          products: Object.fromEntries(products.map((product, index) => [String(7000 + index), {
+            id: 7000 + index,
+            name: product.name,
+            sku: product.sku,
+            ean: '',
+          }])),
+        };
+      }
+      if (method === 'getInventoryProductsData') {
+        expect(params.inventory_id).toBe(55);
+        expect(params.products).toHaveLength(12);
+        expect(params.include_channels_media).toBe(true);
+        return {
+          products: Object.fromEntries(params.products.map((id) => [String(id), {
+            images: { 1: `https://cdn.example/${id}.jpg` },
+          }])),
+        };
+      }
+      throw new Error(`unexpected ${method}`);
+    };
+
+    const result = await fetchBaseLinkerProductCatalog([{
+      baseLinkerAccountId: 'bulk-account',
+      order_id: 9004,
+      order_source: 'allegro',
+      order_source_id: 12438,
+      products,
+    }], callApi);
+
+    expect(calls.map((call) => call.method)).toEqual([
+      'getInventoryProductsList',
+      'getInventoryProductsData',
+    ]);
+    expect(result.productCatalogStats).toMatchObject({ requested: 12, resolved: 12, unresolved: 0 });
+    expect(result.productCatalog['bulk-account:offer:allegro:18000000000'].images[0])
+      .toBe('https://cdn.example/7000.jpg');
+  });
+
   it('loads external shop product details/photos in one storage-aware lookup inside that account namespace', async () => {
     const calls = [];
     const callApi = async (method, params) => {
@@ -174,14 +221,14 @@ describe('BaseLinker product catalog enrichment', () => {
     };
 
     const result = await fetchBaseLinkerProductCatalog([{
-      baseLinkerAccountId: 'A',
+      baseLinkerAccountId: 'inventory-source-account',
       products: [{ storage: 'db', storage_id: 307, product_id: 2685 }],
     }], callApi);
 
     expect(calls[0].method).toBe('getInventoryProductsData');
     expect(calls[0].params.inventory_id).toBe(307);
     expect(calls[0].params.include_channels_media).toBe(true);
-    expect(result.productCatalog['A:db:307:2685'].images).toEqual(['https://cdn/base.jpg']);
+    expect(result.productCatalog['inventory-source-account:db:307:2685'].images).toEqual(['https://cdn/base.jpg']);
   });
 
   it('fails closed when an ordered Base product has no exact inventory id instead of scanning inventories heuristically', async () => {

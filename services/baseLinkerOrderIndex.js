@@ -395,13 +395,32 @@ async function performIndexSync(scope, opts = {}) {
   const currentIds = new Set(rows.map((row) => row.orderId));
   const now = new Date();
 
+  let productImageWarmStats = null;
   try {
-    await warmBaseLinkerProductCatalog(
+    const imageWarmResult = await warmBaseLinkerProductCatalog(
       rows.map((row) => row.preview).filter(Boolean),
       makeBaseLinkerAccountCaller(accountId, { usageStage: 'product_catalog_sync' }),
       { maxRequests: FULL_SCAN_PRODUCT_WARM_REQUESTS, linkedOnly: false },
     );
-  } catch (_) { /* product images are supplementary; queue truth must still sync */ }
+    productImageWarmStats = imageWarmResult?.productCatalogWarmStats || imageWarmResult?.productCatalogStats || null;
+    const warnings = Array.isArray(imageWarmResult?.productCatalogWarnings)
+      ? imageWarmResult.productCatalogWarnings
+      : [];
+    if (warnings.length) {
+      console.warn('[baselinker-product-images]', JSON.stringify({
+        baseLinkerAccountId: accountId,
+        stats: productImageWarmStats,
+        warnings: warnings.slice(0, 10),
+      }));
+    }
+  } catch (error) {
+    // Image enrichment is supplementary to queue truth, but failures must be
+    // observable instead of silently looking like legitimate missing photos.
+    console.error('[baselinker-product-images]', JSON.stringify({
+      baseLinkerAccountId: accountId,
+      code: error?.code || error?.message || 'catalog_sync_failed',
+    }));
+  }
 
   // The durable queue preview itself carries the ready-to-render image URL.
   // Clients never resolve product identities or join a separate catalog map.
@@ -493,6 +512,7 @@ async function performIndexSync(scope, opts = {}) {
     trackedReverified: Number(trackedReconcile?.checked || 0),
     trackedReconcileChanged: Number(trackedReconcile?.changed || 0),
     trackedReverifyPending: Number(trackedReconcile?.pending || 0),
+    productImageWarmStats,
   };
 }
 

@@ -7,11 +7,14 @@ const PRODUCT_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const NEGATIVE_PRODUCT_CACHE_TTL_MS = Math.max(5 * 60 * 1000, Number(process.env.BASELINKER_PRODUCT_NEGATIVE_CACHE_TTL_MS) || (60 * 60 * 1000));
 const PERSISTED_PRODUCT_CACHE_TTL_MS = Math.max(PRODUCT_CACHE_TTL_MS, Number(process.env.BASELINKER_PRODUCT_CACHE_TTL_MS) || (24 * 60 * 60 * 1000));
 const LOOKUP_CHUNK_SIZE = 100;
-const IMAGE_RESOLVER_VERSION = 5;
-const ALLEGRO_OFFER_TIMEOUT_MS = Math.min(15000, Math.max(2000, Number(process.env.BASELINKER_ALLEGRO_IMAGE_TIMEOUT_MS) || 6000));
-const ALLEGRO_OFFER_MAX_PER_RUN = Math.min(20, Math.max(1, Number(process.env.BASELINKER_ALLEGRO_IMAGE_MAX_PER_RUN) || 8));
+const STORAGE_LIST_PAGE_SIZE = 1000;
+const STORAGE_CATALOG_SNAPSHOT_TTL_MS = Math.max(5 * 60 * 1000, Number(process.env.BASELINKER_STORAGE_CATALOG_SNAPSHOT_TTL_MS) || (60 * 60 * 1000));
+const UNLINKED_BULK_SCAN_MIN_REFS = Math.max(2, Number(process.env.BASELINKER_UNLINKED_BULK_SCAN_MIN_REFS) || 8);
+const STORAGE_CATALOG_MAX_PAGES = Math.max(1, Math.min(100, Number(process.env.BASELINKER_STORAGE_CATALOG_MAX_PAGES) || 50));
+const IMAGE_RESOLVER_VERSION = 6;
 const UNLINKED_STORAGE_MAX_PER_RUN = Math.min(10, Math.max(1, Number(process.env.BASELINKER_UNLINKED_STORAGE_MAX_PER_RUN || process.env.BASELINKER_UNLINKED_INVENTORY_MAX_PER_RUN) || 4));
 const productCache = new Map();
+const storageCatalogSnapshots = new Map();
 let productImageCacheReadyPromise = null;
 
 async function ensureProductImageCacheReady() {
@@ -349,198 +352,208 @@ function exactUnlinkedMatch(rows, ref, strategy) {
   return matches.length === 1 ? matches[0] : null;
 }
 
-async function resolveUnlinkedStorageRefs(refs, productCatalog, warnings, callApi) {
-  const candidates = refs
-    .filter((ref) => !ref.productId && ['db', 'shop', 'warehouse'].includes(ref.storage))
-    .filter((ref) => Number.isInteger(Number(ref.storageId)) && Number(ref.storageId) > 0)
-    .filter((ref) => ref.ean || ref.sku || ref.name)
-    .filter((ref) => normalizeImageUrls(productCatalog[ref.key]?.images).length === 0)
-    .slice(0, UNLINKED_STORAGE_MAX_PER_RUN);
-  if (!candidates.length) return;
+function storageDescriptor(ref) {
+  const numericStorageId = Number(ref.storageId);
+  const isInventory = ref.storage === 'db';
+  return {
+    key: `${ref.accountId}:${ref.storage}:${numericStorageId}`,
+    numericStorageId,
+    isInventory,
+    apiStorageId: isInventory ? '' : `${ref.storage}_${numericStorageId}`,
+    listMethod: isInventory ? 'getInventoryProductsList' : 'getProductsList',
+    dataMethod: isInventory ? 'getInventoryProductsData' : 'getProductsData',
+  };
+}
 
-  const resolvedByStorage = new Map();
-  for (const ref of candidates) {
-    const numericStorageId = Number(ref.storageId);
-    const storageKey = `${ref.storage}:${numericStorageId}`;
-    const isInventory = ref.storage === 'db';
-    const apiStorageId = isInventory ? '' : `${ref.storage}_${numericStorageId}`;
-    const method = isInventory ? 'getInventoryProductsList' : 'getProductsList';
-    const strategy = ref.ean ? 'ean' : (ref.sku ? 'sku' : 'name');
-    const params = isInventory
-      ? { inventory_id: numericStorageId, page: 1 }
-      : { storage_id: apiStorageId, page: 1 };
-    if (strategy === 'ean') params.filter_ean = ref.ean;
-    else if (strategy === 'sku') params.filter_sku = ref.sku;
-    else params.filter_name = ref.name;
+function currentStorageSnapshot(descriptor) {
+  const cached = storageCatalogSnapshots.get(descriptor.key);
+  if (cached && cached.expiresAt > Date.now()) return cached;
+  const snapshot = {
+    rowsById: new Map(),
+    nextPage: 1,
+    complete: false,
+    expiresAt: Date.now() + STORAGE_CATALOG_SNAPSHOT_TTL_MS,
+  };
+  storageCatalogSnapshots.set(descriptor.key, snapshot);
+  return snapshot;
+}
 
+async function advanceStorageSnapshot(descriptor, snapshot, warnings, callApi, remainingRequests) {
+  while (!snapshot.complete && snapshot.nextPage <= STORAGE_CATALOG_MAX_PAGES && remainingRequests() > 0) {
+    const page = snapshot.nextPage;
+    const params = descriptor.isInventory
+      ? { inventory_id: descriptor.numericStorageId, page, include_variants: true, filter_sort: 'id ASC' }
+      : { storage_id: descriptor.apiStorageId, page, filter_sort: 'id ASC' };
+    let rows;
     try {
-      const payload = await callApi(method, params);
-      let match = exactUnlinkedMatch(inventoryListRows(payload), ref, strategy);
-
-      // Name search is only a deterministic fallback inside the exact source
-      // storage. We still require one row whose complete normalized token set
-      // equals the order line, so this never becomes cross-catalog guessing.
-      if (!match && strategy === 'name') {
-        for (const filterName of distinctiveNameFilters(ref.name)) {
-          const fallbackParams = isInventory
-            ? { inventory_id: numericStorageId, page: 1, filter_name: filterName }
-            : { storage_id: apiStorageId, page: 1, filter_name: filterName };
-          const fallbackPayload = await callApi(method, fallbackParams);
-          match = exactUnlinkedMatch(inventoryListRows(fallbackPayload), ref, strategy);
-          if (match) break;
-        }
-      }
-
-      if (!match) {
-        if (!productCatalog[ref.key]) productCatalog[ref.key] = { state: 'unlinked_storage_not_unique', images: [] };
-        continue;
-      }
-      if (!resolvedByStorage.has(storageKey)) resolvedByStorage.set(storageKey, { ref, matches: [] });
-      resolvedByStorage.get(storageKey).matches.push({ ref, productId: match.id });
+      rows = inventoryListRows(await callApi(descriptor.listMethod, params));
     } catch (error) {
       warnings.push({
-        scope: isInventory ? 'inventory_unlinked_lookup' : 'external_unlinked_lookup',
-        storageId: isInventory ? numericStorageId : apiStorageId,
+        scope: descriptor.isInventory ? 'inventory_bulk_list' : 'external_bulk_list',
+        storageId: descriptor.isInventory ? descriptor.numericStorageId : descriptor.apiStorageId,
+        page,
+        code: error?.code || error?.message || 'catalog_lookup_failed',
+      });
+      break;
+    }
+    for (const item of rows) snapshot.rowsById.set(item.id, item);
+    snapshot.nextPage += 1;
+    snapshot.expiresAt = Date.now() + STORAGE_CATALOG_SNAPSHOT_TTL_MS;
+    if (rows.length < STORAGE_LIST_PAGE_SIZE) snapshot.complete = true;
+  }
+  return snapshot.complete;
+}
+
+function exactBulkUnlinkedMatch(rows, ref) {
+  const candidates = [];
+  if (ref.ean) {
+    const wanted = exactText(ref.ean);
+    const matches = rows.filter(({ row }) => exactText(row?.ean) === wanted);
+    if (matches.length === 1) candidates.push(matches[0]);
+  }
+  if (ref.sku) {
+    const wanted = exactText(ref.sku);
+    const matches = rows.filter(({ row }) => exactText(row?.sku) === wanted);
+    if (matches.length === 1) candidates.push(matches[0]);
+  }
+  if (ref.name) {
+    const wanted = canonicalNameSignature(ref.name);
+    const matches = rows.filter(({ row }) => canonicalNameSignature(row?.name) === wanted);
+    if (matches.length === 1) candidates.push(matches[0]);
+  }
+  const ids = [...new Set(candidates.map((item) => item.id))];
+  return ids.length === 1 ? candidates.find((item) => item.id === ids[0]) : null;
+}
+
+async function loadMatchedProductImages(descriptor, matches, productCatalog, warnings, callApi, remainingRequests) {
+  const refsByProductId = new Map();
+  for (const { ref, productId } of matches) {
+    const id = cleanId(productId);
+    if (!id) continue;
+    if (!refsByProductId.has(id)) refsByProductId.set(id, []);
+    refsByProductId.get(id).push(ref);
+  }
+
+  for (const ids of chunk(Array.from(refsByProductId.keys()))) {
+    if (remainingRequests() <= 0) break;
+    try {
+      const payload = descriptor.isInventory
+        ? await callApi(descriptor.dataMethod, {
+          inventory_id: descriptor.numericStorageId,
+          products: ids.map((id) => Number.isSafeInteger(Number(id)) ? Number(id) : id),
+          include_channels_media: true,
+        })
+        : await callApi(descriptor.dataMethod, {
+          storage_id: descriptor.apiStorageId,
+          products: ids,
+        });
+      const products = payload?.products && typeof payload.products === 'object' ? payload.products : {};
+      for (const productId of ids) {
+        const product = products[productId] ?? products[String(productId)];
+        if (!product) continue;
+        for (const ref of refsByProductId.get(productId) || []) {
+          const entry = descriptor.isInventory ? inventoryEntry(product, ref) : externalEntry(product);
+          productCatalog[ref.key] = entry;
+          setCached(ref.key, entry);
+        }
+      }
+    } catch (error) {
+      warnings.push({
+        scope: descriptor.isInventory ? 'inventory_bulk_data' : 'external_bulk_data',
+        storageId: descriptor.isInventory ? descriptor.numericStorageId : descriptor.apiStorageId,
         code: error?.code || error?.message || 'catalog_lookup_failed',
       });
     }
   }
+}
 
-  for (const { ref: storageRef, matches } of resolvedByStorage.values()) {
-    const isInventory = storageRef.storage === 'db';
-    const numericStorageId = Number(storageRef.storageId);
-    const apiStorageId = isInventory ? '' : `${storageRef.storage}_${numericStorageId}`;
-    for (const batch of chunk(matches)) {
-      const ids = batch.map((item) => Number.isSafeInteger(Number(item.productId)) ? Number(item.productId) : item.productId);
-      try {
-        const payload = isInventory
-          ? await callApi('getInventoryProductsData', {
-            inventory_id: numericStorageId,
-            products: ids,
-            include_channels_media: true,
-          })
-          : await callApi('getProductsData', {
-            storage_id: apiStorageId,
-            products: ids,
-          });
-        const products = payload?.products && typeof payload.products === 'object' ? payload.products : {};
-        for (const item of batch) {
-          const product = products[item.productId] ?? products[String(item.productId)];
-          if (!product) continue;
-          const entry = isInventory ? inventoryEntry(product, item.ref) : externalEntry(product);
-          productCatalog[item.ref.key] = entry;
-          setCached(item.ref.key, entry);
+async function resolveUnlinkedStorageRefs(refs, productCatalog, warnings, callApi, remainingRequests = () => Number.POSITIVE_INFINITY) {
+  const candidates = refs
+    .filter((ref) => !ref.productId && ['db', 'shop', 'warehouse'].includes(ref.storage))
+    .filter((ref) => Number.isInteger(Number(ref.storageId)) && Number(ref.storageId) > 0)
+    .filter((ref) => ref.ean || ref.sku || ref.name)
+    .filter((ref) => normalizeImageUrls(productCatalog[ref.key]?.images).length === 0);
+  if (!candidates.length) return;
+
+  const groups = new Map();
+  for (const ref of candidates) {
+    const descriptor = storageDescriptor(ref);
+    if (!groups.has(descriptor.key)) groups.set(descriptor.key, { descriptor, refs: [] });
+    groups.get(descriptor.key).refs.push(ref);
+  }
+
+  for (const { descriptor, refs: storageRefs } of groups.values()) {
+    const bulkMatchedKeys = new Set();
+    if (storageRefs.length >= UNLINKED_BULK_SCAN_MIN_REFS && remainingRequests() > 0) {
+      const snapshot = currentStorageSnapshot(descriptor);
+      const complete = await advanceStorageSnapshot(descriptor, snapshot, warnings, callApi, remainingRequests);
+      if (complete) {
+        const rows = Array.from(snapshot.rowsById.values());
+        const matches = [];
+        for (const ref of storageRefs) {
+          const match = exactBulkUnlinkedMatch(rows, ref);
+          if (match) {
+            matches.push({ ref, productId: match.id });
+            bulkMatchedKeys.add(ref.key);
+          } else if (!ref.ean) {
+            // A complete exact-storage scan is authoritative for SKU/full-name
+            // matching. EAN misses remain eligible for filter_ean because that
+            // documented filter also searches additional EANs hidden from rows.
+            productCatalog[ref.key] = { state: 'unlinked_storage_not_unique', images: [] };
+          }
         }
+        await loadMatchedProductImages(descriptor, matches, productCatalog, warnings, callApi, remainingRequests);
+      }
+    }
+
+    const individualRefs = storageRefs
+      .filter((ref) => !bulkMatchedKeys.has(ref.key))
+      .filter((ref) => !productCatalog[ref.key])
+      .slice(0, UNLINKED_STORAGE_MAX_PER_RUN);
+    const matches = [];
+    for (const ref of individualRefs) {
+      if (remainingRequests() <= 0) break;
+      const strategy = ref.ean ? 'ean' : (ref.sku ? 'sku' : 'name');
+      const params = descriptor.isInventory
+        ? { inventory_id: descriptor.numericStorageId, page: 1 }
+        : { storage_id: descriptor.apiStorageId, page: 1 };
+      if (strategy === 'ean') params.filter_ean = ref.ean;
+      else if (strategy === 'sku') params.filter_sku = ref.sku;
+      else params.filter_name = ref.name;
+
+      let match = null;
+      try {
+        match = exactUnlinkedMatch(inventoryListRows(await callApi(descriptor.listMethod, params)), ref, strategy);
+        if (!match && strategy === 'name') {
+          for (const filterName of distinctiveNameFilters(ref.name)) {
+            if (remainingRequests() <= 0) break;
+            const fallbackParams = descriptor.isInventory
+              ? { inventory_id: descriptor.numericStorageId, page: 1, filter_name: filterName }
+              : { storage_id: descriptor.apiStorageId, page: 1, filter_name: filterName };
+            match = exactUnlinkedMatch(inventoryListRows(await callApi(descriptor.listMethod, fallbackParams)), ref, strategy);
+            if (match) break;
+          }
+        }
+        if (!match) {
+          productCatalog[ref.key] = { state: 'unlinked_storage_not_unique', images: [] };
+          continue;
+        }
+        matches.push({ ref, productId: match.id });
       } catch (error) {
         warnings.push({
-          scope: isInventory ? 'inventory_unlinked_data' : 'external_unlinked_data',
-          storageId: isInventory ? numericStorageId : apiStorageId,
+          scope: descriptor.isInventory ? 'inventory_unlinked_lookup' : 'external_unlinked_lookup',
+          storageId: descriptor.isInventory ? descriptor.numericStorageId : descriptor.apiStorageId,
           code: error?.code || error?.message || 'catalog_lookup_failed',
         });
       }
     }
+    await loadMatchedProductImages(descriptor, matches, productCatalog, warnings, callApi, remainingRequests);
   }
 }
 
-function decodeHtmlEntities(value) {
-  return String(value || '')
-    .replace(/&amp;/g, '&')
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>');
-}
-
-function safeAllegroImageUrl(value) {
-  const raw = decodeHtmlEntities(value).trim();
-  if (!raw) return '';
-  try {
-    const url = new URL(raw);
-    if (url.protocol !== 'https:') return '';
-    const host = url.hostname.toLowerCase();
-    if (host !== 'allegroimg.com' && !host.endsWith('.allegroimg.com')) return '';
-    return url.toString();
-  } catch (_) {
-    return '';
-  }
-}
-
-function extractAllegroImageFromHtml(html) {
-  const source = String(html || '');
-  const metaPatterns = [
-    /<meta[^>]+property=["']og:image(?::secure_url)?["'][^>]+content=["']([^"']+)["'][^>]*>/i,
-    /<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:image(?::secure_url)?["'][^>]*>/i,
-    /<meta[^>]+name=["']twitter:image["'][^>]+content=["']([^"']+)["'][^>]*>/i,
-    /<meta[^>]+content=["']([^"']+)["'][^>]+name=["']twitter:image["'][^>]*>/i,
-  ];
-  for (const pattern of metaPatterns) {
-    const match = source.match(pattern);
-    const url = safeAllegroImageUrl(match?.[1]);
-    if (url) return url;
-  }
-  return '';
-}
-
-async function fetchAllegroOfferImage(auctionId) {
-  const id = cleanId(auctionId);
-  if (!/^\d{5,30}$/.test(id)) return '';
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), ALLEGRO_OFFER_TIMEOUT_MS);
-  try {
-    // The slug is deliberately synthetic: Allegro identifies the concrete
-    // listing by the numeric suffix. No product name/SKU matching participates.
-    for (const target of [`https://allegro.pl/oferta/x-${encodeURIComponent(id)}`, `https://allegro.pl/oferta/${encodeURIComponent(id)}`]) {
-      const response = await fetch(target, {
-        method: 'GET',
-        redirect: 'follow',
-        signal: controller.signal,
-        headers: {
-          Accept: 'text/html,application/xhtml+xml',
-          'Accept-Language': 'pl-PL,pl;q=0.9,en;q=0.7',
-          'User-Agent': 'Mozilla/5.0 (compatible; WarehouseProductImageResolver/1.0)',
-        },
-      });
-      if (!response.ok) continue;
-      const html = await response.text();
-      const image = extractAllegroImageFromHtml(html);
-      if (image) return image;
-    }
-    return '';
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-async function resolveAllegroOfferRefs(refs, productCatalog, warnings, imageLoader = fetchAllegroOfferImage) {
-  const candidates = refs
-    .filter((ref) => ref.sourceType === 'allegro' && /^\d{5,30}$/.test(ref.auctionId))
-    .filter((ref) => normalizeImageUrls(productCatalog[ref.key]?.images).length === 0)
-    .slice(0, ALLEGRO_OFFER_MAX_PER_RUN);
-
-  for (const ref of candidates) {
-    const cached = getCached(ref.key);
-    if (cached && normalizeImageUrls(cached.images).length) {
-      productCatalog[ref.key] = cached;
-      continue;
-    }
-    try {
-      const imageUrl = await imageLoader(ref.auctionId);
-      if (!imageUrl) {
-        if (!productCatalog[ref.key]) productCatalog[ref.key] = { state: 'offer_no_image', images: [] };
-        continue;
-      }
-      const entry = { state: 'resolved', images: [imageUrl] };
-      productCatalog[ref.key] = entry;
-      setCached(ref.key, entry);
-    } catch (error) {
-      warnings.push({
-        scope: 'allegro_offer_image',
-        auctionId: ref.auctionId,
-        code: error?.name === 'AbortError' ? 'offer_image_timeout' : (error?.code || error?.message || 'offer_image_lookup_failed'),
-      });
-    }
-  }
-}
+// BaseLinker does not expose an order-line photo or a documented offer-photo
+// lookup by auction_id. Production resolution intentionally stays on the
+// documented storage APIs above instead of scraping marketplace HTML.
 
 /**
  * Enriches the order lines returned by the current getOrders read without
@@ -582,12 +595,13 @@ async function fetchBaseLinkerProductCatalogSingle(orders, callApi, { maxRequest
     // Exact-source fallback for BaseLinker order rows whose product_id is blank.
     // The lookup stays inside the row's authoritative storage_id and is bounded
     // by both the per-run candidate cap and the shared BaseLinker request budget.
-    await resolveUnlinkedStorageRefs(refs, productCatalog, warnings, budgetedCallApi);
-
-    // Allegro listing fallback uses the exact auction_id and consumes no
-    // BaseLinker API budget. It covers unlinked marketplace rows when the
-    // catalog binding is missing or has no usable image.
-    await resolveAllegroOfferRefs(refs, productCatalog, warnings);
+    await resolveUnlinkedStorageRefs(
+      refs,
+      productCatalog,
+      warnings,
+      budgetedCallApi,
+      () => Math.max(0, maxRequests - requestCount),
+    );
   }
 
   for (const ref of refs) {
@@ -616,7 +630,13 @@ async function getCachedBaseLinkerProductCatalog(orders) {
     productCatalogStats: { requested: 0, resolved: 0, unresolved: 0, warnings: 0 },
     productCatalogWarnings: [],
   };
-  const rows = await BaseLinkerProductImageCache.find({ productKey: { $in: refs.map((ref) => ref.key) }, resolverVersion: IMAGE_RESOLVER_VERSION })
+  const rows = await BaseLinkerProductImageCache.find({
+    productKey: { $in: refs.map((ref) => ref.key) },
+    $or: [
+      { resolverVersion: IMAGE_RESOLVER_VERSION },
+      { state: 'resolved', imageUrl: { $nin: ['', null] } },
+    ],
+  })
     .select('productKey state imageUrl refreshedAt resolverVersion').lean();
   const byKey = new Map(rows.map((row) => [String(row.productKey), row]));
   const productCatalog = {};
@@ -667,11 +687,15 @@ async function warmBaseLinkerProductCatalog(orders, callApi, { maxRequests = 5, 
   const nowMs = Date.now();
   const freshRows = await BaseLinkerProductImageCache.find({
     productKey: { $in: warmRefs.map((ref) => ref.key) },
-    resolverVersion: IMAGE_RESOLVER_VERSION,
+    $or: [
+      { resolverVersion: IMAGE_RESOLVER_VERSION },
+      { state: 'resolved', imageUrl: { $nin: ['', null] } },
+    ],
   }).select('productKey state imageUrl refreshedAt resolverVersion').lean();
   const fresh = new Set(freshRows.filter((row) => {
     const refreshedAt = row?.refreshedAt ? new Date(row.refreshedAt).getTime() : 0;
     const hasImage = String(row?.imageUrl || '').trim().length > 0 && String(row?.state || '') === 'resolved';
+    if (!hasImage && Number(row?.resolverVersion) !== IMAGE_RESOLVER_VERSION) return false;
     const ttl = hasImage ? PERSISTED_PRODUCT_CACHE_TTL_MS : NEGATIVE_PRODUCT_CACHE_TTL_MS;
     return refreshedAt > 0 && (nowMs - refreshedAt) < ttl;
   }).map((row) => String(row.productKey)));
@@ -708,7 +732,17 @@ async function warmBaseLinkerProductCatalog(orders, callApi, { maxRequests = 5, 
     } });
   }
   if (writes.length) await BaseLinkerProductImageCache.bulkWrite(writes, { ordered: false });
-  return getCachedBaseLinkerProductCatalog(list);
+  const cachedResult = await getCachedBaseLinkerProductCatalog(list);
+  return {
+    ...cachedResult,
+    productCatalogWarnings: freshResult.productCatalogWarnings || [],
+    productCatalogWarmStats: {
+      requestCount: Number(freshResult.requestCount || 0),
+      attempted: Number(freshResult.productCatalogStats?.requested || 0),
+      resolvedThisRun: Number(freshResult.productCatalogStats?.resolved || 0),
+      warnings: Number(freshResult.productCatalogStats?.warnings || 0),
+    },
+  };
 }
 
 async function fetchBaseLinkerProductCatalog(orders, callApi = null) {
@@ -748,8 +782,7 @@ module.exports = {
   normalizeImageUrls,
   inventoryImageUrls,
   exactUnlinkedMatch,
-  extractAllegroImageFromHtml,
-  fetchAllegroOfferImage,
+  exactBulkUnlinkedMatch,
   collectOrderProductRefs,
   fetchBaseLinkerProductCatalog,
   getCachedBaseLinkerProductCatalog,

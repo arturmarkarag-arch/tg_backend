@@ -71,6 +71,10 @@ Only resolution state, first image URL and refresh timestamps are persisted. Cat
 
 Transient transport/API lookup failures are not cached as a successful 24-hour result.
 
+`getOrders.products[].product_id` may be blank. For a backlog of such rows, the resolver uses only documented storage APIs: it incrementally reads the exact source catalog with `getInventoryProductsList`/`getProductsList`, accepts only a unique exact EAN, SKU or normalized full-name match, and loads media with `getInventoryProductsData`/`getProductsData` in chunks of 100. The catalog-list snapshot advances across scheduler cycles under the same request cap, so a large queue drains fairly instead of retrying the first few rows forever.
+
+Marketplace HTML is never scraped for photos. If the order line has no product link and no unique exact match inside its declared storage, the UI remains without a photo rather than risking a wrong product image.
+
 ## 7. API budget and observability
 
 Every real outgoing BaseLinker HTTP call passes through the central client and is recorded in a **rolling 60-second window** by:
