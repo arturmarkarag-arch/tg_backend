@@ -1,3 +1,4 @@
+const { Sentry, sentryEnabled } = require('./instrument');
 const express = require('express');
 const cors = require('cors');
 const path = require('path');
@@ -185,6 +186,13 @@ app.use('/api/v1/auth', authV1Router);
 if (ENABLE_TEST_API) {
   // eslint-disable-next-line global-require
   app.use('/api/warehouse-test', requireTelegramRole('admin'), require('./routes/warehouseTest'));
+}
+
+// @sentry/node 10.x requires the Express error handler to be mounted after
+// routes and before our own JSON error handler. It captures server failures but
+// then forwards the same error, so the existing API response contract is intact.
+if (sentryEnabled) {
+  Sentry.setupExpressErrorHandler(app);
 }
 
 // Centralised error handler — converts AppError (and known Mongoose errors)

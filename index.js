@@ -1,11 +1,7 @@
-const dotenv = require('dotenv');
-const path = require('path');
-
-// Load local .env from repo root only when running locally.
-// In production (Render), environment variables are provided by the service.
-if (process.env.NODE_ENV !== 'production') {
-  dotenv.config({ path: path.resolve(__dirname, '../.env') });
-}
+// Sentry must initialize before http/Express/Mongoose or their automatic
+// instrumentation cannot patch those modules. instrument.js also loads the
+// existing local ../.env contract before initializing the SDK.
+const { Sentry, sentryEnabled } = require('./instrument');
 
 const http = require('http');
 const mongoose = require('mongoose');
@@ -49,6 +45,9 @@ async function shutdown(signal, code = 0) {
     await mongoose.connection.close(false);
   } catch (err) {
   } finally {
+    if (sentryEnabled) {
+      try { await Sentry.flush(2_000); } catch (_) { /* best effort during shutdown */ }
+    }
     clearTimeout(hardExit);
     process.exit(code);
   }
@@ -309,6 +308,10 @@ async function startServer() {
     });
   } catch (error) {
     console.error('[startup]', error?.stack || error);
+    if (sentryEnabled) {
+      Sentry.captureException(error);
+      try { await Sentry.flush(2_000); } catch (_) { /* startup is already failing */ }
+    }
     process.exit(1);
   }
 }
