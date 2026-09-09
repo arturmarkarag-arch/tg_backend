@@ -89,6 +89,15 @@ async function main() {
     AppSetting.find({ key: /^baselinker\.productImageSweep\.v1:/ }).select('key value').lean(),
   ]);
 
+  if (process.argv.includes('--cache-only')) {
+    console.log(JSON.stringify({
+      measuredAt: new Date().toISOString(),
+      persistedCacheVersions: cacheVersions,
+      trackedSweepStates: sweepStates.map((row) => ({ key: row.key, value: row.value })),
+    }, null, 2));
+    return;
+  }
+
   const indexedOrders = indexedDocs
     .map((doc) => ({ ...(doc.preview || {}), baseLinkerAccountId: clean(doc.baseLinkerAccountId), order_id: Number(doc.orderId) }))
     .filter((order) => order.baseLinkerAccountId && Array.isArray(order.products));
