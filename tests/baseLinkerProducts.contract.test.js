@@ -2,6 +2,7 @@ const {
   catalogKeyForOrderProduct,
   normalizeImageUrls,
   inventoryImageUrls,
+  exactBulkUnlinkedMatch,
   fetchBaseLinkerProductCatalog,
 } = require('../services/baseLinkerProducts');
 
@@ -43,6 +44,15 @@ describe('BaseLinker product catalog enrichment', () => {
       },
       media_options: { allegro_12438: 1 },
     }, { sourceType: 'allegro', sourceId: '12438' })).toEqual(['https://cdn/allegro.jpg']);
+  });
+
+  it('fails closed when exact EAN and SKU point at different catalog products', () => {
+    const rows = [
+      { id: '1', row: { ean: '111', sku: 'SKU-A', name: 'First' } },
+      { id: '2', row: { ean: '222', sku: 'SKU-B', name: 'Second' } },
+    ];
+    expect(exactBulkUnlinkedMatch(rows, { ean: '111', sku: 'SKU-B', name: '' }))
+      .toEqual({ match: null, conflict: true });
   });
 
   it('resolves an unlinked order line only inside its exact inventory by unique full name, then loads channel-aware media', async () => {

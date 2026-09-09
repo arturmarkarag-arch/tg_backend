@@ -114,9 +114,11 @@ function getCached(key) {
 }
 
 function setCached(key, value) {
+  const hasResolvedImage = String(value?.state || '') === 'resolved'
+    && normalizeImageUrls(value?.images).length > 0;
   productCache.set(key, {
     value,
-    expiresAt: Date.now() + PRODUCT_CACHE_TTL_MS,
+    expiresAt: Date.now() + (hasResolvedImage ? PRODUCT_CACHE_TTL_MS : NEGATIVE_PRODUCT_CACHE_TTL_MS),
   });
 }
 
@@ -230,7 +232,13 @@ async function resolveExternalRefs(refs, productCatalog, warnings, callApi) {
         for (const productId of ids) {
           const ref = byProductId.get(String(productId));
           const product = products[productId] ?? products[String(productId)];
-          if (!ref || !product) continue;
+          if (!ref) continue;
+          if (!product) {
+            const entry = { state: 'catalog_product_not_returned', images: [] };
+            productCatalog[ref.key] = entry;
+            setCached(ref.key, entry);
+            continue;
+          }
           const entry = externalEntry(product);
           productCatalog[ref.key] = entry;
           setCached(ref.key, entry);
@@ -279,7 +287,14 @@ async function tryDirectInventoryRefs(refs, productCatalog, unresolved, warnings
         for (const productId of ids) {
           const ref = byProductId.get(String(productId));
           const product = products[productId] ?? products[String(productId)];
-          if (!ref || !product) continue;
+          if (!ref) continue;
+          if (!product) {
+            found.add(ref.key);
+            const entry = { state: 'catalog_product_not_returned', images: [] };
+            productCatalog[ref.key] = entry;
+            setCached(ref.key, entry);
+            continue;
+          }
           found.add(ref.key);
           const entry = inventoryEntry(product, ref);
           productCatalog[ref.key] = entry;
@@ -422,7 +437,10 @@ function exactBulkUnlinkedMatch(rows, ref) {
     if (matches.length === 1) candidates.push(matches[0]);
   }
   const ids = [...new Set(candidates.map((item) => item.id))];
-  return ids.length === 1 ? candidates.find((item) => item.id === ids[0]) : null;
+  return {
+    match: ids.length === 1 ? candidates.find((item) => item.id === ids[0]) : null,
+    conflict: ids.length > 1,
+  };
 }
 
 async function loadMatchedProductImages(descriptor, matches, productCatalog, warnings, callApi, remainingRequests) {
@@ -491,10 +509,12 @@ async function resolveUnlinkedStorageRefs(refs, productCatalog, warnings, callAp
         const rows = Array.from(snapshot.rowsById.values());
         const matches = [];
         for (const ref of storageRefs) {
-          const match = exactBulkUnlinkedMatch(rows, ref);
+          const { match, conflict } = exactBulkUnlinkedMatch(rows, ref);
           if (match) {
             matches.push({ ref, productId: match.id });
             bulkMatchedKeys.add(ref.key);
+          } else if (conflict) {
+            productCatalog[ref.key] = { state: 'unlinked_identity_conflict', images: [] };
           } else if (!ref.ean) {
             // A complete exact-storage scan is authoritative for SKU/full-name
             // matching. EAN misses remain eligible for filter_ean because that
@@ -641,16 +661,22 @@ async function getCachedBaseLinkerProductCatalog(orders) {
   const byKey = new Map(rows.map((row) => [String(row.productKey), row]));
   const productCatalog = {};
   let resolved = 0;
+  const byState = {};
   for (const ref of refs) {
     const row = byKey.get(ref.key);
-    if (!row) continue;
+    if (!row) {
+      byState.not_cached = Number(byState.not_cached || 0) + 1;
+      continue;
+    }
     const image = String(row.imageUrl || '').trim();
-    productCatalog[ref.key] = { state: String(row.state || 'unresolved'), images: image ? [image] : [] };
+    const state = String(row.state || 'unresolved');
+    productCatalog[ref.key] = { state, images: image ? [image] : [] };
+    byState[state] = Number(byState[state] || 0) + 1;
     if (String(row.state || '') === 'resolved' && image) resolved += 1;
   }
   return {
     productCatalog,
-    productCatalogStats: { requested: refs.length, resolved, unresolved: Math.max(0, refs.length - resolved), warnings: 0 },
+    productCatalogStats: { requested: refs.length, resolved, unresolved: Math.max(0, refs.length - resolved), warnings: 0, byState },
     productCatalogWarnings: [],
   };
 }
