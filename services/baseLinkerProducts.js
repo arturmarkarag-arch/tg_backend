@@ -11,7 +11,7 @@ const STORAGE_LIST_PAGE_SIZE = 1000;
 const STORAGE_CATALOG_SNAPSHOT_TTL_MS = Math.max(5 * 60 * 1000, Number(process.env.BASELINKER_STORAGE_CATALOG_SNAPSHOT_TTL_MS) || (60 * 60 * 1000));
 const UNLINKED_BULK_SCAN_MIN_REFS = Math.max(2, Number(process.env.BASELINKER_UNLINKED_BULK_SCAN_MIN_REFS) || 8);
 const STORAGE_CATALOG_MAX_PAGES = Math.max(1, Math.min(100, Number(process.env.BASELINKER_STORAGE_CATALOG_MAX_PAGES) || 50));
-const IMAGE_RESOLVER_VERSION = 6;
+const IMAGE_RESOLVER_VERSION = 7;
 const UNLINKED_STORAGE_MAX_PER_RUN = Math.min(10, Math.max(1, Number(process.env.BASELINKER_UNLINKED_STORAGE_MAX_PER_RUN || process.env.BASELINKER_UNLINKED_INVENTORY_MAX_PER_RUN) || 4));
 const productCache = new Map();
 const storageCatalogSnapshots = new Map();
@@ -185,8 +185,8 @@ function collectOrderProductRefs(orders) {
       const accountId = cleanId(order?.baseLinkerAccountId);
       const sourceType = cleanId(order?.order_source).toLowerCase();
       const key = catalogKeyForOrderProduct(product, accountId, sourceType, order?.order_id);
-      if (!key || refsByKey.has(key)) continue;
-      refsByKey.set(key, {
+      if (!key) continue;
+      const incoming = {
         key,
         accountId,
         sourceType,
@@ -198,7 +198,31 @@ function collectOrderProductRefs(orders) {
         ean: cleanId(product.ean),
         sku: cleanId(product.sku),
         name: cleanId(product.name),
-      });
+      };
+      const existing = refsByKey.get(key);
+      if (!existing) {
+        refsByKey.set(key, incoming);
+        continue;
+      }
+
+      // The same marketplace offer often appears in many orders. Base may omit
+      // SKU/EAN on one occurrence and return it on another, so keeping only the
+      // first row makes the result depend on order chronology. Merge every
+      // stable identity signal, but fail closed if Base reports a conflict.
+      for (const field of ['ean', 'sku', 'name']) {
+        const next = incoming[field];
+        if (!next || existing.identityConflicts?.[field]) continue;
+        if (!existing[field]) {
+          existing[field] = next;
+          continue;
+        }
+        const left = field === 'name' ? canonicalNameSignature(existing[field]) : exactText(existing[field]);
+        const right = field === 'name' ? canonicalNameSignature(next) : exactText(next);
+        if (left && right && left !== right) {
+          existing[field] = '';
+          existing.identityConflicts = { ...(existing.identityConflicts || {}), [field]: true };
+        }
+      }
     }
   }
   return Array.from(refsByKey.values());

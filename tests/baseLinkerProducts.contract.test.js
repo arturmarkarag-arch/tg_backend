@@ -3,6 +3,7 @@ const {
   normalizeImageUrls,
   inventoryImageUrls,
   exactBulkUnlinkedMatch,
+  collectOrderProductRefs,
   fetchBaseLinkerProductCatalog,
 } = require('../services/baseLinkerProducts');
 
@@ -25,6 +26,42 @@ describe('BaseLinker product catalog enrichment', () => {
       auction_id: '18424860436',
     }, 'A', 'allegro')).toBe('A:offer:allegro:18424860436');
     expect(catalogKeyForOrderProduct({ auction_id: '18424860436' }, 'A', 'amazon')).toBeNull();
+  });
+
+  it('merges identity fields from repeated occurrences of the same marketplace offer', () => {
+    const refs = collectOrderProductRefs([
+      {
+        baseLinkerAccountId: 'A', order_id: 1, order_source: 'allegro', order_source_id: 12438,
+        products: [{ storage: 'db', storage_id: 11049, product_id: '', auction_id: '18424860436', name: 'Exact product', sku: '' }],
+      },
+      {
+        baseLinkerAccountId: 'A', order_id: 2, order_source: 'allegro', order_source_id: 12438,
+        products: [{ storage: 'db', storage_id: 11049, product_id: '', auction_id: '18424860436', name: 'Exact product', sku: 'SKU-42' }],
+      },
+    ]);
+
+    expect(refs).toHaveLength(1);
+    expect(refs[0]).toMatchObject({
+      key: 'A:offer:allegro:18424860436',
+      sku: 'SKU-42',
+      name: 'Exact product',
+    });
+  });
+
+  it('fails closed when repeated occurrences disagree on a stable identity field', () => {
+    const refs = collectOrderProductRefs([
+      {
+        baseLinkerAccountId: 'A', order_id: 1, order_source: 'allegro', order_source_id: 12438,
+        products: [{ storage: 'db', storage_id: 11049, product_id: '', auction_id: '18424860436', name: 'Exact product', sku: 'SKU-A' }],
+      },
+      {
+        baseLinkerAccountId: 'A', order_id: 2, order_source: 'allegro', order_source_id: 12438,
+        products: [{ storage: 'db', storage_id: 11049, product_id: '', auction_id: '18424860436', name: 'Exact product', sku: 'SKU-B' }],
+      },
+    ]);
+
+    expect(refs[0].sku).toBe('');
+    expect(refs[0].identityConflicts).toEqual({ sku: true });
   });
 
   it('prefers default inventory gallery images and removes duplicates', () => {
