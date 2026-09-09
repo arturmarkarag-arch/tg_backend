@@ -11,7 +11,7 @@ const checks = [
   ['linked products are batched in chunks of 100', products.includes('const LOOKUP_CHUNK_SIZE = 100') && products.includes('for (const ids of chunk(Array.from(byProductId.keys())))')],
   ['db inventory photos use one getInventoryProductsData batch per inventory/chunk', products.includes("callApi('getInventoryProductsData'") && products.includes('inventory_id: inventoryId') && products.includes('products: ids.map')],
   ['channel media is requested in the same product-data call', products.includes('include_channels_media: true')],
-  ['central poll resolves only product_id-linked rows', index.includes('{ maxRequests: FULL_SCAN_PRODUCT_WARM_REQUESTS, linkedOnly: true }') && products.includes('const warmRefs = linkedOnly ? refs.filter((ref) => ref.productId) : refs')],
+  ['central poll includes exact-source fallback for product_id-blank rows', index.includes('{ maxRequests: FULL_SCAN_PRODUCT_WARM_REQUESTS, linkedOnly: false }') && products.includes('const warmRefs = linkedOnly ? refs.filter((ref) => ref.productId) : refs') && products.includes('resolveUnlinkedStorageRefs')],
   ['cache prevents repeated product-data calls while fresh', products.includes('PERSISTED_PRODUCT_CACHE_TTL_MS') && products.includes('staleKeys') && products.includes('BaseLinkerProductImageCache.bulkWrite')],
   ['queue preview persists ready-to-render image_url', index.includes('getOrdersWithCachedProductImages(rows.map((row) => row.preview))') && dto.includes("setIfDefined(out, 'image_url', product.image_url)" )],
   ['worker read joins only local cached images', routes.includes('getOrdersWithCachedProductImages(inputOrders)') && !routes.includes('compactProductCatalog(catalog.productCatalog')],

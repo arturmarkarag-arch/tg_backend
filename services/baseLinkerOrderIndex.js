@@ -399,7 +399,7 @@ async function performIndexSync(scope, opts = {}) {
     await warmBaseLinkerProductCatalog(
       rows.map((row) => row.preview).filter(Boolean),
       makeBaseLinkerAccountCaller(accountId, { usageStage: 'product_catalog_sync' }),
-      { maxRequests: FULL_SCAN_PRODUCT_WARM_REQUESTS, linkedOnly: true },
+      { maxRequests: FULL_SCAN_PRODUCT_WARM_REQUESTS, linkedOnly: false },
     );
   } catch (_) { /* product images are supplementary; queue truth must still sync */ }
 

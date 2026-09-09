@@ -7,10 +7,10 @@ const PRODUCT_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const NEGATIVE_PRODUCT_CACHE_TTL_MS = Math.max(5 * 60 * 1000, Number(process.env.BASELINKER_PRODUCT_NEGATIVE_CACHE_TTL_MS) || (60 * 60 * 1000));
 const PERSISTED_PRODUCT_CACHE_TTL_MS = Math.max(PRODUCT_CACHE_TTL_MS, Number(process.env.BASELINKER_PRODUCT_CACHE_TTL_MS) || (24 * 60 * 60 * 1000));
 const LOOKUP_CHUNK_SIZE = 100;
-const IMAGE_RESOLVER_VERSION = 4;
+const IMAGE_RESOLVER_VERSION = 5;
 const ALLEGRO_OFFER_TIMEOUT_MS = Math.min(15000, Math.max(2000, Number(process.env.BASELINKER_ALLEGRO_IMAGE_TIMEOUT_MS) || 6000));
 const ALLEGRO_OFFER_MAX_PER_RUN = Math.min(20, Math.max(1, Number(process.env.BASELINKER_ALLEGRO_IMAGE_MAX_PER_RUN) || 8));
-const UNLINKED_INVENTORY_MAX_PER_RUN = Math.min(10, Math.max(1, Number(process.env.BASELINKER_UNLINKED_INVENTORY_MAX_PER_RUN) || 4));
+const UNLINKED_STORAGE_MAX_PER_RUN = Math.min(10, Math.max(1, Number(process.env.BASELINKER_UNLINKED_STORAGE_MAX_PER_RUN || process.env.BASELINKER_UNLINKED_INVENTORY_MAX_PER_RUN) || 4));
 const productCache = new Map();
 let productImageCacheReadyPromise = null;
 
@@ -29,7 +29,7 @@ function cleanId(value) {
   return String(value).trim();
 }
 
-function catalogKeyForOrderProduct(product, accountId = '', orderSource = '') {
+function catalogKeyForOrderProduct(product, accountId = '', orderSource = '', orderId = '') {
   const account = cleanId(accountId || product?.baseLinkerAccountId);
   if (!account) throw appError('baselinker_account_id_required');
   const exactProductKey = productKey(account, product);
@@ -43,6 +43,16 @@ function catalogKeyForOrderProduct(product, accountId = '', orderSource = '') {
   // no name/SKU guessing is ever needed.
   if (source === 'allegro' && /^\d{5,30}$/.test(auctionId)) {
     return `${account}:offer:allegro:${auctionId}`;
+  }
+
+  // BaseLinker explicitly allows getOrders.products[].product_id to be blank.
+  // In that case we still need a stable key for this exact order line so the
+  // photo resolver can use the authoritative storage_id + EAN/SKU/name without
+  // guessing across inventories or across orders.
+  const exactOrderId = cleanId(orderId || product?.order_id);
+  const orderProductId = cleanId(product?.order_product_id ?? product?.orderProductId);
+  if (exactOrderId && orderProductId) {
+    return `${account}:order:${exactOrderId}:line:${orderProductId}`;
   }
   return null;
 }
@@ -169,7 +179,7 @@ function collectOrderProductRefs(orders) {
     for (const product of Array.isArray(order?.products) ? order.products : []) {
       const accountId = cleanId(order?.baseLinkerAccountId);
       const sourceType = cleanId(order?.order_source).toLowerCase();
-      const key = catalogKeyForOrderProduct(product, accountId, sourceType);
+      const key = catalogKeyForOrderProduct(product, accountId, sourceType, order?.order_id);
       if (!key || refsByKey.has(key)) continue;
       refsByKey.set(key, {
         key,
@@ -312,7 +322,14 @@ function distinctiveNameFilters(value) {
 
 function inventoryListRows(payload) {
   const products = payload?.products && typeof payload.products === 'object' ? payload.products : {};
-  return Object.entries(products).map(([id, row]) => ({ id: cleanId(row?.id || id), row })).filter((item) => item.id);
+  if (Array.isArray(products)) {
+    return products
+      .map((row) => ({ id: cleanId(row?.id ?? row?.product_id), row }))
+      .filter((item) => item.id);
+  }
+  return Object.entries(products)
+    .map(([id, row]) => ({ id: cleanId(row?.id ?? row?.product_id ?? id), row }))
+    .filter((item) => item.id);
 }
 
 function exactUnlinkedMatch(rows, ref, strategy) {
@@ -332,80 +349,92 @@ function exactUnlinkedMatch(rows, ref, strategy) {
   return matches.length === 1 ? matches[0] : null;
 }
 
-async function resolveUnlinkedInventoryRefs(refs, productCatalog, warnings, callApi) {
+async function resolveUnlinkedStorageRefs(refs, productCatalog, warnings, callApi) {
   const candidates = refs
-    .filter((ref) => !ref.productId && ref.storage === 'db')
+    .filter((ref) => !ref.productId && ['db', 'shop', 'warehouse'].includes(ref.storage))
     .filter((ref) => Number.isInteger(Number(ref.storageId)) && Number(ref.storageId) > 0)
     .filter((ref) => ref.ean || ref.sku || ref.name)
     .filter((ref) => normalizeImageUrls(productCatalog[ref.key]?.images).length === 0)
-    .slice(0, UNLINKED_INVENTORY_MAX_PER_RUN);
+    .slice(0, UNLINKED_STORAGE_MAX_PER_RUN);
   if (!candidates.length) return;
 
-  const resolvedByInventory = new Map();
+  const resolvedByStorage = new Map();
   for (const ref of candidates) {
-    const inventoryId = Number(ref.storageId);
+    const numericStorageId = Number(ref.storageId);
+    const storageKey = `${ref.storage}:${numericStorageId}`;
+    const isInventory = ref.storage === 'db';
+    const apiStorageId = isInventory ? '' : `${ref.storage}_${numericStorageId}`;
+    const method = isInventory ? 'getInventoryProductsList' : 'getProductsList';
     const strategy = ref.ean ? 'ean' : (ref.sku ? 'sku' : 'name');
-    const params = { inventory_id: inventoryId, page: 1 };
+    const params = isInventory
+      ? { inventory_id: numericStorageId, page: 1 }
+      : { storage_id: apiStorageId, page: 1 };
     if (strategy === 'ean') params.filter_ean = ref.ean;
     else if (strategy === 'sku') params.filter_sku = ref.sku;
     else params.filter_name = ref.name;
 
     try {
-      const payload = await callApi('getInventoryProductsList', params);
+      const payload = await callApi(method, params);
       let match = exactUnlinkedMatch(inventoryListRows(payload), ref, strategy);
 
-      // BaseLinker's filter_name can be order-sensitive. Keep this fallback
-      // deterministic: search only inside the already-known inventory by up to
-      // three distinctive words, then accept only one row whose complete
-      // normalized token multiset is exactly equal to the order-line name.
+      // Name search is only a deterministic fallback inside the exact source
+      // storage. We still require one row whose complete normalized token set
+      // equals the order line, so this never becomes cross-catalog guessing.
       if (!match && strategy === 'name') {
         for (const filterName of distinctiveNameFilters(ref.name)) {
-          const fallbackPayload = await callApi('getInventoryProductsList', {
-            inventory_id: inventoryId,
-            page: 1,
-            filter_name: filterName,
-          });
+          const fallbackParams = isInventory
+            ? { inventory_id: numericStorageId, page: 1, filter_name: filterName }
+            : { storage_id: apiStorageId, page: 1, filter_name: filterName };
+          const fallbackPayload = await callApi(method, fallbackParams);
           match = exactUnlinkedMatch(inventoryListRows(fallbackPayload), ref, strategy);
           if (match) break;
         }
       }
 
       if (!match) {
-        if (!productCatalog[ref.key]) productCatalog[ref.key] = { state: 'unlinked_inventory_not_unique', images: [] };
+        if (!productCatalog[ref.key]) productCatalog[ref.key] = { state: 'unlinked_storage_not_unique', images: [] };
         continue;
       }
-      if (!resolvedByInventory.has(inventoryId)) resolvedByInventory.set(inventoryId, []);
-      resolvedByInventory.get(inventoryId).push({ ref, productId: match.id });
+      if (!resolvedByStorage.has(storageKey)) resolvedByStorage.set(storageKey, { ref, matches: [] });
+      resolvedByStorage.get(storageKey).matches.push({ ref, productId: match.id });
     } catch (error) {
       warnings.push({
-        scope: 'inventory_unlinked_lookup',
-        inventoryId,
+        scope: isInventory ? 'inventory_unlinked_lookup' : 'external_unlinked_lookup',
+        storageId: isInventory ? numericStorageId : apiStorageId,
         code: error?.code || error?.message || 'catalog_lookup_failed',
       });
     }
   }
 
-  for (const [inventoryId, matches] of resolvedByInventory.entries()) {
+  for (const { ref: storageRef, matches } of resolvedByStorage.values()) {
+    const isInventory = storageRef.storage === 'db';
+    const numericStorageId = Number(storageRef.storageId);
+    const apiStorageId = isInventory ? '' : `${storageRef.storage}_${numericStorageId}`;
     for (const batch of chunk(matches)) {
       const ids = batch.map((item) => Number.isSafeInteger(Number(item.productId)) ? Number(item.productId) : item.productId);
       try {
-        const payload = await callApi('getInventoryProductsData', {
-          inventory_id: inventoryId,
-          products: ids,
-          include_channels_media: true,
-        });
+        const payload = isInventory
+          ? await callApi('getInventoryProductsData', {
+            inventory_id: numericStorageId,
+            products: ids,
+            include_channels_media: true,
+          })
+          : await callApi('getProductsData', {
+            storage_id: apiStorageId,
+            products: ids,
+          });
         const products = payload?.products && typeof payload.products === 'object' ? payload.products : {};
         for (const item of batch) {
           const product = products[item.productId] ?? products[String(item.productId)];
           if (!product) continue;
-          const entry = inventoryEntry(product, item.ref);
+          const entry = isInventory ? inventoryEntry(product, item.ref) : externalEntry(product);
           productCatalog[item.ref.key] = entry;
           setCached(item.ref.key, entry);
         }
       } catch (error) {
         warnings.push({
-          scope: 'inventory_unlinked_data',
-          inventoryId,
+          scope: isInventory ? 'inventory_unlinked_data' : 'external_unlinked_data',
+          storageId: isInventory ? numericStorageId : apiStorageId,
           code: error?.code || error?.message || 'catalog_lookup_failed',
         });
       }
@@ -550,13 +579,14 @@ async function fetchBaseLinkerProductCatalogSingle(orders, callApi, { maxRequest
   }
 
   if (!linkedOnly) {
-    // Compatibility image-resolution path only. The central queue poll intentionally
-    // does not spend extra BaseLinker requests trying to identify unlinked
-    // order lines. Its normal contract is getOrders -> product_id batch data.
-    await resolveUnlinkedInventoryRefs(refs, productCatalog, warnings, budgetedCallApi);
+    // Exact-source fallback for BaseLinker order rows whose product_id is blank.
+    // The lookup stays inside the row's authoritative storage_id and is bounded
+    // by both the per-run candidate cap and the shared BaseLinker request budget.
+    await resolveUnlinkedStorageRefs(refs, productCatalog, warnings, budgetedCallApi);
 
-    // Compatibility fallback for historical Allegro-only rows. This is not
-    // part of the central BaseLinker polling budget.
+    // Allegro listing fallback uses the exact auction_id and consumes no
+    // BaseLinker API budget. It covers unlinked marketplace rows when the
+    // catalog binding is missing or has no usable image.
     await resolveAllegroOfferRefs(refs, productCatalog, warnings);
   }
 
@@ -609,7 +639,7 @@ function attachProductImagesToOrders(orders, productCatalog = {}) {
   return (Array.isArray(orders) ? orders : []).map((order) => ({
     ...order,
     products: (Array.isArray(order?.products) ? order.products : []).map((product) => {
-      const key = catalogKeyForOrderProduct(product, order?.baseLinkerAccountId, order?.order_source);
+      const key = catalogKeyForOrderProduct(product, order?.baseLinkerAccountId, order?.order_source, order?.order_id);
       const imageUrl = key ? (normalizeImageUrls(productCatalog?.[key]?.images)[0] || '') : '';
       if (!imageUrl) return { ...product };
       return { ...product, image_url: imageUrl };
@@ -651,7 +681,7 @@ async function warmBaseLinkerProductCatalog(orders, callApi, { maxRequests = 5, 
   const missingOnlyOrders = list.map((order) => ({
     ...order,
     products: (Array.isArray(order?.products) ? order.products : []).filter((product) => {
-      const key = catalogKeyForOrderProduct(product, order?.baseLinkerAccountId, order?.order_source);
+      const key = catalogKeyForOrderProduct(product, order?.baseLinkerAccountId, order?.order_source, order?.order_id);
       return key && staleKeys.has(key) && (!linkedOnly || Boolean(String(product?.product_id || '').trim()));
     }),
   })).filter((order) => order.products.length);
@@ -665,6 +695,10 @@ async function warmBaseLinkerProductCatalog(orders, callApi, { maxRequests = 5, 
     // only deterministic results reach this cache. A transient failure is never
     // cached as a 24h successful lookup.
     const imageUrl = normalizeImageUrls(entry?.images)[0] || '';
+    // unresolved_exact_source also represents rows that were not attempted yet
+    // because the bounded request budget/candidate cap was exhausted. Persisting
+    // that as a negative cache would suppress the next poll for an hour.
+    if (state === 'unresolved_exact_source') continue;
     const accountId = String(key).split(':', 1)[0] || '';
     if (!accountId) continue;
     writes.push({ updateOne: {
