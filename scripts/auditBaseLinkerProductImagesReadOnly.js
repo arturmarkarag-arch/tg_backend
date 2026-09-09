@@ -76,10 +76,12 @@ async function main() {
     socketTimeoutMS: 120_000,
   });
 
-  const [indexedDocs, trackedDocs, accounts, cacheVersions, sweepStates] = await Promise.all([
+  const [indexedDocs, trackedDocs, accounts, cacheRows, cacheVersions, sweepStates] = await Promise.all([
     BaseLinkerOrderIndex.find({}).select('baseLinkerAccountId orderId preview').lean(),
     BaseLinkerPickingOrder.find({}).select('baseLinkerAccountId orderId sourceType sourceId items workflowStage').lean(),
     BaseLinkerAccount.find({}).select('accountId name').lean(),
+    BaseLinkerProductImageCache.find({})
+      .select('productKey state imageUrl resolverVersion refreshedAt').lean(),
     BaseLinkerProductImageCache.aggregate([
       { $group: { _id: { resolverVersion: '$resolverVersion', state: '$state' }, count: { $sum: 1 } } },
       { $sort: { '_id.resolverVersion': 1, '_id.state': 1 } },
@@ -102,6 +104,10 @@ async function main() {
   }
 
   const catalogs = {};
+  const persistedByKey = new Map(cacheRows.map((row) => [clean(row.productKey), row]));
+  const persistedImages = new Map(cacheRows
+    .filter((row) => clean(row.state) === 'resolved' && clean(row.imageUrl))
+    .map((row) => [clean(row.productKey), clean(row.imageUrl)]));
   const api = {};
   const warnings = [];
   for (const [accountId, accountOrders] of groups) {
@@ -124,11 +130,13 @@ async function main() {
   const missingBySourceAndReason = {};
   const uniqueMissingBySource = {};
   const uniqueMissingBySourceSets = {};
+  const pendingResolvableByKey = {};
   const uniqueMissing = new Set();
   const affectedOrders = new Set();
   let totalLines = 0;
   let missingLines = 0;
   let resolvedLines = 0;
+  let currentlyVisibleLines = 0;
 
   for (const order of orders) {
     const accountId = clean(order.baseLinkerAccountId);
@@ -140,6 +148,20 @@ async function main() {
       const storedImage = clean(product.image_url);
       const entry = key ? catalogs[key] : null;
       const resolvedImage = normalizeImageUrls(entry?.images)[0] || '';
+      const currentlyVisible = Boolean(storedImage || (key && persistedImages.get(key)));
+      if (currentlyVisible) currentlyVisibleLines += 1;
+      if (!currentlyVisible && resolvedImage && key) {
+        if (!pendingResolvableByKey[key]) {
+          const persisted = persistedByKey.get(key);
+          pendingResolvableByKey[key] = {
+            source,
+            occurrences: 0,
+            persistedState: clean(persisted?.state) || 'not_cached',
+            persistedResolverVersion: Number(persisted?.resolverVersion || 0),
+          };
+        }
+        pendingResolvableByKey[key].occurrences += 1;
+      }
       if (storedImage || resolvedImage) {
         resolvedLines += 1;
         continue;
@@ -161,13 +183,20 @@ async function main() {
   console.log(JSON.stringify({
     measuredAt: new Date().toISOString(),
     orderCounts: { intake: indexedOrders.length, tracked: trackedOrders.length, total: orders.length },
-    lineCounts: { total: totalLines, resolved: resolvedLines, missing: missingLines },
+    lineCounts: {
+      total: totalLines,
+      currentlyVisible: currentlyVisibleLines,
+      currentlyMissing: totalLines - currentlyVisibleLines,
+      resolvableAfterSweep: resolvedLines,
+      irreduciblyMissingWithCurrentDocumentedSources: missingLines,
+    },
     affectedOrders: affectedOrders.size,
     uniqueMissingProductKeys: uniqueMissing.size,
     missingByReason,
     missingBySource,
     missingBySourceAndReason,
     uniqueMissingBySource,
+    pendingResolvableByKey,
     baseLinkerReadRequests: api,
     persistedCacheVersions: cacheVersions,
     trackedSweepStates: sweepStates.map((row) => ({ key: row.key, value: row.value })),
