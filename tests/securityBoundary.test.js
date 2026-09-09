@@ -55,10 +55,24 @@ describe('security boundaries', () => {
     });
   });
 
-  it('advertises a 24-hour cache lifetime for successful CORS preflights', () => {
+  it('advertises a 24-hour cache lifetime for successful CORS preflights', async () => {
     vi.resetModules();
     const { expressCorsOptions } = require('../utils/corsOptions');
     expect(expressCorsOptions.maxAge).toBe(86_400);
+
+    const express = require('express');
+    const cors = require('cors');
+    const request = require('supertest');
+    const app = express();
+    app.use(cors(expressCorsOptions));
+
+    const response = await request(app)
+      .options('/api/test')
+      .set('Origin', 'https://app.example.test')
+      .set('Access-Control-Request-Method', 'GET')
+      .set('Access-Control-Request-Headers', 'authorization,x-telegram-initdata');
+    expect(response.status).toBe(204);
+    expect(response.headers['access-control-max-age']).toBe('86400');
 
     const socketSource = require('fs').readFileSync(path.join(__dirname, '..', 'socket.js'), 'utf8');
     expect(socketSource).toContain('...expressCorsOptions');
