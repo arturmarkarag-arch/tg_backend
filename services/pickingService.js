@@ -148,28 +148,28 @@ async function finalizeSessionAndGetBlockers(orderingSessionId, deliveryGroupId,
  * when every item is terminal (packed / cancelled / skipped / voided).
  */
 async function markOrderItemsPacked(taskItems, productId, actor = { by: 'system', byName: '', byRole: 'system' }, session = null) {
-  const opts    = session ? { session } : {};
+  const opts = session ? { session } : {};
 
   // Keep one entry PER ORDER (not just the id set): the delivered quantity has to
-  // travel with it. A boolean `packed` cannot say "7 of the 10 ordered", so
-  // without this the shortfall was lost the moment the task closed.
+  // travel with it. A boolean `packed` cannot say "7 of the 10 ordered".
   const packedByOrder = new Map();
   for (const item of taskItems) {
     if (!item.packed) continue;
     packedByOrder.set(String(item.orderId), item);
   }
+  if (packedByOrder.size === 0) return;
+
   const packedAt = new Date();
-
-  await Promise.all(
-    [...packedByOrder.entries()].map(async ([orderId, taskItem]) => {
-      const ordered  = Number(taskItem.quantity) || 0;
-      // packedQuantity is null only on legacy/system paths that never set it;
-      // there "packed" still means the full ordered amount went out.
-      const delivered = taskItem.packedQuantity == null ? ordered : Number(taskItem.packedQuantity) || 0;
-
-      const result = await Order.updateOne(
-        { _id: orderId, 'items.productId': productId },
-        {
+  const orderIds = [...packedByOrder.keys()];
+  const itemUpdates = [...packedByOrder.entries()].map(([orderId, taskItem]) => {
+    const ordered = Number(taskItem.quantity) || 0;
+    // packedQuantity is null only on legacy/system paths that never set it;
+    // there "packed" still means the full ordered amount went out.
+    const delivered = taskItem.packedQuantity == null ? ordered : Number(taskItem.packedQuantity) || 0;
+    return {
+      updateOne: {
+        filter: { _id: orderId, 'items.productId': productId },
+        update: {
           $set: {
             'items.$.packed': true,
             'items.$.packedQuantity': delivered,
@@ -179,33 +179,48 @@ async function markOrderItemsPacked(taskItems, productId, actor = { by: 'system'
             'items.$.packedAt': packedAt,
           },
         },
-        opts,
-      );
-      if (result.matchedCount === 0) return;
+      },
+    };
+  });
 
-      await Order.updateOne(
-        {
-          _id: orderId,
-          status: { $in: ['new', 'in_progress'] },
-          // A `skipped` item (late, strict-missed) is terminal and must NOT keep an
-          // order from auto-fulfilling — treat it like packed/cancelled here.
-          items: { $not: { $elemMatch: { packed: false, cancelled: false, skipped: { $ne: true }, voided: { $ne: true } } } },
-        },
-        {
-          $set: { status: 'fulfilled' },
-          $push: { history: { at: new Date(), ...actor, action: 'status_changed', meta: { from: 'in_progress', to: 'fulfilled', via: 'picking' } } },
-        },
-        opts,
-      );
+  // N shops used to mean N independent updateOne round-trips. bulkWrite keeps the
+  // per-order delivered quantity while sending the whole item update set as one
+  // Mongo command inside the same transaction.
+  await Order.bulkWrite(itemUpdates, { ...opts, ordered: true });
 
-      // Notify connected clients so the order board updates in real time
-      try {
-        const order = await Order.findById(orderId, 'buyerTelegramId').lean();
-        const io = getIO();
-        if (order?.buyerTelegramId) io.emit('user_order_updated', { buyerTelegramId: order.buyerTelegramId });
-      } catch { /* non-critical — socket may not be initialised in test env */ }
-    })
+  // The item writes above are visible inside this transaction. One updateMany can
+  // now perform the same terminal-state gate for every touched order. Requiring
+  // items.productId preserves the old "only after the first update matched" rule.
+  await Order.updateMany(
+    {
+      _id: { $in: orderIds },
+      'items.productId': productId,
+      status: { $in: ['new', 'in_progress'] },
+      // A `skipped` item (late, strict-missed) is terminal and must NOT keep an
+      // order from auto-fulfilling — treat it like packed/cancelled here.
+      items: { $not: { $elemMatch: { packed: false, cancelled: false, skipped: { $ne: true }, voided: { $ne: true } } } },
+    },
+    {
+      $set: { status: 'fulfilled' },
+      $push: { history: { at: new Date(), ...actor, action: 'status_changed', meta: { from: 'in_progress', to: 'fulfilled', via: 'picking' } } },
+    },
+    opts,
   );
+
+  // Notify connected clients from one projection read instead of one findById per
+  // order. The read participates in the same transaction when one is present.
+  try {
+    let buyerQuery = Order.find(
+      { _id: { $in: orderIds }, 'items.productId': productId },
+      'buyerTelegramId',
+    ).lean();
+    if (session) buyerQuery = buyerQuery.session(session);
+    const rows = await buyerQuery;
+    const io = getIO();
+    for (const row of rows) {
+      if (row?.buyerTelegramId) io.emit('user_order_updated', { buyerTelegramId: row.buyerTelegramId });
+    }
+  } catch { /* non-critical — socket may not be initialised in test env */ }
 }
 
 /**

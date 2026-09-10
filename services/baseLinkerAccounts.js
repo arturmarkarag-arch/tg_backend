@@ -117,9 +117,19 @@ function publicAccount(account) {
   };
 }
 
-async function listBaseLinkerAccounts({ includeDisabled = true } = {}) {
+async function listBaseLinkerAccountRows({ includeDisabled = true } = {}) {
   const query = includeDisabled ? {} : { enabled: true };
-  const rows = await BaseLinkerAccount.find(query).sort({ createdAt: 1, accountId: 1 }).lean();
+  // Internal runtime read: keep queue.revision + metadataSnapshot so callers can
+  // derive the exact queue scope without re-querying each account. Credentials
+  // are deliberately excluded even though this value never leaves the server.
+  return BaseLinkerAccount.find(query)
+    .select('-tokenEncrypted')
+    .sort({ createdAt: 1, accountId: 1 })
+    .lean();
+}
+
+async function listBaseLinkerAccounts({ includeDisabled = true } = {}) {
+  const rows = await listBaseLinkerAccountRows({ includeDisabled });
   return rows.map(publicAccount);
 }
 
@@ -257,6 +267,7 @@ async function recordAccountSync(accountId, error = null) {
 module.exports = {
   MASTER_KEY_ENV,
   listBaseLinkerAccounts,
+  listBaseLinkerAccountRows,
   getBaseLinkerAccount,
   getTokenForAccount,
   publicAccount,

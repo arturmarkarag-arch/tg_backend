@@ -164,12 +164,8 @@ async function ensureBaseLinkerOrderIndexReady() {
   return indexReadyPromise;
 }
 
-async function loadIndexState(accountId, scope = null) {
-  const id = accountIdString(accountId || scope?.baseLinkerAccountId);
-  if (!id) throw appError('baselinker_account_id_required');
-  scope = scope || await getQueueScope(id);
-  const row = await AppSetting.findOne({ key: stateKey(id) }).lean();
-  const value = row?.value && typeof row.value === 'object' ? row.value : {};
+function indexStateFromValue(id, scope, rawValue = {}) {
+  const value = rawValue && typeof rawValue === 'object' ? rawValue : {};
   return {
     baseLinkerAccountId: id,
     initialized: value.initialized === true && scope.configured && value.scopeKey === scope.scopeKey,
@@ -180,6 +176,32 @@ async function loadIndexState(accountId, scope = null) {
     trackedReverifyPending: Number(value.trackedReverifyPending || 0),
     lastError: value.lastError || null,
   };
+}
+
+async function loadIndexState(accountId, scope = null) {
+  const id = accountIdString(accountId || scope?.baseLinkerAccountId);
+  if (!id) throw appError('baselinker_account_id_required');
+  scope = scope || await getQueueScope(id);
+  const row = await AppSetting.findOne({ key: stateKey(id) }).lean();
+  return indexStateFromValue(id, scope, row?.value);
+}
+
+async function loadIndexStates(scopes = []) {
+  const normalized = (Array.isArray(scopes) ? scopes : []).map((scope) => {
+    const id = accountIdString(scope?.baseLinkerAccountId);
+    if (!id) throw appError('baselinker_account_id_required');
+    return { id, scope };
+  });
+  if (normalized.length === 0) return new Map();
+
+  const keys = normalized.map(({ id }) => stateKey(id));
+  const rows = await AppSetting.find({ key: { $in: keys } }, 'key value').lean();
+  const valuesByKey = new Map((Array.isArray(rows) ? rows : []).map((row) => [String(row.key), row.value]));
+
+  return new Map(normalized.map(({ id, scope }) => [
+    id,
+    indexStateFromValue(id, scope, valuesByKey.get(stateKey(id))),
+  ]));
 }
 
 async function saveIndexState(accountId, value) {
@@ -747,6 +769,6 @@ async function getLocalOrderProjection(baseLinkerAccountId, orderId) {
 
 module.exports = {
   INDEX_STATE_KEY, INDEX_REFRESH_MS, POLL_FRESHNESS_MS, INDEX_MAX_PAGES, TRACKED_REVERIFY_LIMIT, TRACKED_REVERIFY_STALE_MS, SAFE_INDEX_PAGES_PER_SCAN,
-  ensureBaseLinkerOrderIndexReady, loadIndexState, syncBaseLinkerOrderIndex, syncOneAccount, reconcileTrackedOrderStatuses,
+  ensureBaseLinkerOrderIndexReady, loadIndexState, loadIndexStates, syncBaseLinkerOrderIndex, syncOneAccount, reconcileTrackedOrderStatuses,
   removeIndexedOrders, getIndexedOrderPage, orderFromPicking, scanIntake, getLocalOrderProjection,
 };

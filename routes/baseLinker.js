@@ -9,16 +9,17 @@ const {
   getIndexedOrderPage,
   getLocalOrderProjection,
   loadIndexState,
+  loadIndexStates,
   syncBaseLinkerOrderIndex,
   INDEX_REFRESH_MS,
 } = require('../services/baseLinkerOrderIndex');
 const { isBaseLinkerQueueSchedulerStarted } = require('../services/baseLinkerQueueScheduler');
-const { getQueueScope } = require('../services/baseLinkerQueueScope');
+const { getQueueScope, queueScopeFromSettings } = require('../services/baseLinkerQueueScope');
 const { fetchBaseLinkerProductCatalog, getOrdersWithCachedProductImages, attachProductImagesToOrders } = require('../services/baseLinkerProducts');
 const { compactOrders } = require('../services/baseLinkerPublicDto');
 const { orderKey } = require('../services/baseLinkerIdentity');
 const { makeBaseLinkerAccountCaller, getBaseLinkerApiUsage } = require('../services/baseLinkerClient');
-const { listBaseLinkerAccounts, getBaseLinkerAccount } = require('../services/baseLinkerAccounts');
+const { listBaseLinkerAccounts, listBaseLinkerAccountRows, publicAccount, getBaseLinkerAccount } = require('../services/baseLinkerAccounts');
 const {
   fetchBaseLinkerOrderPackages,
   fetchVerifiedBaseLinkerOrderPackage,
@@ -53,9 +54,7 @@ function callerFor(accountId, { requireEnabled = true, usageStage = 'other' } = 
   return makeBaseLinkerAccountCaller(accountId, { requireEnabled, usageStage });
 }
 
-async function publicAccountRuntime(account) {
-  const scope = await getQueueScope(account.accountId);
-  const index = await loadIndexState(account.accountId, scope);
+function publicAccountRuntime(account, scope, index) {
   return {
     ...account,
     queueConfigured: scope.configured,
@@ -76,11 +75,21 @@ async function publicAccountRuntime(account) {
 }
 
 router.get('/status', asyncHandler(async (_req, res) => {
-  const accounts = await listBaseLinkerAccounts({ includeDisabled: true });
-  const runtime = [];
-  for (const account of accounts) runtime.push(await publicAccountRuntime(account));
+  // One account query + one AppSetting query regardless of account count. Use the
+  // internal rows here because queue.revision is part of scopeKey correctness but
+  // is intentionally omitted from the public account DTO.
+  const rows = await listBaseLinkerAccountRows({ includeDisabled: true });
+  const now = Date.now();
+  const scopes = rows.map((row) => queueScopeFromSettings(row.queue || {}, now, row));
+  const indexByAccountId = await loadIndexStates(scopes);
+  const runtime = rows.map((row, index) => {
+    const account = publicAccount(row);
+    const scope = scopes[index];
+    return publicAccountRuntime(account, scope, indexByAccountId.get(String(account.accountId)));
+  });
+
   res.json({
-    configured: accounts.length > 0,
+    configured: rows.length > 0,
     accounts: runtime,
     queueSchedulerStarted: isBaseLinkerQueueSchedulerStarted(),
     queueRefreshMs: INDEX_REFRESH_MS,
