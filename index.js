@@ -250,10 +250,12 @@ async function startServer() {
       console.error('[baselinker-print-agent] index sync failed', err?.stack || err);
     }
 
-    // Некритичні TTL-індекси токенів.
+    // Некритичні TTL-індекси токенів / одноразових OAuth state.
     try {
       await require('./models/GoogleLinkToken').syncIndexes();
       await require('./models/RegistrationToken').syncIndexes();
+      await require('./models/AllegroOAuthState').syncIndexes();
+      await require('./models/AllegroAccount').syncIndexes();
     } catch (err) {
     }
 

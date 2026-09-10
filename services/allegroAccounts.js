@@ -3,6 +3,7 @@
 const crypto = require('crypto');
 const AllegroAccount = require('../models/AllegroAccount');
 const { getBaseLinkerAccount } = require('./baseLinkerAccounts');
+const { publicOAuthConfiguration } = require('./allegroOAuth');
 const { appError } = require('../utils/errors');
 
 function clean(value, max = 500) {
@@ -23,6 +24,8 @@ function publicAllegroAccount(account) {
     marketplaceIds: Array.isArray(row.marketplaceIds) ? row.marketplaceIds.map((value) => clean(value, 80)).filter(Boolean) : [],
     scopes: Array.isArray(row.scopes) ? row.scopes.map((value) => clean(value, 160)).filter(Boolean) : [],
     tokenExpiresAt: row.tokenExpiresAt || null,
+    tokenRefreshedAt: row.tokenRefreshedAt || null,
+    authConnectedAt: row.authConnectedAt || null,
     lastSuccessfulSyncAt: row.lastSuccessfulSyncAt || null,
     lastSyncError: clean(row.lastSyncError, 1000),
     lastConnectionCheckAt: row.lastConnectionCheckAt || null,
@@ -33,18 +36,7 @@ function publicAllegroAccount(account) {
 }
 
 function oauthConfiguration() {
-  const clientId = clean(process.env.ALLEGRO_CLIENT_ID, 512);
-  const clientSecret = clean(process.env.ALLEGRO_CLIENT_SECRET, 4096);
-  const redirectUri = clean(process.env.ALLEGRO_REDIRECT_URI, 2048);
-  const environment = clean(process.env.ALLEGRO_ENVIRONMENT, 32).toLowerCase() === 'sandbox' ? 'sandbox' : 'production';
-  return {
-    clientIdConfigured: Boolean(clientId),
-    clientSecretConfigured: Boolean(clientSecret),
-    redirectUriConfigured: Boolean(redirectUri),
-    oauthConfigured: Boolean(clientId && clientSecret && redirectUri),
-    redirectUri: redirectUri || '',
-    environment,
-  };
+  return publicOAuthConfiguration();
 }
 
 async function listAllegroAccounts({ baseLinkerAccountId = '', includeDisabled = true } = {}) {
@@ -106,9 +98,10 @@ async function updateAllegroAccount(accountId, patch = {}) {
 
 async function deleteAllegroAccountDraft(accountId) {
   const row = await getAllegroAccount(accountId);
-  // Once OAuth has established a real identity, deletion needs lifecycle guards
-  // (orders, print jobs, pending commands). Stage 1 only permits deleting drafts.
-  if (row.authState !== 'authorization_required' || clean(row.allegroUserId, 128)) {
+  // A failed first OAuth attempt still has no durable Allegro identity and may
+  // be removed as a draft. Once identity exists, later stages must run lifecycle
+  // guards before deletion because orders/print jobs can refer to our UUID.
+  if (clean(row.allegroUserId, 128) || !['authorization_required', 'error'].includes(row.authState)) {
     throw appError('allegro_account_delete_requires_lifecycle');
   }
   await AllegroAccount.deleteOne({ _id: row._id });

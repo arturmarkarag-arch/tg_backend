@@ -93,6 +93,9 @@ const publicApiPaths = [
   /^\/api\/maintenance$/,
   // Local Windows Print Agent authenticates with its own long random token.
   /^\/api\/print-agent(?:\/.*)?$/,
+  // Allegro OAuth returns from allegro.pl without our Telegram/JWT session.
+  // Only this exact callback is public; one-time server-side state authenticates it.
+  /^\/api\/allegro\/oauth\/callback$/,
 
 ];
 

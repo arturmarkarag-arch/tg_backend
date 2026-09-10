@@ -11,6 +11,7 @@ const check = (name, fn) => { fn(); checks.push(name); console.log(`PASS ${name}
 
 const model = read('models/AllegroAccount.js');
 const service = read('services/allegroAccounts.js');
+const oauth = read('services/allegroOAuth.js');
 const admin = read('routes/admin.js');
 const route = read('routes/allegro.js');
 const app = read('app.js');
@@ -31,18 +32,21 @@ check('a draft must point to an existing BaseLinker account', () => {
   assert(service.includes("await getBaseLinkerAccount(parentId, { lean: true })"));
 });
 
-check('Stage 1 contains no browser-supplied OAuth token storage', () => {
-  assert(!model.includes('accessToken'));
-  assert(!model.includes('refreshToken'));
-  assert(!allegroAdmin.match(/req\.body\?\.(accessToken|refreshToken|token)/));
+check('OAuth credentials are server-managed and never accepted from admin request bodies', () => {
+  assert(model.includes('accessTokenEncrypted'));
+  assert(model.includes('refreshTokenEncrypted'));
+  assert(model.includes('select: false'));
+  assert(!allegroAdmin.match(/req\.body\?\.(accessToken|refreshToken|token|clientSecret)/));
 });
 
 check('Allegro secrets stay server-side and only configuration flags are public', () => {
-  assert(service.includes('process.env.ALLEGRO_CLIENT_ID'));
-  assert(service.includes('process.env.ALLEGRO_CLIENT_SECRET'));
-  assert(service.includes('process.env.ALLEGRO_REDIRECT_URI'));
-  assert(service.includes('clientSecretConfigured: Boolean(clientSecret)'));
-  assert(!service.includes('clientSecret,'));
+  assert(oauth.includes('process.env.ALLEGRO_CLIENT_ID'));
+  assert(oauth.includes('process.env.ALLEGRO_CLIENT_SECRET'));
+  assert(oauth.includes('process.env.ALLEGRO_REDIRECT_URI'));
+  assert(oauth.includes('clientSecretConfigured: Boolean(config.clientSecret)'));
+  const publicBlock = oauth.slice(oauth.indexOf('function publicOAuthConfiguration()'), oauth.indexOf('function requireOAuthConfiguration()'));
+  assert(publicBlock.includes('oauthConfigured: config.oauthConfigured'));
+  assert(!publicBlock.includes('clientSecret: config.clientSecret'));
 });
 
 check('nested admin create route preserves BaseLinker -> Allegro mapping', () => {
