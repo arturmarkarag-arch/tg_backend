@@ -2,6 +2,9 @@
 
 Date: 2026-09-10
 
+> **Architecture note (Stage 3):** the temporary Stage 1/2 BaseLinker parent/mapping described below has been superseded. Allegro is now an independent provider with standalone accounts. See `2026-09-10/allegro-stage3-http-core.md`.
+
+
 ## Scope
 
 This stage intentionally does **not** talk to Allegro yet. It establishes the durable local model and admin API needed before OAuth and order synchronization exist.

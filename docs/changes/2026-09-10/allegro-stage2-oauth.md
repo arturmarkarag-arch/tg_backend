@@ -2,6 +2,9 @@
 
 Date: 2026-09-10
 
+> **Architecture note (Stage 3):** the temporary Stage 1/2 BaseLinker parent/mapping described below has been superseded. Allegro is now an independent provider with standalone accounts. See `2026-09-10/allegro-stage3-http-core.md`.
+
+
 ## Scope
 
 This stage adds a real OAuth lifecycle for the Allegro child accounts introduced in Stage 1. It intentionally does **not** implement order ingestion, event journal processing, shipment creation, labels, TTN synchronization, or warehouse picking yet.

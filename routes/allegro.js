@@ -7,9 +7,13 @@ const { listAllegroAccounts, oauthConfiguration, publicAllegroAccount } = requir
 const {
   createOAuthAttempt,
   completeOAuthCallback,
-  checkAllegroConnection,
   frontendOAuthRedirect,
 } = require('../services/allegroOAuth');
+const {
+  getAllegroApiUsage,
+  listAllegroApiErrors,
+  checkAllegroApiConnection,
+} = require('../services/allegroHttpClient');
 
 const router = express.Router();
 
@@ -45,14 +49,26 @@ router.get('/status', asyncHandler(async (_req, res) => {
   const config = oauthConfiguration();
   const connected = accounts.filter((account) => account.authState === 'connected');
   const enabled = connected.filter((account) => account.enabled === true);
+  const usage = await getAllegroApiUsage(accounts.map((account) => account.accountId));
   res.set('Cache-Control', 'no-store');
   res.json({
     configured: enabled.length > 0,
-    stage: 2,
+    stage: 3,
+    provider: 'allegro',
+    independentProvider: true,
     oauthConfigured: config.oauthConfigured,
     oauth: config,
     environment: config.environment,
     accounts,
+    api: {
+      officialLimitPerMinute: usage.officialLimitPerMinute,
+      configuredBudgetPerMinute: usage.configuredBudgetPerMinute,
+      effectiveBudgetPerMinute: usage.effectiveBudgetPerMinute,
+      coordinationMode: usage.coordinationMode,
+      accountMaxConcurrency: usage.accountMaxConcurrency,
+      timeoutMs: Number(process.env.ALLEGRO_HTTP_TIMEOUT_MS) || 15000,
+      errorRetentionDays: Number(process.env.ALLEGRO_ERROR_RETENTION_DAYS) || 14,
+    },
     summary: {
       total: accounts.length,
       authorizationRequired: accounts.filter((account) => account.authState === 'authorization_required').length,
@@ -65,6 +81,21 @@ router.get('/status', asyncHandler(async (_req, res) => {
   });
 }));
 
+router.get('/api-usage', asyncHandler(async (_req, res) => {
+  const accounts = await listAllegroAccounts({ includeDisabled: true });
+  res.set('Cache-Control', 'no-store');
+  res.json(await getAllegroApiUsage(accounts.map((account) => account.accountId)));
+}));
+
+router.get('/errors', asyncHandler(async (req, res) => {
+  const rows = await listAllegroApiErrors({
+    accountId: req.query?.accountId,
+    limit: req.query?.limit,
+  });
+  res.set('Cache-Control', 'no-store');
+  res.json({ errors: rows });
+}));
+
 router.post('/accounts/:accountId/oauth/start', asyncHandler(async (req, res) => {
   const result = await createOAuthAttempt(req.params.accountId, req.telegramId);
   res.set('Cache-Control', 'no-store');
@@ -72,7 +103,7 @@ router.post('/accounts/:accountId/oauth/start', asyncHandler(async (req, res) =>
 }));
 
 router.post('/accounts/:accountId/connection-check', asyncHandler(async (req, res) => {
-  const result = await checkAllegroConnection(req.params.accountId);
+  const result = await checkAllegroApiConnection(req.params.accountId);
   res.set('Cache-Control', 'no-store');
   res.json({
     ok: true,
@@ -83,6 +114,7 @@ router.post('/accounts/:accountId/connection-check', asyncHandler(async (req, re
       baseMarketplaceId: result.identity.baseMarketplaceId,
       traceId: result.identity.traceId || '',
     },
+    requestId: result.requestId || '',
   });
 }));
 

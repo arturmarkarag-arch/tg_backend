@@ -26,7 +26,6 @@ const ERRORS = {
   allegro_account_not_found: { status: 404, message: 'Allegro-акаунт не знайдено.' },
   allegro_account_disabled: { status: 409, message: 'Allegro-акаунт вимкнений.' },
   allegro_account_name_required: { status: 400, message: 'Вкажіть нашу назву Allegro-акаунта.' },
-  allegro_baselinker_account_required: { status: 400, message: 'Allegro-акаунт потрібно прив’язати до BaseLinker-акаунта.' },
   allegro_account_authorization_required: { status: 409, message: 'Спочатку авторизуйте цей Allegro-акаунт через OAuth.' },
   allegro_account_delete_requires_lifecycle: { status: 409, message: 'Підключений Allegro-акаунт не можна видалити без перевірки активних замовлень і черг.' },
   allegro_oauth_not_configured: { status: 503, message: ({ missing = [] } = {}) =>
@@ -44,12 +43,21 @@ const ERRORS = {
   allegro_identity_check_failed: { status: 502, message: 'Не вдалося перевірити Allegro-акаунт через GET /me.' },
   allegro_identity_response_invalid: { status: 502, message: 'Allegro не повернув коректну identity акаунта.' },
   allegro_oauth_identity_mismatch: { status: 409, message: ({ expectedLogin, receivedLogin } = {}) =>
-                                `Цю привʼязку вже створено для іншого Allegro-акаунта${expectedLogin ? ` (${expectedLogin})` : ''}${receivedLogin ? `. Ви авторизували ${receivedLogin}` : ''}. Для іншого продавця створіть окрему привʼязку.` },
+                                `Цей локальний Allegro-акаунт уже належить іншому продавцю${expectedLogin ? ` (${expectedLogin})` : ''}${receivedLogin ? `. Ви авторизували ${receivedLogin}` : ''}. Для іншого продавця створіть окремий Allegro-акаунт.` },
   allegro_account_already_connected: { status: 409, message: ({ connectedAccountName } = {}) =>
                                 `Цей реальний Allegro-акаунт уже підключено${connectedAccountName ? ` як «${connectedAccountName}»` : ''}.` },
   allegro_token_rotation_conflict: { status: 409, message: 'Токени Allegro вже оновив інший процес. Повторіть дію.' },
   allegro_upstream_timeout: { status: 504, message: 'Allegro не відповів вчасно.' },
   allegro_upstream_unavailable: { status: 503, message: 'Зараз немає зʼєднання з Allegro API.' },
+  allegro_api_path_invalid: { status: 400, message: 'Некоректний шлях Allegro API.' },
+  allegro_rate_budget_exhausted: { status: 503, message: 'Внутрішній ліміт запитів Allegro на цю хвилину вичерпано. Запит буде безпечно повторено пізніше.' },
+  allegro_endpoint_rate_budget_exhausted: { status: 503, message: 'Ліміт цього ресурсу Allegro тимчасово вичерпано. Запит буде безпечно повторено пізніше.' },
+  allegro_account_concurrency_exhausted: { status: 503, message: 'Для цього Allegro-акаунта вже виконується забагато паралельних запитів. Повторіть трохи пізніше.' },
+  allegro_api_rate_limited: { status: 503, message: ({ userMessage } = {}) =>
+                                userMessage || 'Allegro тимчасово обмежив частоту API-запитів. Повторимо після дозволеного інтервалу.' },
+  allegro_api_authorization_lost: { status: 409, message: 'Allegro відхилив авторизацію навіть після оновлення токена. Перепідключіть цей Allegro-акаунт через OAuth.' },
+  allegro_api_error: { status: 502, message: ({ userMessage, upstreamStatus } = {}) =>
+                                userMessage || `Allegro API повернув помилку${upstreamStatus ? ` HTTP ${upstreamStatus}` : ''}.` },
   baselinker_queue_settings_invalid: { status: 400, message: 'Оберіть три різні статуси BaseLinker: вхідні, вислано та анульовано.' },
   baselinker_queue_status_unknown: { status: 400, message: 'Цього статусу більше немає в BaseLinker. Оновіть список і оберіть інший.' },
   baselinker_queue_not_configured: { status: 503, message: 'Робоча черга очікує налаштування трьох статусів BaseLinker.' },

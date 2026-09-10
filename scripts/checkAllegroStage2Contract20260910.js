@@ -13,6 +13,7 @@ const model = read('models/AllegroAccount.js');
 const stateModel = read('models/AllegroOAuthState.js');
 const oauth = read('services/allegroOAuth.js');
 const accounts = read('services/allegroAccounts.js');
+const http = read('services/allegroHttpClient.js');
 const route = read('routes/allegro.js');
 const app = read('app.js');
 const errors = read('utils/errors.js');
@@ -24,7 +25,7 @@ check('encrypted access + refresh credentials are select:false', () => {
 
 check('OAuth state persists only SHA-256 digest and expires via TTL index', () => {
   assert(stateModel.includes('stateHash'));
-  assert(stateModel.includes("expireAfterSeconds: 0"));
+  assert(stateModel.includes('expireAfterSeconds: 0'));
   assert(oauth.includes("crypto.createHash('sha256')"));
   assert(!stateModel.includes('state: {'));
 });
@@ -39,7 +40,7 @@ check('authorization start is admin-only and uses one-time state + prompt confir
   assert(route.includes("router.post('/accounts/:accountId/oauth/start'"));
   assert(oauth.includes("authorize.searchParams.set('state', state)"));
   assert(oauth.includes("authorize.searchParams.set('prompt', 'confirm')"));
-  assert(oauth.includes("AllegroOAuthState.deleteMany({ accountId: id })"));
+  assert(oauth.includes('AllegroOAuthState.deleteMany({ accountId: id })'));
 });
 
 check('minimum planned scopes cover identity, direct orders and shipment workflow', () => {
@@ -53,9 +54,9 @@ check('minimum planned scopes cover identity, direct orders and shipment workflo
 });
 
 check('production config requires User-Agent and dedicated encryption key', () => {
-  assert(oauth.includes("ALLEGRO_USER_AGENT"));
-  assert(oauth.includes("ALLEGRO_TOKEN_ENCRYPTION_KEY"));
-  assert(oauth.includes("ALLEGRO_CLIENT_SECRET"));
+  assert(oauth.includes('ALLEGRO_USER_AGENT'));
+  assert(oauth.includes('ALLEGRO_TOKEN_ENCRYPTION_KEY'));
+  assert(oauth.includes('ALLEGRO_CLIENT_SECRET'));
 });
 
 check('access and refresh secrets use AES-256-GCM with kind-bound AAD', () => {
@@ -70,12 +71,15 @@ check('refresh rotation is distributed-locked and CAS guarded', () => {
   assert(oauth.includes('$inc: { tokenRevision: 1 }'));
   assert(oauth.includes('tokenRevisionFilter(row)'));
   assert(oauth.includes('CAS lost'));
+  assert(oauth.includes('rejectedTokenRevision'));
+  assert(oauth.includes('Number(row.tokenRevision || 0) > rejectedRevision'));
+
 });
 
 check('real Allegro identity cannot silently change behind our UUID', () => {
   assert(oauth.includes('allegro_oauth_identity_mismatch'));
-  assert(oauth.includes("allegroUserId: identity.id"));
-  assert(oauth.includes("accountId: { $ne: row.accountId }"));
+  assert(oauth.includes('allegroUserId: identity.id'));
+  assert(oauth.includes('accountId: { $ne: row.accountId }'));
 });
 
 check('public Allegro DTO does not expose encrypted tokens or token revision', () => {
@@ -85,14 +89,14 @@ check('public Allegro DTO does not expose encrypted tokens or token revision', (
   assert(!dtoBody.includes('tokenRevision'));
 });
 
-check('connection check exists and may refresh an expired access token', () => {
-  assert(route.includes("router.post('/accounts/:accountId/connection-check'"));
-  assert(oauth.includes('forceRefresh: true'));
-  assert(oauth.includes('fetchAllegroIdentity'));
+check('connection check uses the common Stage 3 authenticated HTTP client', () => {
+  assert(route.includes('checkAllegroApiConnection'));
+  assert(http.includes("path: '/me'"));
+  assert(http.includes('forceRefresh: true'));
 });
 
-check('Stage 2 status exposes only public OAuth configuration', () => {
-  assert(route.includes('stage: 2'));
+check('status exposes only public OAuth configuration', () => {
+  assert(route.includes('stage: 3'));
   assert(accounts.includes('publicOAuthConfiguration'));
   assert(!accounts.includes('clientSecret:'));
 });
@@ -107,4 +111,4 @@ check('stable OAuth errors are centralized', () => {
   ]) assert(errors.includes(`${code}:`));
 });
 
-console.log(`\nAllegro Stage 2 backend contract: ${pass}/${pass} PASS`);
+console.log(`\nAllegro OAuth backend contract: ${pass}/${pass} PASS`);

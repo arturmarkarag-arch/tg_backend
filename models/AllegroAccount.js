@@ -14,10 +14,9 @@ const AllegroAccountSchema = new mongoose.Schema({
   // never the primary key used by the warehouse workflow.
   accountId: { type: String, required: true, trim: true, maxlength: 64 },
 
-  // Business mapping requested by the warehouse: many Allegro seller accounts
-  // may feed one BaseLinker account. This is not an Allegro API relationship.
-  baseLinkerAccountId: { type: String, required: true, trim: true, maxlength: 64, index: true },
-
+  // Allegro is an independent provider. It deliberately has no required
+  // BaseLinker relation. If a cross-provider mapping is ever needed, it must
+  // live in a separate optional mapping model instead of coupling identities.
   name: { type: String, required: true, trim: true, maxlength: 160 },
   color: { type: String, default: '', trim: true, maxlength: 32 },
   enabled: { type: Boolean, default: false, index: true },
@@ -52,7 +51,7 @@ AllegroAccountSchema.index({ accountId: 1 }, { unique: true });
 // A real Allegro seller account must not be connected twice. Drafts have no
 // Allegro user id and are excluded from this index.
 AllegroAccountSchema.index({ allegroUserId: 1 }, { unique: true, sparse: true });
-AllegroAccountSchema.index({ baseLinkerAccountId: 1, createdAt: 1 });
 AllegroAccountSchema.index({ enabled: 1, authState: 1 });
+AllegroAccountSchema.index({ createdAt: 1, accountId: 1 });
 
 module.exports = mongoose.model('AllegroAccount', AllegroAccountSchema);

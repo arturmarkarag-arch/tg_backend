@@ -250,13 +250,24 @@ async function startServer() {
       console.error('[baselinker-print-agent] index sync failed', err?.stack || err);
     }
 
-    // Некритичні TTL-індекси токенів / одноразових OAuth state.
+    // Некритичні TTL-індекси токенів.
     try {
       await require('./models/GoogleLinkToken').syncIndexes();
       await require('./models/RegistrationToken').syncIndexes();
+    } catch (err) {
+    }
+
+    // Allegro is an independent provider. Clean the temporary Stage 1/2
+    // BaseLinker mapping before syncing the current schema so both obsolete
+    // fields and obsolete Mongo indexes disappear without touching OAuth data.
+    try {
+      const { migrateAllegroIndependentAccounts } = require('./services/allegroIndependentMigration');
+      await migrateAllegroIndependentAccounts();
       await require('./models/AllegroOAuthState').syncIndexes();
       await require('./models/AllegroAccount').syncIndexes();
+      await require('./models/AllegroApiErrorLog').syncIndexes();
     } catch (err) {
+      console.error('[allegro] migration/index sync failed', err?.stack || err);
     }
 
     // Некритичні TTL-індекси журналів.

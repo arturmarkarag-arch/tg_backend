@@ -478,7 +478,7 @@ async function markRefreshExpired(accountId, err) {
   });
 }
 
-async function getValidAccessToken(accountId, { requireEnabled = true, forceRefresh = false } = {}) {
+async function getValidAccessToken(accountId, { requireEnabled = true, forceRefresh = false, rejectedTokenRevision = null } = {}) {
   const id = clean(accountId, 64);
   let row = await credentialRow(id);
   if (requireEnabled && row.enabled !== true) throw appError('allegro_account_disabled');
@@ -491,6 +491,17 @@ async function getValidAccessToken(accountId, { requireEnabled = true, forceRefr
     row = await credentialRow(id);
     if (requireEnabled && row.enabled !== true) throw appError('allegro_account_disabled');
     if (row.authState !== 'connected') throw appError('allegro_account_authorization_required');
+
+    // Several requests can discover the same rejected access token at once. If
+    // another worker already rotated credentials while we were waiting for the
+    // distributed lock, use that newer revision instead of consuming yet another
+    // refresh token. This keeps forced 401 recovery serialized *and* deduplicated.
+    const rejectedRevision = Number.isFinite(Number(rejectedTokenRevision)) ? Number(rejectedTokenRevision) : null;
+    if (forceRefresh && rejectedRevision !== null
+      && Number(row.tokenRevision || 0) > rejectedRevision
+      && isTokenUsable(row, 0)) {
+      return { account: row, accessToken: decryptSecret(row.accessTokenEncrypted, row.accountId, 'access') };
+    }
     if (!forceRefresh && isTokenUsable(row)) {
       return { account: row, accessToken: decryptSecret(row.accessTokenEncrypted, row.accountId, 'access') };
     }
@@ -509,55 +520,6 @@ async function getValidAccessToken(accountId, { requireEnabled = true, forceRefr
     const winner = updated.accessTokenEncrypted ? updated : await credentialRow(id);
     return { account: winner, accessToken: decryptSecret(winner.accessTokenEncrypted, winner.accountId, 'access') };
   });
-}
-
-async function checkAllegroConnection(accountId) {
-  const id = clean(accountId, 64);
-  let access = await getValidAccessToken(id, { requireEnabled: false });
-  let identity;
-  try {
-    identity = await fetchAllegroIdentity(access.accessToken);
-  } catch (err) {
-    if (Number(err?.args?.upstreamStatus) !== 401) throw err;
-    access = await getValidAccessToken(id, { requireEnabled: false, forceRefresh: true });
-    try {
-      identity = await fetchAllegroIdentity(access.accessToken);
-    } catch (secondError) {
-      if (Number(secondError?.args?.upstreamStatus) === 401) {
-        await AllegroAccount.updateOne({ accountId: id }, {
-          $set: {
-            authState: 'revoked',
-            enabled: false,
-            lastConnectionCheckAt: new Date(),
-            lastConnectionError: 'Allegro rejected a freshly refreshed access token.',
-          },
-        });
-      }
-      throw secondError;
-    }
-  }
-
-  const row = await AllegroAccount.findOne({ accountId: id });
-  if (!row) throw appError('allegro_account_not_found');
-  if (clean(row.allegroUserId, 128) && clean(row.allegroUserId, 128) !== identity.id) {
-    row.authState = 'error';
-    row.enabled = false;
-    row.lastConnectionCheckAt = new Date();
-    row.lastConnectionError = 'Allegro identity changed unexpectedly.';
-    await row.save();
-    throw appError('allegro_oauth_identity_mismatch', {
-      expectedLogin: clean(row.login, 160),
-      receivedLogin: clean(identity.login, 160),
-    });
-  }
-  row.allegroUserId = identity.id;
-  row.login = identity.login;
-  row.marketplaceIds = identity.baseMarketplaceId ? [identity.baseMarketplaceId] : [];
-  row.authState = 'connected';
-  row.lastConnectionCheckAt = new Date();
-  row.lastConnectionError = '';
-  await row.save();
-  return { account: row, identity };
 }
 
 function frontendOAuthRedirect({ outcome = 'error', accountId = '', errorCode = '' } = {}) {
@@ -582,7 +544,6 @@ module.exports = {
   createOAuthAttempt,
   completeOAuthCallback,
   getValidAccessToken,
-  checkAllegroConnection,
   fetchAllegroIdentity,
   frontendOAuthRedirect,
   tokenLockKey,

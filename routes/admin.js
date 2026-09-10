@@ -37,10 +37,9 @@ router.get('/allegro-settings', telegramAuth, requireTelegramRole('admin'), asyn
   res.json({ accounts: await listAllegroAccounts({ includeDisabled: true }), oauth: oauthConfiguration() });
 }));
 
-router.post('/baselinker-settings/accounts/:baseLinkerAccountId/allegro-accounts', telegramAuth, requireTelegramRole('admin'), asyncHandler(async (req, res) => {
+router.post('/allegro-settings/accounts', telegramAuth, requireTelegramRole('admin'), asyncHandler(async (req, res) => {
   const { createAllegroAccountDraft } = require('../services/allegroAccounts');
   const account = await createAllegroAccountDraft({
-    baseLinkerAccountId: req.params.baseLinkerAccountId,
     name: req.body?.name,
     color: req.body?.color,
   });

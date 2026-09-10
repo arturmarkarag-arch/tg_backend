@@ -2,7 +2,6 @@
 
 const crypto = require('crypto');
 const AllegroAccount = require('../models/AllegroAccount');
-const { getBaseLinkerAccount } = require('./baseLinkerAccounts');
 const { publicOAuthConfiguration } = require('./allegroOAuth');
 const { appError } = require('../utils/errors');
 
@@ -14,7 +13,6 @@ function publicAllegroAccount(account) {
   const row = typeof account?.toObject === 'function' ? account.toObject() : (account || {});
   return {
     accountId: clean(row.accountId, 64),
-    baseLinkerAccountId: clean(row.baseLinkerAccountId, 64),
     name: clean(row.name, 160),
     color: clean(row.color, 32),
     enabled: row.enabled === true,
@@ -39,12 +37,10 @@ function oauthConfiguration() {
   return publicOAuthConfiguration();
 }
 
-async function listAllegroAccounts({ baseLinkerAccountId = '', includeDisabled = true } = {}) {
+async function listAllegroAccounts({ includeDisabled = true } = {}) {
   const query = {};
-  const parentId = clean(baseLinkerAccountId, 64);
-  if (parentId) query.baseLinkerAccountId = parentId;
   if (!includeDisabled) query.enabled = true;
-  const rows = await AllegroAccount.find(query).sort({ baseLinkerAccountId: 1, createdAt: 1, accountId: 1 }).lean();
+  const rows = await AllegroAccount.find(query).sort({ createdAt: 1, accountId: 1 }).lean();
   return rows.map(publicAllegroAccount);
 }
 
@@ -58,19 +54,12 @@ async function getAllegroAccount(accountId, { requireEnabled = false, lean = fal
   return row;
 }
 
-async function createAllegroAccountDraft({ baseLinkerAccountId, name, color = '' } = {}) {
-  const parentId = clean(baseLinkerAccountId, 64);
+async function createAllegroAccountDraft({ name, color = '' } = {}) {
   const normalizedName = clean(name, 160);
-  if (!parentId) throw appError('allegro_baselinker_account_required');
   if (!normalizedName) throw appError('allegro_account_name_required');
-
-  // Fail closed: a mapping may only point at a durable BaseLinker account that
-  // actually exists. Disabled BaseLinker accounts are still valid parents.
-  await getBaseLinkerAccount(parentId, { lean: true });
 
   const doc = await AllegroAccount.create({
     accountId: crypto.randomUUID(),
-    baseLinkerAccountId: parentId,
     name: normalizedName,
     color: clean(color, 32),
     enabled: false,
