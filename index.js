@@ -28,6 +28,7 @@ const { startPickingMaintenanceScheduler } = require('./services/pickingMaintena
 const { startTelegramDeliveryScheduler } = require('./services/telegramDeliveryScheduler');
 const { startTelegramMemberTagScheduler } = require('./services/telegramMemberTagScheduler');
 const { startBaseLinkerQueueScheduler } = require('./services/baseLinkerQueueScheduler');
+const { startAllegroOrderScheduler } = require('./services/allegroOrderScheduler');
 const { enterMaintenance, isMaintenanceActive } = require('./services/maintenanceState');
 
 let httpServer = null;
@@ -266,6 +267,8 @@ async function startServer() {
       await require('./models/AllegroOAuthState').syncIndexes();
       await require('./models/AllegroAccount').syncIndexes();
       await require('./models/AllegroApiErrorLog').syncIndexes();
+      await require('./models/AllegroOrderSyncState').syncIndexes();
+      await require('./models/AllegroOrderIndex').syncIndexes();
     } catch (err) {
       console.error('[allegro] migration/index sync failed', err?.stack || err);
     }
@@ -311,6 +314,7 @@ async function startServer() {
       startTelegramMemberTagScheduler();
       startPickingMaintenanceScheduler();
       startBaseLinkerQueueScheduler();
+      startAllegroOrderScheduler();
     }
 
     server.on('error', (err) => {

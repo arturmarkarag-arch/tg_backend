@@ -83,7 +83,8 @@
     "test:telegram-member-tags": "node scripts/checkTelegramMemberTagsArchitecture20260910.js && vitest run tests/telegramMemberTags.contract.test.js --no-file-parallelism",
     "test:allegro:stage1": "node scripts/checkAllegroStage1Contract20260910.js",
     "test:allegro:stage2": "node scripts/checkAllegroStage2Contract20260910.js",
-    "test:allegro:stage3": "node scripts/checkAllegroStage3Contract20260910.js"
+    "test:allegro:stage3": "node scripts/checkAllegroStage3Contract20260910.js",
+    "test:allegro:stage4": "node scripts/checkAllegroStage4Contract20260911.js"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1030.0",

@@ -96,7 +96,7 @@ check('connection check uses the common Stage 3 authenticated HTTP client', () =
 });
 
 check('status exposes only public OAuth configuration', () => {
-  assert(route.includes('stage: 3'));
+  assert(/stage:\s*[3-9]/.test(route));
   assert(accounts.includes('publicOAuthConfiguration'));
   assert(!accounts.includes('clientSecret:'));
 });

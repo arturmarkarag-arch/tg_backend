@@ -14,6 +14,13 @@ const {
   listAllegroApiErrors,
   checkAllegroApiConnection,
 } = require('../services/allegroHttpClient');
+const {
+  getAllegroOrderSyncStates,
+  getAllegroOrderPage,
+  getLocalAllegroOrder,
+  syncAllegroOrders,
+} = require('../services/allegroOrders');
+const { isAllegroOrderSchedulerStarted, ORDER_POLL_MS } = require('../services/allegroOrderScheduler');
 
 const router = express.Router();
 
@@ -49,17 +56,28 @@ router.get('/status', asyncHandler(async (_req, res) => {
   const config = oauthConfiguration();
   const connected = accounts.filter((account) => account.authState === 'connected');
   const enabled = connected.filter((account) => account.enabled === true);
-  const usage = await getAllegroApiUsage(accounts.map((account) => account.accountId));
+  const accountIds = accounts.map((account) => account.accountId);
+  const [usage, syncStates] = await Promise.all([
+    getAllegroApiUsage(accountIds),
+    getAllegroOrderSyncStates(accountIds),
+  ]);
+  const syncByAccountId = new Map(syncStates.map((state) => [String(state.accountId), state]));
+  const accountsWithSync = accounts.map((account) => ({
+    ...account,
+    orderSync: syncByAccountId.get(String(account.accountId)) || null,
+  }));
   res.set('Cache-Control', 'no-store');
   res.json({
     configured: enabled.length > 0,
-    stage: 3,
+    stage: 4,
     provider: 'allegro',
     independentProvider: true,
     oauthConfigured: config.oauthConfigured,
     oauth: config,
     environment: config.environment,
-    accounts,
+    accounts: accountsWithSync,
+    orderSchedulerStarted: isAllegroOrderSchedulerStarted(),
+    orderPollMs: ORDER_POLL_MS,
     api: {
       officialLimitPerMinute: usage.officialLimitPerMinute,
       configuredBudgetPerMinute: usage.configuredBudgetPerMinute,
@@ -116,6 +134,30 @@ router.post('/accounts/:accountId/connection-check', asyncHandler(async (req, re
     },
     requestId: result.requestId || '',
   });
+}));
+
+router.get('/orders', asyncHandler(async (req, res) => {
+  const result = await getAllegroOrderPage({
+    accountId: req.query?.accountId,
+    workflowFilter: req.query?.workflowFilter,
+    search: req.query?.search,
+    page: req.query?.page,
+    pageSize: req.query?.pageSize,
+  });
+  res.set('Cache-Control', 'no-store');
+  res.json({ ...result, fetchedAt: new Date().toISOString() });
+}));
+
+router.get('/accounts/:accountId/orders/:orderId', asyncHandler(async (req, res) => {
+  const order = await getLocalAllegroOrder(req.params.accountId, req.params.orderId);
+  res.set('Cache-Control', 'no-store');
+  res.json({ order, fetchedAt: new Date().toISOString() });
+}));
+
+router.post('/sync', asyncHandler(async (req, res) => {
+  const result = await syncAllegroOrders({ accountId: req.body?.accountId });
+  res.set('Cache-Control', 'no-store');
+  res.json({ ...result, syncedAt: new Date().toISOString() });
 }));
 
 module.exports = router;

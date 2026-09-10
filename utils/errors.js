@@ -58,6 +58,11 @@ const ERRORS = {
   allegro_api_authorization_lost: { status: 409, message: 'Allegro відхилив авторизацію навіть після оновлення токена. Перепідключіть цей Allegro-акаунт через OAuth.' },
   allegro_api_error: { status: 502, message: ({ userMessage, upstreamStatus } = {}) =>
                                 userMessage || `Allegro API повернув помилку${upstreamStatus ? ` HTTP ${upstreamStatus}` : ''}.` },
+  allegro_order_id_required: { status: 400, message: 'Не вказано ідентифікатор замовлення Allegro.' },
+  allegro_order_not_found: { status: 404, message: 'Замовлення Allegro не знайдено у локальному індексі.' },
+  allegro_order_response_invalid: { status: 502, message: 'Allegro повернув некоректні дані замовлення.' },
+  allegro_order_bootstrap_too_large: { status: 409, message: ({ fulfillmentStatus } = {}) =>
+                                `Початкова синхронізація Allegro перевищила безпечну межу${fulfillmentStatus ? ` для статусу ${fulfillmentStatus}` : ''}. Потрібна окрема контрольована міграція великої черги.` },
   baselinker_queue_settings_invalid: { status: 400, message: 'Оберіть три різні статуси BaseLinker: вхідні, вислано та анульовано.' },
   baselinker_queue_status_unknown: { status: 400, message: 'Цього статусу більше немає в BaseLinker. Оновіть список і оберіть інший.' },
   baselinker_queue_not_configured: { status: 503, message: 'Робоча черга очікує налаштування трьох статусів BaseLinker.' },
