@@ -127,36 +127,48 @@ async function publishShopAssignmentTransition(input = {}) {
 
   try {
     const io = getIO();
-    if (!io) return result;
+    // Socket.IO and other post-commit projections are independent. A missing
+    // realtime transport must never suppress the durable Telegram tag outbox.
+    if (io) {
+      const groups = [...new Set([
+        result.prevGroupId,
+        result.newGroupId,
+        ...(Array.isArray(result.affectedGroupIds) ? result.affectedGroupIds : []),
+      ].filter(Boolean).map(String))];
+      for (const groupId of groups) {
+        io.to(`picking_group_${groupId}`).emit('shop_status_changed', { groupId });
+      }
 
-    const groups = [...new Set([
-      result.prevGroupId,
-      result.newGroupId,
-      ...(Array.isArray(result.affectedGroupIds) ? result.affectedGroupIds : []),
-    ].filter(Boolean).map(String))];
-    for (const groupId of groups) {
-      io.to(`picking_group_${groupId}`).emit('shop_status_changed', { groupId });
-    }
+      // Seller counts / topology on the group selector change only when CURRENT
+      // assignment topology changes. A pure Order ownership repair must not pretend
+      // that sellers moved between groups.
+      if (result.assignmentChanged && result.prevGroupId !== result.newGroupId) {
+        io.emit('delivery_groups_updated');
+      }
 
-    // Seller counts / topology on the group selector change only when CURRENT
-    // assignment topology changes. A pure Order ownership repair must not pretend
-    // that sellers moved between groups.
-    if (result.assignmentChanged && result.prevGroupId !== result.newGroupId) {
-      io.emit('delivery_groups_updated');
-    }
+      // Every committed CURRENT seller assignment change must reach the seller's
+      // open app, even when old/new Shops belong to the SAME DeliveryGroup. The
+      // client already owns one canonical handler for this event: it re-fetches
+      // the profile, which changes shopId and refreshes ordering status.
+      if (result.assignmentChanged && result.sellerTelegramId) {
+        io.emit('user_shop_changed', { telegramId: result.sellerTelegramId });
+      }
 
-    // Every committed CURRENT seller assignment change must reach the seller's
-    // open app, even when old/new Shops belong to the SAME DeliveryGroup. The
-    // client already owns one canonical handler for this event: it re-fetches
-    // the profile, which changes shopId and refreshes ordering status.
-    if (result.assignmentChanged && result.sellerTelegramId) {
-      io.emit('user_shop_changed', { telegramId: result.sellerTelegramId });
-    }
-
-    if (result.orderChanged && result.sellerTelegramId) {
-      io.emit('user_order_updated', { buyerTelegramId: result.sellerTelegramId });
+      if (result.orderChanged && result.sellerTelegramId) {
+        io.emit('user_order_updated', { buyerTelegramId: result.sellerTelegramId });
+      }
     }
   } catch (_) { /* best-effort realtime publication */ }
+
+  // Telegram member tags are a post-commit projection of User -> Shop. Queue a
+  // durable dirty marker instead of calling Telegram inside the HTTP/transaction
+  // path; the Telegram scheduler re-reads current DB truth before applying it.
+  if (result.assignmentChanged && result.sellerTelegramId) {
+    try {
+      const { enqueueTelegramMemberTagSync } = require('./telegramMemberTagSync');
+      await enqueueTelegramMemberTagSync(result.sellerTelegramId, { source: 'shop_assignment_changed' });
+    } catch (_) { /* assignment truth must never fail because Telegram projection is unavailable */ }
+  }
 
   return result;
 }

@@ -11,6 +11,7 @@
 
 const User = require('../models/User');
 const Shop = require('../models/Shop');
+const { getAllowedGroupIds } = require('./telegramGroupSettings');
 
 /**
  * Продавці (і адміни, прив'язані до магазину) активних магазинів групи.
@@ -49,7 +50,6 @@ async function sellersOfGroup(deliveryGroupId, { includeBlocked = false } = {}) 
  */
 async function serviceGroupChatIds() {
   try {
-    const { getAllowedGroupIds } = require('../routes/admin');
     return await getAllowedGroupIds();
   } catch (err) {
     return [];

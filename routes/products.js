@@ -30,6 +30,7 @@ const { normalizeDeliveryGroup } = require('../utils/deliveryGroupHelpers');
 const { getOrderingWindowOpenAt } = require('../utils/orderingSchedule');
 const { warsawDateKeyToUtcRange } = require('../utils/warsawDateTime');
 const cache = require('../utils/cache');
+const { getAllowedGroupIds } = require('../utils/telegramGroupSettings');
 const { getShop, getDeliveryGroup } = require('../utils/modelCache');
 const { buildWarehouseStockEstimate } = require('../utils/warehouseStockEstimate');
 const { appendProductsToBlockDocument } = require('../services/blockMembershipPrimitives');
@@ -1007,7 +1008,6 @@ router.post('/report-missing', registeredOnly, asyncHandler(async (req, res) => 
   if (!barcodeValue) throw appError('product_barcode_required');
   if (!filename) throw appError('product_filename_required');
 
-  const { getAllowedGroupIds } = require('./admin');
   const allowedGroupIds = await getAllowedGroupIds();
 
   if (!allowedGroupIds.length) throw appError('telegram_groups_not_configured');

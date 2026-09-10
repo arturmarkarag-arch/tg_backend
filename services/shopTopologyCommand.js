@@ -196,6 +196,7 @@ async function updateShopTopologyCommand({ shopId, patch = {}, actor = null }) {
         deliveryGroupId: nextGroupId || null,
         groupChanged,
         activeChanged,
+        nameChanged,
         identityChanged: nameChanged || addressChanged || cityChanged,
         actorTelegramId: str(actor?.telegramId),
       };
@@ -224,6 +225,16 @@ async function updateShopTopologyCommand({ shopId, patch = {}, actor = null }) {
         }
       }
     } catch (_) { /* best-effort */ }
+
+    // shop.name is part of the Telegram member-tag projection. A rename must
+    // invalidate tags for every currently assigned user, otherwise User -> Shop
+    // is correct while Telegram keeps the old visible shop name.
+    if (outcome?.nameChanged) {
+      try {
+        const { enqueueShopMemberTagSync } = require('./telegramMemberTagSync');
+        await enqueueShopMemberTagSync(id, { source: 'shop_name_changed' });
+      } catch (_) { /* Shop identity is authoritative even if Telegram projection is temporarily unavailable */ }
+    }
 
     const updated = await Shop.findById(id).lean();
     return { shop: updated, ...outcome };

@@ -11,6 +11,12 @@ const cache = require('../utils/cache');
 const { softRemoveUser } = require('../services/softRemoveUser');
 const { getIO } = require('../socket');
 const {
+  getAllowedGroupIds,
+  setAllowedGroupIds,
+  getMainTelegramGroupId,
+  setMainTelegramGroupId,
+} = require('../utils/telegramGroupSettings');
+const {
   MAX_SUPPORT_ADMINS,
   normalizeSupportAdmin,
   getSupportAdmins,
@@ -355,15 +361,6 @@ router.delete('/cities/:id', telegramAuth, requireTelegramRole('admin'), asyncHa
 }));
 
 // ── Telegram allowed groups ──────────────────────────────────────────────────
-const TELEGRAM_GROUPS_KEY = 'telegram.allowedGroupIds';
-
-async function getAllowedGroupIds() {
-  const fromDb = await getAppSetting(TELEGRAM_GROUPS_KEY, null);
-  if (Array.isArray(fromDb) && fromDb.length > 0) return fromDb.map(String);
-  // fallback to env
-  return (process.env.TELEGRAM_ALLOWED_GROUP_IDS || '')
-    .split(',').map((s) => s.trim()).filter(Boolean);
-}
 // ── OpenAI API Key ──────────────────────────────────────────────────────────
 const OPENAI_API_KEY_SETTING = 'openai.apiKey';
 
@@ -416,8 +413,8 @@ router.put('/openai-key', telegramAuth, requireTelegramRole('admin'), async (req
 
 router.get('/telegram-groups', telegramAuth, requireTelegramRole('admin'), async (req, res) => {
   try {
-    const ids = await getAllowedGroupIds();
-    res.json({ groups: ids });
+    const [ids, mainGroupId] = await Promise.all([getAllowedGroupIds(), getMainTelegramGroupId()]);
+    res.json({ groups: ids, mainGroupId });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -433,9 +430,9 @@ router.post('/telegram-groups', telegramAuth, requireTelegramRole('admin'), asyn
     if (current.includes(groupId)) {
       return res.status(409).json({ error: 'Ця група вже додана' });
     }
-    const updated = [...current, groupId];
-    await setAppSetting(TELEGRAM_GROUPS_KEY, updated);
-    res.json({ groups: updated });
+    const updated = await setAllowedGroupIds([...current, groupId]);
+    const mainGroupId = await getMainTelegramGroupId();
+    res.json({ groups: updated, mainGroupId });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -444,14 +441,64 @@ router.post('/telegram-groups', telegramAuth, requireTelegramRole('admin'), asyn
 router.delete('/telegram-groups/:groupId', telegramAuth, requireTelegramRole('admin'), async (req, res) => {
   try {
     const groupId = String(req.params.groupId).trim();
-    const current = await getAllowedGroupIds();
-    const updated = current.filter((id) => id !== groupId);
-    await setAppSetting(TELEGRAM_GROUPS_KEY, updated);
-    res.json({ groups: updated });
+    const [current, mainGroupId] = await Promise.all([getAllowedGroupIds(), getMainTelegramGroupId()]);
+    if (mainGroupId && mainGroupId === groupId) {
+      return res.status(409).json({
+        error: 'telegram_main_group_in_use',
+        message: 'Спочатку виберіть іншу основну Telegram-групу для плашок.',
+      });
+    }
+    const updated = await setAllowedGroupIds(current.filter((id) => id !== groupId));
+    res.json({ groups: updated, mainGroupId });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
+
+
+// ── Main Telegram group + member shop tags ───────────────────────────────────
+router.put('/telegram-groups/main', telegramAuth, requireTelegramRole('admin'), asyncHandler(async (req, res) => {
+  const groupId = String(req.body?.groupId || '').trim();
+  if (!groupId || !/^-?\d+$/.test(groupId)) {
+    return res.status(400).json({ error: 'telegram_main_group_invalid', message: 'Виберіть коректну дозволену Telegram-групу.' });
+  }
+
+  try {
+    const previousMainGroupId = await getMainTelegramGroupId();
+    const mainGroupId = await setMainTelegramGroupId(groupId);
+    const { enqueueTelegramMemberTagReconcile } = require('../services/telegramMemberTagSync');
+    const reconcile = await enqueueTelegramMemberTagReconcile({
+      source: previousMainGroupId && previousMainGroupId !== mainGroupId
+        ? 'main_group_changed'
+        : 'main_group_configured',
+    });
+    res.json({ groups: await getAllowedGroupIds(), mainGroupId, reconcile });
+  } catch (err) {
+    if (err?.code === 'telegram_main_group_not_allowed') {
+      return res.status(400).json({ error: err.code, message: 'Основна група має бути в списку дозволених груп бота.' });
+    }
+    throw err;
+  }
+}));
+
+router.get('/telegram-member-tags', telegramAuth, requireTelegramRole('admin'), asyncHandler(async (req, res) => {
+  const { getTelegramMemberTagSyncSummary } = require('../services/telegramMemberTagSync');
+  res.set('Cache-Control', 'no-store');
+  res.json(await getTelegramMemberTagSyncSummary());
+}));
+
+router.post('/telegram-member-tags/reconcile', telegramAuth, requireTelegramRole('admin'), asyncHandler(async (req, res) => {
+  const mainGroupId = await getMainTelegramGroupId();
+  if (!mainGroupId) {
+    return res.status(409).json({
+      error: 'telegram_main_group_not_configured',
+      message: 'Спочатку виберіть основну Telegram-групу.',
+    });
+  }
+  const { enqueueTelegramMemberTagReconcile } = require('../services/telegramMemberTagSync');
+  const result = await enqueueTelegramMemberTagReconcile({ source: 'manual_reconcile' });
+  res.status(202).json({ ...result, mainGroupId });
+}));
 
 // ── Telegram contacts shown to unregistered users ────────────────────────────
 router.get('/telegram-support-admins', telegramAuth, requireTelegramRole('admin'), asyncHandler(async (req, res) => {
@@ -748,6 +795,5 @@ router.get('/openai/usage', telegramAuth, requireTelegramRole('admin'), asyncHan
   res.json(data);
 }));
 
-router.getAllowedGroupIds = getAllowedGroupIds;
 router.getPriceGroupIds = getPriceGroupIds;
 module.exports = router;

@@ -11,6 +11,7 @@ const { publishShopAssignmentTransition } = require('./services/shopAssignmentCo
 const { getSupportAdmins, toPublicSupportAdmins } = require('./utils/telegramSupportAdmins');
 const { isRemovedUser, activeUserFilter } = require('./utils/userAccountState');
 const { trackMemberFromMessage, handleChatMemberUpdate, setMemberPhoto } = require('./services/groupMemberSync');
+const { getAllowedGroupIds, getMainTelegramGroupId } = require('./utils/telegramGroupSettings');
 const {
   issueRegistrationToken,
   peekRegistrationToken,
@@ -61,6 +62,24 @@ async function handleMyChatMemberUpdate(update) {
     const newStatus = payload.new_chat_member?.status || payload.new_chat_member_status;
     if (!chatId || !newStatus) return;
 
+    // When the bot itself regains tag-management rights in MAIN, recover every
+    // ERP projection automatically. Revocation does not fan out failures; the
+    // admin Settings health endpoint will report the missing permission.
+    if (['group', 'supergroup'].includes(String(payload.chat?.type || ''))) {
+      try {
+        const mainGroupId = await getMainTelegramGroupId();
+        const member = payload.new_chat_member || {};
+        const canManageTags = member.status === 'creator'
+          || (member.status === 'administrator'
+            && (member.can_manage_tags === true
+              || (member.can_manage_tags == null && member.can_pin_messages === true)));
+        if (mainGroupId === chatId && canManageTags) {
+          const { enqueueTelegramMemberTagReconcile } = require('./services/telegramMemberTagSync');
+          await enqueueTelegramMemberTagReconcile({ source: 'main_group_bot_permissions_ready' });
+        }
+      } catch (_) { /* permission recovery is best-effort; manual reconcile remains available */ }
+    }
+
     const user = await User.findOne({ telegramId: chatId }).lean();
     if (!user || isRemovedUser(user)) {
       return;
@@ -102,10 +121,9 @@ const ALLOWED_TELEGRAM_GROUP_IDS = (process.env.TELEGRAM_ALLOWED_GROUP_IDS || ''
 
 async function isAuthorizedGroup(chatId) {
   try {
-    const { getAllowedGroupIds } = require('./routes/admin');
     const ids = await getAllowedGroupIds();
     if (ids.length) return ids.includes(String(chatId));
-  } catch (_) { /* fallback to env */ }
+  } catch (_) { /* preserve env compatibility if DB/config lookup fails */ }
   if (!ALLOWED_TELEGRAM_GROUP_IDS.length) return false;
   return ALLOWED_TELEGRAM_GROUP_IDS.includes(Number(chatId));
 }
@@ -394,7 +412,6 @@ async function isUserInAllowedGroup(telegramId) {
   if (!bot || !telegramId) return false;
   let groupIds = [];
   try {
-    const { getAllowedGroupIds } = require('./routes/admin');
     groupIds = await getAllowedGroupIds();
   } catch (e) {
     return false;
@@ -658,10 +675,20 @@ async function initBot(token) {
       // new_chat_members fires in basic groups (not supergroups) when someone joins.
       // Supergroups use chat_member updates handled separately.
       if (isGroupChat && msg.new_chat_members?.length) {
+        const mainGroupId = await getMainTelegramGroupId().catch(() => '');
         for (const newMember of msg.new_chat_members) {
           if (newMember.is_bot) continue;
           const memberId = String(newMember.id);
           trackMemberFromMessage(chatId, newMember).catch(() => {});
+
+          // Basic groups may expose a join through the service message without a
+          // separate chat_member update. Dirty the same durable projection here;
+          // duplicate signals are safe because the outbox is idempotent per user.
+          if (mainGroupId && mainGroupId === chatId && /^\d+$/.test(memberId)) {
+            const { enqueueTelegramMemberTagSync } = require('./services/telegramMemberTagSync');
+            enqueueTelegramMemberTagSync(memberId, { source: 'telegram_new_chat_member' }).catch(() => {});
+          }
+
           const existing = await User.findOne(activeUserFilter({ telegramId: memberId })).lean();
           if (!existing) scheduleGroupWelcome(chatId, memberId, newMember);
         }
@@ -861,6 +888,20 @@ async function initBot(token) {
         if (!groupChatId || !(await isAuthorizedGroup(groupChatId))) return;
 
         const joined = await handleChatMemberUpdate(update);
+
+        // Telegram-side membership/admin changes are also projection invalidations.
+        // This covers join, admin -> member, member -> admin, etc. Only the
+        // explicitly configured MAIN group participates; other allowed groups are
+        // never touched by the member-tag subsystem.
+        try {
+          const mainGroupId = await getMainTelegramGroupId();
+          const changedTelegramId = String(update.new_chat_member?.user?.id || '');
+          if (mainGroupId && mainGroupId === groupChatId && /^\d+$/.test(changedTelegramId)) {
+            const { enqueueTelegramMemberTagSync } = require('./services/telegramMemberTagSync');
+            await enqueueTelegramMemberTagSync(changedTelegramId, { source: 'telegram_chat_member_changed' });
+          }
+        } catch (_) { /* passive group tracking must not fail because projection queue is unavailable */ }
+
         if (!joined) return; // left / kicked / already known / bot
 
         const { telegramId, from } = joined;

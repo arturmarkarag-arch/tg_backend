@@ -23,6 +23,7 @@
  */
 
 const express = require('express');
+const { getAllowedGroupIds } = require('../utils/telegramGroupSettings');
 const { asyncHandler } = require('../utils/errors');
 const Product = require('../models/Product');
 const Block = require('../models/Block');
@@ -73,7 +74,6 @@ async function countNewProducts() {
 // fan out hundreds of getChatMember calls.
 async function countUnregisteredGroupMembers() {
   const { countUnregisteredPresentMembers } = require('../services/groupMemberSync');
-  const { getAllowedGroupIds } = require('./admin');
   const groupIds = await getAllowedGroupIds();
   return countUnregisteredPresentMembers(groupIds);
 }
