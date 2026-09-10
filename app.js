@@ -25,6 +25,7 @@ const productFeedbackRouter = require('./routes/productFeedback');
 const navBadgesRouter = require('./routes/navBadges');
 const supplementRouter = require('./routes/supplement');
 const baseLinkerRouter = require('./routes/baseLinker');
+const allegroRouter = require('./routes/allegro');
 const baseLinkerPrintAgentRouter = require('./routes/baseLinkerPrintAgent');
 const { getPublicMaintenanceState, maintenanceReadOnlyMiddleware } = require('./services/maintenanceState');
 
@@ -180,6 +181,7 @@ app.use('/api/product-feedback', productFeedbackRouter);
 app.use('/api/nav-badges', navBadgesRouter);
 app.use('/api/supplement', supplementRouter);
 app.use('/api/baselinker', baseLinkerRouter);
+app.use('/api/allegro', allegroRouter);
 app.use('/api/print-agent', baseLinkerPrintAgentRouter);
 app.use('/api/v1/telegram', telegramV1Router);
 app.use('/api/v1/auth', authV1Router);

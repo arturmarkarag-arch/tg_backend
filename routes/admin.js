@@ -31,6 +31,32 @@ const OPENAI_MODEL_SETTING_KEY = 'openai.defaultModel';
 const ORDERING_SCHEDULE_KEY = 'ordering.schedule';
 const ORDERING_SCHEDULE_DEFAULTS = { openHour: 16, openMinute: 0, closeHour: 7, closeMinute: 30 };
 
+router.get('/allegro-settings', telegramAuth, requireTelegramRole('admin'), asyncHandler(async (_req, res) => {
+  const { listAllegroAccounts, oauthConfiguration } = require('../services/allegroAccounts');
+  res.set('Cache-Control', 'no-store');
+  res.json({ accounts: await listAllegroAccounts({ includeDisabled: true }), oauth: oauthConfiguration() });
+}));
+
+router.post('/baselinker-settings/accounts/:baseLinkerAccountId/allegro-accounts', telegramAuth, requireTelegramRole('admin'), asyncHandler(async (req, res) => {
+  const { createAllegroAccountDraft } = require('../services/allegroAccounts');
+  const account = await createAllegroAccountDraft({
+    baseLinkerAccountId: req.params.baseLinkerAccountId,
+    name: req.body?.name,
+    color: req.body?.color,
+  });
+  res.status(201).json({ account });
+}));
+
+router.patch('/allegro-settings/accounts/:accountId', telegramAuth, requireTelegramRole('admin'), asyncHandler(async (req, res) => {
+  const { updateAllegroAccount } = require('../services/allegroAccounts');
+  res.json({ account: await updateAllegroAccount(req.params.accountId, req.body || {}) });
+}));
+
+router.delete('/allegro-settings/accounts/:accountId', telegramAuth, requireTelegramRole('admin'), asyncHandler(async (req, res) => {
+  const { deleteAllegroAccountDraft } = require('../services/allegroAccounts');
+  res.json(await deleteAllegroAccountDraft(req.params.accountId));
+}));
+
 router.get('/baselinker-settings', telegramAuth, requireTelegramRole('admin'), asyncHandler(async (req, res) => {
   const { listBaseLinkerAccounts, MASTER_KEY_ENV } = require('../services/baseLinkerAccounts');
   const { getBaseLinkerAccountLifecycleBlockers } = require('../services/baseLinkerAccountLifecycle');

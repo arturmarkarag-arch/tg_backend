@@ -80,7 +80,8 @@
     "test:delivery-groups:efficiency": "node scripts/checkDeliveryGroupReadEfficiency20260907.js",
     "test:seller-catalog:efficiency": "node scripts/checkSellerCatalogReadEfficiency20260907.js",
     "test:baselinker:central-poll": "node scripts/checkBaseLinkerCentralPolling20260908.js",
-    "test:telegram-member-tags": "node scripts/checkTelegramMemberTagsArchitecture20260910.js && vitest run tests/telegramMemberTags.contract.test.js --no-file-parallelism"
+    "test:telegram-member-tags": "node scripts/checkTelegramMemberTagsArchitecture20260910.js && vitest run tests/telegramMemberTags.contract.test.js --no-file-parallelism",
+    "test:allegro:stage1": "node scripts/checkAllegroStage1Contract20260910.js"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1030.0",

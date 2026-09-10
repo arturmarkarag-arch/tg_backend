@@ -21,6 +21,14 @@
 // Each entry: { status, message } where message is either a string or a function(args) → string.
 // IMPORTANT: keep messages in Ukrainian. New error codes go here, not inline.
 const ERRORS = {
+  // ── Allegro ───────────────────────────────────────────────────────────────
+  allegro_account_id_required: { status: 400, message: 'Не вказано Allegro-акаунт.' },
+  allegro_account_not_found: { status: 404, message: 'Allegro-акаунт не знайдено.' },
+  allegro_account_disabled: { status: 409, message: 'Allegro-акаунт вимкнений.' },
+  allegro_account_name_required: { status: 400, message: 'Вкажіть нашу назву Allegro-акаунта.' },
+  allegro_baselinker_account_required: { status: 400, message: 'Allegro-акаунт потрібно прив’язати до BaseLinker-акаунта.' },
+  allegro_account_authorization_required: { status: 409, message: 'Спочатку авторизуйте цей Allegro-акаунт через OAuth.' },
+  allegro_account_delete_requires_lifecycle: { status: 409, message: 'Підключений Allegro-акаунт не можна видалити без перевірки активних замовлень і черг.' },
   baselinker_queue_settings_invalid: { status: 400, message: 'Оберіть три різні статуси BaseLinker: вхідні, вислано та анульовано.' },
   baselinker_queue_status_unknown: { status: 400, message: 'Цього статусу більше немає в BaseLinker. Оновіть список і оберіть інший.' },
   baselinker_queue_not_configured: { status: 503, message: 'Робоча черга очікує налаштування трьох статусів BaseLinker.' },
