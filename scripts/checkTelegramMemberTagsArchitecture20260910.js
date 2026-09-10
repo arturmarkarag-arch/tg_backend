@@ -121,6 +121,21 @@ check('scheduler is dedicated and blocked groups are throttled, not multiplied i
   assert.ok(service.includes('readyChatIds'));
 });
 
+
+check('member-tag writes are paced per group and 429 pauses the whole group durably', () => {
+  const transport = read('services/telegramMemberTagTransport.js');
+  const service = read('services/telegramMemberTagSync.js');
+  assert.ok(transport.includes('DEFAULT_MEMBER_TAG_WRITE_INTERVAL_MS = 3500'));
+  assert.ok(transport.includes('waitForMemberTagWriteSlot'));
+  assert.ok(transport.includes('TELEGRAM_MEMBER_TAG_WRITE_INTERVAL_MS'));
+  assert.ok(service.includes('deferGroupAfterRateLimit'));
+  assert.ok(service.includes('classification.rateLimited'));
+  assert.ok(service.includes("lastErrorCode: '429'"));
+  assert.ok(service.includes('$max: { nextAttemptAt: retryAt }'));
+  assert.ok(service.includes('activeGroupRateLimitUntil'));
+  assert.ok(service.includes('retryAfterSeconds: classification.retryAfterSeconds'));
+});
+
 check('manual reconcile is ERP-driven across every configured group', () => {
   const source = read('services/telegramMemberTagSync.js');
   const admin = read('routes/admin.js');

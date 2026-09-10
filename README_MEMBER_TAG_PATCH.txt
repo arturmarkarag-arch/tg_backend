@@ -35,3 +35,11 @@ Settings -> Telegram -> Групи бота
 Add the group ID normally. There is no MAIN selector.
 After adding, the server queues tag sync automatically and shows Telegram/can_manage_tags health; missing permission can be granted later.
 "Плашки магазинів" shows per-group health and has a manual "Синхронізувати всіх" recovery action.
+
+
+V4 flood-control hardening
+---------------------------
+- setChatMemberTag writes are paced per group (default 3500 ms).
+- Telegram 429 + retry_after pauses the whole affected group, not just one user.
+- Manual reconcile and event-driven sync cannot bypass an active 429 cooldown.
+- Optional ops override: TELEGRAM_MEMBER_TAG_WRITE_INTERVAL_MS (min 500 ms).

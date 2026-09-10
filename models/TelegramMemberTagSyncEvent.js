@@ -17,6 +17,8 @@ const schema = new mongoose.Schema({
   requestedRevision: { type: Number, default: null },
   errorCode: { type: String, default: '' },
   error: { type: String, default: '' },
+  retryAfterSeconds: { type: Number, default: null },
+  retryAt: { type: Date, default: null },
 }, { timestamps: { createdAt: true, updatedAt: false } });
 
 schema.index({ telegramId: 1, createdAt: -1 });

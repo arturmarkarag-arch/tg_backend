@@ -71,3 +71,19 @@ No Telegram member-directory scan is used.
 - `POST /api/admin/telegram-member-tags/reconcile` -> enqueue all users across all configured groups
 
 The Settings UI has no MAIN selector. The normal "Групи бота" add/remove list is the configuration surface; the "Плашки магазинів" card is diagnostics/reconcile only.
+
+
+## Flood control / 429
+
+`setChatMemberTag` is paced independently per configured Telegram group. The default
+write interval is 3500 ms and can be changed operationally with
+`TELEGRAM_MEMBER_TAG_WRITE_INTERVAL_MS` (minimum 500 ms).
+
+A Telegram 429 is treated as a group-level flood-control condition, not as many
+independent user failures. The worker reads `parameters.retry_after`, adds a small
+safety buffer, defers every pending/retry target for that chat, and aligns the
+in-process write gate with the same deadline. If Telegram does not provide
+`retry_after`, the fallback cooldown is 60 seconds.
+
+New event syncs and manual reconcile preserve an active group cooldown instead of
+resetting `nextAttemptAt` to now, so UI actions cannot bypass Telegram flood control.

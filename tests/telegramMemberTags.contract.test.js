@@ -7,8 +7,8 @@ const {
   hasEmoji,
   decideTelegramMemberTagAction,
 } = require('../utils/telegramMemberTagPolicy');
-const { applyTelegramMemberTag, cleanupManagedTag } = require('../services/telegramMemberTagSync');
-const { setChatMemberTag } = require('../services/telegramMemberTagTransport');
+const { applyTelegramMemberTag, cleanupManagedTag, rateLimitRetryAt } = require('../services/telegramMemberTagSync');
+const { setChatMemberTag, DEFAULT_MEMBER_TAG_WRITE_INTERVAL_MS } = require('../services/telegramMemberTagTransport');
 
 describe('Telegram shop member tags contract', () => {
   it('formats #ShopName with a 16-character Unicode ceiling', () => {
@@ -76,6 +76,13 @@ describe('Telegram shop member tags contract', () => {
       'setChatMemberTag',
       { form: { chat_id: '-100123', user_id: 123456, tag: '#Poznań' } },
     ]]);
+  });
+
+  it('paces writes conservatively and honors Telegram retry_after as a group cooldown', () => {
+    expect(DEFAULT_MEMBER_TAG_WRITE_INTERVAL_MS).toBe(3500);
+    const now = Date.parse('2026-09-10T00:00:00.000Z');
+    expect(rateLimitRetryAt({ retryAfterSeconds: 12 }, now).toISOString()).toBe('2026-09-10T00:00:13.000Z');
+    expect(rateLimitRetryAt({ retryAfterSeconds: null }, now).toISOString()).toBe('2026-09-10T00:01:00.000Z');
   });
 
   it('passes the architecture/source gate', () => {

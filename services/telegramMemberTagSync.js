@@ -7,7 +7,7 @@ const TelegramMemberTagSyncEvent = require('../models/TelegramMemberTagSyncEvent
 const { getAllowedGroupIds } = require('../utils/telegramGroupSettings');
 const { isRemovedUser } = require('../utils/userAccountState');
 const { classifyTelegramSendError, retryDelayMs } = require('../utils/telegramDeliveryPolicy');
-const { setChatMemberTag } = require('./telegramMemberTagTransport');
+const { setChatMemberTag, deferMemberTagWritesUntil } = require('./telegramMemberTagTransport');
 
 const {
   MAX_TAG_CHARACTERS,
@@ -20,6 +20,8 @@ const DEFAULT_BATCH_LIMIT = 25;
 const PROCESSING_LEASE_MS = 2 * 60 * 1000;
 const MAX_AUTOMATIC_ATTEMPTS = 8;
 const BLOCKED_GROUP_RECHECK_MS = 60 * 1000;
+const RATE_LIMIT_FALLBACK_MS = 60 * 1000;
+const RATE_LIMIT_SAFETY_BUFFER_MS = 1000;
 let queueIndexesReady = false;
 let queueIndexesPromise = null;
 
@@ -75,6 +77,46 @@ function rightsError(error) {
     || text.includes('can_manage_tags');
 }
 
+
+function rateLimitRetryAt(classification, now = Date.now()) {
+  const retryAfterSeconds = Math.max(0, Number(classification?.retryAfterSeconds || 0));
+  const delayMs = retryAfterSeconds > 0
+    ? (retryAfterSeconds * 1000) + RATE_LIMIT_SAFETY_BUFFER_MS
+    : RATE_LIMIT_FALLBACK_MS;
+  return new Date(now + delayMs);
+}
+
+async function activeGroupRateLimitUntil(chatId, now = new Date()) {
+  const gid = normalizeChatId(chatId);
+  if (!gid) return null;
+  const row = await TelegramMemberTagSync.findOne({
+    chatId: gid,
+    status: 'retry_wait',
+    lastErrorCode: '429',
+    nextAttemptAt: { $gt: now },
+  }).sort({ nextAttemptAt: -1 }).select('nextAttemptAt').lean();
+  return row?.nextAttemptAt ? new Date(row.nextAttemptAt) : null;
+}
+
+async function deferGroupAfterRateLimit(chatId, until) {
+  const gid = normalizeChatId(chatId);
+  const retryAt = until instanceof Date ? until : new Date(until);
+  if (!gid || Number.isNaN(retryAt.getTime())) return;
+
+  deferMemberTagWritesUntil(gid, retryAt);
+  await TelegramMemberTagSync.updateMany(
+    { chatId: gid, status: { $in: ['pending', 'retry_wait'] } },
+    {
+      $set: {
+        status: 'retry_wait',
+        lastErrorCode: '429',
+        lastError: 'Telegram flood control: group member-tag writes deferred',
+      },
+      $max: { nextAttemptAt: retryAt },
+    },
+  );
+}
+
 async function ensureTelegramMemberTagQueueIndexes() {
   if (queueIndexesReady) return;
   if (queueIndexesPromise) return queueIndexesPromise;
@@ -123,6 +165,8 @@ async function writeEvent(payload) {
     requestedRevision: payload.requestedRevision == null ? null : Number(payload.requestedRevision),
     errorCode: cleanString(payload.errorCode).slice(0, 100),
     error: cleanString(payload.error).slice(0, 1000),
+    retryAfterSeconds: payload.retryAfterSeconds == null ? null : Number(payload.retryAfterSeconds),
+    retryAt: payload.retryAt ? new Date(payload.retryAt) : null,
   };
   try { await TelegramMemberTagSyncEvent.create(event); } catch (_) {}
   try { console.info('[telegram-member-tag-sync]', JSON.stringify(event)); } catch (_) {}
@@ -250,15 +294,19 @@ async function upsertTarget(telegramId, chatId, { source = 'system', mode = 'syn
   if (!tid || !gid) return null;
   await ensureTelegramMemberTagQueueIndexes();
   const now = new Date();
+  const cooldownUntil = await activeGroupRateLimitUntil(gid, now);
+  const rateLimited = Boolean(cooldownUntil);
   return TelegramMemberTagSync.findOneAndUpdate(
     { telegramId: tid, chatId: gid },
     {
       $set: {
         mode,
         cleanupTag: mode === 'cleanup' ? cleanString(cleanupTag) : '',
-        status: 'pending', requestedAt: now, nextAttemptAt: now,
-        source: cleanString(source || 'system'), completedAt: null,
-        attempts: 0, lastErrorCode: '', lastError: '',
+        status: rateLimited ? 'retry_wait' : 'pending',
+        requestedAt: now, nextAttemptAt: cooldownUntil || now,
+        source: cleanString(source || 'system'), completedAt: null, attempts: 0,
+        lastErrorCode: rateLimited ? '429' : '',
+        lastError: rateLimited ? 'Telegram flood control: waiting for active group cooldown' : '',
       },
       $inc: { requestedRevision: 1 },
     },
@@ -286,16 +334,25 @@ async function enqueueTelegramMemberTagReconcile({ source = 'manual_reconcile', 
   if (!ids.length) return { queued: 0, users: 0, groups: groupIds.length };
 
   const now = new Date();
+  const cooldownByGroup = new Map();
+  for (const groupId of groupIds) {
+    cooldownByGroup.set(groupId, await activeGroupRateLimitUntil(groupId, now));
+  }
   const operations = [];
   for (const telegramId of ids) {
     for (const groupId of groupIds) {
+      const cooldownUntil = cooldownByGroup.get(groupId);
+      const rateLimited = Boolean(cooldownUntil);
       operations.push({ updateOne: {
         filter: { telegramId, chatId: groupId },
         update: {
           $set: {
-            mode: 'sync', cleanupTag: '', status: 'pending', requestedAt: now,
-            nextAttemptAt: now, source: cleanString(source), completedAt: null,
-            attempts: 0, lastErrorCode: '', lastError: '',
+            mode: 'sync', cleanupTag: '',
+            status: rateLimited ? 'retry_wait' : 'pending', requestedAt: now,
+            nextAttemptAt: cooldownUntil || now, source: cleanString(source), completedAt: null,
+            attempts: 0,
+            lastErrorCode: rateLimited ? '429' : '',
+            lastError: rateLimited ? 'Telegram flood control: waiting for active group cooldown' : '',
           },
           $inc: { requestedRevision: 1 },
         },
@@ -438,15 +495,26 @@ async function processTelegramMemberTagSync(row) {
     const attempt = Math.max(1, Number(row.attempts || 0));
     const retryable = classification.retryable && !rightsError(error) && attempt < MAX_AUTOMATIC_ATTEMPTS;
     const exhausted = classification.retryable && attempt >= MAX_AUTOMATIC_ATTEMPTS;
+    const retryAt = retryable
+      ? (classification.rateLimited ? rateLimitRetryAt(classification) : nextRetryAt(classification, attempt))
+      : null;
+    if (classification.rateLimited && retryAt) {
+      // Flood control is a chat-level operational condition, not N independent
+      // user failures. Persist one cooldown for every queued target in this group
+      // and stop subsequent rows from immediately generating more 429 responses.
+      await deferGroupAfterRateLimit(chatId, retryAt);
+    }
     const event = await writeEvent({
       ...base,
       result: retryable ? 'retry_wait' : 'failed',
       errorCode: exhausted ? `retry_exhausted:${telegramErrorCode(error) || classification.kind}` : (telegramErrorCode(error) || classification.kind),
       error: telegramErrorDescription(error),
+      retryAfterSeconds: classification.retryAfterSeconds,
+      retryAt,
     });
     await finishClaim(row, {
       status: retryable ? 'retry_wait' : 'failed',
-      ...(retryable ? { nextAttemptAt: nextRetryAt(classification, attempt) } : { completedAt: new Date() }),
+      ...(retryable ? { nextAttemptAt: retryAt } : { completedAt: new Date() }),
       lastResult: event.result, lastUserId: event.userId, lastShopId: event.shopId,
       lastShopName: event.shopName, desiredTag: event.desiredTag,
       lastErrorCode: event.errorCode, lastError: event.error,
@@ -537,6 +605,8 @@ async function getTelegramMemberTagSyncSummary() {
       chatId: row.chatId || '', telegramStatus: row.telegramStatus || '',
       previousTag: row.previousTag || '', desiredTag: row.desiredTag || '',
       result: row.result, source: row.source || '', errorCode: row.errorCode || '', error: row.error || '',
+      retryAfterSeconds: row.retryAfterSeconds == null ? null : Number(row.retryAfterSeconds),
+      retryAt: row.retryAt || null,
     })),
   };
 }
@@ -558,4 +628,7 @@ module.exports = {
   getTelegramMemberTagSyncSummary,
   participantAbsentError,
   rightsError,
+  rateLimitRetryAt,
+  activeGroupRateLimitUntil,
+  deferGroupAfterRateLimit,
 };
