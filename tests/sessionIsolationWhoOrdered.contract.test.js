@@ -8,6 +8,12 @@ const ROOT = path.resolve(__dirname, '..');
 const read = (rel) => fs.readFileSync(path.join(ROOT, rel), 'utf8');
 
 describe('exact ordering-session isolation', () => {
+  it('who-ordered cache miss has an explicit DeliveryGroup model dependency', () => {
+    const source = read('routes/products.js');
+    expect(source).toContain("const DeliveryGroup = require('../models/DeliveryGroup');");
+    expect(source).toContain('groups = await DeliveryGroup.find().lean();');
+  });
+
   it('who-ordered uses exact session sections and never reads legacy cartState', () => {
     const source = read('routes/products.js');
     const route = sliceBetweenOrThrow(
