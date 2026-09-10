@@ -596,11 +596,14 @@ async function drainDueTelegramMemberTagSync({ limit = DEFAULT_BATCH_LIMIT } = {
   for (let i = 0; i < max; i += 1) {
     const row = await claimNextDue(readyChatIds);
     if (!row) break;
+    // `claimNextDue()` already atomically owns this row by setting status=processing.
+    // The revision fence used by finishClaim() only needs the claimed revision in
+    // memory: it compares the CURRENT requestedRevision in Mongo with this value.
+    // Persisting processingRevision here was redundant, added one write per row,
+    // and — because it happened before the per-row try/catch — one local Mongoose
+    // failure could abort the whole scheduler drain. Keep the exact same CAS
+    // semantics without that extra failure surface / Mongo round-trip.
     row.processingRevision = Number(row.requestedRevision || 0);
-    await TelegramMemberTagSync.updateOne(
-      { _id: row._id, status: 'processing', requestedRevision: row.processingRevision },
-      { $set: { processingRevision: row.processingRevision } },
-    );
     try {
       results.push(await processTelegramMemberTagSync(row));
     } catch (error) {
