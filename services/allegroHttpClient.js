@@ -78,7 +78,7 @@ function sleep(ms) {
 }
 
 function appIdentity() {
-  const clientId = clean(process.env.ALLEGRO_CLIENT_ID, 512) || 'unconfigured';
+  const clientId = clean(oauthConfiguration().clientId, 512) || 'unconfigured';
   return crypto.createHash('sha256').update(clientId, 'utf8').digest('hex').slice(0, 24);
 }
 

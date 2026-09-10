@@ -12,6 +12,7 @@ const check = (name, fn) => { fn(); checks.push(name); console.log(`PASS ${name}
 const model = read('models/AllegroAccount.js');
 const service = read('services/allegroAccounts.js');
 const oauth = read('services/allegroOAuth.js');
+const config = read('services/allegroConfiguration.js');
 const admin = read('routes/admin.js');
 const route = read('routes/allegro.js');
 const app = read('app.js');
@@ -36,20 +37,22 @@ check('standalone admin create route does not require a BaseLinker parent', () =
   assert(!allegroAdmin.includes('baseLinkerAccountId'));
 });
 
-check('OAuth credentials are server-managed and never accepted from admin request bodies', () => {
+check('seller OAuth tokens are server-managed and never accepted from admin request bodies', () => {
   assert(model.includes('accessTokenEncrypted'));
   assert(model.includes('refreshTokenEncrypted'));
   assert(model.includes('select: false'));
-  assert(!allegroAdmin.match(/req\.body\?\.(accessToken|refreshToken|token|clientSecret)/));
+  assert(!allegroAdmin.match(/req\.body\?\.(accessToken|refreshToken|token)(?:|\?)/));
 });
 
-check('Allegro secrets stay server-side and only configuration flags are public', () => {
-  assert(oauth.includes('process.env.ALLEGRO_CLIENT_ID'));
-  assert(oauth.includes('process.env.ALLEGRO_CLIENT_SECRET'));
-  assert(oauth.includes('process.env.ALLEGRO_REDIRECT_URI'));
+check('Allegro app config is DB-managed while secrets remain server-only', () => {
+  assert(config.includes("SETTING_KEY = 'allegro.oauth.config.v1'"));
+  assert(config.includes('clientSecretEncrypted'));
+  assert(config.includes('tokenEncryptionKeyEncrypted'));
+  assert(config.includes("rootSecretRaw()"));
   const publicBlock = oauth.slice(oauth.indexOf('function publicOAuthConfiguration()'), oauth.indexOf('function requireOAuthConfiguration()'));
   assert(publicBlock.includes('oauthConfigured: config.oauthConfigured'));
   assert(!publicBlock.includes('clientSecret: config.clientSecret'));
+  assert(!publicBlock.includes('tokenEncryptionKey:'));
 });
 
 check('Allegro operational page is admin-only and mounted separately', () => {

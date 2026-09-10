@@ -12,6 +12,7 @@ const check = (name, fn) => { fn(); pass += 1; console.log(`PASS ${name}`); };
 const model = read('models/AllegroAccount.js');
 const stateModel = read('models/AllegroOAuthState.js');
 const oauth = read('services/allegroOAuth.js');
+const config = read('services/allegroConfiguration.js');
 const accounts = read('services/allegroAccounts.js');
 const http = read('services/allegroHttpClient.js');
 const route = read('routes/allegro.js');
@@ -53,10 +54,12 @@ check('minimum planned scopes cover identity, direct orders and shipment workflo
   ]) assert(oauth.includes(scope));
 });
 
-check('production config requires User-Agent and dedicated encryption key', () => {
-  assert(oauth.includes('ALLEGRO_USER_AGENT'));
-  assert(oauth.includes('ALLEGRO_TOKEN_ENCRYPTION_KEY'));
-  assert(oauth.includes('ALLEGRO_CLIENT_SECRET'));
+check('OAuth app settings come from encrypted admin configuration with legacy env fallback', () => {
+  assert(oauth.includes('currentAllegroConfiguration'));
+  assert(config.includes('ALLEGRO_USER_AGENT'));
+  assert(config.includes('ALLEGRO_TOKEN_ENCRYPTION_KEY'));
+  assert(config.includes('ALLEGRO_CLIENT_SECRET'));
+  assert(config.includes("source: 'db'"));
 });
 
 check('access and refresh secrets use AES-256-GCM with kind-bound AAD', () => {
