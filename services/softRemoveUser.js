@@ -138,6 +138,14 @@ async function softRemoveUser({ telegramId, actor = null, groupChatId = '' }) {
 
     if (assignmentTransition) {
       await publishShopAssignmentTransition(assignmentTransition);
+    } else if (userExisted && !alreadyRemoved) {
+      // Users without a shop assignment transition (warehouse/admin/no-shop) can
+      // still have an ERP-managed tag left from an earlier role. Clear their
+      // projection in every configured bot group after the removal commits.
+      try {
+        const { enqueueTelegramMemberTagSync } = require('./telegramMemberTagSync');
+        await enqueueTelegramMemberTagSync(tid, { source: 'account_soft_removed' });
+      } catch (_) { /* account removal must not fail because Telegram projection is unavailable */ }
     }
     return { ok: true, userExisted, alreadyRemoved, removedAt: now, oldShopId };
   });

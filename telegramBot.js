@@ -11,7 +11,7 @@ const { publishShopAssignmentTransition } = require('./services/shopAssignmentCo
 const { getSupportAdmins, toPublicSupportAdmins } = require('./utils/telegramSupportAdmins');
 const { isRemovedUser, activeUserFilter } = require('./utils/userAccountState');
 const { trackMemberFromMessage, handleChatMemberUpdate, setMemberPhoto } = require('./services/groupMemberSync');
-const { getAllowedGroupIds, getMainTelegramGroupId } = require('./utils/telegramGroupSettings');
+const { getAllowedGroupIds } = require('./utils/telegramGroupSettings');
 const {
   issueRegistrationToken,
   peekRegistrationToken,
@@ -62,20 +62,18 @@ async function handleMyChatMemberUpdate(update) {
     const newStatus = payload.new_chat_member?.status || payload.new_chat_member_status;
     if (!chatId || !newStatus) return;
 
-    // When the bot itself regains tag-management rights in MAIN, recover every
-    // ERP projection automatically. Revocation does not fan out failures; the
-    // admin Settings health endpoint will report the missing permission.
+    // Every configured bot group is a member-tag target. When the bot regains
+    // can_manage_tags in one of them, reconcile only that group. Do not infer the
+    // permission from adjacent rights such as can_pin_messages.
     if (['group', 'supergroup'].includes(String(payload.chat?.type || ''))) {
       try {
-        const mainGroupId = await getMainTelegramGroupId();
+        const allowed = await getAllowedGroupIds();
         const member = payload.new_chat_member || {};
         const canManageTags = member.status === 'creator'
-          || (member.status === 'administrator'
-            && (member.can_manage_tags === true
-              || (member.can_manage_tags == null && member.can_pin_messages === true)));
-        if (mainGroupId === chatId && canManageTags) {
+          || (member.status === 'administrator' && member.can_manage_tags === true);
+        if (allowed.includes(chatId) && canManageTags) {
           const { enqueueTelegramMemberTagReconcile } = require('./services/telegramMemberTagSync');
-          await enqueueTelegramMemberTagReconcile({ source: 'main_group_bot_permissions_ready' });
+          await enqueueTelegramMemberTagReconcile({ source: 'telegram_group_bot_permissions_ready', chatId });
         }
       } catch (_) { /* permission recovery is best-effort; manual reconcile remains available */ }
     }
@@ -675,18 +673,17 @@ async function initBot(token) {
       // new_chat_members fires in basic groups (not supergroups) when someone joins.
       // Supergroups use chat_member updates handled separately.
       if (isGroupChat && msg.new_chat_members?.length) {
-        const mainGroupId = await getMainTelegramGroupId().catch(() => '');
         for (const newMember of msg.new_chat_members) {
           if (newMember.is_bot) continue;
           const memberId = String(newMember.id);
           trackMemberFromMessage(chatId, newMember).catch(() => {});
 
-          // Basic groups may expose a join through the service message without a
-          // separate chat_member update. Dirty the same durable projection here;
-          // duplicate signals are safe because the outbox is idempotent per user.
-          if (mainGroupId && mainGroupId === chatId && /^\d+$/.test(memberId)) {
+          // Basic groups can expose join only through this service message. This
+          // chat already passed isAuthorizedGroup above, so dirty exactly this
+          // (user, group) projection; duplicate signals are revision-safe.
+          if (/^\d+$/.test(memberId)) {
             const { enqueueTelegramMemberTagSync } = require('./services/telegramMemberTagSync');
-            enqueueTelegramMemberTagSync(memberId, { source: 'telegram_new_chat_member' }).catch(() => {});
+            enqueueTelegramMemberTagSync(memberId, { source: 'telegram_new_chat_member', chatId }).catch(() => {});
           }
 
           const existing = await User.findOne(activeUserFilter({ telegramId: memberId })).lean();
@@ -889,16 +886,16 @@ async function initBot(token) {
 
         const joined = await handleChatMemberUpdate(update);
 
-        // Telegram-side membership/admin changes are also projection invalidations.
-        // This covers join, admin -> member, member -> admin, etc. Only the
-        // explicitly configured MAIN group participates; other allowed groups are
-        // never touched by the member-tag subsystem.
+        // Membership/admin changes invalidate exactly this configured group.
+        // Covers join, admin -> member, member -> admin, left/kicked, etc.
         try {
-          const mainGroupId = await getMainTelegramGroupId();
           const changedTelegramId = String(update.new_chat_member?.user?.id || '');
-          if (mainGroupId && mainGroupId === groupChatId && /^\d+$/.test(changedTelegramId)) {
+          if (/^\d+$/.test(changedTelegramId)) {
             const { enqueueTelegramMemberTagSync } = require('./services/telegramMemberTagSync');
-            await enqueueTelegramMemberTagSync(changedTelegramId, { source: 'telegram_chat_member_changed' });
+            await enqueueTelegramMemberTagSync(changedTelegramId, {
+              source: 'telegram_chat_member_changed',
+              chatId: groupChatId,
+            });
           }
         } catch (_) { /* passive group tracking must not fail because projection queue is unavailable */ }
 
@@ -1003,6 +1000,11 @@ async function initBot(token) {
             await RegistrationRequest.findByIdAndDelete(requestId);
             if (resolution.assignmentTransition) {
               await publishShopAssignmentTransition(resolution.assignmentTransition);
+            } else {
+              try {
+                const { enqueueTelegramMemberTagSync } = require('./services/telegramMemberTagSync');
+                await enqueueTelegramMemberTagSync(request.telegramId, { source: 'account_registered' });
+              } catch (_) { /* registration truth must not fail because Telegram projection is unavailable */ }
             }
             deleteWelcomeFor(request.telegramId).catch(() => {});
             await bot.answerCallbackQuery(query.id, { text: 'Заявку схвалено', show_alert: false });

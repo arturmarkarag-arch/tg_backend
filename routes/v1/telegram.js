@@ -828,7 +828,14 @@ router.post('/register-requests/:id/approve', adminOnly, asyncHandler(async (req
 
   if (userExists) throw appError('registration_user_exists');
 
-  if (assignmentTransition) await publishShopAssignmentTransition(assignmentTransition);
+  if (assignmentTransition) {
+    await publishShopAssignmentTransition(assignmentTransition);
+  } else if (createdUser?.telegramId) {
+    try {
+      const { enqueueTelegramMemberTagSync } = require('../../services/telegramMemberTagSync');
+      await enqueueTelegramMemberTagSync(createdUser.telegramId, { source: 'account_registered' });
+    } catch (_) { /* registration truth must not fail because Telegram projection is unavailable */ }
+  }
 
   // Remove the group "register here" welcome now that they're in the system.
   deleteWelcomeFor(createdUser.telegramId).catch(() => {});

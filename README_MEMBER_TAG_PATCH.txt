@@ -1,46 +1,37 @@
-Telegram member shop tags — patch 2026-09-10
+Telegram member shop tags — V3 multi-group fix (2026-09-10)
+==========================================================
 
-TYPE: manual file replacement patch. Do NOT install this ZIP as an application/package.
-BASE: current ERP frontend/backend after the Sentry patch from this chat.
+This V3 patch supersedes V1/V2 member-tag patches.
+Apply backend files over the current backend and frontend files over the current frontend.
 
-BACKEND local steps after copying files:
-  cd <backend>
-  npm install node-telegram-bot-api@0.68.0 --save-exact
+IMPORTANT CHANGES FROM V2
+- MAIN group concept removed completely.
+- Every group added in Settings -> "Групи бота" is a shop-tag target.
+- Queue identity is telegramId + chatId, so group failures/retries are independent.
+- Adding a group persists normally, returns live permission health, and queues all ERP users for that group; missing can_manage_tags does not block configuration.
+- Removing a group schedules ownership-safe cleanup of ERP-managed tags.
+- node-telegram-bot-api remains ^0.67.0. DO NOT install 0.68.0.
+- setChatMemberTag is called through a tiny compatibility adapter over the existing SDK generic _request transport.
+
+LOCAL
+Backend:
+  npm install
   npm run test:telegram-member-tags
 
-Recommended existing regression gates:
-  npm run test:baselinker:architecture
-  npm run test:baselinker:lifecycle
-  npm run test:baselinker:efficiency
-
-FRONTEND local steps after copying files:
-  cd <frontend>
+Frontend:
   npm install
   npm run test:telegram-member-tags
   npm run build
 
-Telegram configuration:
-1. Bot must be administrator in the MAIN group.
-2. Bot must have can_manage_tags=true. No extra rights are required by this feature.
-3. In ERP Settings -> Telegram groups, ensure the group is in allowed groups and select it as MAIN.
-4. Open "Плашки магазинів" health. It must report the configured MAIN group and can_manage_tags=true.
-5. Press "Синхронізувати всіх" once after first deploy.
+Do NOT run:
+  npm install node-telegram-bot-api@0.68.0
 
-Expected behavior:
-- regular member + shop => #ShopName
-- regular member + no shop => tag cleared
-- administrator / creator => never touched
-- restricted/non-member => skipped by explicit policy
-- tag max 16 Unicode code points including #; emoji => invalid_tag, no heuristic rewrite
-- repeated desired==actual => no Telegram write
-- only explicit MAIN group is managed
-- durable queue + revision guard + lease recovery + bounded retry
-- dedicated scheduler leader; reconcile cannot block Telegram notification delivery
-- shop assignment/unassignment and shop rename enqueue only affected ERP users
-- chat_member changes in MAIN enqueue only the affected Telegram user
-- manual reconcile iterates ERP users, never scans all Telegram members
-- main-group migration cleans an old tag only when it still equals the ERP-managed tag; admins/manual-changed tags remain untouched
+PRODUCTION
+Deploy both backend and frontend from this V3 patch.
+The bot must be administrator with can_manage_tags=true in EACH configured bot group.
 
-Important:
-- package-lock.json is intentionally NOT included. The npm install command above updates it correctly on your machine.
-- Do not upgrade node-telegram-bot-api to v2 as part of this patch; that is a separate migration.
+UI
+Settings -> Telegram -> Групи бота
+Add the group ID normally. There is no MAIN selector.
+After adding, the server queues tag sync automatically and shows Telegram/can_manage_tags health; missing permission can be granted later.
+"Плашки магазинів" shows per-group health and has a manual "Синхронізувати всіх" recovery action.

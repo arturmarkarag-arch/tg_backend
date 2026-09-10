@@ -1,108 +1,73 @@
-# Telegram member shop tags — architecture contract
+# Telegram member shop tags — all configured bot groups
 
-Date: 2026-09-10
+## Contract
 
-## Purpose
+`telegram.allowedGroupIds` is the complete managed group set. There is no MAIN group and list order has no identity meaning.
 
-Project the canonical ERP relation `User.shopId -> Shop.name` into the one explicitly configured MAIN Telegram work group as a regular-member tag:
+For every active ERP user with a stable `telegramId`, and independently for every configured group:
 
-`#` + `Shop.name`, NFC-normalized and truncated to 16 Unicode code points including `#`.
+- Telegram `member` + ERP shop -> `#${shop.name}` (max 16 Unicode code points including `#`)
+- Telegram `member` + no shop / removed ERP user -> empty tag
+- Telegram `administrator` -> DO NOT TOUCH
+- Telegram `creator` -> DO NOT TOUCH
+- other Telegram statuses -> no write
+- desired tag already equals actual tag -> NOOP
 
-This is a projection only. Telegram is never the source of shop assignment truth.
+ERP `User -> Shop -> shop.name` is authoritative. Username, names, existing tag text and Telegram profile data are never used to infer a shop.
 
-## Hard boundaries
+## Group lifecycle
 
-- MAIN group identity is `AppSetting('telegram.mainGroupId')`.
-- `telegram.allowedGroupIds` remains the authorization list and is not used as an ordered source of MAIN identity.
-- User identity is the existing stable `User.telegramId`; usernames/names are never matched.
-- Only `ChatMember.status === 'member'` is managed.
-- `administrator` and `creator` are always `SKIP` and no write is attempted.
-- Restricted users are outside this initial contract and are skipped explicitly.
-- `setChatAdministratorCustomTitle` is never part of this subsystem.
-- Other groups, channels, delivery groups and the “Нові товари” destination are never tag targets.
+`POST /api/admin/telegram-groups` persists the configured group independently of transient Telegram availability/permissions, immediately enqueues all ERP Telegram users for that group, and returns a best-effort live health result. If `can_manage_tags` is missing, the group remains configured and its queue waits/rechecks safely until permission is granted.
 
-## Desired-state calculation
+`DELETE /api/admin/telegram-groups/:groupId` removes the group from the managed set. Before removal it schedules ownership-safe cleanup only for tags that this subsystem previously observed as its own. Admin/creator titles and manually changed tags are never cleared.
 
-Every worker attempt re-reads current Mongo state:
+An existing DB value `telegram.allowedGroupIds=[]` is authoritative. The legacy `TELEGRAM_ALLOWED_GROUP_IDS` environment variable is used only when the DB setting does not exist, so deleting all groups cannot silently resurrect env groups.
 
-1. `User.findOne({ telegramId })`
-2. if `user.shopId`, `Shop.findById(user.shopId)`
-3. desired tag = `formatTelegramMemberTag(shop.name)` or `''`
+## Durable projection queue
 
-The outbox does not store an authoritative desired tag. Diagnostic snapshots are write-only history and are never fed back into decisions.
+Queue identity is `(telegramId, chatId)`, not only user. This is required because the same user can be a regular member in one group, an admin in a second group and absent from a third.
 
-If a shop name contains emoji, the projection is marked `invalid_tag` instead of silently rewriting the business name. Telegram does not allow emoji in member tags.
+Each target has independent status/retry/revision state. A failure in one group therefore cannot block convergence in another group.
+
+Normal sync re-reads current User and Shop state at execution time. Queue rows do not own business truth.
+
+The worker has:
+
+- revision guard against stale worker completion;
+- 2-minute processing lease recovery;
+- bounded retries;
+- per-group health preflight;
+- one-minute backoff for groups missing infrastructure/permissions so N users do not create N identical Telegram failures;
+- a dedicated scheduler leader separate from Telegram delivery.
+
+## Telegram transport
+
+The project keeps the existing `node-telegram-bot-api ^0.67.0` runtime. GitHub documents a later `0.68.0`, but npm does not publish that version, so production must not depend on it.
+
+`node-telegram-bot-api@0.67.0` already has one generic internal `_request(path, options)` transport used by all public methods. `services/telegramMemberTagTransport.js` is the single compatibility boundary for the new Bot API method and calls:
+
+`bot._request('setChatMemberTag', { form: { chat_id, user_id, tag } })`
+
+This reuses the bot instance's existing timeout, base API URL/proxy behavior and Telegram error shape, and avoids a second HTTP implementation or a risky whole-library migration. The adapter fails closed if `_request` is ever unavailable, so a future Telegram SDK migration is localized to one file.
 
 ## Invalidation sources
 
-A user is dirtied after commit when:
+- canonical user -> shop assignment transition -> all configured groups for that user;
+- shop name change -> all users in the shop x all configured groups;
+- `chat_member` update -> exact changed user + exact configured group;
+- `new_chat_members` service update -> exact user + exact configured group;
+- bot regains `can_manage_tags` -> reconcile exact configured group;
+- group added -> all ERP Telegram users for exact new group;
+- manual reconcile -> all ERP Telegram users x all configured groups.
 
-- canonical shop assignment/unassignment changes (`publishShopAssignmentTransition`);
-- a Shop name changes (`updateShopTopologyCommand`, queues every currently assigned user);
-- Telegram emits `chat_member` for that user in MAIN;
-- a basic-group `new_chat_members` service message is observed in MAIN;
-- MAIN is configured/changed;
-- the bot itself regains tag-management rights in MAIN;
-- an administrator starts manual reconcile.
+No Telegram member-directory scan is used.
 
-This keeps the mutation path fast: ERP writes do not wait for Telegram network I/O.
+## Admin API / UI
 
-## Durable outbox
+- `GET /api/admin/telegram-groups` -> configured groups
+- `POST /api/admin/telegram-groups` -> validate + add + enqueue group reconcile
+- `DELETE /api/admin/telegram-groups/:groupId` -> remove + ownership-safe cleanup queue
+- `GET /api/admin/telegram-member-tags` -> per-group live health, queue counts, recent events
+- `POST /api/admin/telegram-member-tags/reconcile` -> enqueue all users across all configured groups
 
-`TelegramMemberTagSync` is one dirty-marker row per Telegram user.
-
-- `requestedRevision` increments for every invalidation.
-- the worker snapshots the claimed revision.
-- completion is conditional on the same revision, so an older in-flight attempt cannot overwrite a newer dirty request.
-- each processing row has a 2-minute lease; a process crash leaves a row recoverable by a later scheduler tick.
-- retryable Telegram/network failures use bounded backoff, with 8 automatic attempts maximum.
-- a new invalidation or manual reconcile resets attempts to 0.
-- one failed row is isolated and never aborts the rest of a reconcile batch.
-
-A dedicated `telegram-member-tags` scheduler leader drains this outbox every 5 seconds. It uses the existing distributed scheduler-leader infrastructure, but it is deliberately separate from `telegram-delivery` so a reconcile batch cannot delay Telegram notifications or new-product delivery.
-
-## Telegram decision
-
-For each attempt:
-
-1. `getChatMember(MAIN, telegramId)`
-2. `administrator` -> `skipped_admin`
-3. `creator` -> `skipped_creator`
-4. `left` / `kicked` / participant absent -> `not_in_group`
-5. anything other than `member` -> explicit skip
-6. `member.tag === desiredTag` -> `unchanged` and no Telegram write
-7. otherwise `setChatMemberTag(MAIN, telegramId, { tag: desiredTag })`
-
-An empty desired tag clears the tag.
-
-If the user becomes administrator between read and write and Telegram rejects the write, status is re-read once; admin/creator is converted to a safe skip.
-
-
-## MAIN-group migration
-
-If MAIN changes from group A to B, the normal reconcile targets only B. Before writing B, the worker also performs a best-effort cleanup of the previous MAIN recorded in its diagnostic snapshot, with an ownership guard:
-
-- admin/creator in the old group -> never touch;
-- non-member/restricted -> skip;
-- clear only when the current old-group tag still exactly equals the last non-empty tag managed/observed by this ERP projection;
-- if the tag has been changed manually, leave it untouched;
-- cleanup failure is journalled but does not block convergence in the new MAIN group.
-
-This prevents the common stale-tag case without granting the subsystem authority over unrelated/manual Telegram tags.
-
-## Recovery and diagnostics
-
-Admin API:
-
-- `GET /api/admin/telegram-groups` -> allowed groups + explicit `mainGroupId`
-- `PUT /api/admin/telegram-groups/main` -> choose MAIN and enqueue reconcile
-- `GET /api/admin/telegram-member-tags` -> live bot/group permission health + queue counts + recent events
-- `POST /api/admin/telegram-member-tags/reconcile` -> enqueue all ERP users with Telegram IDs
-
-Health checks the configured chat, bot membership and the exact `can_manage_tags === true` permission. It never infers this capability from `can_pin_messages`; missing/false `can_manage_tags` is a fail-closed diagnostic state.
-
-Structured events are persisted in `TelegramMemberTagSyncEvent` with operational-history TTL and also emitted as `[telegram-member-tag-sync]` JSON logs. Bot token is never included.
-
-## Dependency contract
-
-This project intentionally pins `node-telegram-bot-api` to `0.68.0`: it is the first legacy CommonJS-compatible release used here that contains `setChatMemberTag`. Do not upgrade this feature opportunistically to v2; v2 has a different public API surface and requires a separate migration project.
+The Settings UI has no MAIN selector. The normal "Групи бота" add/remove list is the configuration surface; the "Плашки магазинів" card is diagnostics/reconcile only.

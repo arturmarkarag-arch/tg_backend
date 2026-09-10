@@ -3,14 +3,16 @@
 const mongoose = require('mongoose');
 
 /**
- * Durable dirty-marker / outbox for Telegram member tags.
- *
- * It deliberately does NOT persist authoritative shop/tag data. Each worker run
- * re-reads User -> Shop and the current main Telegram group before touching
- * Telegram, so queued work cannot apply stale assignment data.
+ * Durable projection outbox keyed by Telegram user + Telegram group.
+ * One bad/missing group can retry independently without blocking the same user in
+ * every other configured bot group. Authoritative tag data is never stored here:
+ * normal sync always re-reads User -> Shop at execution time.
  */
 const schema = new mongoose.Schema({
-  telegramId: { type: String, required: true, unique: true, trim: true },
+  telegramId: { type: String, required: true, trim: true, index: true },
+  chatId: { type: String, required: true, trim: true, index: true },
+  mode: { type: String, enum: ['sync', 'cleanup'], default: 'sync' },
+  cleanupTag: { type: String, default: '' },
   status: {
     type: String,
     enum: ['pending', 'processing', 'retry_wait', 'synced', 'skipped', 'failed'],
@@ -26,8 +28,7 @@ const schema = new mongoose.Schema({
   attempts: { type: Number, default: 0 },
   source: { type: String, default: 'system', trim: true },
 
-  // Diagnostic snapshot only; never used to compute the next desired state.
-  lastChatId: { type: String, default: '' },
+  // Diagnostic/ownership snapshot only; never used to derive normal desired state.
   lastUserId: { type: String, default: '' },
   lastShopId: { type: String, default: '' },
   lastShopName: { type: String, default: '' },
@@ -39,6 +40,7 @@ const schema = new mongoose.Schema({
   lastError: { type: String, default: '' },
 }, { timestamps: true });
 
+schema.index({ telegramId: 1, chatId: 1 }, { unique: true, name: 'telegram_member_tag_target_unique' });
 schema.index({ status: 1, nextAttemptAt: 1, requestedAt: 1 });
 
 module.exports = mongoose.model('TelegramMemberTagSync', schema);

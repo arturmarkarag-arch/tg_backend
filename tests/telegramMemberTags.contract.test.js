@@ -7,7 +7,8 @@ const {
   hasEmoji,
   decideTelegramMemberTagAction,
 } = require('../utils/telegramMemberTagPolicy');
-const { applyTelegramMemberTag } = require('../services/telegramMemberTagSync');
+const { applyTelegramMemberTag, cleanupManagedTag } = require('../services/telegramMemberTagSync');
+const { setChatMemberTag } = require('../services/telegramMemberTagTransport');
 
 describe('Telegram shop member tags contract', () => {
   it('formats #ShopName with a 16-character Unicode ceiling', () => {
@@ -28,61 +29,53 @@ describe('Telegram shop member tags contract', () => {
     expect(decideTelegramMemberTagAction({ status: 'member', currentTag: '#Poznań', desiredTag: '#Poznań' })).toEqual({ result: 'unchanged', write: false });
   });
 
-  it('updates or clears only ordinary members when actual differs from desired', () => {
-    expect(decideTelegramMemberTagAction({ status: 'member', currentTag: '#Poznań', desiredTag: '#Warszawa' })).toEqual({ result: 'updated', write: true });
-    expect(decideTelegramMemberTagAction({ status: 'member', currentTag: '#Poznań', desiredTag: '' })).toEqual({ result: 'cleared', write: true });
-  });
-
-  it('uses the library setChatMemberTag options contract and skips admin writes', async () => {
+  it('updates or clears only ordinary members through injected member-tag transport', async () => {
     const calls = [];
-    const memberBot = {
-      getChatMember: async () => ({ status: 'member', tag: '#Poznań' }),
-      setChatMemberTag: async (...args) => { calls.push(args); return true; },
-    };
+    const bot = { getChatMember: async () => ({ status: 'member', tag: '#Poznań' }) };
+    const setMemberTag = async (...args) => { calls.push(args); return true; };
+
     const updated = await applyTelegramMemberTag({
-      bot: memberBot,
-      chatId: '-100123',
-      telegramId: '123456',
-      desiredTag: '#Warszawa',
+      bot, chatId: '-100123', telegramId: '123456', desiredTag: '#Warszawa', setMemberTag,
     });
     expect(updated.result).toBe('updated');
-    expect(calls).toEqual([['-100123', 123456, { tag: '#Warszawa' }]]);
+    expect(calls).toEqual([[bot, '-100123', 123456, '#Warszawa']]);
 
-    const adminCalls = [];
-    const adminBot = {
-      getChatMember: async () => ({ status: 'administrator', custom_title: 'Administrator' }),
-      setChatMemberTag: async (...args) => adminCalls.push(args),
-    };
-    const skipped = await applyTelegramMemberTag({
-      bot: adminBot,
-      chatId: '-100123',
-      telegramId: '123456',
-      desiredTag: '#Warszawa',
+    const cleared = await applyTelegramMemberTag({
+      bot, chatId: '-100123', telegramId: '123456', desiredTag: '', setMemberTag,
     });
-    expect(skipped.result).toBe('skipped_admin');
-    expect(adminCalls).toEqual([]);
+    expect(cleared.result).toBe('cleared');
+    expect(calls[1]).toEqual([bot, '-100123', 123456, '']);
   });
 
-  it('clears by sending an empty tag and treats missing participant as a skip', async () => {
+  it('never touches admin titles and ownership-protects cleanup', async () => {
+    const calls = [];
+    const admin = await applyTelegramMemberTag({
+      bot: { getChatMember: async () => ({ status: 'administrator', custom_title: 'Administrator' }) },
+      chatId: '-100123', telegramId: '123456', desiredTag: '#Warszawa',
+      setMemberTag: async (...args) => calls.push(args),
+    });
+    expect(admin.result).toBe('skipped_admin');
+    expect(calls).toEqual([]);
+
+    const changed = await cleanupManagedTag({
+      bot: { getChatMember: async () => ({ status: 'member', tag: '#ManualTag' }) },
+      chatId: '-100123', telegramId: '123456', cleanupTag: '#Poznań',
+      setMemberTag: async (...args) => calls.push(args),
+    });
+    expect(changed.result).toBe('cleanup_skipped_tag_changed');
+    expect(calls).toEqual([]);
+  });
+
+  it('maps setChatMemberTag through the existing SDK generic request transport', async () => {
     const calls = [];
     const bot = {
-      getChatMember: async () => ({ status: 'member', tag: '#Poznań' }),
-      setChatMemberTag: async (...args) => { calls.push(args); return true; },
+      _request: async (...args) => { calls.push(args); return true; },
     };
-    const cleared = await applyTelegramMemberTag({ bot, chatId: '-100123', telegramId: '123456', desiredTag: '' });
-    expect(cleared.result).toBe('cleared');
-    expect(calls).toEqual([['-100123', 123456, { tag: '' }]]);
-
-    const absent = new Error('Bad Request: USER_NOT_PARTICIPANT');
-    absent.response = { body: { error_code: 400, description: 'Bad Request: USER_NOT_PARTICIPANT' } };
-    const missing = await applyTelegramMemberTag({
-      bot: { getChatMember: async () => { throw absent; } },
-      chatId: '-100123',
-      telegramId: '123456',
-      desiredTag: '#Poznań',
-    });
-    expect(missing.result).toBe('not_in_group');
-    expect(missing.writePerformed).toBe(false);
+    await setChatMemberTag(bot, '-100123', 123456, '#Poznań');
+    expect(calls).toEqual([[
+      'setChatMemberTag',
+      { form: { chat_id: '-100123', user_id: 123456, tag: '#Poznań' } },
+    ]]);
   });
 
   it('passes the architecture/source gate', () => {
