@@ -47,6 +47,7 @@ const {
   releaseOtherLocksOfWorker,
   releasePickingTask,
   markSessionInProgress,
+  notifyPickingQueueChanged,
   FORCE_CLAIM_AFTER_MS,
   LOCK_TIMEOUT_MS,
 } = require('../services/pickingService');
@@ -425,6 +426,11 @@ router.post('/start-session', requireTelegramRoles(['warehouse', 'admin']), asyn
       await reconcileLateOrdersForSession(deliveryGroupId, currentSessionId);
       session = await OrderingSession.findById(currentSessionId).lean();
     }
+    notifyPickingQueueChanged({
+      deliveryGroupId,
+      orderingSessionId: currentSessionId,
+      reason: 'start_reconcile',
+    });
 
     const sessionActiveCount = await PickingTask.countDocuments({
       orderingSessionId: currentSessionId,
@@ -583,6 +589,11 @@ router.post('/start-session', requireTelegramRoles(['warehouse', 'admin']), asyn
       orderingSessionId: currentSessionId,
     });
     if (!coverage.ok) {
+      notifyPickingQueueChanged({
+        deliveryGroupId,
+        orderingSessionId: currentSessionId,
+        reason: 'coverage_gap',
+      });
       return res.json({ coverageGaps: true, gaps: coverage.gaps, ...baseEnvelope });
     }
 
@@ -606,6 +617,11 @@ router.post('/start-session', requireTelegramRoles(['warehouse', 'admin']), asyn
       const finalDoc = completed
         ? (completed.toObject ? completed.toObject() : completed)
         : confirmedDoc;
+      notifyPickingQueueChanged({
+        deliveryGroupId,
+        orderingSessionId: currentSessionId,
+        reason: 'session_empty',
+      });
       return res.json({
         noOrders: true,
         orderingSessionId: String(currentSessionId),
@@ -626,6 +642,11 @@ router.post('/start-session', requireTelegramRoles(['warehouse', 'admin']), asyn
       });
     }
 
+    notifyPickingQueueChanged({
+      deliveryGroupId,
+      orderingSessionId: currentSessionId,
+      reason: 'session_confirmed',
+    });
     return res.json({
       started: true,
       orderingSessionId: String(currentSessionId),
@@ -720,6 +741,11 @@ router.post('/cancel-start', requireTelegramRoles(['warehouse', 'admin']), async
     status: 'pending',
     items: { $not: { $elemMatch: { packed: true } } },
   });
+  notifyPickingQueueChanged({
+    deliveryGroupId,
+    orderingSessionId: sessionId,
+    reason: 'cancel_start',
+  });
 
   res.json({ ok: true, pickingStatus: 'pending', deletedCount });
 }));
@@ -750,6 +776,11 @@ router.post('/resolve-coverage-gap', requireTelegramRoles(['warehouse', 'admin']
   });
 
   const coverage = await auditSessionCoverage({ deliveryGroupId, orderingSessionId: sessionId });
+  notifyPickingQueueChanged({
+    deliveryGroupId,
+    orderingSessionId: sessionId,
+    reason: 'coverage_gap_resolved',
+  });
 
   res.json({ ok: true, cancelledCount, archived, gaps: coverage.gaps, resolved: coverage.ok });
 }));
@@ -782,7 +813,15 @@ async function handleNextTaskCommand(req, res, next) {
     //  - always release this worker's own locks (from a previous request / page reload)
     //  - release any worker's lock that is older than timeout (abandoned tasks)
     // Does NOT touch items[].packed so partial progress is preserved for the next worker.
-    await releaseWorkerAndStaleLocks(user.telegramId, deliveryGroupId);
+    const releasedLocks = await releaseWorkerAndStaleLocks(user.telegramId, deliveryGroupId);
+    const releasedLockCount = releasedLocks?.modifiedCount ?? releasedLocks?.nModified ?? 0;
+    if (releasedLockCount > 0) {
+      notifyPickingQueueChanged({
+        deliveryGroupId,
+        orderingSessionId: sessionId,
+        reason: 'stale_or_previous_lock_released',
+      });
+    }
 
     // Recovery: якщо сервер упав між фазою 1 (task completed) і фазою 2 (archiveProduct)
     // в out-of-stock flow — довиконуємо архівування тут, а не тільки в start-session.
@@ -1279,6 +1318,12 @@ router.post('/tasks/:taskId/claim', requireTelegramRoles(['warehouse', 'admin'])
             // whatever else we were holding so the invariant survives it.
             await releaseOtherLocksOfWorker(user.telegramId, existing._id);
             await markSessionInProgress(existing.orderingSessionId, actorOf(user));
+            notifyPickingQueueChanged({
+              deliveryGroupId: existing.deliveryGroupId,
+              orderingSessionId: existing.orderingSessionId,
+              taskId: existing._id,
+              reason: 'claim_resume',
+            });
             return res.json({ task: mine });
           }
         }
@@ -1290,6 +1335,12 @@ router.post('/tasks/:taskId/claim', requireTelegramRoles(['warehouse', 'admin'])
       const taskData = await buildTaskResponse(claimed);
       if (!taskData) {
         await PickingTask.findByIdAndUpdate(claimed._id, { $set: { status: 'pending', lockedBy: null, lockedAt: null } });
+        notifyPickingQueueChanged({
+          deliveryGroupId: claimed.deliveryGroupId,
+          orderingSessionId: claimed.orderingSessionId,
+          taskId: claimed._id,
+          reason: 'claim_reverted_missing_product',
+        });
         return next(appError('picking_product_not_found'));
       }
 
@@ -1300,6 +1351,12 @@ router.post('/tasks/:taskId/claim', requireTelegramRoles(['warehouse', 'admin'])
 
       // Picking has physically begun → close the cancel-start window.
       await markSessionInProgress(claimed.orderingSessionId, actorOf(user));
+      notifyPickingQueueChanged({
+        deliveryGroupId: claimed.deliveryGroupId,
+        orderingSessionId: claimed.orderingSessionId,
+        taskId: claimed._id,
+        reason: 'claim',
+      });
 
       res.json({ task: taskData });
     }, { ttlMs: 10_000, waitMs: 5_000 });

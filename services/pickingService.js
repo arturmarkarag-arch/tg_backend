@@ -102,6 +102,24 @@ async function withPickingFinalizeLock(orderingSessionId, work) {
   );
 }
 
+// Canonical lightweight invalidation signal for live picking read models.
+// The payload is intentionally tiny and contains no shop/order details. It is
+// broadcast globally so correctness does not depend on a component having joined
+// a Socket.IO room before the mutation; clients filter by deliveryGroupId.
+function notifyPickingQueueChanged({ deliveryGroupId = '', orderingSessionId = '', taskId = '', reason = 'changed' } = {}) {
+  const groupId = String(deliveryGroupId || '');
+  if (!groupId) return;
+  try {
+    const io = getIO();
+    io?.emit('picking_queue_changed', {
+      deliveryGroupId: groupId,
+      orderingSessionId: String(orderingSessionId || ''),
+      taskId: String(taskId || ''),
+      reason: String(reason || 'changed'),
+    });
+  } catch { /* socket is non-critical / absent in tests */ }
+}
+
 // ── Core helpers ─────────────────────────────────────────────────────────────
 
 // Only produce closure diagnostics once this session's live queue is empty.
@@ -271,7 +289,15 @@ async function findAndLockNext(
 
     if (candidate.status === 'locked') {
       if (String(candidate.lockedBy || '') === uid) {
-        await markSessionInProgress(candidate.orderingSessionId, actor);
+        const transitioned = await markSessionInProgress(candidate.orderingSessionId, actor);
+        if (transitioned) {
+          notifyPickingQueueChanged({
+            deliveryGroupId: candidate.deliveryGroupId,
+            orderingSessionId: candidate.orderingSessionId,
+            taskId: candidate._id,
+            reason: 'session_in_progress',
+          });
+        }
         return { task: candidate, routeBlocked: null };
       }
       return {
@@ -301,6 +327,12 @@ async function findAndLockNext(
     if (!claimed) continue;
     await releaseOtherLocksOfWorker(uid, claimed._id);
     await markSessionInProgress(claimed.orderingSessionId, actor);
+    notifyPickingQueueChanged({
+      deliveryGroupId: claimed.deliveryGroupId,
+      orderingSessionId: claimed.orderingSessionId,
+      taskId: claimed._id,
+      reason: 'claim',
+    });
     return { task: claimed, routeBlocked: null };
   }
 
@@ -424,10 +456,22 @@ async function releaseOtherLocksOfWorker(userTelegramId, keepTaskId) {
     ...(keepTaskId ? { _id: { $ne: keepTaskId } } : {}),
   };
 
-  const stray = await PickingTask.find(filter, '_id').lean();
+  const stray = await PickingTask.find(filter, '_id deliveryGroupId orderingSessionId').lean();
   if (!stray.length) return [];
 
   await PickingTask.updateMany(filter, { $set: { status: 'pending', lockedBy: null, lockedAt: null } });
+  const notifiedGroups = new Set();
+  for (const task of stray) {
+    const groupId = String(task.deliveryGroupId || '');
+    if (!groupId || notifiedGroups.has(groupId)) continue;
+    notifiedGroups.add(groupId);
+    notifyPickingQueueChanged({
+      deliveryGroupId: groupId,
+      orderingSessionId: task.orderingSessionId,
+      taskId: task._id,
+      reason: 'previous_lock_released',
+    });
+  }
   return stray.map((t) => String(t._id));
 }
 
@@ -515,6 +559,12 @@ async function releasePickingTask({ taskId, userTelegramId, userFirstName = '', 
       positionIndex: released.positionIndex,
     });
   } catch { /* socket is non-critical / absent in tests */ }
+  notifyPickingQueueChanged({
+    deliveryGroupId: released.deliveryGroupId,
+    orderingSessionId: released.orderingSessionId,
+    taskId: released._id,
+    reason: 'release',
+  });
 
   return { released: true, alreadyReleased: false, task: released.toObject() };
 }
@@ -625,6 +675,12 @@ async function completePickingTask({ taskId, userTelegramId, userFirstName = '',
     task.deliveryGroupId,
     { by: actor.by, byName: actor.byName },
   );
+  notifyPickingQueueChanged({
+    deliveryGroupId: task.deliveryGroupId,
+    orderingSessionId: task.orderingSessionId,
+    taskId: task._id,
+    reason: 'complete',
+  });
 
   const { task: nextRaw, routeBlocked } = await findAndLockNext(
     userTelegramId,
@@ -676,6 +732,12 @@ async function outOfStockPickingTask({ taskId, userTelegramId, userFirstName = '
     const closureBlockers = await finalizeSessionAndGetBlockers(
       task.orderingSessionId, task.deliveryGroupId, { by: actor.by, byName: actor.byName },
     );
+    notifyPickingQueueChanged({
+      deliveryGroupId: task.deliveryGroupId,
+      orderingSessionId: task.orderingSessionId,
+      taskId: task._id,
+      reason: 'out_of_stock_retry',
+    });
     const { task: nextRaw, routeBlocked } = await findAndLockNext(
       userTelegramId, task.blockId, task.deliveryGroupId || null,
       { orderingSessionId: task.orderingSessionId, fromPosition: task.positionIndex, actor },
@@ -771,6 +833,12 @@ async function outOfStockPickingTask({ taskId, userTelegramId, userFirstName = '
   const closureBlockers = await finalizeSessionAndGetBlockers(
     task.orderingSessionId, task.deliveryGroupId, { by: actor.by, byName: actor.byName },
   );
+  notifyPickingQueueChanged({
+    deliveryGroupId: task.deliveryGroupId,
+    orderingSessionId: task.orderingSessionId,
+    taskId: task._id,
+    reason: 'out_of_stock',
+  });
 
   const { task: nextRaw, routeBlocked } = await findAndLockNext(
     userTelegramId, task.blockId, task.deliveryGroupId || null,
@@ -797,6 +865,12 @@ async function forceClaimPickingTask({ taskId, userTelegramId }) {
     if (!claimed) throw Object.assign(new Error('Task unavailable'), { code: 'picking_claim_unavailable' });
     await releaseOtherLocksOfWorker(userTelegramId, claimed._id);
     await markSessionInProgress(claimed.orderingSessionId, { by: String(userTelegramId) });
+    notifyPickingQueueChanged({
+      deliveryGroupId: claimed.deliveryGroupId,
+      orderingSessionId: claimed.orderingSessionId,
+      taskId: claimed._id,
+      reason: 'force_claim',
+    });
     return { task: claimed.toObject() };
   }
 
@@ -825,6 +899,12 @@ async function forceClaimPickingTask({ taskId, userTelegramId }) {
   if (!claimed) throw Object.assign(new Error('Task unavailable'), { code: 'picking_claim_unavailable' });
   await releaseOtherLocksOfWorker(userTelegramId, claimed._id);
   await markSessionInProgress(claimed.orderingSessionId, { by: String(userTelegramId) });
+  notifyPickingQueueChanged({
+    deliveryGroupId: claimed.deliveryGroupId,
+    orderingSessionId: claimed.orderingSessionId,
+    taskId: claimed._id,
+    reason: 'force_claim',
+  });
   return { task: claimed.toObject() };
 }
 
@@ -990,4 +1070,5 @@ module.exports = {
   runTransactionWithRetry,
   withPickingFinalizeLock,
   runOperationWithRetry,
+  notifyPickingQueueChanged,
 };
