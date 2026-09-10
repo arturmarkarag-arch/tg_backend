@@ -12,6 +12,7 @@ const { getSupportAdmins, toPublicSupportAdmins } = require('./utils/telegramSup
 const { isRemovedUser, activeUserFilter } = require('./utils/userAccountState');
 const { trackMemberFromMessage, handleChatMemberUpdate, setMemberPhoto } = require('./services/groupMemberSync');
 const { getAllowedGroupIds } = require('./utils/telegramGroupSettings');
+const { getTelegramMemberTagGroupIds } = require('./utils/telegramMemberTagGroupSettings');
 const {
   issueRegistrationToken,
   peekRegistrationToken,
@@ -62,16 +63,16 @@ async function handleMyChatMemberUpdate(update) {
     const newStatus = payload.new_chat_member?.status || payload.new_chat_member_status;
     if (!chatId || !newStatus) return;
 
-    // Every configured bot group is a member-tag target. When the bot regains
-    // can_manage_tags in one of them, reconcile only that group. Do not infer the
-    // permission from adjacent rights such as can_pin_messages.
+    // When the bot regains can_manage_tags in a dedicated member-tag group,
+    // reconcile only that group. Bot-authorized groups are a separate setting.
+    // Do not infer the permission from adjacent rights such as can_pin_messages.
     if (['group', 'supergroup'].includes(String(payload.chat?.type || ''))) {
       try {
-        const allowed = await getAllowedGroupIds();
+        const tagGroups = await getTelegramMemberTagGroupIds();
         const member = payload.new_chat_member || {};
         const canManageTags = member.status === 'creator'
           || (member.status === 'administrator' && member.can_manage_tags === true);
-        if (allowed.includes(chatId) && canManageTags) {
+        if (tagGroups.includes(chatId) && canManageTags) {
           const { enqueueTelegramMemberTagReconcile } = require('./services/telegramMemberTagSync');
           await enqueueTelegramMemberTagReconcile({ source: 'telegram_group_bot_permissions_ready', chatId });
         }
@@ -882,23 +883,33 @@ async function initBot(token) {
     bot.on('chat_member', async (update) => {
       try {
         const groupChatId = String(update.chat?.id || '');
-        if (!groupChatId || !(await isAuthorizedGroup(groupChatId))) return;
+        if (!groupChatId) return;
 
+        // Bot-authorized groups and shop-tag groups are independent settings.
+        // A tag-only group must receive projection invalidations without making
+        // the bot respond there as if it were an authorized bot group.
+        const [authorizedGroup, memberTagGroups] = await Promise.all([
+          isAuthorizedGroup(groupChatId),
+          getTelegramMemberTagGroupIds().catch(() => []),
+        ]);
+        const memberTagGroup = memberTagGroups.includes(groupChatId);
+        if (!authorizedGroup && !memberTagGroup) return;
+
+        if (memberTagGroup) {
+          try {
+            const changedTelegramId = String(update.new_chat_member?.user?.id || '');
+            if (/^\d+$/.test(changedTelegramId)) {
+              const { enqueueTelegramMemberTagSync } = require('./services/telegramMemberTagSync');
+              await enqueueTelegramMemberTagSync(changedTelegramId, {
+                source: 'telegram_chat_member_changed',
+                chatId: groupChatId,
+              });
+            }
+          } catch (_) { /* member-tag projection must not break group membership processing */ }
+        }
+
+        if (!authorizedGroup) return;
         const joined = await handleChatMemberUpdate(update);
-
-        // Membership/admin changes invalidate exactly this configured group.
-        // Covers join, admin -> member, member -> admin, left/kicked, etc.
-        try {
-          const changedTelegramId = String(update.new_chat_member?.user?.id || '');
-          if (/^\d+$/.test(changedTelegramId)) {
-            const { enqueueTelegramMemberTagSync } = require('./services/telegramMemberTagSync');
-            await enqueueTelegramMemberTagSync(changedTelegramId, {
-              source: 'telegram_chat_member_changed',
-              chatId: groupChatId,
-            });
-          }
-        } catch (_) { /* passive group tracking must not fail because projection queue is unavailable */ }
-
         if (!joined) return; // left / kicked / already known / bot
 
         const { telegramId, from } = joined;

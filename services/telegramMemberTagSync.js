@@ -4,7 +4,7 @@ const User = require('../models/User');
 const Shop = require('../models/Shop');
 const TelegramMemberTagSync = require('../models/TelegramMemberTagSync');
 const TelegramMemberTagSyncEvent = require('../models/TelegramMemberTagSyncEvent');
-const { getAllowedGroupIds } = require('../utils/telegramGroupSettings');
+const { getTelegramMemberTagGroupIds } = require('../utils/telegramMemberTagGroupSettings');
 const { isRemovedUser } = require('../utils/userAccountState');
 const { classifyTelegramSendError, retryDelayMs } = require('../utils/telegramDeliveryPolicy');
 const { setChatMemberTag, deferMemberTagWritesUntil } = require('./telegramMemberTagTransport');
@@ -275,7 +275,7 @@ async function getTelegramMemberTagGroupHealth(groupId, { live = true } = {}) {
 }
 
 async function getTelegramMemberTagHealth({ live = true } = {}) {
-  const groupIds = await getAllowedGroupIds();
+  const groupIds = await getTelegramMemberTagGroupIds();
   const groups = await Promise.all(groupIds.map((groupId) => getTelegramMemberTagGroupHealth(groupId, { live })));
   const readyGroups = groups.filter((row) => row.ok).length;
   return {
@@ -314,10 +314,17 @@ async function upsertTarget(telegramId, chatId, { source = 'system', mode = 'syn
   ).lean();
 }
 
+async function resolveConfiguredMemberTagGroups(chatId = null) {
+  const configured = await getTelegramMemberTagGroupIds();
+  if (chatId == null) return configured;
+  const requested = normalizeChatId(chatId);
+  return requested && configured.includes(requested) ? [requested] : [];
+}
+
 async function enqueueTelegramMemberTagSync(telegramId, { source = 'system', chatId = null } = {}) {
   const tid = normalizeTelegramId(telegramId);
   if (!tid) return { queued: 0, groups: 0 };
-  const groupIds = chatId ? [normalizeChatId(chatId)].filter(Boolean) : await getAllowedGroupIds();
+  const groupIds = await resolveConfiguredMemberTagGroups(chatId);
   let queued = 0;
   for (const groupId of groupIds) {
     if (await upsertTarget(tid, groupId, { source, mode: 'sync' })) queued += 1;
@@ -327,7 +334,7 @@ async function enqueueTelegramMemberTagSync(telegramId, { source = 'system', cha
 
 async function enqueueTelegramMemberTagReconcile({ source = 'manual_reconcile', chatId = null } = {}) {
   await ensureTelegramMemberTagQueueIndexes();
-  const groupIds = chatId ? [normalizeChatId(chatId)].filter(Boolean) : await getAllowedGroupIds();
+  const groupIds = await resolveConfiguredMemberTagGroups(chatId);
   if (!groupIds.length) return { queued: 0, users: 0, groups: 0 };
   const users = await User.find({ telegramId: { $type: 'string', $ne: '' } }, 'telegramId').lean();
   const ids = [...new Set(users.map((user) => normalizeTelegramId(user.telegramId)).filter(Boolean))];
@@ -425,7 +432,7 @@ async function processTelegramMemberTagSync(row) {
   }
 
   if (mode === 'sync') {
-    const groups = await getAllowedGroupIds();
+    const groups = await getTelegramMemberTagGroupIds();
     if (!groups.includes(chatId)) {
       const event = await writeEvent({ ...base, result: 'skipped_group_removed' });
       await finishClaim(row, { status: 'skipped', completedAt: new Date(), lastResult: event.result, lastErrorCode: '', lastError: '' });
@@ -547,7 +554,29 @@ async function drainDueTelegramMemberTagSync({ limit = DEFAULT_BATCH_LIMIT } = {
   const max = Math.max(1, Math.min(100, Number(limit) || DEFAULT_BATCH_LIMIT));
   const now = new Date();
   const due = dueFilter(now);
-  const chatIds = (await TelegramMemberTagSync.distinct('chatId', due)).map(normalizeChatId).filter(Boolean);
+  const configuredGroupIds = await getTelegramMemberTagGroupIds();
+
+  // V3/V4 incorrectly used telegram.allowedGroupIds as tag targets. After the
+  // settings split, stale ordinary sync rows must not keep touching those chats.
+  // Cleanup rows are intentionally exempt because they may target a group just
+  // removed from the dedicated member-tag list.
+  await TelegramMemberTagSync.updateMany(
+    { ...due, mode: { $ne: 'cleanup' }, chatId: { $nin: configuredGroupIds } },
+    {
+      $set: {
+        status: 'skipped', completedAt: now, lastResult: 'skipped_group_removed',
+        lastErrorCode: '', lastError: '',
+      },
+    },
+  );
+
+  const eligibleDue = {
+    ...due,
+    $and: [
+      { $or: [{ mode: 'cleanup' }, { chatId: { $in: configuredGroupIds } }] },
+    ],
+  };
+  const chatIds = (await TelegramMemberTagSync.distinct('chatId', eligibleDue)).map(normalizeChatId).filter(Boolean);
   if (!chatIds.length) return { processed: 0, results: [] };
 
   // Preflight once per due group. A group without permission is delayed as a
@@ -591,10 +620,13 @@ async function drainDueTelegramMemberTagSync({ limit = DEFAULT_BATCH_LIMIT } = {
 
 async function getTelegramMemberTagSyncSummary() {
   await ensureTelegramMemberTagQueueIndexes();
+  const configuredGroupIds = await getTelegramMemberTagGroupIds();
+  const queueMatch = configuredGroupIds.length ? { chatId: { $in: configuredGroupIds } } : { _id: null };
+  const eventMatch = configuredGroupIds.length ? { chatId: { $in: configuredGroupIds } } : { _id: null };
   const [health, counts, recent] = await Promise.all([
     getTelegramMemberTagHealth({ live: true }),
-    TelegramMemberTagSync.aggregate([{ $group: { _id: '$status', count: { $sum: 1 } } }]),
-    TelegramMemberTagSyncEvent.find({}).sort({ createdAt: -1 }).limit(25).lean(),
+    TelegramMemberTagSync.aggregate([{ $match: queueMatch }, { $group: { _id: '$status', count: { $sum: 1 } } }]),
+    TelegramMemberTagSyncEvent.find(eventMatch).sort({ createdAt: -1 }).limit(25).lean(),
   ]);
   return {
     health,

@@ -5,7 +5,7 @@ const mongoose = require('mongoose');
 /**
  * Durable projection outbox keyed by Telegram user + Telegram group.
  * One bad/missing group can retry independently without blocking the same user in
- * every other configured bot group. Authoritative tag data is never stored here:
+ * every other configured member-tag group. Authoritative tag data is never stored here:
  * normal sync always re-reads User -> Shop at execution time.
  */
 const schema = new mongoose.Schema({

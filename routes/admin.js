@@ -15,6 +15,10 @@ const {
   setAllowedGroupIds,
 } = require('../utils/telegramGroupSettings');
 const {
+  getTelegramMemberTagGroupIds,
+  setTelegramMemberTagGroupIds,
+} = require('../utils/telegramMemberTagGroupSettings');
+const {
   MAX_SUPPORT_ADMINS,
   normalizeSupportAdmin,
   getSupportAdmins,
@@ -428,26 +432,8 @@ router.post('/telegram-groups', telegramAuth, requireTelegramRole('admin'), asyn
     if (current.includes(groupId)) {
       return res.status(409).json({ error: 'Ця група вже додана' });
     }
-
-    const {
-      getTelegramMemberTagGroupHealth,
-      enqueueTelegramMemberTagReconcile,
-    } = require('../services/telegramMemberTagSync');
-
-    // Group configuration is durable ERP state and must not depend on a transient
-    // Telegram permission/network check. Persist first, then expose live health;
-    // the dedicated worker waits safely until can_manage_tags becomes available.
     const updated = await setAllowedGroupIds([...current, groupId]);
-    const reconcile = await enqueueTelegramMemberTagReconcile({
-      source: 'telegram_group_added',
-      chatId: groupId,
-    });
-    const health = await getTelegramMemberTagGroupHealth(groupId, { live: true }).catch((error) => ({
-      groupId,
-      ok: false,
-      error: String(error?.message || error || 'telegram_health_failed'),
-    }));
-    res.json({ groups: updated, health, reconcile });
+    res.json({ groups: updated });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -457,20 +443,63 @@ router.delete('/telegram-groups/:groupId', telegramAuth, requireTelegramRole('ad
   try {
     const groupId = String(req.params.groupId).trim();
     const current = await getAllowedGroupIds();
-    if (!current.includes(groupId)) return res.json({ groups: current, cleanup: { queued: 0 } });
-
-    // Queue ownership-safe cleanup before the group leaves the managed set. Only
-    // tags previously observed as ERP-owned are eligible for clearing.
-    const { enqueueTelegramGroupTagCleanup } = require('../services/telegramMemberTagSync');
-    const cleanup = await enqueueTelegramGroupTagCleanup(groupId, { source: 'telegram_group_removed' });
     const updated = await setAllowedGroupIds(current.filter((id) => id !== groupId));
-    res.json({ groups: updated, cleanup });
+    res.json({ groups: updated });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// ── Telegram member shop tags across every configured bot group ──────────────
+// ── Telegram shop member-tag groups ─────────────────────────────────────────
+// Independent from telegram.allowedGroupIds. Adding a group here does NOT make
+// it a bot-authorized group, and adding a bot group does NOT enable shop tags.
+router.get('/telegram-member-tag-groups', telegramAuth, requireTelegramRole('admin'), asyncHandler(async (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  res.json({ groups: await getTelegramMemberTagGroupIds() });
+}));
+
+router.post('/telegram-member-tag-groups', telegramAuth, requireTelegramRole('admin'), asyncHandler(async (req, res) => {
+  const groupId = String(req.body?.groupId || '').trim();
+  if (!groupId || !/^-?\d+$/.test(groupId)) {
+    return res.status(400).json({ error: 'groupId має бути числом' });
+  }
+  const current = await getTelegramMemberTagGroupIds();
+  if (current.includes(groupId)) {
+    return res.status(409).json({ error: 'Ця група вже додана до плашок магазинів' });
+  }
+
+  // Persist configuration independently from transient Telegram health. The
+  // worker will wait safely until the bot is admin with can_manage_tags.
+  const groups = await setTelegramMemberTagGroupIds([...current, groupId]);
+  const {
+    getTelegramMemberTagGroupHealth,
+    enqueueTelegramMemberTagReconcile,
+  } = require('../services/telegramMemberTagSync');
+  const reconcile = await enqueueTelegramMemberTagReconcile({
+    source: 'telegram_member_tag_group_added',
+    chatId: groupId,
+  });
+  const health = await getTelegramMemberTagGroupHealth(groupId, { live: true }).catch((error) => ({
+    groupId,
+    ok: false,
+    error: String(error?.message || error || 'telegram_health_failed'),
+  }));
+  res.json({ groups, health, reconcile });
+}));
+
+router.delete('/telegram-member-tag-groups/:groupId', telegramAuth, requireTelegramRole('admin'), asyncHandler(async (req, res) => {
+  const groupId = String(req.params.groupId || '').trim();
+  const current = await getTelegramMemberTagGroupIds();
+  if (!current.includes(groupId)) return res.json({ groups: current, cleanup: { queued: 0 } });
+
+  // Queue ownership-safe cleanup before the group leaves the managed tag set.
+  // Bot-group configuration is intentionally untouched.
+  const { enqueueTelegramGroupTagCleanup } = require('../services/telegramMemberTagSync');
+  const cleanup = await enqueueTelegramGroupTagCleanup(groupId, { source: 'telegram_member_tag_group_removed' });
+  const groups = await setTelegramMemberTagGroupIds(current.filter((id) => id !== groupId));
+  res.json({ groups, cleanup });
+}));
+
 router.get('/telegram-member-tags', telegramAuth, requireTelegramRole('admin'), asyncHandler(async (req, res) => {
   const { getTelegramMemberTagSyncSummary } = require('../services/telegramMemberTagSync');
   res.set('Cache-Control', 'no-store');
@@ -478,11 +507,11 @@ router.get('/telegram-member-tags', telegramAuth, requireTelegramRole('admin'), 
 }));
 
 router.post('/telegram-member-tags/reconcile', telegramAuth, requireTelegramRole('admin'), asyncHandler(async (req, res) => {
-  const groups = await getAllowedGroupIds();
+  const groups = await getTelegramMemberTagGroupIds();
   if (!groups.length) {
     return res.status(409).json({
-      error: 'telegram_groups_not_configured',
-      message: 'Спочатку додайте хоча б одну групу в «Групи бота».',
+      error: 'telegram_member_tag_groups_not_configured',
+      message: 'Спочатку додайте хоча б одну групу в «Плашки магазинів».',
     });
   }
   const { enqueueTelegramMemberTagReconcile } = require('../services/telegramMemberTagSync');

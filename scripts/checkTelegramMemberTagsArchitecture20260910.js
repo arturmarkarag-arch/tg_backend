@@ -28,18 +28,44 @@ check('only regular member is managed; admins/creator are immutable', () => {
   assert.deepStrictEqual(decideTelegramMemberTagAction({ status: 'member', currentTag: '#Poznań', desiredTag: '#Poznań' }), { result: 'unchanged', write: false });
 });
 
-check('all configured bot groups are tag targets; there is no MAIN identity', () => {
-  const settings = read('utils/telegramGroupSettings.js');
+check('bot groups and member-tag groups are independent persisted settings', () => {
+  const botSettings = read('utils/telegramGroupSettings.js');
+  const tagSettings = read('utils/telegramMemberTagGroupSettings.js');
   const service = read('services/telegramMemberTagSync.js');
-  const admin = read('routes/admin.js');
-  assert.ok(settings.includes("TELEGRAM_GROUPS_KEY = 'telegram.allowedGroupIds'"));
-  assert.ok(!settings.includes('TELEGRAM_MAIN_GROUP_KEY'));
-  assert.ok(service.includes('getAllowedGroupIds()'));
-  assert.ok(!service.includes('getMainTelegramGroupId'));
-  assert.ok(!admin.includes("/telegram-groups/main"));
+  assert.ok(botSettings.includes("TELEGRAM_GROUPS_KEY = 'telegram.allowedGroupIds'"));
+  assert.ok(tagSettings.includes("TELEGRAM_MEMBER_TAG_GROUPS_KEY = 'telegram.memberTagGroupIds'"));
+  assert.ok(tagSettings.includes('return Array.isArray(row?.value) ? normalizeGroupIds(row.value) : []'));
+  assert.ok(!tagSettings.includes('TELEGRAM_ALLOWED_GROUP_IDS'));
+  assert.ok(service.includes("require('../utils/telegramMemberTagGroupSettings')"));
+  assert.ok(!service.includes("require('../utils/telegramGroupSettings')"));
 });
 
-check('queue identity is user + group and retries are isolated per target', () => {
+check('ordinary bot-group CRUD does not enable, reconcile or clean member tags', () => {
+  const admin = read('routes/admin.js');
+  const start = admin.indexOf("router.get('/telegram-groups'");
+  const end = admin.indexOf('// ── Telegram shop member-tag groups', start);
+  assert.ok(start >= 0 && end > start);
+  const block = admin.slice(start, end);
+  assert.ok(block.includes('getAllowedGroupIds'));
+  assert.ok(block.includes('setAllowedGroupIds'));
+  assert.ok(!block.includes('telegramMemberTag'));
+  assert.ok(!block.includes('enqueueTelegram'));
+  assert.ok(!block.includes('can_manage_tags'));
+});
+
+check('member-tag groups have their own CRUD, reconcile and ownership-safe removal', () => {
+  const admin = read('routes/admin.js');
+  assert.ok(admin.includes("router.get('/telegram-member-tag-groups'"));
+  assert.ok(admin.includes("router.post('/telegram-member-tag-groups'"));
+  assert.ok(admin.includes("router.delete('/telegram-member-tag-groups/:groupId'"));
+  assert.ok(admin.includes('getTelegramMemberTagGroupIds'));
+  assert.ok(admin.includes('setTelegramMemberTagGroupIds'));
+  assert.ok(admin.includes("source: 'telegram_member_tag_group_added'"));
+  assert.ok(admin.includes("source: 'telegram_member_tag_group_removed'"));
+  assert.ok(admin.includes('enqueueTelegramGroupTagCleanup'));
+});
+
+check('queue identity is user + member-tag group and retries are isolated per target', () => {
   const model = read('models/TelegramMemberTagSync.js');
   const service = read('services/telegramMemberTagSync.js');
   assert.ok(model.includes("schema.index({ telegramId: 1, chatId: 1 }, { unique: true"));
@@ -50,39 +76,32 @@ check('queue identity is user + group and retries are isolated per target', () =
   assert.ok(service.includes('requestedRevision: row.processingRevision'));
 });
 
-check('shop assignment/rename fan out to configured groups', () => {
+check('event sync fans out only to dedicated member-tag groups', () => {
   const assignment = read('services/shopAssignmentCommand.js');
   const topology = read('services/shopTopologyCommand.js');
   const service = read('services/telegramMemberTagSync.js');
   assert.ok(assignment.includes("enqueueTelegramMemberTagSync(result.sellerTelegramId"));
   assert.ok(topology.includes('enqueueShopMemberTagSync'));
-  assert.ok(service.includes("chatId ? [normalizeChatId(chatId)].filter(Boolean) : await getAllowedGroupIds()"));
+  assert.ok(service.includes('resolveConfiguredMemberTagGroups'));
+  assert.ok(service.includes('const configured = await getTelegramMemberTagGroupIds()'));
+  assert.ok(service.includes('configured.includes(requested)'));
 });
 
-check('Telegram membership events invalidate only the affected configured group', () => {
+check('chat_member handling keeps bot authorization separate from tag projection', () => {
   const source = read('telegramBot.js');
+  assert.ok(source.includes('const [authorizedGroup, memberTagGroups] = await Promise.all'));
+  assert.ok(source.includes('const memberTagGroup = memberTagGroups.includes(groupChatId)'));
+  assert.ok(source.includes('if (!authorizedGroup && !memberTagGroup) return'));
+  assert.ok(source.includes('if (memberTagGroup)'));
+  assert.ok(source.includes('if (!authorizedGroup) return'));
   assert.ok(source.includes("source: 'telegram_chat_member_changed'"));
-  assert.ok(source.includes("source: 'telegram_new_chat_member'"));
-  assert.ok(source.includes('chatId: groupChatId'));
-  assert.ok(source.includes("chatId }).catch"));
-  assert.ok(!source.includes('getMainTelegramGroupId'));
 });
 
-check('group add persists independently, exposes health and immediately reconciles that group', () => {
-  const source = read('routes/admin.js');
-  const persistPos = source.indexOf('setAllowedGroupIds([...current, groupId])');
-  const healthPos = source.indexOf('getTelegramMemberTagGroupHealth(groupId, { live: true })');
-  assert.ok(persistPos >= 0 && healthPos > persistPos);
-  assert.ok(source.includes("source: 'telegram_group_added'"));
-  assert.ok(source.includes('chatId: groupId'));
-});
-
-check('group removal has ownership-safe cleanup and never touches admin titles', () => {
-  const admin = read('routes/admin.js');
+check('group removal cleanup never touches admin titles or manually changed tags', () => {
   const service = read('services/telegramMemberTagSync.js');
-  assert.ok(admin.includes('enqueueTelegramGroupTagCleanup'));
   assert.ok(service.includes('cleanup_skipped_tag_changed'));
   assert.ok(service.includes('cleanup_skipped_admin'));
+  assert.ok(service.includes('cleanup_skipped_creator'));
   assert.ok(!service.includes('setChatAdministratorCustomTitle'));
 });
 
@@ -91,7 +110,7 @@ check('new member-tag method reuses existing SDK transport without upgrading pro
   const service = read('services/telegramMemberTagSync.js');
   assert.strictEqual(pkg.dependencies['node-telegram-bot-api'], '^0.67.0');
   assert.ok(transport.includes("bot._request('setChatMemberTag'"));
-  assert.ok(transport.includes("form: {"));
+  assert.ok(transport.includes('form: {'));
   assert.ok(service.includes("require('./telegramMemberTagTransport')"));
   assert.ok(!service.includes('bot.setChatMemberTag'));
 });
@@ -102,8 +121,7 @@ check('compatibility transport is isolated and fails closed if generic SDK trans
   assert.ok(transport.includes("error.code = 'ETELEGRAMTRANSPORT'"));
 });
 
-
-check('account removal/reactivation paths invalidate tags even without shop transition', () => {
+check('account removal/reactivation paths invalidate member tags', () => {
   const remove = read('services/softRemoveUser.js');
   const registration = read('routes/v1/telegram.js');
   const bot = read('telegramBot.js');
@@ -112,37 +130,35 @@ check('account removal/reactivation paths invalidate tags even without shop tran
   assert.ok(bot.includes("source: 'account_registered'"));
 });
 
-check('scheduler is dedicated and blocked groups are throttled, not multiplied into user failures', () => {
+check('scheduler is dedicated and 429 pauses the whole member-tag group durably', () => {
   const scheduler = read('services/telegramMemberTagScheduler.js');
-  const service = read('services/telegramMemberTagSync.js');
-  assert.ok(scheduler.includes("'telegram-member-tags'"));
-  assert.ok(service.includes('BLOCKED_GROUP_RECHECK_MS'));
-  assert.ok(service.includes('getTelegramMemberTagGroupHealth(chatId, { live: true })'));
-  assert.ok(service.includes('readyChatIds'));
-});
-
-
-check('member-tag writes are paced per group and 429 pauses the whole group durably', () => {
   const transport = read('services/telegramMemberTagTransport.js');
   const service = read('services/telegramMemberTagSync.js');
+  assert.ok(scheduler.includes("'telegram-member-tags'"));
   assert.ok(transport.includes('DEFAULT_MEMBER_TAG_WRITE_INTERVAL_MS = 3500'));
   assert.ok(transport.includes('waitForMemberTagWriteSlot'));
-  assert.ok(transport.includes('TELEGRAM_MEMBER_TAG_WRITE_INTERVAL_MS'));
   assert.ok(service.includes('deferGroupAfterRateLimit'));
   assert.ok(service.includes('classification.rateLimited'));
   assert.ok(service.includes("lastErrorCode: '429'"));
   assert.ok(service.includes('$max: { nextAttemptAt: retryAt }'));
   assert.ok(service.includes('activeGroupRateLimitUntil'));
-  assert.ok(service.includes('retryAfterSeconds: classification.retryAfterSeconds'));
 });
 
-check('manual reconcile is ERP-driven across every configured group', () => {
+check('legacy V3/V4 bot-group queue rows are retired without Telegram writes', () => {
+  const service = read('services/telegramMemberTagSync.js');
+  assert.ok(service.includes('V3/V4 incorrectly used telegram.allowedGroupIds as tag targets'));
+  assert.ok(service.includes("mode: { $ne: 'cleanup' }, chatId: { $nin: configuredGroupIds }"));
+  assert.ok(service.includes("lastResult: 'skipped_group_removed'"));
+});
+
+check('manual reconcile is ERP-driven only across dedicated member-tag groups', () => {
   const source = read('services/telegramMemberTagSync.js');
   const admin = read('routes/admin.js');
   assert.ok(source.includes("User.find({ telegramId: { $type: 'string', $ne: '' } }"));
   assert.ok(source.includes('for (const groupId of groupIds)'));
   assert.ok(admin.includes("router.post('/telegram-member-tags/reconcile'"));
-  assert.ok(!admin.includes('telegram_main_group_not_configured'));
+  assert.ok(admin.includes('getTelegramMemberTagGroupIds()'));
+  assert.ok(admin.includes('Спочатку додайте хоча б одну групу в «Плашки магазинів».'));
 });
 
 if (process.exitCode) process.exit(process.exitCode);
