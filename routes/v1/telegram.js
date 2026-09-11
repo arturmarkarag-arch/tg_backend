@@ -773,7 +773,7 @@ router.post('/register-requests/:id/approve', adminOnly, asyncHandler(async (req
   if (pre.role === 'seller' && !pre.deliveryGroupId) throw appError('registration_group_missing');
 
   // Admin may override shopId at approve time (e.g. seller picked wrong shop)
-  const overrideShopId = req.body.shopId || null;
+  const overrideShopId = req.body?.shopId || null;
 
   let userExists = false;
   let createdUser = null;
