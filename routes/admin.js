@@ -58,12 +58,13 @@ router.delete('/allegro-settings/accounts/:accountId', telegramAuth, requireTele
 
 router.get('/baselinker-settings', telegramAuth, requireTelegramRole('admin'), asyncHandler(async (req, res) => {
   const { listBaseLinkerAccounts, MASTER_KEY_ENV } = require('../services/baseLinkerAccounts');
-  const { getBaseLinkerAccountLifecycleBlockers } = require('../services/baseLinkerAccountLifecycle');
+  const { getBaseLinkerAccountLifecycleBlockersBatch } = require('../services/baseLinkerAccountLifecycle');
   const accounts = await listBaseLinkerAccounts({ includeDisabled: true });
-  const withLifecycle = await Promise.all(accounts.map(async (account) => ({
+  const lifecycleByAccountId = await getBaseLinkerAccountLifecycleBlockersBatch(accounts.map((account) => account.accountId));
+  const withLifecycle = accounts.map((account) => ({
     ...account,
-    lifecycle: await getBaseLinkerAccountLifecycleBlockers(account.accountId),
-  })));
+    lifecycle: lifecycleByAccountId.get(account.accountId),
+  }));
   res.set('Cache-Control', 'no-store');
   res.json({
     accounts: withLifecycle,

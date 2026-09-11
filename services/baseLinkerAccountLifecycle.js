@@ -20,19 +20,105 @@ function withBaseLinkerAccountLifecycleLock(accountId, fn, opts = {}) {
   return withLock(lifecycleLockKey(id), fn, { ttlMs: 45_000, waitMs: 12_000, ...opts });
 }
 
+function unfinishedPickingConditions() {
+  return [
+    { upstreamReviewRequired: true },
+    { ownerTelegramId: { $nin: ['', null] } },
+    {
+      status: { $ne: 'sent' },
+      workflowStage: { $ne: 'sent' },
+      upstreamDisposition: { $ne: 'cancelled' },
+    },
+  ];
+}
+
 function unfinishedPickingFilter(accountId) {
   return {
     baseLinkerAccountId: String(accountId || '').trim(),
-    $or: [
-      { upstreamReviewRequired: true },
-      { ownerTelegramId: { $nin: ['', null] } },
-      {
-        status: { $ne: 'sent' },
-        workflowStage: { $ne: 'sent' },
-        upstreamDisposition: { $ne: 'cancelled' },
-      },
-    ],
+    $or: unfinishedPickingConditions(),
   };
+}
+
+function emptyLifecycleBlockers() {
+  return {
+    intakeOrders: 0,
+    unfinishedPicking: 0,
+    activePrintJobs: 0,
+    total: 0,
+    canDisable: true,
+    canChangeQueueStatuses: true,
+  };
+}
+
+function lifecycleBlockersFromCounts({ intakeOrders = 0, unfinishedPicking = 0, activePrintJobs = 0 } = {}) {
+  const normalized = {
+    intakeOrders: Math.max(0, Number(intakeOrders) || 0),
+    unfinishedPicking: Math.max(0, Number(unfinishedPicking) || 0),
+    activePrintJobs: Math.max(0, Number(activePrintJobs) || 0),
+  };
+  const total = normalized.intakeOrders + normalized.unfinishedPicking + normalized.activePrintJobs;
+  return {
+    ...normalized,
+    total,
+    canDisable: total === 0,
+    canChangeQueueStatuses: total === 0,
+  };
+}
+
+function lifecycleCountMap(rows = []) {
+  const out = new Map();
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const id = String(row?._id || '').trim();
+    if (!id) continue;
+    out.set(id, Math.max(0, Number(row?.count ?? row?.n) || 0));
+  }
+  return out;
+}
+
+async function getBaseLinkerAccountLifecycleBlockersBatch(accountIds = []) {
+  const ids = [...new Set((Array.isArray(accountIds) ? accountIds : [])
+    .map((value) => String(value || '').trim())
+    .filter(Boolean))];
+
+  const result = new Map(ids.map((id) => [id, emptyLifecycleBlockers()]));
+  if (!ids.length) return result;
+
+  const [intakeRows, pickingRows, printRows] = await Promise.all([
+    BaseLinkerOrderIndex.aggregate([
+      { $match: { baseLinkerAccountId: { $in: ids } } },
+      { $group: { _id: '$baseLinkerAccountId', count: { $sum: 1 } } },
+    ]),
+    BaseLinkerPickingOrder.aggregate([
+      {
+        $match: {
+          baseLinkerAccountId: { $in: ids },
+          $or: unfinishedPickingConditions(),
+        },
+      },
+      { $group: { _id: '$baseLinkerAccountId', count: { $sum: 1 } } },
+    ]),
+    BaseLinkerPrintJob.aggregate([
+      {
+        $match: {
+          baseLinkerAccountId: { $in: ids },
+          status: { $in: ['pending', 'claimed', 'printing'] },
+        },
+      },
+      { $group: { _id: '$baseLinkerAccountId', count: { $sum: 1 } } },
+    ]),
+  ]);
+
+  const intake = lifecycleCountMap(intakeRows);
+  const picking = lifecycleCountMap(pickingRows);
+  const printing = lifecycleCountMap(printRows);
+  for (const id of ids) {
+    result.set(id, lifecycleBlockersFromCounts({
+      intakeOrders: intake.get(id) || 0,
+      unfinishedPicking: picking.get(id) || 0,
+      activePrintJobs: printing.get(id) || 0,
+    }));
+  }
+  return result;
 }
 
 async function getBaseLinkerAccountLifecycleBlockers(accountId) {
@@ -46,15 +132,7 @@ async function getBaseLinkerAccountLifecycleBlockers(accountId) {
       status: { $in: ['pending', 'claimed', 'printing'] },
     }),
   ]);
-  const total = intakeOrders + unfinishedPicking + activePrintJobs;
-  return {
-    intakeOrders,
-    unfinishedPicking,
-    activePrintJobs,
-    total,
-    canDisable: total === 0,
-    canChangeQueueStatuses: total === 0,
-  };
+  return lifecycleBlockersFromCounts({ intakeOrders, unfinishedPicking, activePrintJobs });
 }
 
 async function assertBaseLinkerAccountLifecycleIdle(accountId, operation = 'disable') {
@@ -140,6 +218,8 @@ module.exports = {
   withBaseLinkerAccountLifecycleLock,
   unfinishedPickingFilter,
   getBaseLinkerAccountLifecycleBlockers,
+  getBaseLinkerAccountLifecycleBlockersBatch,
+  lifecycleBlockersFromCounts,
   assertBaseLinkerAccountLifecycleIdle,
   refreshBaseLinkerLifecycleTruth,
   disableBaseLinkerAccount,
