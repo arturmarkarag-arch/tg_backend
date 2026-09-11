@@ -21,18 +21,20 @@ check('OAuth requests the sale offer read scope needed for product photos', () =
 });
 
 check('order ingest enriches missing product photos without making images a hard dependency', () => {
-  assert(orders.includes('/sale/product-offers/${encodeURIComponent(offerId)}'));
-  assert(orders.includes("stage: 'offer_image_read'"));
+  assert(orders.includes("path: '/sale/offers'"));
+  assert(orders.includes("query: { 'offer.id': id, limit: 1 }"));
+  assert(orders.includes('/sale/product-offers/${encodeURIComponent(id)}'));
+  assert(orders.includes('/sale/products/${encodeURIComponent(productId)}'));
   assert(orders.includes('image_url: images[0]'));
   assert(orders.includes('images,'));
-  assert(orders.includes('if (![403, 404].includes(Number(error?.status)))'));
+  assert(orders.includes('upstreamStatus(error)'));
 });
 
 check('existing cached product photos are reused and old Stage 5 rows are backfilled on sync', () => {
   assert(orders.includes('existingOfferImageMap'));
   assert(orders.includes('const missing = offerIds.filter((offerId) => !imageMap.has(offerId))'));
   assert(orders.includes('async function backfillMissingOrderImages'));
-  assert(orders.includes("stage: 'offer_image_backfill'"));
+  assert(orders.includes("{ stage: 'offer_image_backfill' }"));
   assert(orders.includes('const imageBackfill = await backfillMissingOrderImages(account)'));
 });
 

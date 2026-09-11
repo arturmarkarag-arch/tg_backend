@@ -122,6 +122,96 @@ function offerImagesFromPayload(payload) {
   return normalizedImageUrls(productImages);
 }
 
+function offerListImagesFromPayload(payload, offerId = '') {
+  const wanted = clean(offerId, 128);
+  const offers = Array.isArray(payload?.offers) ? payload.offers : [];
+  const offer = offers.find((row) => !wanted || clean(row?.id, 128) === wanted) || offers[0] || null;
+  if (!offer) return [];
+  return normalizedImageUrls([
+    offer?.primaryImage,
+    ...(Array.isArray(offer?.images) ? offer.images : []),
+  ]);
+}
+
+function productIdsFromOfferPayload(payload) {
+  const ids = [];
+  for (const item of Array.isArray(payload?.productSet) ? payload.productSet : []) {
+    const id = clean(item?.product?.id, 128);
+    if (id && !ids.includes(id)) ids.push(id);
+    if (ids.length >= 3) break;
+  }
+  return ids;
+}
+
+function upstreamStatus(error) {
+  const n = Number(error?.args?.upstreamStatus ?? error?.status ?? 0);
+  return Number.isFinite(n) ? n : 0;
+}
+
+async function fetchOfferImages(accountId, offerId, { stage = 'offer_image_read' } = {}) {
+  const id = clean(offerId, 128);
+  if (!id) return { images: [], source: 'none' };
+
+  // GET /sale/offers exposes primaryImage explicitly and supports exact offer.id
+  // filtering. Prefer it over the much larger product-offer representation.
+  try {
+    const listed = await allegroRequest(accountId, {
+      method: 'GET',
+      path: '/sale/offers',
+      query: { 'offer.id': id, limit: 1 },
+      stage: `${stage}_offer_list`,
+      retryPolicy: 'safe',
+      maxAttempts: 2,
+    });
+    const images = offerListImagesFromPayload(listed.payload || {}, id);
+    if (images.length) return { images, source: 'sale_offers_primary_image' };
+  } catch (error) {
+    const status = upstreamStatus(error);
+    // Exact list lookup can miss an old/archived edge case. Continue to the
+    // full product-offer fallback only for non-auth, non-transient misses.
+    if (![400, 404].includes(status)) throw error;
+  }
+
+  let productOffer = null;
+  try {
+    const result = await allegroRequest(accountId, {
+      method: 'GET',
+      path: `/sale/product-offers/${encodeURIComponent(id)}`,
+      stage: `${stage}_product_offer`,
+      retryPolicy: 'safe',
+      maxAttempts: 2,
+    });
+    productOffer = result.payload || {};
+    const images = offerImagesFromPayload(productOffer);
+    if (images.length) return { images, source: 'product_offer' };
+  } catch (error) {
+    const status = upstreamStatus(error);
+    if (![404].includes(status)) throw error;
+  }
+
+  // Some product-offer responses carry only product ids. The catalog product
+  // endpoint is authoritative for product.images, so use it as a final exact
+  // identity fallback before giving up.
+  for (const productId of productIdsFromOfferPayload(productOffer || {})) {
+    try {
+      const result = await allegroRequest(accountId, {
+        method: 'GET',
+        path: `/sale/products/${encodeURIComponent(productId)}`,
+        stage: `${stage}_catalog_product`,
+        retryPolicy: 'safe',
+        maxAttempts: 2,
+      });
+      const images = normalizedImageUrls(result.payload?.images);
+      if (images.length) return { images, source: 'catalog_product' };
+    } catch (error) {
+      const status = upstreamStatus(error);
+      if (![404, 422].includes(status)) throw error;
+    }
+  }
+
+  return { images: [], source: 'none' };
+}
+
 async function resolveOfferImages(account, order, existingPreview = null) {
   const imageMap = existingOfferImageMap(existingPreview);
   const lineItems = Array.isArray(order?.lineItems) ? order.lineItems : [];
@@ -134,19 +224,12 @@ async function resolveOfferImages(account, order, existingPreview = null) {
 
   await Promise.all(missing.map(async (offerId) => {
     try {
-      const result = await allegroRequest(account.accountId, {
-        method: 'GET',
-        path: `/sale/product-offers/${encodeURIComponent(offerId)}`,
-        stage: 'offer_image_read',
-        retryPolicy: 'safe',
-        maxAttempts: 2,
-      });
-      const images = offerImagesFromPayload(result.payload || {});
-      if (images.length) imageMap.set(offerId, images);
+      const resolved = await fetchOfferImages(account.accountId, offerId, { stage: 'offer_image_read' });
+      if (resolved.images.length) imageMap.set(offerId, resolved.images);
     } catch (error) {
       // Photos are enrichment only. Missing/archived offers or missing sale scope
       // must never block order ingestion or warehouse work.
-      if (![403, 404].includes(Number(error?.status))) {
+      if (![403, 404].includes(upstreamStatus(error))) {
         console.warn('[allegro] offer image enrichment failed', offerId, error?.message || error);
       }
     }
@@ -156,7 +239,16 @@ async function resolveOfferImages(account, order, existingPreview = null) {
 
 async function backfillMissingOrderImages(account, { maxOffers = 50, maxOrders = 100 } = {}) {
   const scopeState = capabilityMatrix(account?.scopes);
-  if (scopeState.scopesKnown && scopeState.capabilities.saleOffersRead !== true) return { updatedOrders: 0, fetchedOffers: 0 };
+  if (scopeState.scopesKnown && scopeState.capabilities.saleOffersRead !== true) {
+    return {
+      updatedOrders: 0,
+      fetchedOffers: 0,
+      resolvedOffers: 0,
+      unresolvedOffers: 0,
+      missingScope: true,
+      requiredScope: 'allegro:api:sale:offers:read',
+    };
+  }
 
   const rows = await AllegroOrderIndex.find({
     accountId: account.accountId,
@@ -169,7 +261,7 @@ async function backfillMissingOrderImages(account, { maxOffers = 50, maxOrders =
       },
     },
   }).sort({ orderSortDate: -1 }).limit(Math.max(1, Math.min(250, Number(maxOrders) || 100))).lean();
-  if (!rows.length) return { updatedOrders: 0, fetchedOffers: 0 };
+  if (!rows.length) return { updatedOrders: 0, fetchedOffers: 0, resolvedOffers: 0, unresolvedOffers: 0, missingScope: false };
 
   const offerIds = [];
   for (const row of rows) {
@@ -181,27 +273,38 @@ async function backfillMissingOrderImages(account, { maxOffers = 50, maxOrders =
     }
     if (offerIds.length >= Math.max(1, Math.min(100, Number(maxOffers) || 50))) break;
   }
-  if (!offerIds.length) return { updatedOrders: 0, fetchedOffers: 0 };
+  if (!offerIds.length) return { updatedOrders: 0, fetchedOffers: 0, resolvedOffers: 0, unresolvedOffers: 0, missingScope: false };
 
   const imageMap = new Map();
+  const sources = {};
+  const unresolvedOfferIds = [];
   await Promise.all(offerIds.map(async (offerId) => {
     try {
-      const result = await allegroRequest(account.accountId, {
-        method: 'GET',
-        path: `/sale/product-offers/${encodeURIComponent(offerId)}`,
-        stage: 'offer_image_backfill',
-        retryPolicy: 'safe',
-        maxAttempts: 2,
-      });
-      const images = offerImagesFromPayload(result.payload || {});
-      if (images.length) imageMap.set(offerId, images);
+      const resolved = await fetchOfferImages(account.accountId, offerId, { stage: 'offer_image_backfill' });
+      if (resolved.images.length) {
+        imageMap.set(offerId, resolved.images);
+        sources[resolved.source] = Number(sources[resolved.source] || 0) + 1;
+      } else {
+        unresolvedOfferIds.push(offerId);
+      }
     } catch (error) {
-      if (![403, 404].includes(Number(error?.status))) {
+      unresolvedOfferIds.push(offerId);
+      if (![403, 404].includes(upstreamStatus(error))) {
         console.warn('[allegro] offer image backfill failed', offerId, error?.message || error);
       }
     }
   }));
-  if (!imageMap.size) return { updatedOrders: 0, fetchedOffers: offerIds.length };
+  if (!imageMap.size) {
+    return {
+      updatedOrders: 0,
+      fetchedOffers: offerIds.length,
+      resolvedOffers: 0,
+      unresolvedOffers: unresolvedOfferIds.length,
+      unresolvedOfferIds: unresolvedOfferIds.slice(0, 20),
+      missingScope: false,
+      sources,
+    };
+  }
 
   let updatedOrders = 0;
   for (const row of rows) {
@@ -221,7 +324,15 @@ async function backfillMissingOrderImages(account, { maxOffers = 50, maxOrders =
   }
 
   if (updatedOrders > 0) emitOrdersChanged(account.accountId, { orders: [], removedOrderIds: [], resync: true });
-  return { updatedOrders, fetchedOffers: offerIds.length };
+  return {
+    updatedOrders,
+    fetchedOffers: offerIds.length,
+    resolvedOffers: imageMap.size,
+    unresolvedOffers: unresolvedOfferIds.length,
+    unresolvedOfferIds: unresolvedOfferIds.slice(0, 20),
+    missingScope: false,
+    sources,
+  };
 }
 
 function compactLineItem(item = {}, imageMap = new Map()) {
@@ -940,6 +1051,10 @@ module.exports = {
   ACTIVE_FULFILLMENT_STATUSES,
   workflowStageForCheckoutForm,
   compactCheckoutForm,
+  offerListImagesFromPayload,
+  productIdsFromOfferPayload,
+  fetchOfferImages,
+  backfillMissingOrderImages,
   syncOneAllegroAccount,
   forceRebootstrapAllegroAccount,
   setAllegroOrderRetryAt,

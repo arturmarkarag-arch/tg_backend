@@ -30,6 +30,14 @@ function offerImagesFromPayload(payload) {
   return normalizeImageUrls(productImages);
 }
 
+function saleOfferImagesFromPayload(payload, offerId = '') {
+  const wanted = clean(offerId, 64);
+  const offers = Array.isArray(payload?.offers) ? payload.offers : [];
+  const offer = offers.find((row) => !wanted || clean(row?.id, 64) === wanted) || offers[0] || null;
+  if (!offer) return [];
+  return normalizeImageUrls([offer?.primaryImage, ...(Array.isArray(offer?.images) ? offer.images : [])]);
+}
+
 function upstreamStatus(error) {
   return Number(error?.status || error?.args?.upstreamStatus || error?.args?.status || 0) || 0;
 }
@@ -82,16 +90,32 @@ async function resolveOneRef(ref, readers, budget) {
   // Exact marketplace offer is the strongest source and is only attempted when
   // BaseLinker explicitly tells us this order line came from Allegro.
   if (readers.length === 1 && clean(ref?.sourceType, 80).toLowerCase() === 'allegro' && looksLikeOfferId(ref?.auctionId)) {
-    const exact = await requestWithReaderAccounts(readers, {
+    const offerId = clean(ref.auctionId, 64);
+    const exactList = await requestWithReaderAccounts(readers, {
       method: 'GET',
-      path: `/sale/product-offers/${encodeURIComponent(clean(ref.auctionId, 64))}`,
+      path: '/sale/offers',
+      query: { 'offer.id': offerId, limit: 1 },
       stage: 'baselinker_missing_image_offer_fallback',
       retryPolicy: 'safe',
       maxAttempts: 2,
     }, budget);
-    if (exact?.result?.payload) {
-      const images = offerImagesFromPayload(exact.result.payload);
-      if (images.length) return { state: 'resolved', images, source: 'allegro_offer', confidence: 1 };
+    if (exactList?.result?.payload) {
+      const images = saleOfferImagesFromPayload(exactList.result.payload, offerId);
+      if (images.length) return { state: 'resolved', images, source: 'allegro_offer_primary', confidence: 1 };
+    }
+
+    if (budget.remaining > 0) {
+      const exact = await requestWithReaderAccounts(readers, {
+        method: 'GET',
+        path: `/sale/product-offers/${encodeURIComponent(offerId)}`,
+        stage: 'baselinker_missing_image_offer_fallback_full',
+        retryPolicy: 'safe',
+        maxAttempts: 2,
+      }, budget);
+      if (exact?.result?.payload) {
+        const images = offerImagesFromPayload(exact.result.payload);
+        if (images.length) return { state: 'resolved', images, source: 'allegro_offer', confidence: 1 };
+      }
     }
   }
 
