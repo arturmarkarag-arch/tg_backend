@@ -14,6 +14,7 @@ const { activateAllegroOffer } = require('../services/commerce/allegroActivation
 const { previewAllegroOfferUpdate } = require('../services/commerce/allegroOfferUpdatePreview');
 const { applyAllegroOfferContent } = require('../services/commerce/allegroOfferContentUpdate');
 const { previewAllegroPriceSync, applyAllegroPriceSync } = require('../services/commerce/allegroPriceSync');
+const { previewAllegroStockSync } = require('../services/commerce/allegroStockSync');
 const {
   listCatalog,
   getCatalogProduct,
@@ -133,6 +134,15 @@ router.post('/publications/allegro/price-sync', asyncHandler(async (req, res) =>
   res.set('Cache-Control', 'no-store');
   const pending = result.jobs?.some?.((job) => ['reserved', 'sending', 'pending', 'unknown'].includes(job.state));
   res.status(pending ? 202 : 200).json(result);
+}));
+
+// Stage 3D.6A: read-only stock preview. Warehouse remains the source of truth,
+// but upstream writes stay disabled until Stage 3D.6B adds a central reservation
+// ledger for online orders. Without it a FIXED sync could re-add already sold stock.
+router.post('/publications/allegro/stock-sync/preview', asyncHandler(async (req, res) => {
+  const result = await previewAllegroStockSync(req.body || {});
+  res.set('Cache-Control', 'no-store');
+  res.json(result);
 }));
 
 router.get('/catalog', asyncHandler(async (req, res) => {

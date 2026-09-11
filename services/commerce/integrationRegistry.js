@@ -52,7 +52,8 @@ const PROVIDERS = Object.freeze([
       { id: 'offers.update.preview', label: 'Preview змін ACTIVE offer', operation: 'GET /sale/product-offers/{offerId} + local diff', direction: 'read', implementation: LIVE, capability: 'saleOffersRead', scope: 'allegro:api:sale:offers:read', note: 'Stage 3D.4A: read-only diff контенту. Price/stock відкладені до окремих sync stages; category/product remap не виконується автоматично.' },
       { id: 'offers.update', label: 'Редагування контенту offer', operation: 'PATCH /sale/product-offers/{offerId}', direction: 'write', implementation: LIVE, capability: 'saleOffersWrite', scope: 'allegro:api:sale:offers:write', note: 'Stage 3D.4.1: застосовує лише safe contentPatch (name/description/images) з fresh preview; price/stock/category/product.id не змішуємо. 200/202, recovery і read-back verification.' },
       { id: 'offers.price.write', label: 'Синхронізація ціни', operation: 'POST /sale/offer-bulk-modification-commands + GET summary/tasks', direction: 'write', implementation: LIVE, capability: 'saleOffersWrite', scope: 'allegro:api:sale:offers:write', note: 'Stage 3D.5: актуальний Allegro bulk contract для різних FIXED prices; максимум 25 modifications/command. Ресурс Allegro досі позначений beta. Якщо offer має price automation rule, власна ціна вимикає rule — потрібне явне підтвердження оператора.' },
-      { id: 'offers.stock.write', label: 'Синхронізація залишку', operation: 'quantity commands', direction: 'write', implementation: PLANNED },
+      { id: 'offers.stock.preview', label: 'Preview залишку', operation: 'GET /sale/offers by external.id + warehouse stock policy', direction: 'read', implementation: LIVE, capability: 'saleOffersRead', scope: 'allegro:api:sale:offers:read', note: 'Stage 3D.6A: read-only preview. Warehouse є source of truth; stock=0 завершує ACTIVE offer, а ENDED offer не відновлюється просто збільшенням stock.' },
+      { id: 'offers.stock.write', label: 'Синхронізація залишку', operation: 'POST /sale/offer-bulk-modification-commands (stock)', direction: 'write', implementation: PLANNED, capability: 'saleOffersWrite', scope: 'allegro:api:sale:offers:write', note: 'Stage 3D.6B/3D.6C: write навмисно заблокований, доки central reservation ledger не віднімає online-order reservations від фізичного warehouse stock. Інакше FIXED sync може створити oversell.' },
     ],
   },
   {
@@ -153,7 +154,7 @@ async function getCommerceIntegrationRegistry() {
   };
 
   return {
-    version: 7,
+    version: 8,
     generatedAt: new Date().toISOString(),
     providers: PROVIDERS.map((provider) => {
       const accounts = accountMap[provider.id] || [];
