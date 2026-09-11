@@ -475,7 +475,11 @@ async function allegroRequest(accountId, options = {}) {
     let payload;
     try {
       response = await fetch(url, { method, headers, body, signal: controller.signal });
-      payload = await readPayload(response);
+      if (response.ok && options.responseType === 'buffer') {
+        payload = Buffer.from(await response.arrayBuffer());
+      } else {
+        payload = await readPayload(response);
+      }
     } catch (error) {
       const err = networkError({ accountId: id, method, path, stage, attempt, requestId, error });
       await recordErrorLog(err.allegroDiagnostic);
@@ -500,6 +504,8 @@ async function allegroRequest(accountId, options = {}) {
         location: clean(response.headers.get('location'), 2048),
         retryAfterMs: parseRetryAfterMs(response),
         warnings: Array.isArray(payload?.warnings) ? payload.warnings : [],
+        contentType: clean(response.headers.get('content-type'), 256),
+        contentDisposition: clean(response.headers.get('content-disposition'), 1000),
       };
     }
 

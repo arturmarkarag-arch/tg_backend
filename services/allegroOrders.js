@@ -5,6 +5,7 @@ const AllegroOrderIndex = require('../models/AllegroOrderIndex');
 const AllegroOrderSyncState = require('../models/AllegroOrderSyncState');
 const { allegroRequest } = require('./allegroHttpClient');
 const { getAllegroAccount, listAllegroAccounts } = require('./allegroAccounts');
+const { capabilityMatrix } = require('./allegroCapabilities');
 const { appError } = require('../utils/errors');
 const { getIO } = require('../socket');
 const { withLock } = require('../utils/lock');
@@ -90,9 +91,143 @@ function firstBoughtAt(order) {
   return timestamps[0] || safeDate(order?.updatedAt) || null;
 }
 
-function compactLineItem(item = {}) {
+function normalizedImageUrls(values) {
+  const urls = [];
+  for (const value of Array.isArray(values) ? values : []) {
+    const url = clean(typeof value === 'string' ? value : value?.url, 2048);
+    if (/^https:\/\//i.test(url) && !urls.includes(url)) urls.push(url);
+    if (urls.length >= 8) break;
+  }
+  return urls;
+}
+
+function existingOfferImageMap(preview) {
+  const result = new Map();
+  for (const product of Array.isArray(preview?.products) ? preview.products : []) {
+    const offerId = clean(product?.auction_id, 128);
+    if (!offerId) continue;
+    const urls = normalizedImageUrls([...(Array.isArray(product?.images) ? product.images : []), product?.image_url, product?.imageUrl]);
+    if (urls.length) result.set(offerId, urls);
+  }
+  return result;
+}
+
+function offerImagesFromPayload(payload) {
+  const direct = normalizedImageUrls(payload?.images);
+  if (direct.length) return direct;
+  const productImages = [];
+  for (const item of Array.isArray(payload?.productSet) ? payload.productSet : []) {
+    productImages.push(...normalizedImageUrls(item?.product?.images));
+  }
+  return normalizedImageUrls(productImages);
+}
+
+async function resolveOfferImages(account, order, existingPreview = null) {
+  const imageMap = existingOfferImageMap(existingPreview);
+  const lineItems = Array.isArray(order?.lineItems) ? order.lineItems : [];
+  const offerIds = [...new Set(lineItems.map((item) => clean(item?.offer?.id, 128)).filter(Boolean))];
+  const missing = offerIds.filter((offerId) => !imageMap.has(offerId)).slice(0, 50);
+  if (!missing.length) return imageMap;
+
+  const scopeState = capabilityMatrix(account?.scopes);
+  if (scopeState.scopesKnown && scopeState.capabilities.saleOffersRead !== true) return imageMap;
+
+  await Promise.all(missing.map(async (offerId) => {
+    try {
+      const result = await allegroRequest(account.accountId, {
+        method: 'GET',
+        path: `/sale/product-offers/${encodeURIComponent(offerId)}`,
+        stage: 'offer_image_read',
+        retryPolicy: 'safe',
+        maxAttempts: 2,
+      });
+      const images = offerImagesFromPayload(result.payload || {});
+      if (images.length) imageMap.set(offerId, images);
+    } catch (error) {
+      // Photos are enrichment only. Missing/archived offers or missing sale scope
+      // must never block order ingestion or warehouse work.
+      if (![403, 404].includes(Number(error?.status))) {
+        console.warn('[allegro] offer image enrichment failed', offerId, error?.message || error);
+      }
+    }
+  }));
+  return imageMap;
+}
+
+async function backfillMissingOrderImages(account, { maxOffers = 50, maxOrders = 100 } = {}) {
+  const scopeState = capabilityMatrix(account?.scopes);
+  if (scopeState.scopesKnown && scopeState.capabilities.saleOffersRead !== true) return { updatedOrders: 0, fetchedOffers: 0 };
+
+  const rows = await AllegroOrderIndex.find({
+    accountId: account.accountId,
+    'preview.products': {
+      $elemMatch: {
+        $or: [
+          { image_url: '' },
+          { image_url: { $exists: false } },
+        ],
+      },
+    },
+  }).sort({ orderSortDate: -1 }).limit(Math.max(1, Math.min(250, Number(maxOrders) || 100))).lean();
+  if (!rows.length) return { updatedOrders: 0, fetchedOffers: 0 };
+
+  const offerIds = [];
+  for (const row of rows) {
+    for (const product of Array.isArray(row?.preview?.products) ? row.preview.products : []) {
+      const current = normalizedImageUrls([...(Array.isArray(product?.images) ? product.images : []), product?.image_url]);
+      const offerId = clean(product?.auction_id, 128);
+      if (!current.length && offerId && !offerIds.includes(offerId)) offerIds.push(offerId);
+      if (offerIds.length >= Math.max(1, Math.min(100, Number(maxOffers) || 50))) break;
+    }
+    if (offerIds.length >= Math.max(1, Math.min(100, Number(maxOffers) || 50))) break;
+  }
+  if (!offerIds.length) return { updatedOrders: 0, fetchedOffers: 0 };
+
+  const imageMap = new Map();
+  await Promise.all(offerIds.map(async (offerId) => {
+    try {
+      const result = await allegroRequest(account.accountId, {
+        method: 'GET',
+        path: `/sale/product-offers/${encodeURIComponent(offerId)}`,
+        stage: 'offer_image_backfill',
+        retryPolicy: 'safe',
+        maxAttempts: 2,
+      });
+      const images = offerImagesFromPayload(result.payload || {});
+      if (images.length) imageMap.set(offerId, images);
+    } catch (error) {
+      if (![403, 404].includes(Number(error?.status))) {
+        console.warn('[allegro] offer image backfill failed', offerId, error?.message || error);
+      }
+    }
+  }));
+  if (!imageMap.size) return { updatedOrders: 0, fetchedOffers: offerIds.length };
+
+  let updatedOrders = 0;
+  for (const row of rows) {
+    let changed = false;
+    const preview = { ...(row.preview || {}) };
+    preview.products = (Array.isArray(preview.products) ? preview.products : []).map((product) => {
+      const existingImages = normalizedImageUrls([...(Array.isArray(product?.images) ? product.images : []), product?.image_url]);
+      if (existingImages.length) return product;
+      const images = imageMap.get(clean(product?.auction_id, 128)) || [];
+      if (!images.length) return product;
+      changed = true;
+      return { ...product, image_url: images[0], images };
+    });
+    if (!changed) continue;
+    await AllegroOrderIndex.updateOne({ _id: row._id }, { $set: { preview } });
+    updatedOrders += 1;
+  }
+
+  if (updatedOrders > 0) emitOrdersChanged(account.accountId, { orders: [], removedOrderIds: [], resync: true });
+  return { updatedOrders, fetchedOffers: offerIds.length };
+}
+
+function compactLineItem(item = {}, imageMap = new Map()) {
   const offerId = clean(item?.offer?.id, 128);
   const externalId = clean(item?.offer?.external?.id, 300);
+  const images = normalizedImageUrls(imageMap.get(offerId) || []);
   const product = {
     order_product_id: clean(item?.id, 128),
     product_id: '',
@@ -102,6 +237,8 @@ function compactLineItem(item = {}) {
     sku: externalId,
     ean: '',
     quantity: Math.max(0, numberOrZero(item?.quantity)),
+    image_url: images[0] || '',
+    images,
   };
   const priceAmount = clean(item?.price?.amount, 64);
   const priceCurrency = clean(item?.price?.currency, 16);
@@ -109,7 +246,7 @@ function compactLineItem(item = {}) {
   return product;
 }
 
-function compactCheckoutForm(order, account) {
+function compactCheckoutForm(order, account, imageMap = new Map()) {
   const id = clean(order?.id, 128);
   const boughtAt = firstBoughtAt(order);
   const updatedAt = safeDate(order?.updatedAt);
@@ -120,7 +257,7 @@ function compactCheckoutForm(order, account) {
   const shipmentSummary = clean(order?.fulfillment?.shipmentSummary?.lineItemsSent, 32).toUpperCase();
   const deliveryMethod = clean(order?.delivery?.method?.name || order?.delivery?.method?.id, 300);
   const marketplaceId = clean(order?.marketplace?.id, 80);
-  const products = (Array.isArray(order?.lineItems) ? order.lineItems : []).map(compactLineItem);
+  const products = (Array.isArray(order?.lineItems) ? order.lineItems : []).map((item) => compactLineItem(item, imageMap));
 
   return {
     provider: 'allegro',
@@ -157,8 +294,8 @@ function operationalSearchText(preview) {
   ].filter(Boolean).join(' ').toLowerCase().slice(0, 8192);
 }
 
-function indexDocument(order, account, event = null) {
-  const preview = compactCheckoutForm(order, account);
+function indexDocument(order, account, event = null, imageMap = new Map()) {
+  const preview = compactCheckoutForm(order, account, imageMap);
   return {
     accountId: clean(account?.accountId, 64),
     checkoutFormId: clean(order?.id, 128),
@@ -193,7 +330,9 @@ async function upsertCheckoutForm(order, account, event = null) {
     return { removed: removed.deletedCount > 0, checkoutFormId: id, order: null };
   }
 
-  const doc = indexDocument(order, account, event);
+  const existing = await AllegroOrderIndex.findOne({ accountId: account.accountId, checkoutFormId: id }).lean();
+  const imageMap = await resolveOfferImages(account, order, existing?.preview || null);
+  const doc = indexDocument(order, account, event, imageMap);
   await AllegroOrderIndex.updateOne(
     { accountId: doc.accountId, checkoutFormId: doc.checkoutFormId },
     {
@@ -576,7 +715,9 @@ async function forceRebootstrapAllegroAccount(accountId) {
       // the authoritative snapshot is rebuilt. bootstrapAccount only replaces
       // actionable rows after the new SELLER snapshot has been fetched.
       await setAllegroOrderRetryAt(id, null);
-      return await bootstrapAccount(account, state);
+      const result = await bootstrapAccount(account, state);
+      const imageBackfill = await backfillMissingOrderImages(account);
+      return { ...result, imageBackfill };
     } catch (error) {
       // A failed recovery attempt must not destroy the fact that this account
       // had a previously valid projection/cursor. Restore the completed marker
@@ -605,8 +746,11 @@ async function syncOneAllegroAccount(accountId) {
       const lastSuccessAt = safeDate(state?.lastSuccessfulPollAt);
       const staleAfterOutage = state?.initialized === true
         && (!lastSuccessAt || Date.now() - lastSuccessAt.getTime() >= JOURNAL_OUTAGE_REBOOTSTRAP_MS);
-      if (!state?.initialized || staleAfterOutage) return await bootstrapAccount(account, state);
-      return await pollEventJournal(account, state);
+      const result = !state?.initialized || staleAfterOutage
+        ? await bootstrapAccount(account, state)
+        : await pollEventJournal(account, state);
+      const imageBackfill = await backfillMissingOrderImages(account);
+      return { ...result, imageBackfill };
     } catch (error) {
       await markSyncFailure(id, error);
       throw error;

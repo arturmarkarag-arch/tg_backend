@@ -91,9 +91,12 @@ check('realtime warehouse updates use the shared marketplace staff room', () => 
   assert(picking.includes("to('marketplace_staff').emit('allegro_orders_changed'"));
 });
 
-check('Stage 5 does not fake TTN/label support before shipment adapter exists', () => {
-  assert(!picking.includes("/shipments'"));
+check('shipment work stays outside picking state and is implemented by the dedicated Allegro adapter', () => {
   assert(!picking.includes('/shipment-management/'));
+  const shipment = read('services/allegroShipments.js');
+  assert(shipment.includes('/shipment-management/delivery-proposals/'));
+  assert(shipment.includes('/shipment-management/shipments/create-commands'));
+  assert(shipment.includes('/shipment-management/label'));
 });
 
 console.log(`\nAllegro Stage 5 backend warehouse workflow: ${pass}/${pass} PASS`);

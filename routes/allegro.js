@@ -25,6 +25,11 @@ const {
 } = require('../services/allegroOrders');
 const { isAllegroOrderSchedulerStarted, ORDER_POLL_MS } = require('../services/allegroOrderScheduler');
 const {
+  getShipmentSummary,
+  prepareShipment,
+  getShipmentLabel,
+} = require('../services/allegroShipments');
+const {
   getPickingStates,
   getMyActivePicking,
   claimPickingOrder,
@@ -88,7 +93,8 @@ router.get('/status', requireMarketplaceWarehouseAccess, asyncHandler(async (_re
   res.json({
     configured: enabled.length > 0,
     stage: 5,
-    hardeningStage: '5.0',
+    hardeningStage: '5.1',
+    workflowApiVersion: 2,
     provider: 'allegro',
     independentProvider: true,
     oauthConfigured: config.oauthConfigured,
@@ -197,6 +203,28 @@ router.get('/accounts/:accountId/orders/:orderId', requireMarketplaceWarehouseAc
   const pickingStates = await getPickingStates([{ allegroAccountId: req.params.accountId, orderId: req.params.orderId }]);
   res.set('Cache-Control', 'no-store');
   res.json({ order, pickingState: pickingStates[key] || null, fetchedAt: new Date().toISOString() });
+}));
+
+router.get('/accounts/:accountId/orders/:orderId/shipment', requireMarketplaceWarehouseAccess, asyncHandler(async (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  res.json(await getShipmentSummary(req.params.accountId, req.params.orderId));
+}));
+
+router.post('/accounts/:accountId/orders/:orderId/shipment/prepare', requireMarketplaceWarehouseAccess, asyncHandler(async (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  res.json(await prepareShipment(req.params.accountId, req.params.orderId, { user: req.telegramUser }));
+}));
+
+router.get('/accounts/:accountId/orders/:orderId/shipment/label', requireMarketplaceWarehouseAccess, asyncHandler(async (req, res) => {
+  const label = await getShipmentLabel(req.params.accountId, req.params.orderId);
+  res.set({
+    'Cache-Control': 'no-store',
+    'Content-Type': label.contentType || 'application/octet-stream',
+    'Content-Disposition': `inline; filename=\"allegro-${String(req.params.orderId || 'label').replace(/[^a-zA-Z0-9._-]/g, '_')}.${label.extension || 'bin'}\"`,
+    'X-Label-Extension': label.extension || '',
+    'X-Allegro-Waybill': (label.waybills || []).join(',').slice(0, 512),
+  });
+  res.send(label.buffer);
 }));
 
 router.get('/picking/my-active', requireMarketplaceWarehouseAccess, asyncHandler(async (req, res) => {

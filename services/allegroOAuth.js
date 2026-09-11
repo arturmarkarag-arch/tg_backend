@@ -17,6 +17,7 @@ const DEFAULT_SCOPES = [
   'allegro:api:orders:write',
   'allegro:api:shipments:read',
   'allegro:api:shipments:write',
+  'allegro:api:sale:offers:read',
 ];
 const OAUTH_STATE_TTL_MS = 10 * 60_000;
 const ACCESS_TOKEN_MIN_VALIDITY_MS = 60_000;

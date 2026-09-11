@@ -270,6 +270,7 @@ async function startServer() {
       await require('./models/AllegroOrderSyncState').syncIndexes();
       await require('./models/AllegroOrderIndex').syncIndexes();
       await require('./models/AllegroPickingOrder').syncIndexes();
+      await require('./models/AllegroShipmentBinding').syncIndexes();
       // Allegro application credentials are deployment configuration (backend env).
       // Also purge the temporary Stage 4.1 DB copy; seller OAuth tokens remain untouched.
       await require('./services/allegroConfiguration').loadAllegroConfiguration();
