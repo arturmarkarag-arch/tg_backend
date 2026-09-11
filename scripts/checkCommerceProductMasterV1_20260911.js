@@ -30,5 +30,7 @@ assert(/computeProductMasterReadiness/.test(catalog) && /PRODUCT_MASTER_CONTRACT
 assert(/thumbPublicUrl/.test(productsRoute) && /r2PublicUrl\(folder, filename\)/.test(productsRoute), 'R2 pair upload exposes public URLs for Product Master media');
 assert(/legacy.*ean|compatibility/i.test(product) && /legacyEanFromIdentifiers/.test(catalog), 'legacy EAN remains compatible while identifiers are canonical');
 assert(/Provider adapters translate this contract/.test(providerReadme), 'Product Master provider boundary is documented');
+assert(/contentLanguage/.test(product) && !/^\s*language:\s*\{\s*type:\s*String/m.test(product), 'BCP-47 locale is not persisted in Mongo reserved text-index language field');
+assert(/set\('contentLanguage',[\s\S]*raw\.language/.test(catalog) && /language:\s*plain\.contentLanguage/.test(catalog), 'catalog API preserves language while persistence uses contentLanguage');
 
-console.log('Commerce Product Master v1 backend: 11/11 PASS');
+console.log('Commerce Product Master v1 backend: 13/13 PASS');

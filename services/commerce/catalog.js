@@ -91,7 +91,10 @@ async function normalizePayload(raw = {}, { partial = false, current = {} } = {}
 
   if (!partial || raw.description !== undefined) set('description', text(raw.description, 40000));
   if (!partial || raw.brand !== undefined) set('brand', text(raw.brand, 300));
-  if (!partial || raw.language !== undefined) set('language', text(raw.language || 'pl-PL', 35) || 'pl-PL');
+  // API keeps the provider-neutral `language` contract, while persistence uses
+  // contentLanguage so MongoDB's text-index language_override cannot interpret
+  // BCP-47 locales (for example pl-PL) as Mongo text-search language names.
+  if (!partial || raw.language !== undefined) set('contentLanguage', text(raw.language || 'pl-PL', 35) || 'pl-PL');
   if (!partial || raw.condition !== undefined) set('condition', normalizeCondition(raw.condition));
   if (!partial || raw.categoryId !== undefined) set('categoryId', await normalizeCategoryId(raw.categoryId));
   if (!partial || raw.basePrice !== undefined) {
@@ -199,7 +202,7 @@ async function hydrateProducts(rawProducts) {
       name: plain.name || '',
       description: plain.description || '',
       brand: plain.brand || '',
-      language: plain.language || 'pl-PL',
+      language: plain.contentLanguage || 'pl-PL',
       condition: plain.condition || 'unknown',
       categoryId: plain.categoryId ? String(plain.categoryId) : '',
       category: plain.categoryId && categoryById.get(String(plain.categoryId)) ? {

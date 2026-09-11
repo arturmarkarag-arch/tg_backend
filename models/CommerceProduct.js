@@ -66,7 +66,12 @@ const CommerceProductSchema = new mongoose.Schema({
   name: { type: String, trim: true, required: true },
   description: { type: String, trim: true, default: '' },
   brand: { type: String, trim: true, default: '' },
-  language: { type: String, trim: true, default: 'pl-PL' },
+  // Persist the product content locale under a non-reserved field name. MongoDB
+  // text indexes treat a top-level `language` field as their default
+  // language_override. Values such as `pl-PL` are valid BCP-47 locales but are
+  // not valid MongoDB text-search language names, so storing the API field as
+  // `language` makes inserts fail with `language override unsupported: pl-PL`.
+  contentLanguage: { type: String, trim: true, default: 'pl-PL' },
   condition: { type: String, enum: ['unknown', 'new', 'used', 'refurbished'], default: 'unknown' },
   categoryId: { type: mongoose.Schema.Types.ObjectId, ref: 'CommerceCategory', default: null, index: true },
   basePrice: { type: Number, min: 0, default: 0 },
@@ -97,7 +102,7 @@ CommerceProductSchema.pre('validate', function normalizeKeys(next) {
   this.ean = String(this.ean || '').trim();
   this.eanKey = this.ean.replace(/\s+/g, '');
   this.currency = String(this.currency || 'PLN').trim().toUpperCase() || 'PLN';
-  this.language = String(this.language || 'pl-PL').trim() || 'pl-PL';
+  this.contentLanguage = String(this.contentLanguage || 'pl-PL').trim() || 'pl-PL';
   next();
 });
 
