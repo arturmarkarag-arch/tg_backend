@@ -5,6 +5,7 @@ const ChannelListing = require('../../models/ChannelListing');
 const { getCatalogProductsByIds } = require('./catalog');
 const { effectiveStock } = require('./publicationPreview');
 const { refreshCommerceStockReservations, getReservationTotals } = require('./stockReservations');
+const { reconcileConsumedReservations } = require('./inventoryMovements');
 const { stableExternalKey, requestHash } = require('./allegroDraftOffer');
 const { getAllegroAccount } = require('../allegroAccounts');
 const { capabilityMatrix } = require('../allegroCapabilities');
@@ -124,10 +125,11 @@ function localRowValidation(row, reservation = null) {
   const reservationInfo = reservation || { reserved: 0, consumed: 0, unknown: 0, held: 0, rows: 0 };
   const desiredRaw = product && listing
     ? effectiveStock(product, listing, reservationInfo)
-    : { mode: 'inherit', physicalSource: 0, reservedUnits: 0, source: 0, buffer: 0, available: 0 };
+    : { mode: 'inherit', inventoryOnHand: 0, physicalSource: 0, reservedUnits: 0, source: 0, buffer: 0, available: 0 };
   const desiredStock = {
     available: wholeStock(desiredRaw.available),
-    physicalSource: wholeStock(desiredRaw.physicalSource),
+    inventoryOnHand: wholeStock(desiredRaw.inventoryOnHand ?? desiredRaw.physicalSource),
+    physicalSource: wholeStock(desiredRaw.inventoryOnHand ?? desiredRaw.physicalSource), // compatibility alias
     reservedUnits: wholeStock(desiredRaw.reservedUnits),
     source: wholeStock(desiredRaw.source),
     buffer: wholeStock(desiredRaw.buffer),
@@ -149,6 +151,7 @@ async function previewAllegroStockSync(raw = {}) {
   // the provider-neutral reservation ledger from the order projections that the
   // existing schedulers already keep current.
   const reservationLedger = await refreshCommerceStockReservations();
+  const inventoryConsumption = await reconcileConsumedReservations();
   const reservationTotals = await getReservationTotals(items.map((item) => item.productId));
   const localRows = await loadLocalRows(items);
   const grouped = new Map();
@@ -221,12 +224,12 @@ async function previewAllegroStockSync(raw = {}) {
       if (local.desiredStock.clamped) {
         warnings.push({
           code: 'channel_stock_clamped_to_warehouse',
-          message: 'Channel stock policy просила більше одиниць, ніж фізично доступно. Значення затиснуто до warehouse source of truth.',
+          message: 'Channel stock policy просила більше одиниць, ніж є на окремому складі інтернет-магазину. Значення затиснуто до Commerce Inventory source of truth.',
         });
       }
 
       const needsChange = errors.length === 0 && !inSync;
-      const inventoryAccountingRequired = needsChange;
+      const inventoryAccountingRequired = needsChange && !inventoryConsumption.ready;
       if (local.reservation.reserved > 0) {
         warnings.push({
           code: 'commerce_active_reservations_subtracted',
@@ -236,13 +239,15 @@ async function previewAllegroStockSync(raw = {}) {
       if (local.reservation.consumed > 0) {
         warnings.push({
           code: 'commerce_consumed_reservations_held',
-          message: `Ще ${wholeStock(local.reservation.consumed)} од. shipped orders утримуються як consumed, бо Product.quantity не має movement/reconciliation контракту.`,
+          message: `Ще ${wholeStock(local.reservation.consumed)} од. shipped orders утримуються fail-closed: їх online inventory movement ще не застосований.`,
         });
       }
       if (inventoryAccountingRequired) {
         warnings.push({
           code: 'commerce_inventory_consumption_contract_required',
-          message: 'Reservation ledger уже LIVE, але upstream stock write ще locked: наступний етап має визначити, коли shipped/consumed одиниці вже фізично враховані в Product.quantity, щоб не віднімати їх двічі після ручної інвентаризації.',
+          message: inventoryConsumption.ready
+            ? 'Commerce Inventory movements уже узгоджені; upstream stock write лишається locked тільки до окремого Stage 3D.6C bulk apply.'
+            : 'Upstream stock write locked: спочатку треба успішно провести всі shipped/consumed одиниці в окремому Commerce Inventory. Основний Product.quantity не використовується.',
         });
       }
 
@@ -273,12 +278,12 @@ async function previewAllegroStockSync(raw = {}) {
   }
 
   return {
-    stage: '3D.6B',
+    stage: '3D.6B.2',
     mode: 'preview_only',
     providerWriteCalls: 0,
-    sourceOfTruth: 'warehouse_minus_central_reservations',
+    sourceOfTruth: 'commerce_inventory_minus_central_reservations',
     reservationLedgerReady: true,
-    inventoryConsumptionReady: false,
+    inventoryConsumptionReady: inventoryConsumption.ready,
     reservationLedger: {
       startedAt: reservationLedger.startedAt,
       lastRefreshAt: reservationLedger.lastRefreshAt,
@@ -292,6 +297,7 @@ async function previewAllegroStockSync(raw = {}) {
       mappingCoverageReady: reservationLedger.mappingCoverageReady,
       writeReady: false,
     },
+    inventoryConsumption,
     providerCalls,
     summary: {
       total: rows.length,

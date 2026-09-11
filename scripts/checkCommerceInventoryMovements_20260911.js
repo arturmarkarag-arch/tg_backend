@@ -1,0 +1,11 @@
+'use strict';
+const fs=require('fs'); const path=require('path'); const root=path.join(__dirname,'..'); const read=(r)=>fs.readFileSync(path.join(root,r),'utf8');
+const checks=[]; const assert=(v,m)=>{if(!v)throw new Error(m)}; const check=(n,fn)=>{try{fn();checks.push([n,true])}catch(e){checks.push([n,false,e.message])}};
+const model=read('models/CommerceInventoryMovement.js'); const svc=read('services/commerce/inventoryMovements.js'); const stock=read('services/commerce/allegroStockSync.js');
+check('durable unique movement',()=>{assert(model.includes('movementKey'),'key missing'); assert(model.includes('unique: true'),'unique missing'); assert(model.includes('appliedQuantity'),'applied quantity missing');});
+check('transaction touches commerce inventory only',()=>{assert(svc.includes('session.withTransaction'),'transaction missing'); assert(svc.includes('CommerceInventoryItem.findOne'),'commerce inventory missing'); assert(!svc.includes("models/Product"),'main warehouse leaked');});
+check('exactly-once releases reservation hold',()=>{assert(svc.includes('reservation.countsAgainstStock = false'),'hold release missing'); assert(svc.includes("movement?.state === 'applied'"),'recovery missing');});
+check('insufficient stock is fail closed',()=>{assert(svc.includes('commerce_inventory_insufficient_for_consumption'),'insufficient gate missing');});
+check('no auto-restock on quantity regression',()=>{assert(svc.includes('Never auto-restock an already shipped order'),'regression safety missing');});
+check('preview reconciles movements before totals',()=>{assert(stock.includes('reconcileConsumedReservations()'),'movement reconcile missing'); const fn=stock.slice(stock.indexOf('async function previewAllegroStockSync')); assert(fn.indexOf('reconcileConsumedReservations()')<fn.indexOf('getReservationTotals'),'wrong order'); assert(stock.includes("stage: '3D.6B.2'"),'stage missing');});
+for(const [n,ok,m] of checks) console.log(`${ok?'PASS':'FAIL'} ${n}${m?` — ${m}`:''}`); const failed=checks.filter(([,ok])=>!ok); console.log(`Commerce Inventory movements: ${checks.length-failed.length}/${checks.length} PASS`); if(failed.length)process.exit(1);

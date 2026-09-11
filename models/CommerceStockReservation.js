@@ -6,8 +6,8 @@ const mongoose = require('mongoose');
 // an inbound marketplace order line and never stores buyer/address/payment data.
 // `reserved`, `consumed` and `unknown` all count against publishable stock;
 // `released` does not. `consumed` intentionally remains held until the future
-// physical inventory movement/reconciliation layer confirms that Product.quantity
-// already reflects the shipped units.
+// Commerce Inventory movement layer posts the shipped units into the independent
+// internet-store inventory. Main warehouse Product.quantity is a separate domain.
 const CommerceStockReservationSchema = new mongoose.Schema({
   reservationKey: { type: String, required: true, trim: true, maxlength: 128 },
   sourceKind: { type: String, enum: ['marketplace_order'], default: 'marketplace_order', index: true },

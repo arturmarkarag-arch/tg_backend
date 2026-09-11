@@ -388,7 +388,7 @@ async function summarizeLedger(stateDoc) {
   const groups = await CommerceStockReservation.aggregate([
     {
       $group: {
-        _id: { state: '$state', matchState: '$matchState' },
+        _id: { state: '$state', matchState: '$matchState', countsAgainstStock: '$countsAgainstStock' },
         rows: { $sum: 1 },
         units: { $sum: '$quantity' },
       },
@@ -415,8 +415,9 @@ async function summarizeLedger(stateDoc) {
     const matchState = text(group?._id?.matchState, 40);
     const rows = Number(group?.rows || 0);
     const units = Number(group?.units || 0);
+    const countsAgainstStock = group?._id?.countsAgainstStock === true;
     summary.rows += rows;
-    if (STOCK_STATES.includes(state)) {
+    if (STOCK_STATES.includes(state) && countsAgainstStock) {
       summary.heldRows += rows;
       summary.heldUnits += units;
       if (matchState === 'unresolved') summary.unresolvedHeldRows += rows;

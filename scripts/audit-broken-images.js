@@ -325,12 +325,7 @@ async function main() {
       let documentCount = 0;
       let referenceCount = 0;
 
-      const cursor = collection.find(
-        {},
-        {
-          noCursorTimeout: true,
-        }
-      );
+const cursor = collection.find({}).batchSize(500);
 
       for await (const document of cursor) {
         documentCount++;

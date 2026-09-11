@@ -2,6 +2,7 @@
 
 const mongoose = require('mongoose');
 const CommerceProduct = require('../../models/CommerceProduct');
+const CommerceInventoryItem = require('../../models/CommerceInventoryItem');
 const ChannelListing = require('../../models/ChannelListing');
 const Product = require('../../models/Product');
 const { appError } = require('../../utils/errors');
@@ -48,6 +49,12 @@ function normalizeMedia(raw) {
 function normalizeAttributes(raw) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
   return Object.fromEntries(Object.entries(raw).slice(0, 200));
+}
+
+function normalizeInventoryQuantity(value) {
+  const n = Number(value ?? 0);
+  if (!Number.isFinite(n) || n < 0) throw appError('validation_failed', { field: 'inventoryQuantity' });
+  return Math.max(0, Math.floor(n));
 }
 
 function normalizeWarehouseBindings(raw) {
@@ -115,29 +122,22 @@ async function assertWarehouseBindingsExist(bindings) {
   if (count !== ids.length) throw appError('commerce_warehouse_product_not_found');
 }
 
-function calculateBindingStock(binding, warehouseProduct) {
-  if (!binding?.enabled || !warehouseProduct || warehouseProduct.status !== 'active') return 0;
-  const quantity = Math.max(0, Number(warehouseProduct.quantity || 0));
-  const buffer = Math.max(0, Number(binding.stockBuffer || 0));
-  const unitsPerItem = Math.max(0.000001, Number(binding.unitsPerItem || 1));
-  return Math.max(0, Math.floor((quantity - buffer) / unitsPerItem));
-}
-
 async function hydrateProducts(rawProducts) {
   const docs = Array.isArray(rawProducts) ? rawProducts : [];
   if (!docs.length) return [];
 
-  const productIds = [...new Set(docs.flatMap((doc) => (doc.warehouseBindings || [])
+  const sourceProductIds = [...new Set(docs.flatMap((doc) => (doc.warehouseBindings || [])
     .map((binding) => String(binding.productId || ''))
     .filter((id) => mongoose.isValidObjectId(id))))];
   const commerceIds = docs.map((doc) => doc._id);
 
-  const [warehouseRows, listingRows] = await Promise.all([
-    productIds.length
-      ? Product.find({ _id: { $in: productIds } })
+  const [sourceRows, inventoryRows, listingRows] = await Promise.all([
+    sourceProductIds.length
+      ? Product.find({ _id: { $in: sourceProductIds } })
         .select('_id name orderNumber barcode quantity status warehouse originalImageUrl localImageUrl imageUrls')
         .lean()
       : [],
+    CommerceInventoryItem.find({ commerceProductId: { $in: commerceIds } }).lean(),
     ChannelListing.aggregate([
       { $match: { commerceProductId: { $in: commerceIds } } },
       {
@@ -151,33 +151,37 @@ async function hydrateProducts(rawProducts) {
     ]),
   ]);
 
-  const warehouseById = new Map(warehouseRows.map((row) => [String(row._id), row]));
+  const sourceById = new Map(sourceRows.map((row) => [String(row._id), row]));
+  const inventoryByProductId = new Map(inventoryRows.map((row) => [String(row.commerceProductId), row]));
   const listingsById = new Map(listingRows.map((row) => [String(row._id), row]));
 
   return docs.map((doc) => {
     const bindings = (doc.warehouseBindings || []).map((binding) => {
       const bindingObj = typeof binding.toObject === 'function' ? binding.toObject() : binding;
-      const warehouseProduct = warehouseById.get(String(bindingObj.productId || '')) || null;
+      const sourceProduct = sourceById.get(String(bindingObj.productId || '')) || null;
       return {
         productId: String(bindingObj.productId || ''),
         unitsPerItem: Number(bindingObj.unitsPerItem || 1),
         stockBuffer: Number(bindingObj.stockBuffer || 0),
         enabled: bindingObj.enabled !== false,
-        availableStock: calculateBindingStock(bindingObj, warehouseProduct),
-        warehouseProduct: warehouseProduct ? {
-          id: String(warehouseProduct._id),
-          name: warehouseProduct.name || '',
-          orderNumber: warehouseProduct.orderNumber ?? null,
-          barcode: warehouseProduct.barcode || '',
-          quantity: Number(warehouseProduct.quantity || 0),
-          status: warehouseProduct.status || '',
-          warehouse: warehouseProduct.warehouse || '',
-          imageUrl: bestWarehouseImage(warehouseProduct),
+        // Source/provenance only. quantity is displayed for reference and is never
+        // used to calculate Commerce inventory or marketplace stock.
+        warehouseProduct: sourceProduct ? {
+          id: String(sourceProduct._id),
+          name: sourceProduct.name || '',
+          orderNumber: sourceProduct.orderNumber ?? null,
+          barcode: sourceProduct.barcode || '',
+          quantity: Number(sourceProduct.quantity || 0),
+          status: sourceProduct.status || '',
+          warehouse: sourceProduct.warehouse || '',
+          imageUrl: bestWarehouseImage(sourceProduct),
         } : null,
       };
     });
     const listingSummary = listingsById.get(String(doc._id)) || { total: 0, active: 0, errors: 0 };
+    const inventory = inventoryByProductId.get(String(doc._id)) || null;
     const plain = typeof doc.toObject === 'function' ? doc.toObject() : doc;
+    const onHand = Math.max(0, Math.floor(Number(inventory?.onHand || 0)));
     return {
       id: String(doc._id),
       sku: plain.sku || '',
@@ -192,7 +196,17 @@ async function hydrateProducts(rawProducts) {
       status: plain.status || 'draft',
       source: plain.source || 'manual',
       warehouseBindings: bindings,
-      availableStock: bindings.reduce((sum, binding) => sum + Number(binding.availableStock || 0), 0),
+      // Backward-compatible field consumed by publication/preflight code. It is
+      // now strictly the independent internet-store inventory quantity.
+      availableStock: onHand,
+      commerceInventory: {
+        onHand,
+        status: inventory?.status || 'active',
+        source: inventory?.source || 'manual',
+        sourceWarehouseProductId: inventory?.sourceWarehouseProductId ? String(inventory.sourceWarehouseProductId) : '',
+        sourceSnapshotAt: inventory?.sourceSnapshotAt || null,
+        updatedAt: inventory?.updatedAt || null,
+      },
       listingSummary: {
         total: Number(listingSummary.total || 0),
         active: Number(listingSummary.active || 0),
@@ -203,6 +217,7 @@ async function hydrateProducts(rawProducts) {
     };
   });
 }
+
 
 async function listCatalog(query = {}) {
   const page = Math.max(1, Number.parseInt(query.page, 10) || 1);
@@ -248,6 +263,7 @@ async function getCatalogProduct(id) {
 async function createCatalogProduct(raw, req) {
   const actor = actorFromRequest(req);
   const payload = normalizePayload(raw || {}, { partial: false });
+  const inventoryQuantity = normalizeInventoryQuantity(raw?.inventoryQuantity ?? 0);
   await assertWarehouseBindingsExist(payload.warehouseBindings);
   const doc = new CommerceProduct({
     ...payload,
@@ -259,6 +275,21 @@ async function createCatalogProduct(raw, req) {
   });
   try {
     await doc.save();
+    await CommerceInventoryItem.findOneAndUpdate(
+      { commerceProductId: doc._id },
+      {
+        $setOnInsert: {
+          commerceProductId: doc._id,
+          onHand: inventoryQuantity,
+          status: 'active',
+          source: 'manual',
+          createdByTelegramId: actor.telegramId,
+          createdByName: actor.name,
+        },
+        $set: { updatedByTelegramId: actor.telegramId, updatedByName: actor.name },
+      },
+      { upsert: true, new: true, setDefaultsOnInsert: true },
+    );
   } catch (err) {
     if (err?.code === 11000 && err?.keyPattern?.skuKey) throw appError('commerce_product_sku_duplicate');
     throw err;
@@ -271,6 +302,7 @@ async function updateCatalogProduct(id, raw, req) {
   const doc = await CommerceProduct.findById(id);
   if (!doc) throw appError('commerce_product_not_found');
   const patch = normalizePayload(raw || {}, { partial: true });
+  const inventoryQuantity = raw?.inventoryQuantity !== undefined ? normalizeInventoryQuantity(raw.inventoryQuantity) : null;
   if (patch.warehouseBindings) await assertWarehouseBindingsExist(patch.warehouseBindings);
   Object.assign(doc, patch);
   const actor = actorFromRequest(req);
@@ -278,6 +310,26 @@ async function updateCatalogProduct(id, raw, req) {
   doc.updatedByName = actor.name;
   try {
     await doc.save();
+    if (inventoryQuantity !== null) {
+      await CommerceInventoryItem.findOneAndUpdate(
+        { commerceProductId: doc._id },
+        {
+          $set: {
+            onHand: inventoryQuantity,
+            status: 'active',
+            updatedByTelegramId: actor.telegramId,
+            updatedByName: actor.name,
+          },
+          $setOnInsert: {
+            commerceProductId: doc._id,
+            source: 'manual',
+            createdByTelegramId: actor.telegramId,
+            createdByName: actor.name,
+          },
+        },
+        { upsert: true, new: true, setDefaultsOnInsert: true },
+      );
+    }
   } catch (err) {
     if (err?.code === 11000 && err?.keyPattern?.skuKey) throw appError('commerce_product_sku_duplicate');
     throw err;
@@ -429,6 +481,26 @@ async function importWarehouseProducts(raw, req) {
     });
     try {
       await doc.save();
+      await CommerceInventoryItem.findOneAndUpdate(
+        { commerceProductId: doc._id },
+        {
+          $setOnInsert: {
+            commerceProductId: doc._id,
+            // Copying a position from the main warehouse copies catalog data only.
+            // Internet-store stock starts independently and is never live-linked
+            // to Product.quantity.
+            onHand: 0,
+            status: 'active',
+            source: 'warehouse_copy',
+            sourceWarehouseProductId: product._id,
+            sourceSnapshotAt: new Date(),
+            createdByTelegramId: actor.telegramId,
+            createdByName: actor.name,
+          },
+          $set: { updatedByTelegramId: actor.telegramId, updatedByName: actor.name },
+        },
+        { upsert: true, new: true, setDefaultsOnInsert: true },
+      );
       created.push(String(doc._id));
       existingByWarehouseId.set(id, { id: String(doc._id), name: doc.name });
     } catch (err) {

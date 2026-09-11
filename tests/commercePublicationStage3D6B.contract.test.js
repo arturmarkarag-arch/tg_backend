@@ -47,7 +47,8 @@ describe('Commerce publication Stage 3D.6B reservation ledger contract', () => {
       { stock: { mode: 'capped', maxQuantity: 8, buffer: 1 } },
       { held: 3 },
     );
-    expect(stock.physicalSource).toBe(10);
+    expect(stock.inventoryOnHand).toBe(10);
+    expect(stock.physicalSource).toBe(10); // compatibility alias
     expect(stock.reservedUnits).toBe(3);
     expect(stock.source).toBe(7);
     expect(stock.available).toBe(6);
@@ -56,10 +57,10 @@ describe('Commerce publication Stage 3D.6B reservation ledger contract', () => {
   test('stock preview is ledger-aware but Allegro stock write remains locked', () => {
     const service = read('services/commerce/allegroStockSync.js');
     const route = read('routes/commerce.js');
-    expect(service).toContain("stage: '3D.6B'");
+    expect(service).toContain("stage: '3D.6B.2'");
     expect(service).toContain('refreshCommerceStockReservations');
     expect(service).toContain('reservationLedgerReady: true');
-    expect(service).toContain('inventoryConsumptionReady: false');
+    expect(service).toContain('inventoryConsumptionReady: inventoryConsumption.ready');
     expect(service).toContain('providerWriteCalls: 0');
     expect(route).toContain("'/publications/allegro/stock-sync/preview'");
     expect(route).not.toContain("'/publications/allegro/stock-sync'");
@@ -71,7 +72,7 @@ describe('Commerce publication Stage 3D.6B reservation ledger contract', () => {
     const write = registry.split('\n').find((line) => line.includes("id: 'offers.stock.write'") && line.includes('offer-bulk-modification-commands'));
     expect(ledger).toContain('implementation: LIVE');
     expect(write).toContain('implementation: PLANNED');
-    expect(write).toContain('movement/reconciliation');
+    expect(write).toContain('Stage 3D.6C')
   });
 
   test('disappeared reservations are held fail-closed unless terminal cancel/sent is proven', () => {

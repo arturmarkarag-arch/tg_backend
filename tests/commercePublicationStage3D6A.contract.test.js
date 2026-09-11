@@ -34,14 +34,14 @@ describe('Commerce publication Stage 3D.6A contract', () => {
     expect(service).toContain('Повернення stock > 0 не відновить його автоматично');
   });
 
-  test('warehouse stays the stock source of truth and fixed channel stock cannot exceed it', () => {
+  test('Commerce Inventory stays the online stock source of truth and fixed channel stock cannot exceed it', () => {
     const preview = read('services/commerce/publicationPreview.js');
-    expect(preview).toContain('Warehouse is the stock source of truth');
+    expect(preview).toContain('Commerce Inventory is the online stock source of truth');
     expect(preview).toContain('available: Math.min(inherited, requested)');
     expect(preview).toContain('clamped: requested > inherited');
   });
 
-  test('preview exposes warehouse source, channel policy and actual Allegro stock separately', () => {
+  test('preview exposes online source, channel policy and actual Allegro stock separately', () => {
     const service = read('services/commerce/allegroStockSync.js');
     expect(service).toContain('source: wholeStock(desiredRaw.source)');
     expect(service).toContain('buffer: wholeStock(desiredRaw.buffer)');

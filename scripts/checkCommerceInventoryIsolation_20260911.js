@@ -1,0 +1,17 @@
+'use strict';
+const fs = require('fs');
+const path = require('path');
+const root = path.join(__dirname, '..');
+const read = (rel) => fs.readFileSync(path.join(root, rel), 'utf8');
+const checks=[]; const assert=(v,m)=>{if(!v) throw new Error(m)}; const check=(n,fn)=>{try{fn();checks.push([n,true])}catch(e){checks.push([n,false,e.message])}};
+const model=read('models/CommerceInventoryItem.js');
+const catalog=read('services/commerce/catalog.js');
+const preview=read('services/commerce/publicationPreview.js');
+const stock=read('services/commerce/allegroStockSync.js');
+check('dedicated commerce inventory model',()=>{assert(model.includes('commerceProductId'), 'product key missing'); assert(model.includes('onHand'), 'onHand missing');});
+check('catalog stock comes from commerce inventory',()=>{assert(catalog.includes('CommerceInventoryItem.find'), 'inventory query missing'); assert(catalog.includes('availableStock: onHand'), 'catalog onHand missing'); assert(!catalog.includes('calculateBindingStock('), 'legacy live warehouse calculation remains');});
+check('warehouse copy starts online stock at zero',()=>{assert(catalog.includes("source: 'warehouse_copy'"), 'copy source missing'); assert(catalog.includes('onHand: 0'), 'copy must start at zero');});
+check('stock preview uses commerce inventory minus reservations',()=>{assert(preview.includes('inventoryOnHand - reservedUnits'), 'online stock subtraction missing'); assert(stock.includes("sourceOfTruth: 'commerce_inventory_minus_central_reservations'"), 'wrong stock source');});
+check('main warehouse is not online source of truth',()=>{assert(stock.includes('Основний Product.quantity не використовується'), 'isolation note missing');});
+for(const [n,ok,m] of checks) console.log(`${ok?'PASS':'FAIL'} ${n}${m?` — ${m}`:''}`);
+const failed=checks.filter(([,ok])=>!ok); console.log(`Commerce Inventory isolation: ${checks.length-failed.length}/${checks.length} PASS`); if(failed.length) process.exit(1);

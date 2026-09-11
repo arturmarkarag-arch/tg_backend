@@ -9,6 +9,7 @@ const MediaSchema = new mongoose.Schema({
   source: { type: String, enum: ['catalog', 'warehouse', 'provider'], default: 'catalog' },
 }, { _id: false });
 
+// Historical/source linkage only. This must never be used as live Commerce stock.
 const WarehouseBindingSchema = new mongoose.Schema({
   productId: { type: mongoose.Schema.Types.ObjectId, ref: 'Product', required: true },
   unitsPerItem: { type: Number, min: 0.000001, default: 1 },
@@ -28,6 +29,8 @@ const CommerceProductSchema = new mongoose.Schema({
   currency: { type: String, trim: true, uppercase: true, default: 'PLN' },
   media: { type: [MediaSchema], default: [] },
   attributes: { type: mongoose.Schema.Types.Mixed, default: () => ({}) },
+  // Provenance/source links for products copied from the main warehouse. Commerce
+  // inventory lives separately in CommerceInventoryItem.
   warehouseBindings: { type: [WarehouseBindingSchema], default: [] },
   // Idempotency anchor for the simple one-warehouse-product -> one-commerce-product import path.
   // Bundles/future composite products must use a different BOM layer and are not constrained by this field.
