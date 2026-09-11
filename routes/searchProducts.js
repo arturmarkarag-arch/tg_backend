@@ -3,7 +3,7 @@ const { S3Client, HeadBucketCommand } = require('@aws-sdk/client-s3');
 const { normalizeBarcode } = require('../utils/barcodeScanner');
 const SearchProduct = require('../models/SearchProduct');
 const { appError, asyncHandler } = require('../utils/errors');
-const { telegramAuth, requireTelegramRoles } = require('../middleware/telegramAuth');
+const { requireTelegramRoles } = require('../middleware/telegramAuth');
 
 const s3Client = new S3Client({
   region: process.env.R2_REGION || 'auto',
@@ -23,6 +23,11 @@ const s3Client = new S3Client({
 })();
 
 const router = express.Router();
+
+// SearchProduct is seller/admin/warehouse business data, not a public barcode
+// directory. Keep the boundary inside the router as defense-in-depth even if
+// app-level public-path configuration changes later.
+router.use(requireTelegramRoles(['seller', 'admin', 'warehouse']));
 
 // Rate limiter: max 3 resend requests per barcode per 3 hours
 const RESEND_LIMIT = 3;
@@ -60,7 +65,6 @@ router.get('/check', asyncHandler(async (req, res) => {
     return res.json({
       found: false,
       existingRequest: Boolean(record?.requestTelegramPhotoFileId),
-      requestCaption: record?.requestCaption || '',
     });
   }
 
@@ -79,19 +83,29 @@ router.get('/check', asyncHandler(async (req, res) => {
 }));
 
 router.get('/', asyncHandler(async (req, res) => {
-  // Public endpoint — a barcode is REQUIRED so it can only return the single
-  // record being scanned, never the whole catalogue.
+  // Authenticated barcode lookup. Return a narrow DTO, never the raw document.
   const barcodeValue = String(req.query.barcode || '').trim();
   const normalizedBarcode = normalizeBarcode(barcodeValue);
   if (!normalizedBarcode) throw appError('product_barcode_required');
 
-  const items = await SearchProduct.find({ status: 'active', barcode: normalizedBarcode })
+  const rows = await SearchProduct.find({ status: 'active', barcode: normalizedBarcode })
+    .select('_id barcode price title caption imageUrl createdAt updatedAt')
     .sort({ createdAt: -1 })
     .lean();
+  const items = rows.map((record) => ({
+    id: record._id,
+    barcode: record.barcode || '',
+    price: Number(record.price || 0),
+    title: record.title || '',
+    caption: record.caption || '',
+    imageUrl: record.imageUrl || '',
+    createdAt: record.createdAt || null,
+    updatedAt: record.updatedAt || null,
+  }));
   res.json({ items });
 }));
 
-router.post('/resend', telegramAuth, requireTelegramRoles(['seller', 'admin', 'warehouse']), asyncHandler(async (req, res) => {
+router.post('/resend', asyncHandler(async (req, res) => {
   const barcodeValue = String(req.body.barcode || '').trim();
   if (!barcodeValue) throw appError('product_barcode_required');
 

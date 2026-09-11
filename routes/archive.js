@@ -143,7 +143,7 @@ router.post('/:id/restore', asyncHandler(async (req, res) => {
     }
   });
 
-  try { getIO().emit('incoming_updated'); } catch (e) {}
+  try { getIO().to('staff').emit('incoming_updated'); } catch (e) {}
 
   res.json(product);
 }));

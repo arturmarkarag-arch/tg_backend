@@ -1,5 +1,7 @@
 'use strict';
 
+const { emitUserAndStaff } = require('../utils/socketScope');
+
 /**
  * STRICT late-order reconciliation (the only picking-injection policy).
  *
@@ -191,7 +193,7 @@ async function reconcileLateOrderStrict(orderId, { maxRetries = 3 } = {}) {
 
   // Surface the change to the seller's order view (badge) — best-effort.
   if ((out.appended || out.skipped) && out.buyerTelegramId) {
-    try { getIO().emit('user_order_updated', { buyerTelegramId: out.buyerTelegramId }); } catch { /* socket may be down in tests */ }
+    try { emitUserAndStaff(getIO(), out.buyerTelegramId, 'user_order_updated', { buyerTelegramId: out.buyerTelegramId }); } catch { /* socket may be down in tests */ }
   }
   return out;
 }

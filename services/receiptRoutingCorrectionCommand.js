@@ -355,9 +355,9 @@ async function correctReceiptItemRouting({
     try {
       const io = getIO();
       io?.to(`receipt_${rid}`).emit('receipt_item_updated', updatedItem);
-      io?.emit('receipt_supplement_batch_changed');
-      io?.emit('incoming_updated');
-      for (const waveId of affectedWaveIds) io?.emit('supplement_wave_changed', { waveId });
+      io?.to('staff').emit('receipt_supplement_batch_changed');
+      io?.to('staff').emit('incoming_updated');
+      for (const waveId of affectedWaveIds) io?.to('app_users').emit('supplement_wave_changed', { waveId });
     } catch (_) {}
 
     return { item: updatedItem, changed: true, affectedWaveIds, alreadyFulfilledShopIds: fulfilledShopIds };

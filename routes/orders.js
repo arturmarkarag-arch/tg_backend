@@ -20,6 +20,7 @@ const { voidOpenOrderItems } = require('../utils/orderItemState');
 const { buildLiveActiveOrderFilter } = require('../utils/orderStatus');
 const OrderingSession = require('../models/OrderingSession');
 const { pushSessionEvent } = require('../utils/sessionStatus');
+const { emitUserAndStaff } = require('../utils/socketScope');
 
 // Fields the UI actually reads off a populated order item's product (a warehouse
 // Product) — the union across OrderSummary / MyOrders / OrderHistory / CrossDocking
@@ -458,7 +459,7 @@ router.post('/conflicts/resolve', staffOnly, asyncHandler(async (req, res) => {
 
   // Transport-specific compatibility event. CURRENT/picking/order projections are
   // already published by shopAssignmentCommand after commit.
-  try { getIO()?.emit('user_shop_changed', { telegramId: String(buyerTelegramId) }); } catch (_) {}
+  try { emitUserAndStaff(getIO(), buyerTelegramId, 'user_shop_changed', { telegramId: String(buyerTelegramId) }); } catch (_) {}
 
   res.json({ ok: true });
 }));
@@ -1088,7 +1089,7 @@ async function placeOrderImpl(req, res) {
   try {
     const io = getIO();
     if (io) {
-      io.emit('user_order_updated', {
+      emitUserAndStaff(io, buyer.telegramId, 'user_order_updated', {
         buyerTelegramId: buyer.telegramId,
         lastOrderAt: order.createdAt,
       });
@@ -1595,10 +1596,10 @@ router.post('/:id/stale/restore-to-cart', telegramAuth, adminOnly, asyncHandler(
   try {
     const io = getIO();
     if (io) {
-      io.emit('user_order_updated', { buyerTelegramId: result.buyerTelegramId });
+      emitUserAndStaff(io, result.buyerTelegramId, 'user_order_updated', { buyerTelegramId: result.buyerTelegramId });
       const groupId = result.deliveryGroupId || null;
       if (groupId) io.to(`picking_group_${String(groupId)}`).emit('shop_status_changed', { groupId: String(groupId) });
-      io.emit('delivery_groups_updated');
+      io.to('app_users').emit('delivery_groups_updated');
     }
   } catch (emitErr) {
   }
@@ -1653,11 +1654,11 @@ router.post('/:id/stale/expire', telegramAuth, adminOnly, asyncHandler(async (re
   try {
     const io = getIO();
     if (io) {
-      if (result.buyerTelegramId) io.emit('user_order_updated', { buyerTelegramId: result.buyerTelegramId });
+      if (result.buyerTelegramId) emitUserAndStaff(io, result.buyerTelegramId, 'user_order_updated', { buyerTelegramId: result.buyerTelegramId });
       if (result.deliveryGroupId) {
         io.to(`picking_group_${result.deliveryGroupId}`).emit('shop_status_changed', { groupId: result.deliveryGroupId });
       }
-      io.emit('delivery_groups_updated');
+      io.to('app_users').emit('delivery_groups_updated');
     }
   } catch (emitErr) {
   }
@@ -1866,7 +1867,7 @@ router.post('/upsert-item', telegramAuth, requireOrderingWindowOpen, asyncHandle
   try {
     const io = getIO();
     if (io) {
-      io.emit('user_order_updated', { buyerTelegramId: user.telegramId });
+      emitUserAndStaff(io, user.telegramId, 'user_order_updated', { buyerTelegramId: user.telegramId });
       io.to(`picking_group_${String(group._id)}`).emit('shop_status_changed', { groupId: String(group._id) });
     }
   } catch { /* non-critical */ }

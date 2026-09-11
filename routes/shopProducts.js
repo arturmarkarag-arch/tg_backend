@@ -25,6 +25,10 @@ const anyRole    = requireTelegramRoles(['admin', 'warehouse', 'seller']);
 
 const router = express.Router();
 
+// ShopProduct browse is authenticated business data. Keep an explicit router
+// boundary so a future app-level public allowlist cannot expose it by accident.
+router.use(anyRole);
+
 // ── R2 helpers (mirror products.js) ──────────────────────────────────────────
 const s3Client = new S3Client({
   region:   process.env.R2_REGION || 'auto',
@@ -56,8 +60,38 @@ function safeFilename(raw) {
   return String(raw || '').replace(/[^a-zA-Z0-9._-]/g, '');
 }
 
+function sellerShopProductDto(item) {
+  if (!item) return null;
+  return {
+    id: item._id,
+    _id: item._id,
+    name: item.name || '',
+    barcode: item.barcode || '',
+    price: Number(item.price || 0),
+    quantityPerPackage: Number(item.quantityPerPackage || 0),
+    imageUrl: item.imageUrl || '',
+    aiDescription: item.aiDescription || '',
+    orderingEnabled: item.orderingEnabled !== false,
+    isMirror: Boolean(item.linkedProductId),
+    createdAt: item.createdAt || null,
+    updatedAt: item.updatedAt || null,
+  };
+}
+
+function scannerShopProductDto(item) {
+  if (!item) return null;
+  return {
+    id: item._id,
+    barcode: item.barcode || '',
+    name: item.name || '',
+    price: Number(item.price || 0),
+    quantityPerPackage: Number(item.quantityPerPackage || 0),
+    imageUrl: item.imageUrl || '',
+  };
+}
+
 // ── GET / — list with pagination + search ─────────────────────────────────────
-router.get('/', anyRole, asyncHandler(async (req, res) => {
+router.get('/', asyncHandler(async (req, res) => {
   const limit  = Math.min(100, Math.max(1, Number(req.query.limit)  || 50));
   const offset = Math.max(0, Number(req.query.offset) || 0);
   const query  = {};
@@ -73,12 +107,15 @@ router.get('/', anyRole, asyncHandler(async (req, res) => {
     const terms = String(req.query.search).trim()
       .split(/\s+/).map(escapeRegex).filter(Boolean);
     if (terms.length) {
+      const sellerSearch = req.telegramUser?.role === 'seller';
       query.$and = terms.map((t) => ({
         $or: [
           { name:          new RegExp(t, 'i') },
           { barcode:       new RegExp(t, 'i') },
-          { notes:         new RegExp(t, 'i') },
           { aiDescription: new RegExp(t, 'i') },
+          // Internal notes are staff-only data. Sellers must not be able to
+          // infer note contents through a search-membership side channel.
+          ...(!sellerSearch ? [{ notes: new RegExp(t, 'i') }] : []),
         ],
       }));
     }
@@ -95,29 +132,32 @@ router.get('/', anyRole, asyncHandler(async (req, res) => {
       .lean(),
   ]);
 
-  res.json({ items, total, offset, limit, hasMore: offset + items.length < total });
+  const safeItems = req.telegramUser?.role === 'seller' ? items.map(sellerShopProductDto) : items;
+  res.json({ items: safeItems, total, offset, limit, hasMore: offset + items.length < total });
 }));
 
-// ── GET /barcode/:code — scanner lookup (public, no auth required) ────────────
+// ── GET /barcode/:code — authenticated scanner lookup, narrow DTO ────────────
 router.get('/barcode/:code', asyncHandler(async (req, res) => {
   const code = String(req.params.code).trim();
   if (!code) throw appError('product_barcode_required');
-  const item = await ShopProduct.findOne({ barcode: code }).lean();
+  const item = await ShopProduct.findOne({ barcode: code })
+    .select('_id barcode name price quantityPerPackage imageUrl')
+    .lean();
   if (!item) return res.status(404).json({ error: 'not_found' });
-  res.json(item);
+  res.json(scannerShopProductDto(item));
 }));
 
 // ── GET /:id — single ShopProduct by id ───────────────────────────────────────
 // Used by the shop-products deep-link (?product=<shopProductId>): the page
 // fetches the doc, pulls its barcode, and drops that into the search box.
-router.get('/:id', anyRole, asyncHandler(async (req, res) => {
+router.get('/:id', asyncHandler(async (req, res) => {
   const query = { _id: req.params.id };
   if (req.telegramUser?.role === 'seller' || req.user?.role === 'seller') {
     query.orderingEnabled = { $ne: false };
   }
   const item = await ShopProduct.findOne(query).lean();
   if (!item) throw appError('product_not_found');
-  res.json(item);
+  res.json(req.telegramUser?.role === 'seller' ? sellerShopProductDto(item) : item);
 }));
 
 // ── POST / — create ───────────────────────────────────────────────────────────
@@ -153,7 +193,7 @@ router.post('/', staffOnly, asyncHandler(async (req, res) => {
     try {
       const io = getIO();
       if (io) {
-        io.emit('catalogue_updated', { action: 'add', shopProductId: String(item._id) });
+        io.to('app_users').emit('catalogue_updated', { action: 'add', shopProductId: String(item._id) });
         io.to('staff').emit('catalogue_cache_patch', { action: 'add', entity: 'shop', shopProductId: String(item._id), patch: shopProductCataloguePatch(item) });
       }
     } catch (e) {}
@@ -251,16 +291,16 @@ async function editMirrorThroughToWarehouse(product, fields, req, res) {
   try {
     const io = getIO();
     if (io) {
-      io.emit('incoming_updated'); // refresh open warehouse boards
+      io.to('staff').emit('incoming_updated'); // refresh open warehouse boards
       // Shared mirror edits (price/name/pack/notes/barcode/photo) all affect the
       // live seller catalogue, not only photo changes.
-      io.emit('catalogue_updated', { action: 'update', productId: String(product._id) });
+      io.to('app_users').emit('catalogue_updated', { action: 'update', productId: String(product._id) });
       io.to('staff').emit('catalogue_cache_patch', { action: 'update', entity: 'warehouse', productId: String(product._id), patch: productCataloguePatch(product) });
       if (receiptMetadataResult?.item?.receiptId) {
         io.to(`receipt_${String(receiptMetadataResult.item.receiptId)}`).emit('receipt_item_updated', receiptMetadataResult.item);
       }
       for (const change of receiptMetadataResult?.propagation?.supplementChanges || []) {
-        io.emit('supplement_wave_changed', {
+        io.to('app_users').emit('supplement_wave_changed', {
           ...change,
           receiptItemId: String(receiptMetadataResult.item._id),
           action: 'metadata_updated',
@@ -356,13 +396,13 @@ router.patch('/:id', staffOnly, asyncHandler(async (req, res) => {
   try {
     const io = getIO();
     if (io) {
-      io.emit('catalogue_updated', { action: 'update', shopProductId: String(item._id) });
+      io.to('app_users').emit('catalogue_updated', { action: 'update', shopProductId: String(item._id) });
       io.to('staff').emit('catalogue_cache_patch', { action: 'update', entity: 'shop', shopProductId: String(item._id), patch: shopProductCataloguePatch(item) });
       if (receiptMetadataResult?.item?.receiptId) {
         io.to(`receipt_${String(receiptMetadataResult.item.receiptId)}`).emit('receipt_item_updated', receiptMetadataResult.item);
       }
       for (const change of receiptMetadataResult?.propagation?.supplementChanges || []) {
-        io.emit('supplement_wave_changed', {
+        io.to('app_users').emit('supplement_wave_changed', {
           ...change,
           receiptItemId: String(receiptMetadataResult.item._id),
           action: 'metadata_updated',
@@ -450,13 +490,13 @@ router.post('/:id/describe', staffOnly, asyncHandler(async (req, res) => {
         const staffPayload = target === owner
           ? { action: 'update', entity: 'warehouse', productId: String(owner._id), patch: productCataloguePatch(owner) }
           : { action: 'update', entity: 'shop', shopProductId: String(item._id), patch: shopProductCataloguePatch(item) };
-        io.emit('catalogue_updated', publicPayload);
+        io.to('app_users').emit('catalogue_updated', publicPayload);
         io.to('staff').emit('catalogue_cache_patch', staffPayload);
         if (receiptMetadataResult?.item?.receiptId) {
           io.to(`receipt_${String(receiptMetadataResult.item.receiptId)}`).emit('receipt_item_updated', receiptMetadataResult.item);
         }
         for (const change of receiptMetadataResult?.propagation?.supplementChanges || []) {
-          io.emit('supplement_wave_changed', {
+          io.to('app_users').emit('supplement_wave_changed', {
             ...change,
             receiptItemId: String(receiptMetadataResult.item._id),
             action: 'metadata_updated',
@@ -489,7 +529,7 @@ router.delete('/:id', staffOnly, asyncHandler(async (req, res) => {
   try {
     const io = getIO();
     if (io) {
-      io.emit('catalogue_updated', { action: 'remove', shopProductId: String(item._id) });
+      io.to('app_users').emit('catalogue_updated', { action: 'remove', shopProductId: String(item._id) });
       io.to('staff').emit('catalogue_cache_patch', { action: 'remove', entity: 'shop', shopProductId: String(item._id) });
     }
   } catch (e) {}

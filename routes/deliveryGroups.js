@@ -106,7 +106,7 @@ router.post('/catalog-reviewed', telegramAuth, asyncHandler(async (req, res) => 
   res.json({ catalogReviewedAt: saved?.at || doc.at });
 }));
 
-router.get('/summary', asyncHandler(async (req, res) => {
+router.get('/summary', telegramAuth, requireTelegramRoles(['admin', 'warehouse']), asyncHandler(async (req, res) => {
   res.json(await buildDeliveryGroupSummaryReadModel());
 }));
 
@@ -240,7 +240,7 @@ router.post('/:id/close-ordering-session', telegramAuth, requireTelegramRole('ad
   });
 }));
 
-router.get('/', asyncHandler(async (req, res) => {
+router.get('/', telegramAuth, requireTelegramRoles(['admin', 'warehouse']), asyncHandler(async (req, res) => {
   res.json(await buildDeliveryGroupListReadModel());
 }));
 

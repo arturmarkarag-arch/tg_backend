@@ -687,15 +687,15 @@ router.post('/supplement-batches/:deliveryGroupId/publish', staffOnly, asyncHand
         itemCount: result.selected,
         status: 'open',
       };
-      getIO()?.emit('supplement_wave_opened', wavePayload);
-      getIO()?.emit('supplement_wave_changed', wavePayload);
+      getIO()?.to('app_users').emit('supplement_wave_opened', wavePayload);
+      getIO()?.to('app_users').emit('supplement_wave_changed', wavePayload);
       // Compatibility event lets old open clients refresh their lists during rollout.
-      getIO()?.emit('supplement_opened', { waveId, deliveryGroupId });
+      getIO()?.to('app_users').emit('supplement_opened', { waveId, deliveryGroupId });
     } catch (_) {}
     await require('../services/supplementNotify').notifyWaves([result.wave], 'opened').catch(() => {});
   }
 
-  try { getIO()?.emit('receipt_supplement_batch_changed', { deliveryGroupId }); } catch (_) {}
+  try { getIO()?.to('staff').emit('receipt_supplement_batch_changed', { deliveryGroupId }); } catch (_) {}
 
   res.json({
     selectedCount: result.selected || 0,
@@ -1436,9 +1436,9 @@ router.patch('/:id/items/:itemId', staffOnly, asyncHandler(async (req, res) => {
   if (io) {
     io.to(`receipt_${req.params.id}`).emit('receipt_item_updated', item);
     // Правка проведеної накладної міняє живий товар — дошки складу мають це побачити.
-    if (propagation.productId || propagation.shopProductId) io.emit('incoming_updated');
+    if (propagation.productId || propagation.shopProductId) io.to('staff').emit('incoming_updated');
     for (const change of propagation.supplementChanges || []) {
-      io.emit('supplement_wave_changed', {
+      io.to('app_users').emit('supplement_wave_changed', {
         ...change,
         receiptItemId: String(item._id),
         action: 'metadata_updated',
@@ -1607,7 +1607,7 @@ router.delete('/:id/items/:itemId', staffOnly, asyncHandler(async (req, res) => 
     const io = getIO();
     if (io) {
       io.to(`receipt_${req.params.id}`).emit('receipt_item_deleted', req.params.itemId);
-      if (removedArtifacts) io.emit('incoming_updated');
+      if (removedArtifacts) io.to('staff').emit('incoming_updated');
     }
 
     res.json({
@@ -2133,8 +2133,8 @@ router.post('/:id/items/:itemId/add-warehouse-remainder', staffOnly, asyncHandle
     const io = getIO();
     if (didPromote && io && updatedItem) {
       io.to(`receipt_${req.params.id}`).emit('receipt_item_updated', updatedItem);
-      io.emit('incoming_updated');
-      if (productId) io.emit('catalogue_updated', { action: 'add', productId });
+      io.to('staff').emit('incoming_updated');
+      if (productId) io.to('app_users').emit('catalogue_updated', { action: 'add', productId });
     }
 
     res.json(updatedItem);
@@ -2285,7 +2285,7 @@ router.post('/:id/items/:itemId/confirm', staffOnly, asyncHandler(async (req, re
         if (created.length) {
           for (const offer of created) {
             try {
-              getIO()?.emit('supplement_opened', {
+              getIO()?.to('app_users').emit('supplement_opened', {
                 offerId: String(offer._id),
                 deliveryGroupId: String(offer.deliveryGroupId),
               });
@@ -2301,9 +2301,9 @@ router.post('/:id/items/:itemId/confirm', staffOnly, asyncHandler(async (req, re
     const io = getIO();
     if (io) {
       io.to(`receipt_${req.params.id}`).emit('receipt_item_confirmed', confirmedItem);
-      io.emit('incoming_updated');
+      io.to('staff').emit('incoming_updated');
       if (Number(confirmedItem?.supplementBatchVersion || 0) >= 1) {
-        io.emit('receipt_supplement_batch_changed', {
+        io.to('staff').emit('receipt_supplement_batch_changed', {
           deliveryGroupId: confirmedItem?.routing?.supplementDeliveryGroupId || null,
         });
       }
@@ -2384,9 +2384,9 @@ router.post('/:id/items/:itemId/unconfirm', staffOnly, asyncHandler(async (req, 
     const io = getIO();
     if (io) {
       io.to(`receipt_${req.params.id}`).emit('receipt_item_confirmed', updatedItem);
-      io.emit('incoming_updated');
+      io.to('staff').emit('incoming_updated');
       if (Number(updatedItem?.supplementBatchVersion || 0) >= 1) {
-        io.emit('receipt_supplement_batch_changed', {
+        io.to('staff').emit('receipt_supplement_batch_changed', {
           deliveryGroupId: updatedItem?.routing?.supplementDeliveryGroupId || null,
         });
       }
@@ -2477,7 +2477,7 @@ router.post('/:id/commit', staffOnly, asyncHandler(async (req, res) => {
         if (offers.length) {
           for (const offer of offers) {
             try {
-              getIO()?.emit('supplement_opened', {
+              getIO()?.to('app_users').emit('supplement_opened', {
                 offerId: String(offer._id),
                 deliveryGroupId: String(offer.deliveryGroupId),
               });
@@ -2493,7 +2493,7 @@ router.post('/:id/commit', staffOnly, asyncHandler(async (req, res) => {
       // Items confirmed before receiving completion become visible in the batch
       // panel at this exact moment. Wake every open staff client immediately
       // instead of waiting for the 20s query fallback.
-      try { getIO()?.emit('receipt_supplement_batch_changed', { receiptId: String(receipt._id) }); } catch (_) {}
+      try { getIO()?.to('staff').emit('receipt_supplement_batch_changed', { receiptId: String(receipt._id) }); } catch (_) {}
 
       return res.json({ receipt, createdProductsCount: 0, supplementOffersCount });
     }
@@ -2691,7 +2691,7 @@ router.post('/:id/commit', staffOnly, asyncHandler(async (req, res) => {
     }).catch((e) => {});
 
     // Notify warehouse board that new products are available in the incoming strip
-    try { getIO().emit('incoming_updated'); } catch (_) {}
+    try { getIO().to('staff').emit('incoming_updated'); } catch (_) {}
 
     // ── Дозамовлення після durable commit ───────────────────────────────────
     // Legacy Receipt.type='supplement' лишається однією receipt-level хвилею.
@@ -2714,7 +2714,7 @@ router.post('/:id/commit', staffOnly, asyncHandler(async (req, res) => {
       if (offers.length) {
         for (const offer of offers) {
           try {
-            getIO()?.emit('supplement_opened', {
+            getIO()?.to('app_users').emit('supplement_opened', {
               offerId: String(offer._id),
               deliveryGroupId: String(offer.deliveryGroupId),
             });

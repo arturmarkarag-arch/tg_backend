@@ -303,7 +303,7 @@ function offerViewForWarehouse(offer, { product, requests = [], location = null,
 function emit(event, payload) {
   try {
     const io = getIO();
-    if (io) io.emit(event, payload);
+    if (io) io.to('app_users').emit(event, payload);
   } catch { /* сокет може бути вимкнений у тестах */ }
 }
 

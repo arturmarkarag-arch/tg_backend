@@ -15,6 +15,7 @@ const { activeOrderShopFilter } = require('../utils/orderShopFilter');
 const { getIO } = require('../socket');
 const { withLock } = require('../utils/lock');
 const { TRANSFER_FIELDS, toShopTransferDto } = require('../utils/shopTransferDto');
+const { emitUserAndStaff } = require('../utils/socketScope');
 
 /**
  * Run `fn` while holding the per-seller shop locks for every telegramId in `ids`.
@@ -313,7 +314,7 @@ router.post('/:id/approve', telegramAuth, requireTelegramRole('admin'), asyncHan
     if (io && migrationResult?.assignmentChanged) {
       // Direct notification for the affected seller remains transport-specific;
       // group/cache publication above is canonical and shared by every caller.
-      io.emit('user_shop_changed', { telegramId: requestDoc.sellerTelegramId });
+      emitUserAndStaff(io, requestDoc.sellerTelegramId, 'user_shop_changed', { telegramId: requestDoc.sellerTelegramId });
     }
   } catch (_) { /* best-effort */ }
 

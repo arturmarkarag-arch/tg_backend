@@ -13,6 +13,7 @@ const { isRemovedUser, activeUserFilter } = require('./utils/userAccountState');
 const { trackMemberFromMessage, handleChatMemberUpdate, setMemberPhoto } = require('./services/groupMemberSync');
 const { getAllowedGroupIds } = require('./utils/telegramGroupSettings');
 const { getTelegramMemberTagGroupIds } = require('./utils/telegramMemberTagGroupSettings');
+const { emitUserAndStaff } = require('./utils/socketScope');
 const {
   issueRegistrationToken,
   peekRegistrationToken,
@@ -581,7 +582,7 @@ async function handleShopInviteTransfer(chatId, code) {
           if (result.newGroupId && result.newGroupId !== result.prevGroupId) {
             io.to(`picking_group_${result.newGroupId}`).emit('shop_status_changed', { groupId: result.newGroupId });
           }
-          io.emit('user_order_updated', { buyerTelegramId: chatId });
+          emitUserAndStaff(io, chatId, 'user_order_updated', { buyerTelegramId: chatId });
         }
       } catch (e) {}
     } else {

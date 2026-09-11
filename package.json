@@ -90,7 +90,9 @@
     "test:commerce:stage3a": "node scripts/checkCommercePublicationStage3A20260911.js",
     "test:commerce:stage3b": "node scripts/checkCommercePublicationStage3B20260911.js",
     "test:commerce:stage3c": "node scripts/checkCommercePublicationStage3C20260911.js",
-    "test:commerce:stage3d1": "node scripts/checkCommercePublicationStage3D1_20260911.js"
+    "test:commerce:stage3d1": "node scripts/checkCommercePublicationStage3D1_20260911.js",
+    "test:security:access-matrix": "node scripts/checkSecurityAccessMatrix20260912.js",
+    "test:security:contracts": "vitest run tests/securityAccessMatrix20260912.contract.test.js tests/socketAuthorization20260912.contract.test.js --no-file-parallelism"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1030.0",

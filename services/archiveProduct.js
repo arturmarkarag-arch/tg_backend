@@ -1,3 +1,4 @@
+const { emitUserAndStaff } = require('../utils/socketScope');
 /**
  * Unified Product archive application command.
  *
@@ -52,7 +53,7 @@ async function publishArchiveProductOutcome(
     try {
       const io = getIO();
       if (io) {
-        io.emit('user_order_updated', { buyerTelegramId });
+        emitUserAndStaff(io, buyerTelegramId, 'user_order_updated', { buyerTelegramId });
         io.to(`user_${buyerTelegramId}`).emit('user_product_archived', {
           productId: String(product._id),
           reason,
@@ -74,7 +75,7 @@ async function publishArchiveProductOutcome(
       for (const groupId of outcome.affectedGroupIds) {
         io.to(`picking_group_${groupId}`).emit('shop_status_changed', { groupId });
       }
-      io.emit('delivery_groups_updated');
+      io.to('app_users').emit('delivery_groups_updated');
     } catch (_) {}
   }
 
@@ -84,7 +85,7 @@ async function publishArchiveProductOutcome(
       if (waves.length) await require('./supplementNotify').notifyWaves(waves, 'cancelled');
       const io = getIO();
       for (const wave of waves) {
-        io?.emit('supplement_wave_changed', {
+        io?.to('app_users').emit('supplement_wave_changed', {
           waveId: String(wave._id),
           deliveryGroupId: String(wave.deliveryGroupId || ''),
           orderingSessionId: String(wave.orderingSessionId || ''),
@@ -97,8 +98,8 @@ async function publishArchiveProductOutcome(
 
   try {
     const io = getIO();
-    io?.emit('product_archived', { productId: String(product._id) });
-    io?.emit('incoming_updated');
+    io?.to('app_users').emit('product_archived', { productId: String(product._id) });
+    io?.to('staff').emit('incoming_updated');
   } catch (_) {}
 
   let positionChanges = [];
@@ -111,7 +112,7 @@ async function publishArchiveProductOutcome(
       const io = getIO();
       const updatedBlocks = await Block.find({ blockId: { $in: outcome.affectedBlockIds } }).lean();
       for (const updated of updatedBlocks) {
-        io?.emit('block_updated', {
+        io?.to('staff').emit('block_updated', {
           blockId: updated.blockId,
           version: updated.version,
           productIds: (updated.productIds || []).map(String),
@@ -121,7 +122,7 @@ async function publishArchiveProductOutcome(
   }
 
   if (positionChanges.length) {
-    try { getIO()?.emit('picking_tasks_positions_updated', positionChanges); } catch (_) {}
+    try { getIO()?.to('staff').emit('picking_tasks_positions_updated', positionChanges); } catch (_) {}
   }
 
   return { cancelledCount: outcome.cancelledCount || 0 };

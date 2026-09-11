@@ -37,6 +37,7 @@ const { appendProductsToBlockDocument } = require('../services/blockMembershipPr
 const { hasReceiptCommercialMutation, syncReceiptItemCommercialMetadataFromProduct } = require('../services/receiptCommercialMetadataCommand');
 const { allocateProductOrderNumber, allocateProductOrderNumbers, withProductOrderNumberLock } = require('../services/productOrderNumber');
 const { parseDecimalNumber } = require('../utils/decimalNumber');
+const { fetchAllowedImage } = require('../utils/safeImageProxy');
 
 const staffOnly = requireTelegramRoles(['admin', 'warehouse']);
 const registeredOnly = requireTelegramRoles(['seller', 'admin', 'warehouse']);
@@ -520,27 +521,21 @@ router.get('/catalog', registeredOnly, asyncHandler(async (req, res) => {
     Product.aggregate([...basePipeline, { $count: 'total' }]),
   ]);
 
-  const items = pageRows.map((product) => ({
-    id: product._id,
-    title: getProductTitle(product),
-    name: product.name || '',
-    price: product.price,
-    quantity: product.quantity,
-    quantityPerPackage: product.quantityPerPackage || 0,
-    barcode: product.barcode || '',
-    source: product.source || '',
-    image_url: product.imageUrls?.[0] || product.localImageUrl || '',
-    thumbnail_url: product.imageUrls?.[0] || product.localImageUrl || '',
-    imageUrls: product.imageUrls || [],
-    originalImageUrl: product.originalImageUrl || '',
-    localImageUrl: product.localImageUrl || '',
-    labelPositions: product.labelPositions || {},
-    status: product.status,
-    orderNumber: product.orderNumber,
-    createdAt: product.createdAt,
-    shelvedAt: product.shelvedAt || null,
-    firstBlockPlacedAt: product.firstBlockPlacedAt || null,
-  }));
+  const items = pageRows.map((product) => {
+    const imageUrl = product.imageUrls?.[0] || product.localImageUrl || '';
+    return {
+      id: product._id,
+      title: getProductTitle(product),
+      name: product.name || '',
+      price: product.price,
+      quantityPerPackage: product.quantityPerPackage || 0,
+      barcode: product.barcode || '',
+      image_url: imageUrl,
+      thumbnail_url: imageUrl,
+      orderNumber: product.orderNumber ?? 0,
+      shelvedAt: product.shelvedAt || null,
+    };
+  });
   const total = totalRows[0]?.total ?? 0;
 
   return res.json({
@@ -593,7 +588,7 @@ router.get('/catalog/:id/position', registeredOnly, asyncHandler(async (req, res
 //   200 { position, total }     — found in the catalogue
 //   404 { error: 'not_in_catalog' }  — archived / not in any block / otherwise hidden
 //   400 { error: 'invalid_id' }      — malformed id
-router.get('/:id/position', asyncHandler(async (req, res) => {
+router.get('/:id/position', staffOnly, asyncHandler(async (req, res) => {
   const { id } = req.params;
   if (!mongoose.Types.ObjectId.isValid(id)) {
     return res.status(400).json({ error: 'invalid_id' });
@@ -656,7 +651,7 @@ router.get('/:id/position', asyncHandler(async (req, res) => {
   });
 }));
 
-router.get('/', async (req, res) => {
+router.get('/', staffOnly, async (req, res) => {
   const limit = Math.min(50, Math.max(1, Number(req.query.limit) || 24));
   const offset = Math.max(0, Number(req.query.offset) || 0);
   const dateFilter = req.query.date_filter;
@@ -696,7 +691,6 @@ router.get('/', async (req, res) => {
   const isV1 = String(req.baseUrl || '').includes('/api/v1') || String(req.originalUrl || '').startsWith('/api/v1');
   if (isV1) {
     query.orderingEnabled = { $ne: false };
-    applySellerCycleCutoff(query, await getSellerCatalogCycleOpenAt(req));
   }
 
   // For the seller-facing catalogue (v1), show every order-enabled product placed in a block
@@ -768,32 +762,36 @@ router.get('/', async (req, res) => {
     const wantLocation = req.query.withLocation === '1' || req.query.withLocation === 'true';
     const locMap = wantLocation ? await buildLocationMap(products.map((p) => p._id)) : new Map();
 
-    const items = products.map((product) => ({
-      id: product._id,
-      title: getProductTitle(product),
-      location: wantLocation ? (locMap.get(String(product._id)) || null) : undefined,
-      name: product.name || '',
-      price: product.price,
-      quantity: product.quantity,
-      quantityPerPackage: product.quantityPerPackage || 0,
-      barcode: product.barcode || '',
-      source: product.source || '',
-      image_url: product.imageUrls?.[0] || product.localImageUrl || '',
-      thumbnail_url: product.imageUrls?.[0] || product.localImageUrl || '',
-      // Raw image fields + label positions: the warehouse editor (InlinePhotoCanvas)
-      // needs the CLEAN originalImageUrl and the saved labelPositions to reopen with
-      // markers in place and avoid baking labels on top of an already-annotated photo.
-      // The seller mini-app ignores these extra fields (it reads image_url/thumbnail_url).
-      imageUrls: product.imageUrls || [],
-      originalImageUrl: product.originalImageUrl || '',
-      localImageUrl: product.localImageUrl || '',
-      labelPositions: product.labelPositions || {},
-      status: product.status,
-      orderNumber: product.orderNumber ?? 0,
-      createdAt: product.createdAt,
-      shelvedAt: product.shelvedAt || null,
-      firstBlockPlacedAt: product.firstBlockPlacedAt || null,
-    }));
+    const isSeller = req.telegramUser?.role === 'seller';
+    const items = products.map((product) => {
+      const publicImage = product.imageUrls?.[0] || product.localImageUrl || '';
+      const sellerDto = {
+        id: product._id,
+        title: getProductTitle(product),
+        name: product.name || '',
+        price: product.price,
+        quantityPerPackage: product.quantityPerPackage || 0,
+        barcode: product.barcode || '',
+        image_url: publicImage,
+        thumbnail_url: publicImage,
+        orderNumber: product.orderNumber ?? 0,
+        shelvedAt: product.shelvedAt || null,
+      };
+      if (isSeller) return sellerDto;
+      return {
+        ...sellerDto,
+        location: wantLocation ? (locMap.get(String(product._id)) || null) : undefined,
+        quantity: product.quantity,
+        source: product.source || '',
+        imageUrls: product.imageUrls || [],
+        originalImageUrl: product.originalImageUrl || '',
+        localImageUrl: product.localImageUrl || '',
+        labelPositions: product.labelPositions || {},
+        status: product.status,
+        createdAt: product.createdAt,
+        firstBlockPlacedAt: product.firstBlockPlacedAt || null,
+      };
+    });
 
     return res.json({
       items,
@@ -814,7 +812,7 @@ router.get('/', async (req, res) => {
   res.json(products);
 });
 
-router.get('/check', asyncHandler(async (req, res) => {
+router.get('/check', staffOnly, asyncHandler(async (req, res) => {
   const barcodeValue = String(req.query.barcode || '').trim();
   const normalizedBarcode = normalizeBarcode(barcodeValue);
   if (!normalizedBarcode) throw appError('product_barcode_required');
@@ -845,7 +843,7 @@ router.get('/check', asyncHandler(async (req, res) => {
   });
 }));
 
-router.get('/pending', asyncHandler(async (req, res) => {
+router.get('/pending', staffOnly, asyncHandler(async (req, res) => {
   const products = await Product.find({ status: 'pending' }).sort({ orderNumber: 1 });
   res.json(products);
 }));
@@ -883,7 +881,6 @@ function newProductsPipeline(cutoff) {
         price: 1,
         imageUrls: 1,
         image_url: 1,
-        mandatoryDistribution: 1,
         mayNotReachAllShops: 1,
         _sortDate: '$shelvedAt',
       },
@@ -904,8 +901,6 @@ function newProductsPipeline(cutoff) {
               name: 1,
               price: 1,
               imageUrl: 1,
-              originalImageUrl: 1,
-              mandatoryDistribution: 1,
               mayNotReachAllShops: 1,
               _sortDate: '$createdAt',
             },
@@ -919,7 +914,7 @@ function newProductsPipeline(cutoff) {
 // Paged list of new arrivals within the last `days` (default 14). Powers the
 // "Нові товари" view-only gallery (50 per page, server-side pagination). See
 // newProductsPipeline for what counts as "new".
-router.get('/new-list', asyncHandler(async (req, res) => {
+router.get('/new-list', registeredOnly, asyncHandler(async (req, res) => {
   const days = Math.min(90, Math.max(1, Number(req.query.days) || 14));
   const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
   const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 50));
@@ -943,8 +938,6 @@ router.get('/new-list', asyncHandler(async (req, res) => {
         imageUrls: 1,
         image_url: 1,
         imageUrl: 1,
-        originalImageUrl: 1,
-        mandatoryDistribution: 1,
         mayNotReachAllShops: 1,
       },
     },
@@ -1206,32 +1199,33 @@ router.get('/:id/who-ordered', staffOnly, asyncHandler(async (req, res) => {
 
 // Proxy an image through the server so the browser canvas can draw it without
 // CORS/taint issues regardless of whether the source is local or R2.
-router.get('/proxy-image', asyncHandler(async (req, res) => {
+router.get('/proxy-image', staffOnly, asyncHandler(async (req, res) => {
   const { url } = req.query;
-  if (!url || !url.startsWith('http')) {
-    return res.status(400).json({ error: 'invalid_url' });
-  }
-  const axios = require('axios');
-  let upstream;
+  if (!url) return res.status(400).json({ error: 'invalid_url' });
+
   try {
-    upstream = await axios.get(url, { responseType: 'arraybuffer', timeout: 15000 });
+    const { body, contentType } = await fetchAllowedImage(url);
+    res.set('Content-Type', contentType);
+    res.set('Cache-Control', 'private, max-age=300');
+    return res.send(body);
   } catch (err) {
-    const status = err?.response?.status;
-    // A missing R2 object (deleted / never finished uploading) makes axios reject.
-    // Surface it as a clean 404 so the client shows a placeholder instead of a
-    // scary 500 — and so it's distinguishable from a real proxy/network failure.
-    if (status === 404 || status === 403) {
+    if (['image_proxy_invalid_url', 'image_proxy_host_forbidden', 'image_proxy_private_address', 'image_proxy_dns_empty', 'image_proxy_dns_rebind_blocked'].includes(err?.code || err?.message)) {
+      return res.status(403).json({ error: 'image_proxy_forbidden' });
+    }
+    if (err?.response?.status === 404 || err?.response?.status === 403) {
       return res.status(404).json({ error: 'image_not_found' });
+    }
+    if (err?.code === 'ERR_FR_TOO_MANY_REDIRECTS' || (err?.response?.status >= 300 && err?.response?.status < 400)) {
+      return res.status(403).json({ error: 'image_proxy_redirect_forbidden' });
+    }
+    if (['image_proxy_not_image', 'image_proxy_size_invalid'].includes(err?.code || err?.message)) {
+      return res.status(415).json({ error: err?.code || err?.message });
     }
     return res.status(502).json({ error: 'image_proxy_failed' });
   }
-  res.set('Content-Type', upstream.headers['content-type'] || 'image/jpeg');
-  res.set('Cache-Control', 'private, max-age=300');
-  res.set('Access-Control-Allow-Origin', '*');
-  res.send(Buffer.from(upstream.data));
 }));
 
-router.get('/:id', asyncHandler(async (req, res) => {
+router.get('/:id', staffOnly, asyncHandler(async (req, res) => {
   const product = await Product.findById(req.params.id).lean();
   if (!product) throw appError('product_not_found');
   // Deep-link pins (?product=) land here — carry the shelf location too so the
@@ -1317,7 +1311,7 @@ router.post('/block-upload-photos', staffOnly, asyncHandler(async (req, res) => 
   try {
     const io = getIO();
     if (io) {
-      io.emit('block_updated', {
+      io.to('staff').emit('block_updated', {
         blockId: savedBlock.blockId,
         version: savedBlock.version,
         productIds: savedBlock.productIds.map(String),
@@ -1325,7 +1319,7 @@ router.post('/block-upload-photos', staffOnly, asyncHandler(async (req, res) => 
       // New products added to a block → notify sellers their catalogue changed.
       // action:'add' lets the mini-app silently revalidate its window (no blink)
       // instead of a full catalogue reset.
-      io.emit('catalogue_updated', { action: 'add' });
+      io.to('app_users').emit('catalogue_updated', { action: 'add' });
     }
   } catch (e) {
   }
@@ -1397,7 +1391,7 @@ router.post('/receive', staffOnly, asyncHandler(async (req, res) => {
 
   try {
     const io = getIO();
-    if (io) io.emit('incoming_updated');
+    if (io) io.to('staff').emit('incoming_updated');
   } catch (e) {
   }
   res.status(201).json(product);
@@ -1639,19 +1633,19 @@ router.patch('/:id', staffOnly, asyncHandler(async (req, res) => {
   try {
     const io = getIO();
     if (io) {
-      io.emit('incoming_updated');
+      io.to('staff').emit('incoming_updated');
       // Every shared Product edit can affect an already-open catalogue card
       // (name/price/pack size/notes/barcode/order/photo), not only photo edits.
       // Keep the existing targeted payload so MiniApp refreshes only its current
       // window when this product is actually visible. Admin TanStack caches use
       // the same event through QuerySocketBridge.
-      io.emit('catalogue_updated', { action: 'update', productId: String(product._id) });
+      io.to('app_users').emit('catalogue_updated', { action: 'update', productId: String(product._id) });
       io.to('staff').emit('catalogue_cache_patch', { action: 'update', entity: 'warehouse', productId: String(product._id), patch: productCataloguePatch(product) });
       if (receiptMetadataResult?.item?.receiptId) {
         io.to(`receipt_${String(receiptMetadataResult.item.receiptId)}`).emit('receipt_item_updated', receiptMetadataResult.item);
       }
       for (const change of receiptMetadataResult?.propagation?.supplementChanges || []) {
-        io.emit('supplement_wave_changed', {
+        io.to('app_users').emit('supplement_wave_changed', {
           ...change,
           receiptItemId: String(receiptMetadataResult.item._id),
           action: 'metadata_updated',
@@ -1749,14 +1743,14 @@ router.post('/:id/describe', staffOnly, asyncHandler(async (req, res) => {
     try {
       const io = getIO();
       if (io) {
-        io.emit('incoming_updated');
-        io.emit('catalogue_updated', { action: 'update', productId: String(product._id) });
+        io.to('staff').emit('incoming_updated');
+        io.to('app_users').emit('catalogue_updated', { action: 'update', productId: String(product._id) });
         io.to('staff').emit('catalogue_cache_patch', { action: 'update', entity: 'warehouse', productId: String(product._id), patch: productCataloguePatch(product) });
         if (receiptMetadataResult?.item?.receiptId) {
           io.to(`receipt_${String(receiptMetadataResult.item.receiptId)}`).emit('receipt_item_updated', receiptMetadataResult.item);
         }
         for (const change of receiptMetadataResult?.propagation?.supplementChanges || []) {
-          io.emit('supplement_wave_changed', {
+          io.to('app_users').emit('supplement_wave_changed', {
             ...change,
             receiptItemId: String(receiptMetadataResult.item._id),
             action: 'metadata_updated',

@@ -28,6 +28,7 @@ const { assignLateShopNumber, buildShopNumberLookup } = require('../utils/shopNu
 const { ITEM_STATUS, ITEM_RELATION_STATUS, REQUEST_STATUS, ACTIVE_ITEM_STATUSES, revisionOf, sellerMayRestoreRequest } = require('../utils/supplementState');
 const { offerSnapshotForRequestRevision } = require('../services/supplementRevisionProjection');
 const { getIO } = require('../socket');
+const { emitUserAndStaff } = require('../utils/socketScope');
 const {
   ACTIVE_STATUSES,
   effectiveOfferStatus,
@@ -75,7 +76,7 @@ function actorOf(user) {
   };
 }
 function emit(event, payload) {
-  try { getIO()?.emit(event, payload); } catch (_) {}
+  try { getIO()?.to('app_users').emit(event, payload); } catch (_) {}
 }
 
 async function sellerContext(user) {
@@ -230,7 +231,7 @@ async function afterSellerRequestMutation({ offer, ctx, user, action, request })
     shopId: ctx.shopId,
     action,
   });
-  emit('user_order_updated', { buyerTelegramId: str(user.telegramId) });
+  try { emitUserAndStaff(getIO(), user.telegramId, 'user_order_updated', { buyerTelegramId: str(user.telegramId) }); } catch (_) {}
 }
 
 // Canonical V48.S3 seller CRUD.

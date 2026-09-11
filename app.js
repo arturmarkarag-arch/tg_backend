@@ -29,6 +29,7 @@ const allegroRouter = require('./routes/allegro');
 const commerceRouter = require('./routes/commerce');
 const baseLinkerPrintAgentRouter = require('./routes/baseLinkerPrintAgent');
 const { getPublicMaintenanceState, maintenanceReadOnlyMiddleware } = require('./services/maintenanceState');
+const { telegramAuth, requireTelegramRole, requireTelegramRoles } = require('./middleware/telegramAuth');
 
 // The warehouse test harness (destructive: cleanup/seed/reset of real
 // collections) must NEVER be reachable in production. Outside production it is
@@ -44,10 +45,10 @@ const app = express();
 app.disable('x-powered-by');
 app.use(cors(expressCorsOptions));
 app.use(express.json());
-app.use('/uploads', (req, res, next) => {
-  res.header('Access-Control-Allow-Origin', '*');
-  next();
-}, express.static(path.join(__dirname, 'uploads')));
+// Legacy local uploads are warehouse-domain. Keep them behind auth instead of
+// exposing every existing file as anonymous static content. Public product media
+// is served from the explicitly public R2 domain instead.
+app.use('/uploads', telegramAuth, requireTelegramRoles(['admin', 'warehouse']), express.static(path.join(__dirname, 'uploads')));
 if (ENABLE_TEST_API) {
   app.use('/warehouse-test', express.static(path.join(__dirname, '../Тести Е2Е/test-warehouse')));
 }
@@ -71,11 +72,13 @@ if (ENABLE_TEST_API) {
   });
 }
 
-const { telegramAuth, requireTelegramRole } = require('./middleware/telegramAuth');
 
 const publicApiPaths = [
-  /^\/api\/v1\/auth(\/.*)?$/,
-  /^\/api\/search-products(\/.*)?$/,
+  /^\/api\/v1\/auth\/config$/,
+  /^\/api\/v1\/auth\/google$/,
+  /^\/api\/v1\/auth\/google\/link\/complete$/,
+  /^\/api\/v1\/auth\/me$/,
+  /^\/api\/v1\/auth\/logout$/,
   /^\/api\/v1\/telegram\/validate$/,
   /^\/api\/v1\/telegram\/register-request$/,
   // Self-service invite for a group member who opened the mini-app without a
@@ -84,12 +87,10 @@ const publicApiPaths = [
   // via signed initData and re-checks group membership live before minting.
   /^\/api\/v1\/telegram\/registration-invite$/,
   /^\/api\/v1\/telegram\/me$/,
-  /^\/api\/delivery-groups\/summary$/,
   /^\/api\/shops\/cities$/,
   // Minimal, seller-PII-free shop list for the registration screen. The full
   // GET /api/shops (with seller data) now requires auth and is staff-only.
   /^\/api\/shops\/registry$/,
-  /^\/api\/shop-products\/barcode\/.+$/,
   /^\/api\/health$/,
   /^\/api\/maintenance$/,
   // Local Windows Print Agent authenticates with its own long random token.

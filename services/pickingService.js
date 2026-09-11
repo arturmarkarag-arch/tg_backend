@@ -1,5 +1,7 @@
 'use strict';
 
+const { emitUserAndStaff } = require('../utils/socketScope');
+
 /**
  * Core picking business logic — extracted from routes/picking.js so it can be
  * tested independently of Express and can be called from other services.
@@ -111,7 +113,7 @@ function notifyPickingQueueChanged({ deliveryGroupId = '', orderingSessionId = '
   if (!groupId) return;
   try {
     const io = getIO();
-    io?.emit('picking_queue_changed', {
+    io?.to('staff').emit('picking_queue_changed', {
       deliveryGroupId: groupId,
       orderingSessionId: String(orderingSessionId || ''),
       taskId: String(taskId || ''),
@@ -236,7 +238,7 @@ async function markOrderItemsPacked(taskItems, productId, actor = { by: 'system'
     const rows = await buyerQuery;
     const io = getIO();
     for (const row of rows) {
-      if (row?.buyerTelegramId) io.emit('user_order_updated', { buyerTelegramId: row.buyerTelegramId });
+      if (row?.buyerTelegramId) emitUserAndStaff(io, row.buyerTelegramId, 'user_order_updated', { buyerTelegramId: row.buyerTelegramId });
     }
   } catch { /* non-critical — socket may not be initialised in test env */ }
 }
@@ -551,7 +553,7 @@ async function releasePickingTask({ taskId, userTelegramId, userFirstName = '', 
 
   try {
     const io = getIO();
-    io?.emit('picking_task_released', {
+    io?.to('staff').emit('picking_task_released', {
       taskId: String(released._id),
       deliveryGroupId: String(released.deliveryGroupId || ''),
       orderingSessionId: String(released.orderingSessionId || ''),

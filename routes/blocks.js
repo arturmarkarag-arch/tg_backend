@@ -99,6 +99,9 @@ function slimBlock(block) {
 }
 
 const staffOnly = requireTelegramRoles(['admin', 'warehouse']);
+// Entire block topology is warehouse-domain. One router-level boundary prevents
+// a forgotten per-route guard from exposing shelves/products to sellers again.
+router.use(staffOnly);
 
 // GET /api/blocks — all blocks with product count, or paginated blocks when limit/offset are supplied
 router.get('/', asyncHandler(async (req, res) => {
@@ -177,7 +180,7 @@ router.post('/', staffOnly, asyncHandler(async (req, res) => {
 
         try {
           const io = getIO();
-          io.emit('block_updated', slimBlock(created));
+          io.to('staff').emit('block_updated', slimBlock(created));
         } catch (e) {
         }
 
@@ -298,14 +301,14 @@ router.post('/move', staffOnly, asyncHandler(async (req, res) => {
 
   try {
     const io = getIO();
-    io.emit('block_updated', slimBlock(updatedSource));
+    io.to('staff').emit('block_updated', slimBlock(updatedSource));
     if (fromBlockId !== toBlockId) {
-      io.emit('block_updated', slimBlock(updatedTarget));
+      io.to('staff').emit('block_updated', slimBlock(updatedTarget));
     }
   } catch (_) {}
 
   if (positionChanges.length) {
-    try { getIO()?.emit('picking_tasks_positions_updated', positionChanges); } catch (_) {}
+    try { getIO()?.to('staff').emit('picking_tasks_positions_updated', positionChanges); } catch (_) {}
   }
   res.json({ source: updatedSource, target: updatedTarget });
 }));
@@ -338,13 +341,13 @@ router.delete('/:number/products/:productId', staffOnly, asyncHandler(async (req
 
   try {
     const io = getIO();
-    io.emit('block_updated', slimBlock(updated));
-    io.emit('incoming_updated');
-    io.emit('catalogue_updated', { action: 'add' });
+    io.to('staff').emit('block_updated', slimBlock(updated));
+    io.to('staff').emit('incoming_updated');
+    io.to('app_users').emit('catalogue_updated', { action: 'add' });
   } catch (_) {}
 
   if (removal.positionChanges.length) {
-    try { getIO()?.emit('picking_tasks_positions_updated', removal.positionChanges); } catch (_) {}
+    try { getIO()?.to('staff').emit('picking_tasks_positions_updated', removal.positionChanges); } catch (_) {}
   }
   res.json(updated);
 }));
@@ -376,12 +379,12 @@ router.post('/:number/add', staffOnly, asyncHandler(async (req, res) => {
   // are performed by the canonical Product -> Block command above.
   try {
     const io = getIO();
-    io.emit('block_updated', slimBlock(updated));
-    io.emit('catalogue_updated', { action: 'add' });
+    io.to('staff').emit('block_updated', slimBlock(updated));
+    io.to('app_users').emit('catalogue_updated', { action: 'add' });
   } catch (_) { /* socket not initialized yet */ }
 
   if (placement.positionChanges.length) {
-    try { getIO()?.emit('picking_tasks_positions_updated', placement.positionChanges); } catch (_) {}
+    try { getIO()?.to('staff').emit('picking_tasks_positions_updated', placement.positionChanges); } catch (_) {}
   }
   res.json(updated);
 }));
@@ -418,7 +421,7 @@ router.delete('/:number', requireTelegramRoles(['admin', 'warehouse', 'manager']
 
     try {
       const io = getIO();
-      io.emit('block_deleted', { blockId: num, maxBlockId: Number(newMax?.blockId || 0) });
+      io.to('staff').emit('block_deleted', { blockId: num, maxBlockId: Number(newMax?.blockId || 0) });
     } catch (_) { /* socket not ready */ }
 
     return res.json({ ok: true, blockId: num, maxBlockId: Number(newMax?.blockId || 0) });

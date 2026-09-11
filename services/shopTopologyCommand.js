@@ -221,7 +221,7 @@ async function updateShopTopologyCommand({ shopId, patch = {}, actor = null }) {
           }
         }
         if (outcome.groupChanged || outcome.activeChanged) {
-          io.emit('delivery_groups_updated');
+          io.to('app_users').emit('delivery_groups_updated');
         }
       }
     } catch (_) { /* best-effort */ }

@@ -9,6 +9,7 @@ const { invalidateShop } = require('../utils/modelCache');
 const { getIO } = require('../socket');
 const { migrateSellerShop } = require('./migrateSellerShop');
 const { unassignSellerAndPark } = require('./unassignSeller');
+const { emitUserAndStaff } = require('../utils/socketScope');
 
 function str(value) {
   return value == null ? '' : String(value);
@@ -143,7 +144,7 @@ async function publishShopAssignmentTransition(input = {}) {
       // assignment topology changes. A pure Order ownership repair must not pretend
       // that sellers moved between groups.
       if (result.assignmentChanged && result.prevGroupId !== result.newGroupId) {
-        io.emit('delivery_groups_updated');
+        io.to('app_users').emit('delivery_groups_updated');
       }
 
       // Every committed CURRENT seller assignment change must reach the seller's
@@ -151,11 +152,11 @@ async function publishShopAssignmentTransition(input = {}) {
       // client already owns one canonical handler for this event: it re-fetches
       // the profile, which changes shopId and refreshes ordering status.
       if (result.assignmentChanged && result.sellerTelegramId) {
-        io.emit('user_shop_changed', { telegramId: result.sellerTelegramId });
+        emitUserAndStaff(io, result.sellerTelegramId, 'user_shop_changed', { telegramId: result.sellerTelegramId });
       }
 
       if (result.orderChanged && result.sellerTelegramId) {
-        io.emit('user_order_updated', { buyerTelegramId: result.sellerTelegramId });
+        emitUserAndStaff(io, result.sellerTelegramId, 'user_order_updated', { buyerTelegramId: result.sellerTelegramId });
       }
     }
   } catch (_) { /* best-effort realtime publication */ }

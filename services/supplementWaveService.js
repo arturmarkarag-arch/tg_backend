@@ -74,7 +74,7 @@ async function effectiveOfferStatusFromDb(offer, { session = null } = {}) {
   return { wave, status: effectiveOfferStatus(offer, wave) };
 }
 
-function emit(event, payload) { try { getIO()?.emit(event, payload); } catch (_) {} }
+function emit(event, payload) { try { getIO()?.to('app_users').emit(event, payload); } catch (_) {} }
 
 function revisionArchiveOf(offer, now = new Date()) {
   return {

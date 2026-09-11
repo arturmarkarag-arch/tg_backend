@@ -4,7 +4,7 @@ const { moveProductBetweenBlocks } = require('./services/blockMoveCommand');
 const User = require('./models/User');
 const { isRemovedUser } = require('./utils/userAccountState');
 const { validateTelegramInitData } = require('./utils/validateTelegramInitData');
-const { verifySession } = require('./utils/jwt');
+const { verifySession, isSessionNotRevoked } = require('./utils/jwt');
 const { pubClient, subClient, isEnabled: redisEnabled } = require('./utils/redis');
 const { hasBaseLinkerPickingAccess } = require('./utils/baseLinkerAccess');
 const { hasMarketplaceWarehouseAccess } = require('./utils/marketplaceWarehouseAccess');
@@ -82,6 +82,7 @@ function initSocket(httpServer) {
     const initData = socket.handshake.auth?.initData;
     const token = socket.handshake.auth?.token;
     let telegramId = '';
+    let jwtIat = null;
 
     if (initData) {
       const { valid, error } = validateTelegramInitData(initData, process.env.TELEGRAM_BOT_TOKEN);
@@ -102,6 +103,7 @@ function initSocket(httpServer) {
         return next(new Error('Unauthorized: Invalid session token'));
       }
       telegramId = session.telegramId;
+      jwtIat = session.iat;
     } else {
       return next(new Error('Unauthorized: initData or token is required'));
     }
@@ -115,6 +117,9 @@ function initSocket(httpServer) {
     }
     if (dbUser.botBlocked) {
       return next(new Error('Forbidden: Account blocked'));
+    }
+    if (jwtIat !== null && !isSessionNotRevoked(jwtIat, dbUser)) {
+      return next(new Error('Unauthorized: Session revoked'));
     }
     if (!['admin', 'warehouse', 'seller', 'baselinker'].includes(dbUser.role)) {
       return next(new Error('Forbidden: Insufficient role'));
@@ -140,6 +145,7 @@ function initSocket(httpServer) {
     // still receive the minimal public catalogue_updated signal, but never the
     // product field patch used by admin TanStack caches.
     if (['admin', 'warehouse'].includes(socket.userRole)) socket.join('staff');
+    if (['admin', 'warehouse', 'seller'].includes(socket.userRole)) socket.join('app_users');
     if (socket.baseLinkerPickingAccess) socket.join('baselinker_staff');
     if (socket.marketplaceWarehouseAccess) socket.join('marketplace_staff');
 
@@ -208,13 +214,13 @@ function initSocket(httpServer) {
         const current = lockedItems.get(productId);
         if (current && current.socketId === socket.id) {
           lockedItems.delete(productId);
-          io.emit('item_unlocked', { productId });
+          io.to('staff').emit('item_unlocked', { productId });
         }
       }, LOCK_TIMEOUT_MS);
       lockedItems.set(productId, lockData);
 
       // Broadcast lock to everyone except sender
-      socket.broadcast.emit('item_locked', { productId, userId, userName });
+      socket.to('staff').emit('item_locked', { productId, userId, userName });
     });
 
     // Unlock an item
@@ -227,7 +233,7 @@ function initSocket(httpServer) {
       const existing = lockedItems.get(productId);
       if (existing && existing.userId === userId) {
         releaseLock(productId);
-        io.emit('item_unlocked', { productId });
+        io.to('staff').emit('item_unlocked', { productId });
       }
     });
 
@@ -254,14 +260,14 @@ function initSocket(httpServer) {
           ? updatedSource
           : await Block.findById(result.targetId).lean();
 
-        io.emit('block_updated', slimBlock(updatedSource));
-        if (!result.sameBlock) io.emit('block_updated', slimBlock(updatedTarget));
+        io.to('staff').emit('block_updated', slimBlock(updatedSource));
+        if (!result.sameBlock) io.to('staff').emit('block_updated', slimBlock(updatedTarget));
         if (result.positionChanges.length) {
-          io.emit('picking_tasks_positions_updated', result.positionChanges);
+          io.to('staff').emit('picking_tasks_positions_updated', result.positionChanges);
         }
 
         releaseLock(productId);
-        io.emit('item_unlocked', { productId });
+        io.to('staff').emit('item_unlocked', { productId });
         socket.emit('move_success', {
           source: { blockId: result.fromBlockId },
           target: { blockId: result.toBlockId },
@@ -277,6 +283,10 @@ function initSocket(httpServer) {
 
     // Request current locks
     socket.on('get_locks', () => {
+      if (!isWarehouseStaff()) {
+        socket.emit('locks_error', { error: 'forbidden' });
+        return;
+      }
       const locks = {};
       for (const [productId, data] of lockedItems) {
         locks[productId] = { userId: data.userId, userName: data.userName };
@@ -289,7 +299,7 @@ function initSocket(httpServer) {
       for (const [productId, data] of lockedItems) {
         if (data.socketId === socket.id) {
           releaseLock(productId);
-          io.emit('item_unlocked', { productId });
+          io.to('staff').emit('item_unlocked', { productId });
         }
       }
 
