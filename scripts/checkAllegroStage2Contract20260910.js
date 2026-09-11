@@ -15,6 +15,7 @@ const oauth = read('services/allegroOAuth.js');
 const config = read('services/allegroConfiguration.js');
 const accounts = read('services/allegroAccounts.js');
 const http = read('services/allegroHttpClient.js');
+const runtimePolicy = read('services/allegroRuntimePolicy.js');
 const route = read('routes/allegro.js');
 const app = read('app.js');
 const errors = read('utils/errors.js');
@@ -76,7 +77,9 @@ check('refresh rotation is distributed-locked and CAS guarded', () => {
   assert(oauth.includes('tokenRevisionFilter(row)'));
   assert(oauth.includes('CAS lost'));
   assert(oauth.includes('rejectedTokenRevision'));
-  assert(oauth.includes('Number(row.tokenRevision || 0) > rejectedRevision'));
+  assert(oauth.includes('shouldReuseRotatedTokenAfterForcedRefresh'));
+  assert(runtimePolicy.includes('currentRevision > rejectedRevision'));
+  assert(runtimePolicy.includes('if (rejectedRevision === null) return false'));
 
 });
 

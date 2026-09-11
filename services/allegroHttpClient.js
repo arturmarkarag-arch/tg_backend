@@ -1,5 +1,7 @@
 'use strict';
 
+const { parseOptionalNonNegativeNumber, retryDelayMs } = require('./allegroRuntimePolicy');
+
 const crypto = require('crypto');
 const AllegroAccount = require('../models/AllegroAccount');
 const AllegroApiErrorLog = require('../models/AllegroApiErrorLog');
@@ -340,7 +342,7 @@ async function recordErrorLog(entry) {
         : [],
       traceId: clean(entry.traceId, 256),
       retryable: entry.retryable === true,
-      retryAfterMs: Number.isFinite(Number(entry.retryAfterMs)) ? Number(entry.retryAfterMs) : null,
+      retryAfterMs: parseOptionalNonNegativeNumber(entry.retryAfterMs),
       attempt: Math.max(1, Number(entry.attempt) || 1),
       requestId: clean(entry.requestId, 64),
       occurredAt: now,
@@ -400,12 +402,6 @@ function networkError({ accountId, method, path, stage, attempt, requestId, erro
     requestId,
   };
   return err;
-}
-
-function retryDelayMs({ attempt, retryAfterMs = null }) {
-  if (Number.isFinite(Number(retryAfterMs)) && Number(retryAfterMs) >= 0) return Number(retryAfterMs);
-  const base = Math.min(2000, 250 * (2 ** Math.max(0, attempt - 1)));
-  return base + Math.floor(Math.random() * Math.max(1, Math.floor(base / 2)));
 }
 
 async function markFreshTokenRejected(accountId) {
@@ -612,7 +608,7 @@ function publicErrorLog(row) {
       : [],
     traceId: clean(value.traceId, 256),
     retryable: value.retryable === true,
-    retryAfterMs: Number.isFinite(Number(value.retryAfterMs)) ? Number(value.retryAfterMs) : null,
+    retryAfterMs: parseOptionalNonNegativeNumber(value.retryAfterMs),
     attempt: Math.max(1, Number(value.attempt) || 1),
     requestId: clean(value.requestId, 64),
     occurredAt: value.occurredAt || null,

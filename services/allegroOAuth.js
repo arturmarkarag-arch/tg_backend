@@ -1,5 +1,7 @@
 'use strict';
 
+const { shouldReuseRotatedTokenAfterForcedRefresh } = require('./allegroRuntimePolicy');
+
 const crypto = require('crypto');
 const AllegroAccount = require('../models/AllegroAccount');
 const AllegroOAuthState = require('../models/AllegroOAuthState');
@@ -499,10 +501,12 @@ async function getValidAccessToken(accountId, { requireEnabled = true, forceRefr
     // another worker already rotated credentials while we were waiting for the
     // distributed lock, use that newer revision instead of consuming yet another
     // refresh token. This keeps forced 401 recovery serialized *and* deduplicated.
-    const rejectedRevision = Number.isFinite(Number(rejectedTokenRevision)) ? Number(rejectedTokenRevision) : null;
-    if (forceRefresh && rejectedRevision !== null
-      && Number(row.tokenRevision || 0) > rejectedRevision
-      && isTokenUsable(row, 0)) {
+    if (shouldReuseRotatedTokenAfterForcedRefresh({
+      forceRefresh,
+      rejectedTokenRevision,
+      currentTokenRevision: row.tokenRevision,
+      tokenUsable: isTokenUsable(row, 0),
+    })) {
       return { account: row, accessToken: decryptSecret(row.accessTokenEncrypted, row.accountId, 'access') };
     }
     if (!forceRefresh && isTokenUsable(row)) {
