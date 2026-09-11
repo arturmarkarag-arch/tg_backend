@@ -198,6 +198,24 @@ function compareSnapshots(desired, actual) {
   };
 }
 
+function contentPatchIssues(patch = {}, offer = {}) {
+  const actual = actualSnapshot(offer);
+  const issues = [];
+  if (Object.prototype.hasOwnProperty.call(patch, 'name') && text(patch.name, 300) !== actual.name) {
+    issues.push({ code: 'name_mismatch', field: 'name', expected: text(patch.name, 300), actual: actual.name, message: 'Назва в Allegro не збігається з content PATCH.' });
+  }
+  if (Object.prototype.hasOwnProperty.call(patch, 'description') && !sameJson(patch.description, actual.description)) {
+    issues.push({ code: 'description_mismatch', field: 'description', expected: patch.description, actual: actual.description, message: 'Опис в Allegro не збігається з content PATCH.' });
+  }
+  if (Object.prototype.hasOwnProperty.call(patch, 'images')) {
+    const expectedImages = imageUrls(patch.images);
+    if (!sameJson(expectedImages, actual.images)) {
+      issues.push({ code: 'images_mismatch', field: 'images', expected: expectedImages, actual: actual.images, message: 'Галерея фото в Allegro не збігається з повним масивом content PATCH.' });
+    }
+  }
+  return issues;
+}
+
 async function requireReadAccount(accountId) {
   const account = await getAllegroAccount(accountId, { requireEnabled: true, lean: true });
   if (account.authState !== 'connected') throw appError('allegro_account_authorization_required');
@@ -293,6 +311,7 @@ async function previewAllegroOfferUpdate(raw = {}) {
 module.exports = {
   actualSnapshot,
   compareSnapshots,
+  contentPatchIssues,
   desiredSnapshot,
   previewAllegroOfferUpdate,
 };

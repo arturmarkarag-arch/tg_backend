@@ -50,7 +50,7 @@ const PROVIDERS = Object.freeze([
       { id: 'offers.sales-settings.apply', label: 'Застосування Sales Settings', operation: 'PATCH /sale/product-offers/{offerId}', direction: 'write', implementation: LIVE, capability: 'saleOffersWrite', scope: 'allegro:api:sale:offers:write', note: 'Stage 3D.2.1: застосовує delivery/afterSalesServices/location до INACTIVE draft, підтримує 200/202, operation polling і read-back verification.' },
       { id: 'offers.publish', label: 'Активація offer', operation: 'PATCH /sale/product-offers/{offerId} publication.status=ACTIVE', direction: 'write', implementation: LIVE, capability: 'saleOffersWrite', scope: 'allegro:api:sale:offers:write', note: 'Stage 3D.3: окремого Allegro publish endpoint не використовуємо; мінімальний PATCH тільки publication.status=ACTIVE, durable operation polling/read-back і final activation gate.' },
       { id: 'offers.update.preview', label: 'Preview змін ACTIVE offer', operation: 'GET /sale/product-offers/{offerId} + local diff', direction: 'read', implementation: LIVE, capability: 'saleOffersRead', scope: 'allegro:api:sale:offers:read', note: 'Stage 3D.4A: read-only diff контенту. Price/stock відкладені до окремих sync stages; category/product remap не виконується автоматично.' },
-      { id: 'offers.update', label: 'Редагування контенту offer', operation: 'PATCH /sale/product-offers/{offerId}', direction: 'write', implementation: PLANNED, capability: 'saleOffersWrite', scope: 'allegro:api:sale:offers:write', note: 'Stage 3D.4.1: майбутній apply тільки керованого контенту; price/stock не змішуємо з content PATCH.' },
+      { id: 'offers.update', label: 'Редагування контенту offer', operation: 'PATCH /sale/product-offers/{offerId}', direction: 'write', implementation: LIVE, capability: 'saleOffersWrite', scope: 'allegro:api:sale:offers:write', note: 'Stage 3D.4.1: застосовує лише safe contentPatch (name/description/images) з fresh preview; price/stock/category/product.id не змішуємо. 200/202, recovery і read-back verification.' },
       { id: 'offers.price.write', label: 'Синхронізація ціни', operation: 'price commands', direction: 'write', implementation: PLANNED },
       { id: 'offers.stock.write', label: 'Синхронізація залишку', operation: 'quantity commands', direction: 'write', implementation: PLANNED },
     ],
@@ -153,7 +153,7 @@ async function getCommerceIntegrationRegistry() {
   };
 
   return {
-    version: 5,
+    version: 6,
     generatedAt: new Date().toISOString(),
     providers: PROVIDERS.map((provider) => {
       const accounts = accountMap[provider.id] || [];

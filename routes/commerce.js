@@ -12,6 +12,7 @@ const { resolveAllegroSalesSettings, saveAllegroSalesSettings } = require('../se
 const { applyAllegroSalesSettings, refreshAllegroSalesSettingsApply } = require('../services/commerce/allegroSalesSettingsApply');
 const { activateAllegroOffer } = require('../services/commerce/allegroActivation');
 const { previewAllegroOfferUpdate } = require('../services/commerce/allegroOfferUpdatePreview');
+const { applyAllegroOfferContent } = require('../services/commerce/allegroOfferContentUpdate');
 const {
   listCatalog,
   getCatalogProduct,
@@ -107,6 +108,14 @@ router.post('/publications/allegro/update-preview', asyncHandler(async (req, res
   const result = await previewAllegroOfferUpdate(req.body || {});
   res.set('Cache-Control', 'no-store');
   res.json(result);
+}));
+
+// Stage 3D.4.1: one business command applies only the safe content patch from a
+// fresh preview. The same endpoint also polls/reconciles any durable async job.
+router.post('/publications/allegro/update-content', asyncHandler(async (req, res) => {
+  const result = await applyAllegroOfferContent(req.body || {});
+  res.set('Cache-Control', 'no-store');
+  res.status(result.state === 'confirmed' ? 200 : 202).json(result);
 }));
 
 router.get('/catalog', asyncHandler(async (req, res) => {
