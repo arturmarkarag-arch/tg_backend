@@ -66,6 +66,25 @@ function toResultItem(p, score) {
   };
 }
 
+function toSellerShopSearchItem(item) {
+  if (!item) return null;
+  return {
+    id: item._id,
+    _id: item._id,
+    name: item.name || '',
+    barcode: item.barcode || '',
+    price: Number(item.price || 0),
+    quantityPerPackage: Number(item.quantityPerPackage || 0),
+    imageUrl: item.imageUrl || '',
+    aiDescription: item.aiDescription || '',
+    orderingEnabled: item.orderingEnabled !== false,
+    isMirror: Boolean(item.linkedProductId),
+    createdAt: item.createdAt || null,
+    updatedAt: item.updatedAt || null,
+    _score: Number(item._score || 0),
+  };
+}
+
 // Resolve a vector hit (a ProductVector row) to its catalogue ShopProduct: a warehouse
 // MIRROR via linkedProductId == productId, or a SHOP-OWNED item via _id == shopProductId.
 // `proj` is the inner $project (light card fields vs the full doc, minus vectors).
@@ -209,9 +228,9 @@ async function attachWarehouseLocations(items) {
 // The multimodal payoff: a typed word ("рукавички", "піца") is embedded with
 // gemini-embedding-2 and matched against the catalog's IMAGE vectors in the same
 // space — so it finds the product photo even with no name/description text. Gemini
-// only; returns FULL ShopProduct docs ordered by similarity (so the catalog list
-// can render + edit them like a normal page).
-// Allowed for sellers — they read-only browse the same paginated results.
+// Staff receives full editable docs. Sellers receive the same minimized catalogue
+// DTO as the ordinary ShopProduct browse path and can never switch the request to
+// warehouse `products` by crafting the JSON body.
 //
 // Pagination: we rank up to TOP_K_CAP candidates by similarity once, then the
 // client pages through that ordered top-K with offset/limit. Atlas $vectorSearch
@@ -228,8 +247,14 @@ router.post('/query-text', anyRole, asyncHandler(async (req, res) => {
   const limit  = Math.min(50, Math.max(1, parseInt(req.body?.limit, 10) || 20));
   const offset = Math.min(TOP_K_CAP, Math.max(0, parseInt(req.body?.offset, 10) || 0));
 
-  // Which catalog to search: shopproducts (Товари Магазинів, default) | products (Товари Складу).
-  const collection = String(req.body?.collection || 'shopproducts').toLowerCase() === 'products' ? 'products' : 'shopproducts';
+  const sellerSearch = req.telegramUser?.role === 'seller';
+  // Which catalog to search: shopproducts (Товари Магазинів, default) | products
+  // (Товари Складу). `products` is a warehouse domain and is staff-only even when
+  // the caller bypasses the UI and crafts the request manually.
+  const requestedCollection = String(req.body?.collection || 'shopproducts').toLowerCase() === 'products'
+    ? 'products'
+    : 'shopproducts';
+  const collection = sellerSearch ? 'shopproducts' : requestedCollection;
 
   let embedding = null;
   try {
@@ -242,7 +267,6 @@ router.post('/query-text', anyRole, asyncHandler(async (req, res) => {
 
   // Rank productvectors, then resolve each hit to its FULL doc (so the catalog list
   // can render + edit it). Hits that don't resolve (e.g. a deleted mirror) drop out.
-  const sellerSearch = req.telegramUser?.role === 'seller';
   const resolve = collection === 'products'
     ? [
         { $match: { productId: { $exists: true } } },
@@ -251,7 +275,16 @@ router.post('/query-text', anyRole, asyncHandler(async (req, res) => {
           { $project: { geminiVector: 0 } },
         ] } },
       ]
-    : [shopResolveLookup({ geminiVector: 0, embedding: 0, descriptor: 0 }, 'doc')];
+    : [shopResolveLookup(
+        sellerSearch
+          ? {
+              _id: 1, name: 1, barcode: 1, price: 1, quantityPerPackage: 1,
+              imageUrl: 1, aiDescription: 1, orderingEnabled: 1, linkedProductId: 1,
+              createdAt: 1, updatedAt: 1,
+            }
+          : { geminiVector: 0, embedding: 0, descriptor: 0 },
+        'doc',
+      )];
 
   let result;
   try {
@@ -270,7 +303,8 @@ router.post('/query-text', anyRole, asyncHandler(async (req, res) => {
     return visionError(res, req, 502, 'vector_search_failed', 'Векторний пошук тимчасово недоступний', `index=${VECTOR_INDEX}; ${err.message}`);
   }
 
-  const items = result?.[0]?.items || [];
+  const rawItems = result?.[0]?.items || [];
+  const items = sellerSearch ? rawItems.map(toSellerShopSearchItem).filter(Boolean) : rawItems;
   const total = result?.[0]?.counts?.[0]?.total || 0;
 
   if (collection === 'products') await attachWarehouseLocations(items);

@@ -28,7 +28,7 @@ const { assignLateShopNumber, buildShopNumberLookup } = require('../utils/shopNu
 const { ITEM_STATUS, ITEM_RELATION_STATUS, REQUEST_STATUS, ACTIVE_ITEM_STATUSES, revisionOf, sellerMayRestoreRequest } = require('../utils/supplementState');
 const { offerSnapshotForRequestRevision } = require('../services/supplementRevisionProjection');
 const { getIO } = require('../socket');
-const { emitUserAndStaff } = require('../utils/socketScope');
+const { emitUserAndStaff, emitSupplementScoped } = require('../utils/socketScope');
 const {
   ACTIVE_STATUSES,
   effectiveOfferStatus,
@@ -76,7 +76,7 @@ function actorOf(user) {
   };
 }
 function emit(event, payload) {
-  try { getIO()?.to('app_users').emit(event, payload); } catch (_) {}
+  try { emitSupplementScoped(getIO(), event, payload); } catch (_) {}
 }
 
 async function sellerContext(user) {
@@ -535,7 +535,8 @@ router.post('/requests/:requestId/cancel', warehouseRoles, asyncHandler(async (r
     emit('supplement_request_changed', {
       offerId: str(result.offer._id), waveId: result.offer.waveId ? str(result.offer.waveId) : null,
       revision: revisionOf(result.offer), deliveryGroupId: str(result.offer.deliveryGroupId),
-      orderingSessionId: result.offer.orderingSessionId || null, requestId: str(req.params.requestId), action: result.action,
+      orderingSessionId: result.offer.orderingSessionId || null, requestId: str(req.params.requestId),
+      shopId: result.request?.shopId ? str(result.request.shopId) : null, action: result.action,
     });
     // A FROZEN item cannot accept replacement seller demand. If staff cancelled
     // its last unpacked request, close that empty current revision immediately;
@@ -557,7 +558,8 @@ router.post('/requests/:requestId/restore', warehouseRoles, asyncHandler(async (
     emit('supplement_request_changed', {
       offerId: str(result.offer._id), waveId: result.offer.waveId ? str(result.offer.waveId) : null,
       revision: revisionOf(result.offer), deliveryGroupId: str(result.offer.deliveryGroupId),
-      orderingSessionId: result.offer.orderingSessionId || null, requestId: str(req.params.requestId), action: result.action,
+      orderingSessionId: result.offer.orderingSessionId || null, requestId: str(req.params.requestId),
+      shopId: result.request?.shopId ? str(result.request.shopId) : null, action: result.action,
     });
   }
   res.json({ ok: true, action: result.action, quantity: result.request?.quantity || 0 });

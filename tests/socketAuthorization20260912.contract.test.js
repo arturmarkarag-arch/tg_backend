@@ -27,4 +27,16 @@ describe('Socket authorization 2026-09-12', () => {
     expect(socket).toContain("socket.join('app_users')");
     expect(scope).toContain('io.to(room).emit(event, payload)');
   });
+
+  it('scopes supplement realtime by authoritative seller shop/group and refreshes rooms after reassignment', () => {
+    const socket = read('socket.js');
+    const scope = read('utils/socketScope.js');
+    const assignment = read('services/shopAssignmentCommand.js');
+    expect(socket).toContain('socket.join(`seller_shop_${socket.shopId}`)');
+    expect(socket).toContain('socket.join(`seller_group_${socket.deliveryGroupId}`)');
+    expect(scope).toContain('function emitSupplementScoped(io, event, payload = {})');
+    expect(scope).toContain('function syncSellerSocketScope(io, telegramId)');
+    expect(scope).toContain('io.in(userRoom).disconnectSockets(true)');
+    expect(assignment).toContain('await syncSellerSocketScope(io, result.sellerTelegramId)');
+  });
 });

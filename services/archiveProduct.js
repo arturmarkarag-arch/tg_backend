@@ -1,4 +1,4 @@
-const { emitUserAndStaff } = require('../utils/socketScope');
+const { emitUserAndStaff, emitSupplementScoped } = require('../utils/socketScope');
 /**
  * Unified Product archive application command.
  *
@@ -85,7 +85,7 @@ async function publishArchiveProductOutcome(
       if (waves.length) await require('./supplementNotify').notifyWaves(waves, 'cancelled');
       const io = getIO();
       for (const wave of waves) {
-        io?.to('app_users').emit('supplement_wave_changed', {
+        emitSupplementScoped(io, 'supplement_wave_changed', {
           waveId: String(wave._id),
           deliveryGroupId: String(wave.deliveryGroupId || ''),
           orderingSessionId: String(wave.orderingSessionId || ''),

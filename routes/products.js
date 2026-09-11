@@ -38,6 +38,7 @@ const { hasReceiptCommercialMutation, syncReceiptItemCommercialMetadataFromProdu
 const { allocateProductOrderNumber, allocateProductOrderNumbers, withProductOrderNumberLock } = require('../services/productOrderNumber');
 const { parseDecimalNumber } = require('../utils/decimalNumber');
 const { fetchAllowedImage } = require('../utils/safeImageProxy');
+const { emitSupplementScoped } = require('../utils/socketScope');
 
 const staffOnly = requireTelegramRoles(['admin', 'warehouse']);
 const registeredOnly = requireTelegramRoles(['seller', 'admin', 'warehouse']);
@@ -170,6 +171,11 @@ async function buildLocationMap(ids = []) {
 }
 
 const router = express.Router();
+
+// Products is an application-user domain. Fail closed at router level so any
+// future route cannot accidentally become available to provider-worker roles.
+// Individual warehouse/raw routes remain narrowed further with staffOnly.
+router.use(registeredOnly);
 
 // GET /api/v1/products/warehouse-stats?ids=<id,id,...>
 //
@@ -1645,7 +1651,7 @@ router.patch('/:id', staffOnly, asyncHandler(async (req, res) => {
         io.to(`receipt_${String(receiptMetadataResult.item.receiptId)}`).emit('receipt_item_updated', receiptMetadataResult.item);
       }
       for (const change of receiptMetadataResult?.propagation?.supplementChanges || []) {
-        io.to('app_users').emit('supplement_wave_changed', {
+        emitSupplementScoped(io, 'supplement_wave_changed', {
           ...change,
           receiptItemId: String(receiptMetadataResult.item._id),
           action: 'metadata_updated',
@@ -1750,7 +1756,7 @@ router.post('/:id/describe', staffOnly, asyncHandler(async (req, res) => {
           io.to(`receipt_${String(receiptMetadataResult.item.receiptId)}`).emit('receipt_item_updated', receiptMetadataResult.item);
         }
         for (const change of receiptMetadataResult?.propagation?.supplementChanges || []) {
-          io.to('app_users').emit('supplement_wave_changed', {
+          emitSupplementScoped(io, 'supplement_wave_changed', {
             ...change,
             receiptItemId: String(receiptMetadataResult.item._id),
             action: 'metadata_updated',

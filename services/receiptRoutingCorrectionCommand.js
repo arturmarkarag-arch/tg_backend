@@ -46,6 +46,7 @@ const {
 } = require('../utils/supplementState');
 const { maybeCompleteSession } = require('../utils/sessionStatus');
 const { getIO } = require('../socket');
+const { emitSupplementScoped } = require('../utils/socketScope');
 
 function str(v) { return v == null ? '' : String(v); }
 function sameRouting(a, b) {
@@ -357,7 +358,21 @@ async function correctReceiptItemRouting({
       io?.to(`receipt_${rid}`).emit('receipt_item_updated', updatedItem);
       io?.to('staff').emit('receipt_supplement_batch_changed');
       io?.to('staff').emit('incoming_updated');
-      for (const waveId of affectedWaveIds) io?.to('app_users').emit('supplement_wave_changed', { waveId });
+      if (affectedWaveIds.length) {
+        const affectedWaves = await SupplementWave.find(
+          { _id: { $in: affectedWaveIds } },
+          '_id deliveryGroupId orderingSessionId status',
+        ).lean();
+        for (const wave of affectedWaves) {
+          emitSupplementScoped(io, 'supplement_wave_changed', {
+            waveId: str(wave._id),
+            deliveryGroupId: str(wave.deliveryGroupId),
+            orderingSessionId: str(wave.orderingSessionId) || null,
+            status: wave.status || null,
+            reason: 'routing_corrected',
+          });
+        }
+      }
     } catch (_) {}
 
     return { item: updatedItem, changed: true, affectedWaveIds, alreadyFulfilledShopIds: fulfilledShopIds };

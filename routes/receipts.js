@@ -15,6 +15,7 @@ const ReceiptItemLog = require('../models/ReceiptItemLog');
 const DeliveryGroup = require('../models/DeliveryGroup');
 const Counter = require('../models/Counter');
 const { getIO } = require('../socket');
+const { emitSupplementScoped } = require('../utils/socketScope');
 const { upsertShopOwnedFromReceiptItem, syncMirror } = require('../utils/upsertShopProduct');
 const { embedShopProductAsync } = require('../utils/shopProductEmbedding');
 const { embedProductAsync } = require('../utils/productEmbedding');
@@ -687,10 +688,10 @@ router.post('/supplement-batches/:deliveryGroupId/publish', staffOnly, asyncHand
         itemCount: result.selected,
         status: 'open',
       };
-      getIO()?.to('app_users').emit('supplement_wave_opened', wavePayload);
-      getIO()?.to('app_users').emit('supplement_wave_changed', wavePayload);
+      emitSupplementScoped(getIO(), 'supplement_wave_opened', wavePayload);
+      emitSupplementScoped(getIO(), 'supplement_wave_changed', wavePayload);
       // Compatibility event lets old open clients refresh their lists during rollout.
-      getIO()?.to('app_users').emit('supplement_opened', { waveId, deliveryGroupId });
+      emitSupplementScoped(getIO(), 'supplement_opened', { waveId, deliveryGroupId });
     } catch (_) {}
     await require('../services/supplementNotify').notifyWaves([result.wave], 'opened').catch(() => {});
   }
@@ -1438,7 +1439,7 @@ router.patch('/:id/items/:itemId', staffOnly, asyncHandler(async (req, res) => {
     // Правка проведеної накладної міняє живий товар — дошки складу мають це побачити.
     if (propagation.productId || propagation.shopProductId) io.to('staff').emit('incoming_updated');
     for (const change of propagation.supplementChanges || []) {
-      io.to('app_users').emit('supplement_wave_changed', {
+      emitSupplementScoped(io, 'supplement_wave_changed', {
         ...change,
         receiptItemId: String(item._id),
         action: 'metadata_updated',
@@ -2285,7 +2286,7 @@ router.post('/:id/items/:itemId/confirm', staffOnly, asyncHandler(async (req, re
         if (created.length) {
           for (const offer of created) {
             try {
-              getIO()?.to('app_users').emit('supplement_opened', {
+              emitSupplementScoped(getIO(), 'supplement_opened', {
                 offerId: String(offer._id),
                 deliveryGroupId: String(offer.deliveryGroupId),
               });
@@ -2477,7 +2478,7 @@ router.post('/:id/commit', staffOnly, asyncHandler(async (req, res) => {
         if (offers.length) {
           for (const offer of offers) {
             try {
-              getIO()?.to('app_users').emit('supplement_opened', {
+              emitSupplementScoped(getIO(), 'supplement_opened', {
                 offerId: String(offer._id),
                 deliveryGroupId: String(offer.deliveryGroupId),
               });
@@ -2714,7 +2715,7 @@ router.post('/:id/commit', staffOnly, asyncHandler(async (req, res) => {
       if (offers.length) {
         for (const offer of offers) {
           try {
-            getIO()?.to('app_users').emit('supplement_opened', {
+            emitSupplementScoped(getIO(), 'supplement_opened', {
               offerId: String(offer._id),
               deliveryGroupId: String(offer.deliveryGroupId),
             });

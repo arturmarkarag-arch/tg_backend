@@ -8,6 +8,7 @@ const SupplementRequest = require('../models/SupplementRequest');
 const { withLock } = require('../utils/lock');
 const { appError } = require('../utils/errors');
 const { getIO } = require('../socket');
+const { emitSupplementScoped } = require('../utils/socketScope');
 const { containerKeyFor } = require('./supplementV3Migration');
 const {
   ITEM_STATUS,
@@ -74,7 +75,7 @@ async function effectiveOfferStatusFromDb(offer, { session = null } = {}) {
   return { wave, status: effectiveOfferStatus(offer, wave) };
 }
 
-function emit(event, payload) { try { getIO()?.to('app_users').emit(event, payload); } catch (_) {} }
+function emit(event, payload) { try { emitSupplementScoped(getIO(), event, payload); } catch (_) {} }
 
 function revisionArchiveOf(offer, now = new Date()) {
   return {

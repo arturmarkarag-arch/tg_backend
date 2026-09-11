@@ -71,6 +71,7 @@ function runChecks({ quiet = false } = {}) {
 
   const products = read('routes/products.js');
   includesAll(products, [
+    'router.use(registeredOnly);',
     "router.get('/', staffOnly,",
     "router.get('/check', staffOnly,",
     "router.get('/pending', staffOnly,",
@@ -130,11 +131,15 @@ function runChecks({ quiet = false } = {}) {
 
   const socket = read('socket.js');
   includesAll(socket, [
+    "const Shop = require('./models/Shop')",
     "const { verifySession, isSessionNotRevoked } = require('./utils/jwt')",
     '!isSessionNotRevoked(jwtIat, dbUser)',
     "socket.join(`user_${socket.telegramId}`)",
     "socket.join('staff')",
     "socket.join('app_users')",
+    "socket.join(`seller_shop_${socket.shopId}`)",
+    "socket.join(`seller_group_${socket.deliveryGroupId}`)",
+    "if (shop && shop.isActive !== false)",
     "socket.on('get_locks', () => {",
     "socket.emit('locks_error', { error: 'forbidden' })",
     "socket.to('staff').emit('item_locked'",
@@ -148,6 +153,15 @@ function runChecks({ quiet = false } = {}) {
   includesAll(socketScope, [
     "io.to('staff').emit(event, payload)",
     'io.to(room).emit(event, payload)',
+    'function emitSupplementScoped(io, event, payload = {})',
+    'function syncSellerSocketScope(io, telegramId)',
+    "String(room).startsWith('seller_shop_')",
+    "String(room).startsWith('seller_group_')",
+    'io.in(userRoom).socketsLeave(room)',
+    'io.in(userRoom).socketsJoin(roomSellerShop(shopId))',
+    'io.in(userRoom).socketsJoin(roomSellerGroup(deliveryGroupId))',
+    'if (shop && shop.isActive !== false)',
+    'io.in(userRoom).disconnectSockets(true)',
   ], 'socket user scope');
 
   const productionEventFiles = [
@@ -163,6 +177,13 @@ function runChecks({ quiet = false } = {}) {
   const userLeaks = scanFiles(productionEventFiles, /(?:\bio|socket)\s*\.\s*emit\(\s*['"](?:user_order_updated|user_shop_changed)['"]/);
   assert(userLeaks.length === 0, `global user identity socket emit remains in: ${userLeaks.join(', ')}`);
   pass('seller-private identity events use targeted rooms');
+
+  const shopAssignment = read('services/shopAssignmentCommand.js');
+  includesAll(shopAssignment, [
+    'await syncSellerSocketScope(io, result.sellerTelegramId)',
+    "emitUserAndStaff(io, result.sellerTelegramId, 'user_shop_changed'",
+  ], 'live seller room reassignment');
+  pass('seller socket shop/group rooms refresh on live reassignment');
 
   const warehouseEventFiles = [
     'socket.js',
@@ -196,6 +217,78 @@ function runChecks({ quiet = false } = {}) {
   );
   assert(providerCrossRoleLeaks.length === 0, `app UI event still broadcasts to provider workers in: ${providerCrossRoleLeaks.join(', ')}`);
   pass('seller/staff UI invalidations exclude provider-worker sockets');
+
+  const supplementCoreFiles = [
+    'routes/supplement.js',
+    'services/supplementOffers.js',
+    'services/supplementWaveService.js',
+  ];
+  const supplementCoreBroad = scanFiles(supplementCoreFiles, /app_users/);
+  assert(supplementCoreBroad.length === 0, `supplement core still uses broad app_users room in: ${supplementCoreBroad.join(', ')}`);
+
+  const mixedSupplementFiles = [
+    'routes/products.js',
+    'routes/shopProducts.js',
+    'routes/receipts.js',
+    'services/archiveProduct.js',
+    'services/receiptRoutingCorrectionCommand.js',
+  ];
+  const mixedSupplementBroad = scanFiles(
+    mixedSupplementFiles,
+    /\.to\(\s*['"]app_users['"]\s*\)\.emit\(\s*['"]supplement_/,
+  );
+  assert(mixedSupplementBroad.length === 0, `supplement metadata still broadcasts to every seller in: ${mixedSupplementBroad.join(', ')}`);
+  for (const rel of [...supplementCoreFiles, ...mixedSupplementFiles]) {
+    const source = read(rel);
+    if (source.includes('supplement_') && !rel.endsWith('receiptRoutingCorrectionCommand.js')) {
+      assert(
+        source.includes('emitSupplementScoped') || !/emit\(\s*['"]supplement_/.test(source),
+        `${rel}: supplement events must use scoped seller/staff publication`,
+      );
+    }
+  }
+  pass('supplement realtime is scoped to staff + authoritative seller shop/group');
+
+  const orders = read('routes/orders.js');
+  includesAll(orders, [
+    'function toSellerOrderDto(orderLike)',
+    'delete obj.history',
+    'delete obj.idempotencyKey',
+    'delete safe.packedBy',
+    'delete safe.packedByName',
+    'idempotencyKey: sanitizedKeyEarly, buyerTelegramId: authenticatedBuyerId',
+    'buyerTelegramId: String(buyer.telegramId)',
+    "toSellerOrderDto(existing)",
+    "toSellerOrderDto(existingActive)",
+    "toSellerOrderDto(responseBody)",
+  ], 'seller order ownership/DTO boundary');
+  const earlyIdem = section(orders, 'if (sanitizedKeyEarly) {', '// Resolve current buyer from authenticated user');
+  assert(earlyIdem.includes('buyerTelegramId: authenticatedBuyerId'), 'early idempotency lookup must be buyer-scoped');
+  assert(!/Order\.findOne\(\{\s*idempotencyKey:\s*sanitizedKeyEarly\s*\}\)/.test(earlyIdem), 'key-only early idempotency lookup must not return foreign orders');
+  pass('seller Order reads are minimized and idempotency replay is buyer-scoped');
+
+  const visionSearch = read('routes/visionSearch.js');
+  includesAll(visionSearch, [
+    'function toSellerShopSearchItem(item)',
+    "const sellerSearch = req.telegramUser?.role === 'seller'",
+    "const collection = sellerSearch ? 'shopproducts' : requestedCollection",
+    'rawItems.map(toSellerShopSearchItem).filter(Boolean)',
+  ], 'vision search seller boundary');
+  const sellerVisionDto = section(visionSearch, 'function toSellerShopSearchItem(item)', '// Resolve a vector hit');
+  for (const field of ['receiptItemId', 'createdBy', 'labelPositions', 'notes', 'location']) {
+    assert(!sellerVisionDto.includes(field), `seller Vision Search DTO leaks ${field}`);
+  }
+  pass('seller Vision Search cannot bypass Product/ShopProduct data minimization');
+
+  const picking = read('routes/picking.js');
+  const sessionStatus = section(picking, "router.get('/session-status'", '//');
+  includesAll(picking, [
+    "router.get('/session-status', requireTelegramRoles(['warehouse', 'admin', 'seller'])",
+    "Shop.findById(req.telegramUser.shopId, 'deliveryGroupId isActive')",
+    "String(shop.deliveryGroupId || '') !== String(groupId)",
+    "error: 'picking_session_forbidden'",
+  ], 'picking session seller boundary');
+  pass('seller picking session-status is limited to the seller authoritative delivery group');
 
   if (!quiet) {
     for (const [index, name] of checks.entries()) console.log(`PASS ${index + 1}/${checks.length} ${name}`);

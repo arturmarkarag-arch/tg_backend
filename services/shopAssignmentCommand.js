@@ -9,7 +9,7 @@ const { invalidateShop } = require('../utils/modelCache');
 const { getIO } = require('../socket');
 const { migrateSellerShop } = require('./migrateSellerShop');
 const { unassignSellerAndPark } = require('./unassignSeller');
-const { emitUserAndStaff } = require('../utils/socketScope');
+const { emitUserAndStaff, syncSellerSocketScope } = require('../utils/socketScope');
 
 function str(value) {
   return value == null ? '' : String(value);
@@ -152,6 +152,7 @@ async function publishShopAssignmentTransition(input = {}) {
       // client already owns one canonical handler for this event: it re-fetches
       // the profile, which changes shopId and refreshes ordering status.
       if (result.assignmentChanged && result.sellerTelegramId) {
+        await syncSellerSocketScope(io, result.sellerTelegramId);
         emitUserAndStaff(io, result.sellerTelegramId, 'user_shop_changed', { telegramId: result.sellerTelegramId });
       }
 

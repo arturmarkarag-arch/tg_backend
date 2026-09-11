@@ -17,6 +17,7 @@ const Receipt = require('../models/Receipt');
 const { withLock } = require('../utils/lock');
 const { getProductTitle } = require('./archiveProduct');
 const { getIO } = require('../socket');
+const { emitSupplementScoped } = require('../utils/socketScope');
 const { normalizeReceiptItemRouting } = require('../utils/receiptRouting');
 const { ITEM_STATUS, ITEM_RELATION_STATUS, REQUEST_STATUS, ACTIVE_ITEM_STATUSES, revisionOf, isSellerEditable, isPackable } = require('../utils/supplementState');
 const { resolveSupplementTarget } = require('./supplementTargets');
@@ -303,7 +304,7 @@ function offerViewForWarehouse(offer, { product, requests = [], location = null,
 function emit(event, payload) {
   try {
     const io = getIO();
-    if (io) io.to('app_users').emit(event, payload);
+    emitSupplementScoped(io, event, payload);
   } catch { /* сокет може бути вимкнений у тестах */ }
 }
 
@@ -528,7 +529,12 @@ async function releaseEmptyOffers(now = new Date()) {
   }
   for (const waveId of waveIds) {
     const wave = await recomputeWaveCompletion(waveId, {}, now).catch(() => null);
-    if (wave) emit('supplement_wave_changed', { waveId, status: wave.status });
+    if (wave) emit('supplement_wave_changed', {
+      waveId,
+      deliveryGroupId: String(wave.deliveryGroupId || ''),
+      orderingSessionId: wave.orderingSessionId ? String(wave.orderingSessionId) : null,
+      status: wave.status,
+    });
     if ([ITEM_STATUS.COMPLETED, ITEM_STATUS.CANCELLED].includes(wave?.status) && wave.orderingSessionId) {
       // A released empty Wave can be the final blocker of the delivery cycle.
       await require('../utils/sessionStatus').maybeCompleteSession(String(wave.orderingSessionId)).catch(() => {});

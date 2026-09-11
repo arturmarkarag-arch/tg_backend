@@ -11,6 +11,7 @@ const { embedProductAsync, getProductEmbeddingSource } = require('../utils/produ
 const { syncMirror } = require('../utils/upsertShopProduct');
 const { repriceActiveOrders } = require('../utils/repriceActiveOrders');
 const { getIO } = require('../socket');
+const { emitSupplementScoped } = require('../utils/socketScope');
 const { productCataloguePatch, shopProductCataloguePatch } = require('../utils/catalogueSocket');
 const { getGeminiStatus } = require('../geminiClient');
 const { describeImageUrl } = require('../utils/productDescribe');
@@ -300,7 +301,7 @@ async function editMirrorThroughToWarehouse(product, fields, req, res) {
         io.to(`receipt_${String(receiptMetadataResult.item.receiptId)}`).emit('receipt_item_updated', receiptMetadataResult.item);
       }
       for (const change of receiptMetadataResult?.propagation?.supplementChanges || []) {
-        io.to('app_users').emit('supplement_wave_changed', {
+        emitSupplementScoped(io, 'supplement_wave_changed', {
           ...change,
           receiptItemId: String(receiptMetadataResult.item._id),
           action: 'metadata_updated',
@@ -402,7 +403,7 @@ router.patch('/:id', staffOnly, asyncHandler(async (req, res) => {
         io.to(`receipt_${String(receiptMetadataResult.item.receiptId)}`).emit('receipt_item_updated', receiptMetadataResult.item);
       }
       for (const change of receiptMetadataResult?.propagation?.supplementChanges || []) {
-        io.to('app_users').emit('supplement_wave_changed', {
+        emitSupplementScoped(io, 'supplement_wave_changed', {
           ...change,
           receiptItemId: String(receiptMetadataResult.item._id),
           action: 'metadata_updated',
@@ -496,7 +497,7 @@ router.post('/:id/describe', staffOnly, asyncHandler(async (req, res) => {
           io.to(`receipt_${String(receiptMetadataResult.item.receiptId)}`).emit('receipt_item_updated', receiptMetadataResult.item);
         }
         for (const change of receiptMetadataResult?.propagation?.supplementChanges || []) {
-          io.to('app_users').emit('supplement_wave_changed', {
+          emitSupplementScoped(io, 'supplement_wave_changed', {
             ...change,
             receiptItemId: String(receiptMetadataResult.item._id),
             action: 'metadata_updated',

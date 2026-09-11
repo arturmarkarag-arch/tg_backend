@@ -69,6 +69,26 @@ const staffOnly = requireTelegramRoles(['admin', 'warehouse']);
 const sellerOnly = requireTelegramRoles(['seller', 'admin']);
 const adminOnly = requireTelegramRoles(['admin']);
 
+function toSellerOrderDto(orderLike) {
+  const obj = orderLike?.toObject ? orderLike.toObject() : { ...(orderLike || {}) };
+  delete obj.history;
+  delete obj.idempotencyKey;
+  obj.items = (obj.items || []).map((item) => {
+    const safe = item?.toObject ? item.toObject() : { ...(item || {}) };
+    // Warehouse actor identity is operational staff data, not seller order data.
+    delete safe.packedBy;
+    delete safe.packedByName;
+    return safe;
+  });
+  if (obj.buyer) {
+    obj.buyer = {
+      shopName: obj.buyer.shopName || '',
+      shopCity: obj.buyer.shopCity || '',
+    };
+  }
+  return obj;
+}
+
 // Business rule: per ordering session a buyer may order 1..6 units of any one
 // product. Because re-ordering OVERWRITES the quantity (set semantics), the
 // stored order-item quantity IS the session total for that product, so
@@ -557,7 +577,7 @@ router.get('/', async (req, res) => {
       lastName: buyer?.lastName ?? '',
       phoneNumber: buyer?.phoneNumber ?? '',
     };
-    return obj;
+    return ['admin', 'warehouse'].includes(authUser.role) ? obj : toSellerOrderDto(obj);
   });
 
   res.json({
@@ -699,21 +719,28 @@ router.get('/:id', async (req, res) => {
     lastName: buyer?.lastName ?? '',
     phoneNumber: buyer?.phoneNumber ?? '',
   };
-  res.json(obj);
+  res.json(['admin', 'warehouse'].includes(authUser.role) ? obj : toSellerOrderDto(obj));
 });
 
 router.post('/', asyncHandler(async (req, res) => {
   const { idempotencyKey } = req.body;
   const sanitizedKeyEarly = typeof idempotencyKey === 'string' && idempotencyKey.trim() ? idempotencyKey.trim() : null;
+  const authenticatedBuyerId = String(req.telegramId || '').trim();
 
   // Idempotency: serialise duplicate POSTs on the same key so the second waits
   // for the first commit and returns the existing order, without burning an
-  // orderNumber. If no key is supplied, fall back to the old behaviour.
+  // orderNumber. SECURITY: the key is not an authorization secret. Never return
+  // an existing row by key alone; it must also belong to the authenticated buyer.
+  // If this router is mounted in isolation and auth has not populated req.telegramId
+  // yet, skip the fast-path lookup and let placeOrderImpl establish identity first.
   if (sanitizedKeyEarly) {
     return withLock(`order:idem:${sanitizedKeyEarly}`, async () => {
-      const existing = await Order.findOne({ idempotencyKey: sanitizedKeyEarly }).lean();
+      const existing = authenticatedBuyerId
+        ? await Order.findOne({ idempotencyKey: sanitizedKeyEarly, buyerTelegramId: authenticatedBuyerId }).lean()
+        : null;
       if (existing) {
-        return res.status(200).json(existing);
+        const role = req.telegramUser?.role || req.user?.role || '';
+        return res.status(200).json(['admin', 'warehouse'].includes(role) ? existing : toSellerOrderDto(existing));
       }
       return placeOrderImpl(req, res);
     }, { ttlMs: 30_000, waitMs: 20_000 });
@@ -1032,12 +1059,21 @@ async function placeOrderImpl(req, res) {
     //      holds even when the Redis placement lock degrades to per-process.
     if (err.code === 11000) {
       if (sanitizedKey) {
-        const existing = await Order.findOne({ idempotencyKey: sanitizedKey }).lean();
-        if (existing) { res.status(200).json(existing); return { sentResponse: true }; }
+        const existing = await Order.findOne({
+          idempotencyKey: sanitizedKey,
+          buyerTelegramId: String(buyer.telegramId),
+        }).lean();
+        if (existing) {
+          res.status(200).json(['admin', 'warehouse'].includes(buyer.role) ? existing : toSellerOrderDto(existing));
+          return { sentResponse: true };
+        }
       }
       // Fall back to the active-order identity used for merge/uniqueness.
       const existingActive = await Order.findOne(existingOrderQuery).lean();
-      if (existingActive) { res.status(200).json(existingActive); return { sentResponse: true }; }
+      if (existingActive) {
+        res.status(200).json(['admin', 'warehouse'].includes(buyer.role) ? existingActive : toSellerOrderDto(existingActive));
+        return { sentResponse: true };
+      }
     }
     throw err;
   } finally {
@@ -1115,7 +1151,9 @@ async function placeOrderImpl(req, res) {
   // явно перепідтягнути стан (refetch), бо real-time оновлення не дійде.
   responseBody._meta = { socketDelivered, ...(socketError ? { socketError } : {}) };
 
-  return res.status(201).json(responseBody);
+  return res.status(201).json(
+    ['admin', 'warehouse'].includes(buyer.role) ? responseBody : toSellerOrderDto(responseBody),
+  );
 }
 
 // PATCH /:id/snapshot — explicit staff ownership repair for one Order.

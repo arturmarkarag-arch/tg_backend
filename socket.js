@@ -2,6 +2,7 @@ const { Server } = require('socket.io');
 const Block = require('./models/Block');
 const { moveProductBetweenBlocks } = require('./services/blockMoveCommand');
 const User = require('./models/User');
+const Shop = require('./models/Shop');
 const { isRemovedUser } = require('./utils/userAccountState');
 const { validateTelegramInitData } = require('./utils/validateTelegramInitData');
 const { verifySession, isSessionNotRevoked } = require('./utils/jwt');
@@ -129,7 +130,15 @@ function initSocket(httpServer) {
     }
     socket.telegramId = telegramId;
     socket.userRole = dbUser.role;
-    socket.shopId = dbUser.shopId ? String(dbUser.shopId) : '';
+    socket.shopId = '';
+    socket.deliveryGroupId = '';
+    if (dbUser.role === 'seller' && dbUser.shopId) {
+      const shop = await Shop.findById(dbUser.shopId).select('deliveryGroupId isActive').lean();
+      if (shop && shop.isActive !== false) {
+        socket.shopId = String(shop._id);
+        socket.deliveryGroupId = String(shop.deliveryGroupId || '').trim();
+      }
+    }
     socket.baseLinkerPickingAccess = hasBaseLinkerPickingAccess(dbUser);
     socket.marketplaceWarehouseAccess = hasMarketplaceWarehouseAccess(dbUser);
     next();
@@ -146,6 +155,10 @@ function initSocket(httpServer) {
     // product field patch used by admin TanStack caches.
     if (['admin', 'warehouse'].includes(socket.userRole)) socket.join('staff');
     if (['admin', 'warehouse', 'seller'].includes(socket.userRole)) socket.join('app_users');
+    if (socket.userRole === 'seller') {
+      if (socket.shopId) socket.join(`seller_shop_${socket.shopId}`);
+      if (socket.deliveryGroupId) socket.join(`seller_group_${socket.deliveryGroupId}`);
+    }
     if (socket.baseLinkerPickingAccess) socket.join('baselinker_staff');
     if (socket.marketplaceWarehouseAccess) socket.join('marketplace_staff');
 

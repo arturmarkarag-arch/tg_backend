@@ -263,6 +263,14 @@ async function buildTaskResponse(task, { isSecondChance = false } = {}) {
 router.get('/session-status', requireTelegramRoles(['warehouse', 'admin', 'seller']), asyncHandler(async (req, res) => {
   const { groupId } = req.query;
   if (!groupId) return res.json({ pickingStatus: 'pending' });
+  if (req.telegramUser?.role === 'seller') {
+    const shop = req.telegramUser?.shopId
+      ? await Shop.findById(req.telegramUser.shopId, 'deliveryGroupId isActive').lean()
+      : null;
+    if (!shop || shop.isActive === false || String(shop.deliveryGroupId || '') !== String(groupId)) {
+      return res.status(403).json({ error: 'picking_session_forbidden', message: 'Немає доступу до цієї групи доставки' });
+    }
+  }
   const group = await DeliveryGroup.findById(groupId, 'dayOfWeek orderingSchedule').lean();
   if (!group) return res.json({ pickingStatus: 'pending' });
   const sessionId = await findCurrentSessionId(String(groupId), group.orderingSchedule);
