@@ -116,6 +116,11 @@ const ERRORS = {
   validation_failed:        { status: 400, message: ({ field } = {}) => field
                                 ? `Невалідне значення поля «${field}»`
                                 : 'Невалідні дані запиту' },
+  commerce_product_name_required: { status: 400, message: 'Вкажіть назву товару Commerce Catalog.' },
+  commerce_product_not_found: { status: 404, message: 'Товар Commerce Catalog не знайдено.' },
+  commerce_product_sku_duplicate: { status: 409, message: 'Товар з таким SKU вже існує в Commerce Catalog.' },
+  commerce_warehouse_products_required: { status: 400, message: 'Оберіть хоча б один складський товар для додавання в Commerce Catalog.' },
+  commerce_warehouse_product_not_found: { status: 400, message: 'Одна з прив’язок Commerce Catalog вказує на складський товар, якого не існує.' },
   not_found:                { status: 404, message: 'Не знайдено' },
   forbidden:                { status: 403, message: 'Недостатньо прав для цієї дії' },
   unauthenticated:          { status: 401, message: 'Потрібна авторизація' },

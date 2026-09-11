@@ -1,13 +1,13 @@
-# Commerce Hub — Stage 1 foundation
+# Commerce Hub — provider-neutral commerce architecture
 
 ## Goal
 
 Commerce Hub is the provider-neutral surface for internet-store/marketplace work.
 BaseLinker and Allegro are adapters, not the application architecture. Future
-providers (OLX, Temu, etc.) must plug into the same domain instead of creating a
-new top-level application section for every API.
+providers (OLX, Temu, etc.) plug into the same domain instead of creating a new
+top-level application section for every API.
 
-## Stage 1 contract
+## Stage 1 — Integration Hub ✅
 
 - `GET /api/commerce/integrations` is the source of truth for the integration/API registry shown in the UI.
 - The registry is a **local read-model** only: it reads configured account metadata from MongoDB and performs no upstream marketplace calls.
@@ -15,12 +15,23 @@ new top-level application section for every API.
 - Provider settings, secrets, OAuth administration and diagnostics remain protected by their existing admin-only endpoint guards.
 - Existing BaseLinker and Allegro order workflows remain unchanged and provider-isolated.
 
+## Stage 2 — Commerce Catalog ✅
+
+- `CommerceProduct` is the provider-neutral sellable master item.
+- Physical `Product` remains the authority for warehouse quantity/lifecycle.
+- `CommerceProduct.warehouseBindings` link commercial items to physical stock without copying stock into the catalog.
+- `ChannelListing` is a separate provider/account-specific publication model prepared for Stage 3.
+- The `Товари` tab is a real catalog UI with search/filter, manual create/edit and idempotent import from active warehouse products.
+- Stage 2 performs **no outbound marketplace publication or sync**.
+
+See `docs/architecture/commerce-catalog.md` for the detailed data contract.
+
 ## UI structure
 
 `Інтернет-магазини` is one application page with internal sections:
 
 1. `Замовлення` — current provider-specific order workflows, initially BaseLinker and Allegro.
-2. `Товари` — reserved for the future provider-neutral Commerce Catalog.
+2. `Товари` — provider-neutral Commerce Catalog.
 3. `Публікації` — reserved for PublicationBatch/PublicationJob outbound orchestration.
 4. `Інтеграції` — provider/account status plus API coverage registry.
 
@@ -28,9 +39,9 @@ new top-level application section for every API.
 
 The next stages should add, in this order:
 
-- `CommerceProduct`: provider-neutral sellable catalog item linked to warehouse stock/products.
-- `ChannelListing`: one publication of one CommerceProduct in one provider account.
 - `PublicationBatch` + `PublicationJob`: queued bulk publishing/sync with retry, validation and audit.
-- Provider adapter contract (`orders`, `catalog`, `listing`, `price`, `stock`, `shipment`) implemented independently by Allegro/OLX/Temu/etc.
+- provider adapter contract (`catalog`, `listing`, `price`, `stock`) implemented first for Allegro, then OLX/Temu/etc.
+- channel validation/category mapping before a job may publish.
+- stock/price synchronization policies with the ERP remaining authoritative for physical stock.
 
-Warehouse `Product` remains a physical/logistics entity and must not accumulate marketplace-specific offer fields.
+Warehouse `Product` must not accumulate marketplace-specific offer fields.
