@@ -38,7 +38,9 @@ const PROVIDERS = Object.freeze([
       { id: 'orders.read', label: 'Замовлення', operation: 'order checkout forms / events', direction: 'read', implementation: LIVE, capability: 'ordersRead', scope: 'allegro:api:orders:read' },
       { id: 'orders.write', label: 'Статус/fulfillment замовлення', operation: 'order fulfillment', direction: 'write', implementation: LIVE, capability: 'ordersWrite', scope: 'allegro:api:orders:write' },
       { id: 'offers.read', label: 'Offers / фото товарів', operation: 'sale offers', direction: 'read', implementation: LIVE, capability: 'saleOffersRead', scope: 'allegro:api:sale:offers:read' },
-      { id: 'offers.preflight', label: 'Preflight публікації', operation: 'Commerce publication preview', direction: 'write', implementation: LIVE, capability: 'saleOffersWrite', scope: 'allegro:api:sale:offers:write', note: 'Локальна перевірка товару/акаунта без створення offer в Allegro.' },
+      { id: 'offers.preflight', label: 'Preflight публікації', operation: 'Commerce publication preview', direction: 'read', implementation: LIVE, capability: 'saleOffersWrite', scope: 'allegro:api:sale:offers:write', note: 'Локальна перевірка товару/акаунта без створення offer в Allegro.' },
+      { id: 'catalog.products.search', label: 'Пошук товару в Каталозі Allegro', operation: 'GET /sale/products', direction: 'read', implementation: LIVE, capability: 'saleOffersRead', scope: 'allegro:api:sale:offers:read' },
+      { id: 'catalog.mapping', label: 'Категорії та параметри', operation: 'GET /sale/matching-categories + /sale/categories/{id}/parameters', direction: 'read', implementation: LIVE, capability: 'saleOffersRead', scope: 'allegro:api:sale:offers:read', note: 'Stage 3B: mapping зберігається локально в ChannelListing; offer в Allegro ще не створюється.' },
       { id: 'shipments.read', label: 'Відправлення / ТТН', operation: 'shipment-management', direction: 'read', implementation: LIVE, capability: 'shipmentsRead', scope: 'allegro:api:shipments:read' },
       { id: 'shipments.write', label: 'Wysyłam z Allegro', operation: 'shipment-management', direction: 'write', implementation: LIVE, capability: 'shipmentsWrite', scope: 'allegro:api:shipments:write' },
       { id: 'shipments.labels.read', label: 'Етикетка WzA', operation: 'shipment-management/label', direction: 'read', implementation: LIVE, capability: 'shipmentsRead', scope: 'allegro:api:shipments:read' },
@@ -46,7 +48,6 @@ const PROVIDERS = Object.freeze([
       { id: 'offers.update', label: 'Редагування offer', operation: 'PATCH /sale/product-offers/{offerId}', direction: 'write', implementation: PLANNED, capability: 'saleOffersWrite', scope: 'allegro:api:sale:offers:write' },
       { id: 'offers.price.write', label: 'Синхронізація ціни', operation: 'price commands', direction: 'write', implementation: PLANNED },
       { id: 'offers.stock.write', label: 'Синхронізація залишку', operation: 'quantity commands', direction: 'write', implementation: PLANNED },
-      { id: 'catalog.mapping', label: 'Категорії та параметри', operation: 'sale categories / parameters', direction: 'read', implementation: PLANNED },
     ],
   },
   {
@@ -147,7 +148,7 @@ async function getCommerceIntegrationRegistry() {
   };
 
   return {
-    version: 1,
+    version: 2,
     generatedAt: new Date().toISOString(),
     providers: PROVIDERS.map((provider) => {
       const accounts = accountMap[provider.id] || [];

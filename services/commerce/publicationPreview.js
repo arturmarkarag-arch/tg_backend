@@ -115,7 +115,13 @@ function validateProductForAllegro(product, listing) {
   const ean = text(product.ean, 120);
   const images = Array.isArray(product.media) ? product.media.filter((item) => text(item?.url, 2000)) : [];
   const gtinReady = isLikelyGtin(ean);
-  const strategy = gtinReady ? 'gtin' : 'category_mapping';
+  const allegroMapping = listing?.providerData?.allegro && typeof listing.providerData.allegro === 'object'
+    ? listing.providerData.allegro
+    : {};
+  const mappingReady = allegroMapping.mappingState === 'ready' && Boolean(text(listing?.category?.id, 100));
+  const strategy = mappingReady
+    ? (text(allegroMapping.mappingStrategy, 40) || (text(allegroMapping.catalogProductId, 160) ? 'catalog_product' : 'new_product'))
+    : (gtinReady ? 'gtin' : 'category_mapping');
 
   if (product.status !== 'active') {
     issues.push(issue('product_not_active', 'Товар має бути активним у Commerce Catalog перед публікацією.'));
@@ -129,34 +135,37 @@ function validateProductForAllegro(product, listing) {
   }
   if (!(stock.available > 0)) issues.push(issue('stock_required', 'Для публікації зараз немає доступного залишку.', 'error', { field: 'stock' }));
 
-  if (!ean) {
-    issues.push(issue(
-      'category_mapping_required',
-      'Немає GTIN/EAN. Потрібно вибрати категорію Allegro та заповнити її обов’язкові параметри.',
-      'error',
-      { nextStage: 'category_mapping' },
-    ));
-  } else if (!gtinReady) {
-    issues.push(issue(
-      'gtin_invalid',
-      'EAN/GTIN має некоректний формат. Перевірте код або використайте шлях через категорію та параметри Allegro.',
-      'error',
-      { field: 'ean', nextStage: 'category_mapping' },
-    ));
-  } else {
-    issues.push(issue(
-      'upstream_product_validation_pending',
-      'GTIN готовий для пошуку в Каталозі Allegro. Остаточні обов’язкові параметри перевіримо через Allegro на наступному етапі.',
-      'warning',
-      { nextStage: 'category_mapping' },
-    ));
+  if (!mappingReady) {
+    if (!ean) {
+      issues.push(issue(
+        'category_mapping_required',
+        'Немає GTIN/EAN. Потрібно вибрати категорію Allegro та заповнити її обов’язкові параметри.',
+        'error',
+        { nextStage: 'category_mapping' },
+      ));
+    } else if (!gtinReady) {
+      issues.push(issue(
+        'gtin_invalid',
+        'EAN/GTIN має некоректний формат. Перевірте код або використайте шлях через категорію та параметри Allegro.',
+        'error',
+        { field: 'ean', nextStage: 'category_mapping' },
+      ));
+    } else {
+      issues.push(issue(
+        'upstream_product_validation_pending',
+        'GTIN готовий для пошуку в Каталозі Allegro. Виконайте Stage 3B: вибір продукту/категорії та параметрів.',
+        'warning',
+        { nextStage: 'category_mapping' },
+      ));
+    }
   }
 
   if (!images.length) {
+    const catalogProductMapped = mappingReady && Boolean(text(allegroMapping.catalogProductId, 160));
     issues.push(issue(
       'images_missing',
-      gtinReady ? 'У нашому каталозі немає фото. Якщо Allegro знайде продукт за GTIN, фото можуть прийти з Каталогу Allegro; інакше потрібно додати фото.' : 'Для продукту без валідного GTIN потрібно додати хоча б одне фото.',
-      gtinReady ? 'warning' : 'error',
+      catalogProductMapped ? 'У нашому каталозі немає фото. Для прив’язаного Allegro Catalog product фото можуть бути використані з каталогу Allegro.' : 'Для нового продукту потрібно додати хоча б одне фото.',
+      catalogProductMapped ? 'warning' : 'error',
       { field: 'media' },
     ));
   }
@@ -164,7 +173,7 @@ function validateProductForAllegro(product, listing) {
     issues.push(issue('description_missing', 'Опис не заповнений. Для відомого продукту Allegro може використати дані каталогу, але власний опис бажаний.', 'warning', { field: 'description' }));
   }
 
-  return { issues, price, stock, strategy };
+  return { issues, price, stock, strategy, mappingReady, mappingState: text(allegroMapping.mappingState, 40) || 'never' };
 }
 
 function summarize(rows) {
@@ -248,13 +257,19 @@ async function previewPublication(raw = {}) {
         ready: errorCount === 0,
         errorCount,
         warningCount,
+        mapping: {
+          state: validation.mappingState || (listing?.providerData?.allegro?.mappingState || 'never'),
+          ready: validation.mappingReady === true,
+          categoryId: text(listing?.category?.id, 100),
+          catalogProductId: text(listing?.providerData?.allegro?.catalogProductId, 160),
+        },
         issues,
       });
     }
   }
 
   return {
-    stage: '3A',
+    stage: '3B',
     providerCalls: 0,
     safePreview: true,
     productCount: productIds.length,

@@ -124,6 +124,8 @@ const ERRORS = {
   commerce_publication_products_required: { status: 400, message: 'Оберіть хоча б один товар для перевірки публікації.' },
   commerce_publication_targets_required: { status: 400, message: 'Оберіть хоча б один marketplace-акаунт для публікації.' },
   commerce_publication_provider_unsupported: { status: 400, message: 'Цей marketplace adapter ще не підтримує підготовку публікації.' },
+  commerce_allegro_mapping_scope_required: { status: 409, message: 'Для Allegro mapping потрібен scope allegro:api:sale:offers:read. Перепідключіть цей магазин через OAuth.' },
+  commerce_allegro_category_required: { status: 400, message: 'Оберіть категорію Allegro перед збереженням mapping.' },
   not_found:                { status: 404, message: 'Не знайдено' },
   forbidden:                { status: 403, message: 'Недостатньо прав для цієї дії' },
   unauthenticated:          { status: 401, message: 'Потрібна авторизація' },

@@ -5,6 +5,7 @@ const { asyncHandler } = require('../utils/errors');
 const { requireMarketplaceWarehouseAccess } = require('../utils/marketplaceWarehouseAccess');
 const { getCommerceIntegrationRegistry } = require('../services/commerce/integrationRegistry');
 const { previewPublication } = require('../services/commerce/publicationPreview');
+const { resolveAllegroMapping, saveAllegroMapping } = require('../services/commerce/allegroMapping');
 const {
   listCatalog,
   getCatalogProduct,
@@ -27,6 +28,18 @@ router.get('/integrations', asyncHandler(async (_req, res) => {
 
 router.post('/publications/preview', asyncHandler(async (req, res) => {
   const result = await previewPublication(req.body || {});
+  res.set('Cache-Control', 'no-store');
+  res.json(result);
+}));
+
+router.post('/publications/allegro/mapping/resolve', asyncHandler(async (req, res) => {
+  const result = await resolveAllegroMapping(req.body || {});
+  res.set('Cache-Control', 'no-store');
+  res.json(result);
+}));
+
+router.put('/publications/allegro/mapping', asyncHandler(async (req, res) => {
+  const result = await saveAllegroMapping(req.body || {});
   res.set('Cache-Control', 'no-store');
   res.json(result);
 }));
