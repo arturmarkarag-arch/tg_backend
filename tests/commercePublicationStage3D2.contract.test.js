@@ -49,7 +49,7 @@ describe('Commerce publication Stage 3D.2 contract', () => {
 
   test('routes and registry expose Stage 3D.2 while resolver remains upstream read-only', () => {
     const routes = read('routes/commerce.js');
-    const registry = read('services/commerce/integrationRegistry.js');
+    const registry = read('services/commerce/providers/allegro.js');
     expect(routes).toContain("'/publications/allegro/sales-settings/resolve'");
     expect(routes).toContain("'/publications/allegro/sales-settings'");
     expect(registry).toMatch(/id: 'offers\.sales-settings\.read'[\s\S]*implementation: LIVE/);

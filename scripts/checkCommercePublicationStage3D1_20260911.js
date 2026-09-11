@@ -9,8 +9,8 @@ function assert(value, message) { if (!value) throw new Error(message); }
 
 const route = read('routes/commerce.js');
 const service = read('services/commerce/allegroDraftReconciliation.js');
-const preview = read('services/commerce/publicationPreview.js');
-const registry = read('services/commerce/integrationRegistry.js');
+const preview = read('services/commerce/providers/allegro.js');
+const registry = read('services/commerce/providers/allegro.js');
 
 check('dedicated draft reconciliation endpoint exists', () => {
   assert(route.includes("router.post('/publications/allegro/drafts/reconcile'"), 'reconcile endpoint missing');

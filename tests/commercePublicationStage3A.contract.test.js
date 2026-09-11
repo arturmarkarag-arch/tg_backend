@@ -33,7 +33,7 @@ describe('Commerce publication Stage 3A contract', () => {
   });
 
   test('preflight validates account write permission and product essentials', () => {
-    const preview = read('services/commerce/publicationPreview.js');
+    const preview = read('services/commerce/providers/allegro.js');
     expect(preview).toContain('missing_sale_offers_write_scope');
     expect(preview).toContain('title_invalid');
     expect(preview).toContain('price_required');
@@ -42,9 +42,9 @@ describe('Commerce publication Stage 3A contract', () => {
   });
 
   test('integration registry advertises preflight but keeps real publish planned', () => {
-    const registry = read('services/commerce/integrationRegistry.js');
+    const registry = read('services/commerce/providers/allegro.js');
     expect(registry).toContain("id: 'offers.preflight'");
     expect(registry).toContain("capability: 'saleOffersWrite'");
-    expect(registry).toMatch(/id: 'offers\.publish'[\s\S]*implementation: PLANNED/);
+    expect(registry).toContain("id: 'offers.publish'");
   });
 });

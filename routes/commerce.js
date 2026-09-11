@@ -4,6 +4,7 @@ const express = require('express');
 const { asyncHandler } = require('../utils/errors');
 const { requireMarketplaceWarehouseAccess } = require('../utils/marketplaceWarehouseAccess');
 const { getCommerceIntegrationRegistry } = require('../services/commerce/integrationRegistry');
+const { getCommerceProviderRegistry, executeProviderOperation } = require('../services/commerce/providers/registry');
 const { previewPublication } = require('../services/commerce/publicationPreview');
 const { resolveAllegroMapping, saveAllegroMapping } = require('../services/commerce/allegroMapping');
 const { createAllegroDraft, refreshAllegroDraft } = require('../services/commerce/allegroDraftOffer');
@@ -16,6 +17,8 @@ const { applyAllegroOfferContent } = require('../services/commerce/allegroOfferC
 const { previewAllegroPriceSync, applyAllegroPriceSync } = require('../services/commerce/allegroPriceSync');
 const { previewAllegroStockSync } = require('../services/commerce/allegroStockSync');
 const { applyAllegroStockSync } = require('../services/commerce/allegroStockSyncApply');
+const { lifecyclePreview, manageAllegroLifecycle } = require('../services/commerce/allegroLifecycle');
+const { scanAllegroListingHealth } = require('../services/commerce/allegroListingHealth');
 const {
   listCatalog,
   getCatalogProduct,
@@ -33,6 +36,21 @@ router.get('/integrations', asyncHandler(async (_req, res) => {
   const registry = await getCommerceIntegrationRegistry();
   res.set('Cache-Control', 'no-store');
   res.json(registry);
+}));
+
+router.get('/providers', asyncHandler(async (_req, res) => {
+  const registry = await getCommerceProviderRegistry();
+  res.set('Cache-Control', 'no-store');
+  res.json(registry);
+}));
+
+// Provider Core v1: one provider-neutral dispatch surface. Provider-specific
+// routes below remain compatibility aliases while the UI migrates, but adding a
+// new marketplace no longer requires adding routes to Commerce Core.
+router.post('/providers/:provider/operations/:operation', asyncHandler(async (req, res) => {
+  const execution = await executeProviderOperation(req.params.provider, req.params.operation, req.body || {});
+  res.set('Cache-Control', 'no-store');
+  res.status(execution.httpStatus).json(execution.result);
 }));
 
 
@@ -151,6 +169,30 @@ router.post('/publications/allegro/stock-sync', asyncHandler(async (req, res) =>
   res.set('Cache-Control', 'no-store');
   const pending = result.jobs?.some?.((job) => ['reserved', 'sending', 'pending', 'unknown'].includes(job.state));
   res.status(pending ? 202 : 200).json(result);
+}));
+
+// Stage 3D.7A: lifecycle is explicit and separate from stock sync. Reopen uses
+// Allegro's publication command contract; ENDED+zero/stale stock is prepared first
+// with the stable quantity-change command, then ACTIVATE is submitted.
+router.post('/publications/allegro/lifecycle/preview', asyncHandler(async (req, res) => {
+  const result = await lifecyclePreview(req.body || {});
+  res.set('Cache-Control', 'no-store');
+  res.json(result);
+}));
+
+router.post('/publications/allegro/lifecycle', asyncHandler(async (req, res) => {
+  const result = await manageAllegroLifecycle(req.body || {});
+  res.set('Cache-Control', 'no-store');
+  res.status(['pending', 'sending', 'unknown'].includes(result.state) ? 202 : 200).json(result);
+}));
+
+// Stage 3D.7B: final read-only upstream health/reconciliation. It compares live
+// Allegro state with our CommerceProduct/ChannelListing, price, stock, sales
+// settings and lifecycle, and annotates recent offer-events as diagnostics.
+router.post('/publications/allegro/health', asyncHandler(async (req, res) => {
+  const result = await scanAllegroListingHealth(req.body || {});
+  res.set('Cache-Control', 'no-store');
+  res.json(result);
 }));
 
 router.get('/catalog', asyncHandler(async (req, res) => {

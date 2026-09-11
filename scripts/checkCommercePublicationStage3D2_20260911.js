@@ -9,8 +9,8 @@ function assert(value, message) { if (!value) throw new Error(message); }
 
 const route = read('routes/commerce.js');
 const service = read('services/commerce/allegroSalesSettings.js');
-const preview = read('services/commerce/publicationPreview.js');
-const registry = read('services/commerce/integrationRegistry.js');
+const preview = read('services/commerce/providers/allegro.js');
+const registry = read('services/commerce/providers/allegro.js');
 const oauth = read('services/allegroOAuth.js');
 const capabilities = read('services/allegroCapabilities.js');
 

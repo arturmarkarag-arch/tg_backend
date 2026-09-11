@@ -1,0 +1,15 @@
+'use strict';
+const fs=require('fs'), path=require('path'); const root=path.join(__dirname,'..'); const read=r=>fs.readFileSync(path.join(root,r),'utf8');
+const checks=[]; const assert=(v,m)=>{if(!v)throw new Error(m)}; const check=(n,f)=>{try{f();checks.push([n,true])}catch(e){checks.push([n,false,e.message])}};
+const route=read('routes/commerce.js'), svc=read('services/commerce/allegroLifecycle.js'), registry=read('services/commerce/providers/allegro.js'), preview=read('services/commerce/providers/allegro.js');
+check('preview + one lifecycle command endpoint',()=>{assert(route.includes("'/publications/allegro/lifecycle/preview'"),'preview missing');assert(route.includes("'/publications/allegro/lifecycle'"),'command missing');assert(!route.includes("'/publications/allegro/lifecycle/status'"),'duplicate status endpoint');});
+check('official publication command for END/REOPEN',()=>{assert(svc.includes("/sale/offer-publication-commands/"),'publication command missing');assert(svc.includes("action === 'end' ? 'END' : 'ACTIVATE'"),'END/ACTIVATE mapping missing');});
+check('ENDED reopen stock preparation follows contract',()=>{assert(svc.includes("/sale/offer-quantity-change-commands/"),'quantity prep missing');assert(svc.includes("changeType: 'FIXED'"),'FIXED quantity missing');assert(svc.includes('desiredStock <= 0'),'zero stock reopen gate missing');});
+check('BUY_NOW reopen guard',()=>{assert(svc.includes("format === 'BUY_NOW'"),'BUY_NOW guard missing');});
+check('durable client command ids and polling',()=>{assert(svc.includes('crypto.randomUUID()'),'client UUID missing');assert(svc.includes("retryPolicy: 'idempotent'"),'idempotent PUT missing');assert(svc.includes("/tasks`"),'task polling missing');});
+check('unresolved job resolved before no-op',()=>{assert(svc.includes("state: { $in: ['sending', 'pending', 'unknown'] }"),'unresolved lookup missing');assert(svc.includes('commerce_lifecycle_unresolved_readback'),'readback recovery missing');});
+check('reopen blocks stale commerce stock before ACTIVATE',()=>{assert(svc.includes('commerce_allegro_lifecycle_reopen_stale_stock'),'stale stock gate missing');assert(svc.includes('ACTIVATE не відправлено'),'stale activation stop missing');});
+check('main warehouse isolated',()=>{assert(!svc.includes('Product.quantity'),'main warehouse leaked');assert(svc.includes('previewAllegroStockSync'),'commerce stock readiness missing');});
+check('preview exposes lifecycle snapshot',()=>{assert(preview.includes('lifecycle: state.lifecycle') && preview.includes('publicationStatus:'),'lifecycle adapter projection missing');});
+check('registry lifecycle live',()=>{assert(registry.includes("id: 'offers.lifecycle.write'"),'registry missing');assert(registry.includes('Stage 3D.7A'),'stage note missing');});
+for(const [n,ok,m] of checks) console.log(`${ok?'PASS':'FAIL'} ${n}${m?` — ${m}`:''}`); const fail=checks.filter(([,ok])=>!ok); console.log(`Commerce Publication Stage 3D.7A backend: ${checks.length-fail.length}/${checks.length} PASS`); if(fail.length)process.exit(1);

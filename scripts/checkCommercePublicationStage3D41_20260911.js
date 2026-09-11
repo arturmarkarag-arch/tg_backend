@@ -9,7 +9,7 @@ const check = (n, fn) => { try { fn(); checks.push([n, true]); } catch (e) { che
 const service = read('services/commerce/allegroOfferContentUpdate.js');
 const preview = read('services/commerce/allegroOfferUpdatePreview.js');
 const route = read('routes/commerce.js');
-const registry = read('services/commerce/integrationRegistry.js');
+const registry = read('services/commerce/providers/allegro.js');
 check('minimal PATCH only', () => { assert(service.includes("method: 'PATCH'"), 'PATCH missing'); assert(service.includes('body: patch'), 'patch body missing'); });
 check('fresh preview gate', () => { assert(service.includes('previewAllegroOfferUpdate'), 'preview gate missing'); assert(service.includes('mappingChangeCount'), 'mapping gate missing'); });
 check('no price or stock in content patch', () => { assert(!preview.includes('contentPatch.sellingMode'), 'price leaked'); assert(!preview.includes('contentPatch.stock'), 'stock leaked'); });

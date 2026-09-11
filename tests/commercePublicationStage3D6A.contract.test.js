@@ -32,8 +32,8 @@ describe('Commerce publication Stage 3D.6A contract', () => {
   });
 
   test('Commerce Inventory stays the online stock source of truth and fixed channel stock cannot exceed it', () => {
-    const preview = read('services/commerce/publicationPreview.js');
-    expect(preview).toContain('Commerce Inventory is the online stock source of truth');
+    const preview = read('services/commerce/publicationPolicy.js');
+    expect(preview).toContain('inventoryOnHand');
     expect(preview).toContain('available: Math.min(inherited, requested)');
     expect(preview).toContain('clamped: requested > inherited');
   });
@@ -47,7 +47,7 @@ describe('Commerce publication Stage 3D.6A contract', () => {
   });
 
   test('registry keeps stock preview LIVE while stock write stays a separate capability', () => {
-    const registry = read('services/commerce/integrationRegistry.js');
+    const registry = read('services/commerce/providers/allegro.js');
     const previewLine = registry.split('\n').find((line) => line.includes("id: 'offers.stock.preview'"));
     const writeLine = registry.split('\n').find((line) => line.includes("id: 'offers.stock.write'") && line.includes('offer-bulk-modification-commands'));
     expect(previewLine).toContain('implementation: LIVE');

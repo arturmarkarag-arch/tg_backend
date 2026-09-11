@@ -36,7 +36,7 @@ describe('Commerce publication Stage 3D.1 contract', () => {
 
   test('route and registry expose Stage 3D.1 as read coverage', () => {
     const routes = read('routes/commerce.js');
-    const registry = read('services/commerce/integrationRegistry.js');
+    const registry = read('services/commerce/providers/allegro.js');
     expect(routes).toContain("'/publications/allegro/drafts/reconcile'");
     expect(routes).toContain('reconcileAllegroDraft');
     expect(registry).toMatch(/id: 'offers\.draft\.reconcile'[\s\S]*direction: 'read'[\s\S]*implementation: LIVE/);

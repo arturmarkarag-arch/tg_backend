@@ -43,7 +43,7 @@ describe('Commerce publication Stage 3C contract', () => {
   });
 
   test('integration registry marks draft create live and draft service itself never activates', () => {
-    const registry = read('services/commerce/integrationRegistry.js');
+    const registry = read('services/commerce/providers/allegro.js');
     expect(registry).toMatch(/id: 'offers\.draft\.create'[\s\S]*implementation: LIVE/);
     const service = read('services/commerce/allegroDraftOffer.js');
     expect(service).toContain("publication: { status: 'INACTIVE' }");

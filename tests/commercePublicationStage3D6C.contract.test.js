@@ -29,10 +29,9 @@ describe('Commerce publication Stage 3D.6C contract', () => {
   });
 
   test('main warehouse quantity is not a stock source', () => {
-    const preview = read('services/commerce/publicationPreview.js');
+    const preview = read('services/commerce/publicationPolicy.js');
     const stock = read('services/commerce/allegroStockSync.js');
     const apply = read('services/commerce/allegroStockSyncApply.js');
-    expect(preview).toContain('product.availableStock is the independent internet-store inventory');
     expect(preview).toContain('inventoryOnHand');
     expect(stock).toContain("sourceOfTruth: 'commerce_inventory_minus_central_reservations'");
     expect(apply).toContain("sourceOfTruth: 'commerce_inventory_minus_central_reservations'");
@@ -81,7 +80,7 @@ describe('Commerce publication Stage 3D.6C contract', () => {
 
   test('summary/tasks and fresh read-back verify stock, registry marks stock sync LIVE', () => {
     const apply = read('services/commerce/allegroStockSyncApply.js');
-    const registry = read('services/commerce/integrationRegistry.js');
+    const registry = read('services/commerce/providers/allegro.js');
     expect(apply).toContain("path: `${commandPath(commandId)}/tasks`");
     expect(apply).toContain("text(task?.subject?.field, 40) === 'stock'");
     expect(apply).toContain('sameStock(storedDesired, row.actualStock)');

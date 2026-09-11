@@ -16,8 +16,9 @@ const oauth = read('services/allegroOAuth.js');
 const caps = read('services/allegroCapabilities.js');
 const route = read('routes/commerce.js');
 const preview = read('services/commerce/publicationPreview.js');
+const adapter = read('services/commerce/providers/allegro.js');
 const listing = read('models/ChannelListing.js');
-const registry = read('services/commerce/integrationRegistry.js');
+const registry = read('services/commerce/providers/allegro.js');
 
 check('OAuth requests sale:offers:write', () => assert(oauth.includes("'allegro:api:sale:offers:write'"), 'write scope missing from OAuth defaults'));
 check('capability matrix exposes saleOffersWrite', () => assert(caps.includes('saleOffersWrite'), 'saleOffersWrite capability missing'));
@@ -27,10 +28,10 @@ check('preview performs zero upstream calls', () => {
   assert(!preview.includes("'/sale/product-offers'"), 'preview must not call create offer');
   assert(!preview.includes('allegroRequest('), 'preview must not call Allegro HTTP client');
 });
-check('preflight validates write scope', () => assert(preview.includes('missing_sale_offers_write_scope'), 'write scope validation missing'));
+check('preflight validates write scope', () => assert(adapter.includes('missing_sale_offers_write_scope'), 'write scope validation missing'));
 check('preflight validates product essentials', () => {
   for (const token of ['title_invalid', 'price_required', 'stock_required', 'gtin_invalid', 'category_mapping_required']) {
-    assert(preview.includes(token), `${token} missing`);
+    assert(adapter.includes(token), `${token} missing`);
   }
 });
 check('ChannelListing has durable unique identity', () => {

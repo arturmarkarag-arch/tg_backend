@@ -55,13 +55,13 @@ describe('Commerce publication Stage 3D.4.1 contract', () => {
   });
 
   test('publication preview exposes durable content update state', () => {
-    const preview = read('services/commerce/publicationPreview.js');
+    const preview = read('services/commerce/providers/allegro.js');
     expect(preview).toContain('contentUpdate:');
     expect(preview).toContain('canRetry: listing.providerData.allegro.contentUpdate.canRetry === true');
   });
 
   test('integration registry marks content update live while price stock remain planned', () => {
-    const registry = read('services/commerce/integrationRegistry.js');
+    const registry = read('services/commerce/providers/allegro.js');
     expect(registry).toContain("id: 'offers.update'");
     expect(registry).toContain('safe contentPatch');
     expect(registry).toContain("id: 'offers.price.write'");

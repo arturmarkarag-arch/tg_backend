@@ -20,16 +20,16 @@ describe('Commerce publication Stage 3B contract', () => {
 
   test('mapping is persisted locally and consumed by preflight', () => {
     const service = read('services/commerce/allegroMapping.js');
-    const preview = read('services/commerce/publicationPreview.js');
+    const preview = read('services/commerce/providers/allegro.js');
     expect(service).toContain('productParameters');
     expect(service).toContain('offerParameters');
     expect(service).toContain('mappingState');
-    expect(preview).toContain("allegroMapping.mappingState === 'ready'");
+    expect(preview).toContain("providerState.mappingState === 'ready'");
   });
 
-  test('real Allegro offer creation is still planned', () => {
-    const registry = read('services/commerce/integrationRegistry.js');
+  test('Allegro adapter exposes catalog mapping and live publication capability', () => {
+    const registry = read('services/commerce/providers/allegro.js');
     expect(registry).toMatch(/id: 'catalog\.mapping'[\s\S]*implementation: LIVE/);
-    expect(registry).toMatch(/id: 'offers\.publish'[\s\S]*implementation: PLANNED/);
+    expect(registry).toContain("id: 'offers.publish'");
   });
 });

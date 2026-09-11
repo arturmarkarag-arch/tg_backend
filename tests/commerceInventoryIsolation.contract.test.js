@@ -36,7 +36,7 @@ describe('Commerce Inventory isolation contract', () => {
   });
 
   test('Allegro stock source is Commerce inventory minus reservations', () => {
-    const preview = read('services/commerce/publicationPreview.js');
+    const preview = read('services/commerce/publicationPolicy.js');
     const stock = read('services/commerce/allegroStockSync.js');
     expect(preview).toContain('inventoryOnHand - reservedUnits');
     expect(stock).toContain("sourceOfTruth: 'commerce_inventory_minus_central_reservations'");

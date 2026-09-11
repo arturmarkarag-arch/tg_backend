@@ -8,7 +8,7 @@ const assert = (v, m) => { if (!v) throw new Error(m); };
 const check = (n, fn) => { try { fn(); checks.push([n, true]); } catch (e) { checks.push([n, false, e.message]); } };
 const service = read('services/commerce/allegroPriceSync.js');
 const route = read('routes/commerce.js');
-const registry = read('services/commerce/integrationRegistry.js');
+const registry = read('services/commerce/providers/allegro.js');
 check('preview + one apply command', () => { assert(route.includes("'/publications/allegro/price-sync/preview'"), 'preview missing'); assert(route.includes("'/publications/allegro/price-sync'"), 'apply missing'); assert(!route.includes("'/publications/allegro/price-sync/status'"), 'redundant status route'); });
 check('current Allegro beta bulk contract', () => { assert(service.includes("'/sale/offer-bulk-modification-commands'"), 'bulk endpoint missing'); assert(service.includes('application/vnd.allegro.beta.v1+json'), 'beta media type missing'); assert(service.includes('const BULK_LIMIT = 25'), '25 limit missing'); });
 check('per-offer FIXED price only', () => { const fn = service.slice(service.indexOf('function modificationForJob'), service.indexOf('function isAmbiguous')); assert(fn.includes("changeType: 'FIXED'"), 'FIXED price missing'); assert(fn.includes('prices: {'), 'prices missing'); assert(!fn.includes('stock:'), 'stock leaked into 3D.5'); });

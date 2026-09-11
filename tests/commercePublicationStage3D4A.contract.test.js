@@ -56,7 +56,7 @@ describe('Commerce publication Stage 3D.4A contract', () => {
   });
 
   test('integration registry distinguishes preview from future content write', () => {
-    const registry = read('services/commerce/integrationRegistry.js');
+    const registry = read('services/commerce/providers/allegro.js');
     expect(registry).toContain("id: 'offers.update.preview'");
     expect(registry).toContain("id: 'offers.update'");
     expect(registry).toContain('Price/stock');

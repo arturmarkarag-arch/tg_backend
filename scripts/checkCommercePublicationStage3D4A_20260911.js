@@ -8,7 +8,7 @@ const assert = (value, message) => { if (!value) throw new Error(message); };
 const check = (name, fn) => { try { fn(); checks.push([name, true]); } catch (err) { checks.push([name, false, err.message]); } };
 const service = read('services/commerce/allegroOfferUpdatePreview.js');
 const route = read('routes/commerce.js');
-const registry = read('services/commerce/integrationRegistry.js');
+const registry = read('services/commerce/providers/allegro.js');
 check('preview is GET-only upstream', () => {
   assert(service.includes("method: 'GET'"), 'GET missing');
   assert(!service.includes("method: 'PATCH'"), 'PATCH leaked into 3D.4A');

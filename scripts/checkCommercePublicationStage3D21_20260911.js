@@ -10,8 +10,8 @@ function assert(value, message) { if (!value) throw new Error(message); }
 const route = read('routes/commerce.js');
 const apply = read('services/commerce/allegroSalesSettingsApply.js');
 const settings = read('services/commerce/allegroSalesSettings.js');
-const preview = read('services/commerce/publicationPreview.js');
-const registry = read('services/commerce/integrationRegistry.js');
+const preview = read('services/commerce/providers/allegro.js');
+const registry = read('services/commerce/providers/allegro.js');
 
 check('Stage 3D.2.1 command and status endpoints exist', () => {
   assert(route.includes("router.post('/publications/allegro/sales-settings/apply'"), 'apply endpoint missing');

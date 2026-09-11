@@ -67,7 +67,7 @@ describe('Commerce publication Stage 3D.6B reservation ledger contract', () => {
   });
 
   test('registry keeps central reservation ledger LIVE independently of stock write stage', () => {
-    const registry = read('services/commerce/integrationRegistry.js');
+    const registry = read('services/commerce/providers/allegro.js');
     const ledger = registry.split('\n').find((line) => line.includes("id: 'inventory.reservations'"));
     const write = registry.split('\n').find((line) => line.includes("id: 'offers.stock.write'") && line.includes('offer-bulk-modification-commands'));
     expect(ledger).toContain('implementation: LIVE');

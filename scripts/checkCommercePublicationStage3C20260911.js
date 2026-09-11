@@ -14,7 +14,7 @@ function assert(value, message) { if (!value) throw new Error(message); }
 const route = read('routes/commerce.js');
 const service = read('services/commerce/allegroDraftOffer.js');
 const model = read('models/CommercePublicationJob.js');
-const registry = read('services/commerce/integrationRegistry.js');
+const registry = read('services/commerce/providers/allegro.js');
 
 check('draft create and recovery endpoints exist', () => {
   assert(route.includes("router.post('/publications/allegro/drafts'"), 'draft create endpoint missing');

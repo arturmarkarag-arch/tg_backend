@@ -9,8 +9,8 @@ function assert(value, message) { if (!value) throw new Error(message); }
 
 const route = read('routes/commerce.js');
 const activation = read('services/commerce/allegroActivation.js');
-const preview = read('services/commerce/publicationPreview.js');
-const registry = read('services/commerce/integrationRegistry.js');
+const preview = read('services/commerce/providers/allegro.js');
+const registry = read('services/commerce/providers/allegro.js');
 
 check('one internal activation command exists without a duplicate status endpoint', () => {
   assert(route.includes("router.post('/publications/allegro/activate'"), 'activation endpoint missing');

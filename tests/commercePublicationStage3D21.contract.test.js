@@ -43,7 +43,7 @@ describe('Commerce publication Stage 3D.2.1 contract', () => {
   test('routes expose command/status while sales-settings apply remains separate from activation', () => {
     const route = read('routes/commerce.js');
     const service = read('services/commerce/allegroSalesSettingsApply.js');
-    const registry = read('services/commerce/integrationRegistry.js');
+    const registry = read('services/commerce/providers/allegro.js');
     expect(route).toContain("'/publications/allegro/sales-settings/apply'");
     expect(route).toContain("'/publications/allegro/sales-settings/status'");
     expect(registry).toMatch(/id: 'offers\.sales-settings\.apply'[\s\S]*implementation: LIVE/);

@@ -14,8 +14,8 @@ function assert(value, message) { if (!value) throw new Error(message); }
 
 const route = read('routes/commerce.js');
 const mapping = read('services/commerce/allegroMapping.js');
-const preview = read('services/commerce/publicationPreview.js');
-const registry = read('services/commerce/integrationRegistry.js');
+const preview = read('services/commerce/providers/allegro.js');
+const registry = read('services/commerce/providers/allegro.js');
 const listing = read('models/ChannelListing.js');
 
 check('mapping resolve/save endpoints exist', () => {
@@ -48,7 +48,7 @@ check('mapping persists in ChannelListing only', () => {
   assert(listing.includes('providerData'), 'ChannelListing providerData missing');
 });
 check('preflight consumes durable ready mapping', () => {
-  assert(preview.includes("allegroMapping.mappingState === 'ready'"), 'ready mapping not consumed');
+  assert(preview.includes("providerState.mappingState === 'ready'"), 'ready mapping not consumed');
   assert(preview.includes('catalogProductId'), 'catalog product mapping not exposed');
   assert(preview.includes('categoryId'), 'category mapping not exposed');
 });

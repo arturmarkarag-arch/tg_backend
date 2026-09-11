@@ -1,0 +1,13 @@
+'use strict';
+const fs=require('fs'), path=require('path'); const root=path.join(__dirname,'..'); const read=r=>fs.readFileSync(path.join(root,r),'utf8');
+const checks=[]; const assert=(v,m)=>{if(!v)throw new Error(m)}; const check=(n,f)=>{try{f();checks.push([n,true])}catch(e){checks.push([n,false,e.message])}};
+const route=read('routes/commerce.js'), svc=read('services/commerce/allegroListingHealth.js'), registry=read('services/commerce/providers/allegro.js'), errors=read('utils/errors.js');
+check('one final health endpoint',()=>{assert(route.includes("'/publications/allegro/health'"),'health route missing');assert(!route.includes("'/publications/allegro/health/status'"),'duplicate health status route')});
+check('upstream health is read-only',()=>{assert(svc.includes("method: 'GET'"),'GET missing');assert(svc.includes('/sale/product-offers/'),'live product-offer read missing');assert(svc.includes("path: '/sale/offer-events'"),'offer-events missing');assert(!svc.includes("method: 'PATCH'"),'PATCH leaked');assert(!svc.includes("method: 'PUT'"),'PUT leaked');assert(!svc.includes("method: 'POST'"),'POST leaked')});
+check('all managed dimensions are reconciled',()=>{for(const token of ['contentAndMappingHealth','salesSettingsHealth','effectivePrice','effectiveStock','lifecycleHealth','CommercePublicationJob'])assert(svc.includes(token),`${token} missing`)});
+check('offer events are diagnostic only',()=>{assert(svc.includes("coverage: 'best_effort_last_24h'"),'coverage missing');assert(svc.includes('live offer check все одно виконано'),'event failure fallback missing')});
+check('main warehouse stock stays isolated',()=>{assert(!svc.includes('Product.quantity'),'main warehouse leaked');assert(svc.includes('getReservationTotals'),'reservation totals missing')});
+check('health snapshot persists locally',()=>{assert(svc.includes('providerData.allegro'),'provider data missing');assert(svc.includes("stage: '3D.7B'"),'stage missing');assert(svc.includes('recentEventTypes'),'event snapshot missing')});
+check('registry marks final health live',()=>{assert(registry.includes("id: 'offers.health.read'"),'registry row missing');assert(registry.includes('Stage 3D.7B'),'registry note missing');assert(registry.includes("id: 'offers.health.read'") && registry.includes('upstream write = 0'),'final health contract missing')});
+check('health input error registered',()=>assert(errors.includes('commerce_allegro_health_items_required'),'health error missing'));
+for(const [n,ok,m] of checks) console.log(`${ok?'PASS':'FAIL'} ${n}${m?` — ${m}`:''}`); const fail=checks.filter(([,ok])=>!ok); console.log(`Commerce Publication Stage 3D.7B backend: ${checks.length-fail.length}/${checks.length} PASS`); if(fail.length)process.exit(1);

@@ -75,7 +75,7 @@ describe('Commerce publication Stage 3D.5 contract', () => {
   });
 
   test('registry keeps price and stock as separate outbound capabilities', () => {
-    const registry = read('services/commerce/integrationRegistry.js');
+    const registry = read('services/commerce/providers/allegro.js');
     expect(registry).toContain("id: 'offers.price.write'");
     expect(registry).toContain('offer-bulk-modification-commands');
     expect(registry).toContain("id: 'offers.stock.write'");
