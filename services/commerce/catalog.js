@@ -285,6 +285,18 @@ async function updateCatalogProduct(id, raw, req) {
   return getCatalogProduct(doc._id);
 }
 
+
+async function getCatalogProductsByIds(ids = []) {
+  const normalized = [...new Set((Array.isArray(ids) ? ids : [])
+    .map((id) => String(id || '').trim())
+    .filter((id) => mongoose.isValidObjectId(id)))];
+  if (!normalized.length) return [];
+  const rows = await CommerceProduct.find({ _id: { $in: normalized } }).lean();
+  const hydrated = await hydrateProducts(rows);
+  const byId = new Map(hydrated.map((item) => [String(item.id), item]));
+  return normalized.map((id) => byId.get(id)).filter(Boolean);
+}
+
 async function listWarehouseProducts(query = {}) {
   const page = Math.max(1, Number.parseInt(query.page, 10) || 1);
   const pageSize = Math.min(50, Math.max(1, Number.parseInt(query.pageSize, 10) || 20));
@@ -452,4 +464,5 @@ module.exports = {
   updateCatalogProduct,
   listWarehouseProducts,
   importWarehouseProducts,
+  getCatalogProductsByIds,
 };

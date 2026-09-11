@@ -7,6 +7,7 @@ const ALLEGRO_SCOPE = Object.freeze({
   SHIPMENTS_READ: 'allegro:api:shipments:read',
   SHIPMENTS_WRITE: 'allegro:api:shipments:write',
   SALE_OFFERS_READ: 'allegro:api:sale:offers:read',
+  SALE_OFFERS_WRITE: 'allegro:api:sale:offers:write',
 });
 
 const ORDER_INGEST_REQUIRED_SCOPES = Object.freeze([
@@ -34,6 +35,7 @@ function capabilityMatrix(scopes) {
     shipmentsRead: set.has(ALLEGRO_SCOPE.SHIPMENTS_READ),
     shipmentsWrite: set.has(ALLEGRO_SCOPE.SHIPMENTS_WRITE),
     saleOffersRead: set.has(ALLEGRO_SCOPE.SALE_OFFERS_READ),
+    saleOffersWrite: set.has(ALLEGRO_SCOPE.SALE_OFFERS_WRITE),
   };
   const missingOrderIngestScopes = ORDER_INGEST_REQUIRED_SCOPES.filter((scope) => !set.has(scope));
   return {

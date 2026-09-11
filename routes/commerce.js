@@ -4,6 +4,7 @@ const express = require('express');
 const { asyncHandler } = require('../utils/errors');
 const { requireMarketplaceWarehouseAccess } = require('../utils/marketplaceWarehouseAccess');
 const { getCommerceIntegrationRegistry } = require('../services/commerce/integrationRegistry');
+const { previewPublication } = require('../services/commerce/publicationPreview');
 const {
   listCatalog,
   getCatalogProduct,
@@ -21,6 +22,13 @@ router.get('/integrations', asyncHandler(async (_req, res) => {
   const registry = await getCommerceIntegrationRegistry();
   res.set('Cache-Control', 'no-store');
   res.json(registry);
+}));
+
+
+router.post('/publications/preview', asyncHandler(async (req, res) => {
+  const result = await previewPublication(req.body || {});
+  res.set('Cache-Control', 'no-store');
+  res.json(result);
 }));
 
 router.get('/catalog', asyncHandler(async (req, res) => {

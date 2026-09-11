@@ -11,6 +11,9 @@ const ChannelListingSchema = new mongoose.Schema({
   },
   provider: { type: String, trim: true, lowercase: true, required: true },
   accountId: { type: String, trim: true, required: true },
+  // Durable dedupe key. Kept separate from the existing lookup index so Stage 3A
+  // can add uniqueness without replacing a production Mongo index in place.
+  identityKey: { type: String, default: '', select: false },
   externalId: { type: String, trim: true, default: '' },
   externalUrl: { type: String, trim: true, default: '' },
   channelSku: { type: String, trim: true, default: '' },
@@ -52,7 +55,20 @@ const ChannelListingSchema = new mongoose.Schema({
   providerData: { type: mongoose.Schema.Types.Mixed, default: () => ({}) },
 }, { timestamps: true });
 
+ChannelListingSchema.pre('validate', function normalizeIdentity(next) {
+  this.provider = String(this.provider || '').trim().toLowerCase();
+  this.accountId = String(this.accountId || '').trim();
+  this.identityKey = this.commerceProductId && this.provider && this.accountId
+    ? `${String(this.commerceProductId)}:${this.provider}:${this.accountId}`
+    : '';
+  next();
+});
+
 ChannelListingSchema.index({ commerceProductId: 1, provider: 1, accountId: 1 });
+ChannelListingSchema.index(
+  { identityKey: 1 },
+  { unique: true, partialFilterExpression: { identityKey: { $gt: '' } } },
+);
 ChannelListingSchema.index({ provider: 1, accountId: 1, status: 1, updatedAt: -1 });
 ChannelListingSchema.index(
   { provider: 1, accountId: 1, externalId: 1 },
