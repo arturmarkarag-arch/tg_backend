@@ -2,16 +2,18 @@ const { makeBaseLinkerAccountCaller } = require('./baseLinkerClient');
 const { appError } = require('../utils/errors');
 const { productKey } = require('./baseLinkerIdentity');
 const BaseLinkerProductImageCache = require('../models/BaseLinkerProductImageCache');
+const { resolveBaseLinkerMissingImages } = require('./allegroCatalogImageResolver');
 
-const PRODUCT_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
-const NEGATIVE_PRODUCT_CACHE_TTL_MS = Math.max(5 * 60 * 1000, Number(process.env.BASELINKER_PRODUCT_NEGATIVE_CACHE_TTL_MS) || (60 * 60 * 1000));
-const PERSISTED_PRODUCT_CACHE_TTL_MS = Math.max(PRODUCT_CACHE_TTL_MS, Number(process.env.BASELINKER_PRODUCT_CACHE_TTL_MS) || (24 * 60 * 60 * 1000));
+const PRODUCT_CACHE_TTL_MS = 6 * 60 * 60 * 1000;
+const NEGATIVE_PRODUCT_CACHE_TTL_MS = Math.max(5 * 60 * 1000, Number(process.env.BASELINKER_PRODUCT_NEGATIVE_CACHE_TTL_MS) || (15 * 60 * 1000));
+const PERSISTED_PRODUCT_CACHE_TTL_MS = Math.max(PRODUCT_CACHE_TTL_MS, Number(process.env.BASELINKER_PRODUCT_CACHE_TTL_MS) || (6 * 60 * 60 * 1000));
 const LOOKUP_CHUNK_SIZE = 100;
 const STORAGE_LIST_PAGE_SIZE = 1000;
 const STORAGE_CATALOG_SNAPSHOT_TTL_MS = Math.max(5 * 60 * 1000, Number(process.env.BASELINKER_STORAGE_CATALOG_SNAPSHOT_TTL_MS) || (60 * 60 * 1000));
 const UNLINKED_BULK_SCAN_MIN_REFS = Math.max(2, Number(process.env.BASELINKER_UNLINKED_BULK_SCAN_MIN_REFS) || 8);
 const STORAGE_CATALOG_MAX_PAGES = Math.max(1, Math.min(100, Number(process.env.BASELINKER_STORAGE_CATALOG_MAX_PAGES) || 50));
-const IMAGE_RESOLVER_VERSION = 8;
+const IMAGE_RESOLVER_VERSION = 9;
+const ALLEGRO_FALLBACK_MAX_REQUESTS = Math.min(150, Math.max(5, Number(process.env.ALLEGRO_BASELINKER_IMAGE_MAX_REQUESTS_PER_RUN) || 60));
 const UNLINKED_STORAGE_MAX_PER_RUN = Math.min(10, Math.max(1, Number(process.env.BASELINKER_UNLINKED_STORAGE_MAX_PER_RUN || process.env.BASELINKER_UNLINKED_INVENTORY_MAX_PER_RUN) || 4));
 const productCache = new Map();
 const storageCatalogSnapshots = new Map();
@@ -198,6 +200,11 @@ function collectOrderProductRefs(orders) {
         ean: cleanId(product.ean),
         sku: cleanId(product.sku),
         name: cleanId(product.name),
+        hasDirectImage: normalizeImageUrls([
+          ...(Array.isArray(product?.images) ? product.images : []),
+          product?.image_url,
+          product?.imageUrl,
+        ]).length > 0,
       };
       const existing = refsByKey.get(key);
       if (!existing) {
@@ -209,6 +216,7 @@ function collectOrderProductRefs(orders) {
       // SKU/EAN on one occurrence and return it on another, so keeping only the
       // first row makes the result depend on order chronology. Merge every
       // stable identity signal, but fail closed if Base reports a conflict.
+      existing.hasDirectImage = existing.hasDirectImage || incoming.hasDirectImage;
       for (const field of ['ean', 'sku', 'name']) {
         const next = incoming[field];
         if (!next || existing.identityConflicts?.[field]) continue;
@@ -761,13 +769,57 @@ async function warmBaseLinkerProductCatalog(orders, callApi, { maxRequests = 5, 
   })).filter((order) => order.products.length);
 
   const freshResult = await fetchBaseLinkerProductCatalogSingle(missingOnlyOrders, callApi, { maxRequests, linkedOnly });
+
+  // Cross-provider fallback is intentionally one-way: BaseLinker remains the
+  // primary photo source. We only ask Allegro for rows where BaseLinker did not
+  // return any image at all. Exact Allegro offer id / GTIN are preferred; fuzzy
+  // title search is conservative and never overwrites an existing BaseLinker image.
+  const unresolvedForAllegro = warmRefs.filter((ref) => {
+    if (!staleKeys.has(ref.key) || ref.hasDirectImage) return false;
+    const entry = freshResult.productCatalog?.[ref.key];
+    return normalizeImageUrls(entry?.images).length === 0;
+  });
+  let allegroFallbackStats = { requestCount: 0, attempted: 0, resolved: 0, readers: 0 };
+  if (unresolvedForAllegro.length) {
+    try {
+      const fallback = await resolveBaseLinkerMissingImages(unresolvedForAllegro, {
+        maxRequests: ALLEGRO_FALLBACK_MAX_REQUESTS,
+      });
+      allegroFallbackStats = {
+        requestCount: Number(fallback?.requestCount || 0),
+        attempted: Number(fallback?.attempted || 0),
+        resolved: Number(fallback?.resolved || 0),
+        readers: Number(fallback?.readers || 0),
+      };
+      for (const [key, entry] of Object.entries(fallback?.productCatalog || {})) {
+        if (normalizeImageUrls(freshResult.productCatalog?.[key]?.images).length) continue;
+        freshResult.productCatalog[key] = entry;
+      }
+      const finalResolved = Object.values(freshResult.productCatalog || {})
+        .filter((entry) => entry?.state === 'resolved' && normalizeImageUrls(entry?.images).length).length;
+      const requestedThisRun = Number(freshResult.productCatalogStats?.requested || Object.keys(freshResult.productCatalog || {}).length);
+      freshResult.productCatalogStats = {
+        ...(freshResult.productCatalogStats || {}),
+        resolved: finalResolved,
+        unresolved: Math.max(0, requestedThisRun - finalResolved),
+      };
+    } catch (error) {
+      // Allegro enrichment is optional for BaseLinker queue truth. Transient
+      // Allegro failures must never block packing or become a long negative cache.
+      freshResult.productCatalogWarnings = [
+        ...(freshResult.productCatalogWarnings || []),
+        { scope: 'allegro_photo_fallback', code: error?.code || error?.message || 'allegro_photo_fallback_failed' },
+      ];
+    }
+  }
+
   const now = new Date();
   const writes = [];
   for (const [key, entry] of Object.entries(freshResult.productCatalog || {})) {
     const state = String(entry?.state || 'unresolved');
     // Transport/API errors are represented as warnings rather than entries, so
     // only deterministic results reach this cache. A transient failure is never
-    // cached as a 24h successful lookup.
+    // cached as a successful lookup.
     const imageUrl = normalizeImageUrls(entry?.images)[0] || '';
     // unresolved_exact_source also represents rows that were not attempted yet
     // because the bounded request budget/candidate cap was exhausted. Persisting
@@ -777,7 +829,7 @@ async function warmBaseLinkerProductCatalog(orders, callApi, { maxRequests = 5, 
     if (!accountId) continue;
     writes.push({ updateOne: {
       filter: { baseLinkerAccountId: accountId, productKey: key },
-      update: { $set: { baseLinkerAccountId: accountId, productKey: key, resolverVersion: IMAGE_RESOLVER_VERSION, state, imageUrl, refreshedAt: now } },
+      update: { $set: { baseLinkerAccountId: accountId, productKey: key, resolverVersion: IMAGE_RESOLVER_VERSION, state, imageUrl, source: String(entry?.source || (imageUrl ? 'baselinker' : '')), confidence: Number.isFinite(Number(entry?.confidence)) ? Number(entry.confidence) : null, refreshedAt: now } },
       upsert: true,
     } });
   }
@@ -791,6 +843,7 @@ async function warmBaseLinkerProductCatalog(orders, callApi, { maxRequests = 5, 
       attempted: Number(freshResult.productCatalogStats?.requested || 0),
       resolvedThisRun: Number(freshResult.productCatalogStats?.resolved || 0),
       warnings: Number(freshResult.productCatalogStats?.warnings || 0),
+      allegroFallback: allegroFallbackStats,
     },
   };
 }

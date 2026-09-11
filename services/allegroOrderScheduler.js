@@ -4,8 +4,8 @@ const { listAllegroAccounts } = require('./allegroAccounts');
 const { syncOneAllegroAccount, getAllegroOrderSyncStates, setAllegroOrderRetryAt } = require('./allegroOrders');
 const { runAsSchedulerLeader } = require('./schedulerLeader');
 
-const ORDER_POLL_MS = Math.min(5 * 60_000, Math.max(15_000, Number(process.env.ALLEGRO_ORDER_POLL_MS) || 30_000));
-const DEFAULT_ERROR_BACKOFF_MS = Math.min(30 * 60_000, Math.max(30_000, Number(process.env.ALLEGRO_ORDER_ERROR_BACKOFF_MS) || 60_000));
+const ORDER_POLL_MS = Math.min(60_000, Math.max(3_000, Number(process.env.ALLEGRO_ORDER_POLL_MS) || 5_000));
+const DEFAULT_ERROR_BACKOFF_MS = Math.min(10 * 60_000, Math.max(5_000, Number(process.env.ALLEGRO_ORDER_ERROR_BACKOFF_MS) || 15_000));
 
 let timer = null;
 let running = false;

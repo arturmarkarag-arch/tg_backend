@@ -13,6 +13,8 @@ const BaseLinkerProductImageCacheSchema = new mongoose.Schema({
   resolverVersion: { type: Number, default: 0, index: true },
   state: { type: String, default: 'unresolved', trim: true, maxlength: 80 },
   imageUrl: { type: String, default: '', maxlength: 4096 },
+  source: { type: String, default: '', trim: true, maxlength: 80 },
+  confidence: { type: Number, default: null, min: 0, max: 1 },
   refreshedAt: { type: Date, default: Date.now, index: true },
 }, { timestamps: true });
 

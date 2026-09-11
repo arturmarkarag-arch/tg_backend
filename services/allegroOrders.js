@@ -11,8 +11,8 @@ const { getIO } = require('../socket');
 const { withLock } = require('../utils/lock');
 
 const EVENT_LIMIT = Math.min(1000, Math.max(10, Number(process.env.ALLEGRO_ORDER_EVENT_LIMIT) || 200));
-const MAX_EVENT_PAGES_PER_TICK = Math.min(10, Math.max(1, Number(process.env.ALLEGRO_ORDER_EVENT_PAGES_PER_TICK) || 2));
-const MAX_DETAIL_REFRESHES_PER_TICK = Math.min(500, Math.max(10, Number(process.env.ALLEGRO_ORDER_DETAIL_MAX_PER_TICK) || 100));
+const MAX_EVENT_PAGES_PER_TICK = Math.min(10, Math.max(1, Number(process.env.ALLEGRO_ORDER_EVENT_PAGES_PER_TICK) || 4));
+const MAX_DETAIL_REFRESHES_PER_TICK = Math.min(500, Math.max(10, Number(process.env.ALLEGRO_ORDER_DETAIL_MAX_PER_TICK) || 200));
 const BOOTSTRAP_PAGE_SIZE = 100;
 const BOOTSTRAP_MAX_PAGES = Math.min(100, Math.max(1, Number(process.env.ALLEGRO_ORDER_BOOTSTRAP_MAX_PAGES) || 100));
 // Allegro exposes order events for the last 60 days. Re-bootstrap before that
@@ -20,7 +20,7 @@ const BOOTSTRAP_MAX_PAGES = Math.min(100, Math.max(1, Number(process.env.ALLEGRO
 // outage; otherwise an old cursor may no longer be a safe recovery point.
 const JOURNAL_OUTAGE_REBOOTSTRAP_MS = Math.min(59, Math.max(7, Number(process.env.ALLEGRO_ORDER_REBOOTSTRAP_AFTER_DAYS) || 55)) * 24 * 60 * 60 * 1000;
 const ORDER_SYNC_LOCK_TTL_MS = Math.min(60 * 60_000, Math.max(5 * 60_000, Number(process.env.ALLEGRO_ORDER_SYNC_LOCK_TTL_MS) || 15 * 60_000));
-const ORDER_SYNC_STALE_AFTER_MS = Math.min(24 * 60 * 60_000, Math.max(60_000, Number(process.env.ALLEGRO_ORDER_STALE_AFTER_MS) || 5 * 60_000));
+const ORDER_SYNC_STALE_AFTER_MS = Math.min(24 * 60 * 60_000, Math.max(15_000, Number(process.env.ALLEGRO_ORDER_STALE_AFTER_MS) || 30_000));
 const PAGE_SIZE_VALUES = new Set([10, 20]);
 const ACTIVE_FULFILLMENT_STATUSES = Object.freeze([
   'NEW',
