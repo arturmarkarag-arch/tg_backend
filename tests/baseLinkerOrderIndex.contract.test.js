@@ -52,6 +52,18 @@ describe('BaseLinker minimal Intake index contract', () => {
     expect(service).not.toContain('TERMINAL_INDEX_REFRESH_MS');
   });
 
+  it('does not rewrite every unchanged queue preview on each 30-second poll', () => {
+    const service = read('services/baseLinkerOrderIndex.js');
+    const sync = sliceBetweenOrThrow(service, 'async function performIndexSync', 'async function syncOneAccount', { label: 'performIndexSync' });
+    expect(sync).toContain('const rowsNeedingFullWrite = rows.filter');
+    expect(sync).toContain('previousRowById.get(row.orderId)');
+    expect(sync).toContain('BaseLinkerOrderIndex.bulkWrite(rowsNeedingFullWrite.map');
+    expect(sync).not.toContain('BaseLinkerOrderIndex.bulkWrite(rows.map');
+    expect(sync).toContain('await BaseLinkerOrderIndex.updateMany(');
+    expect(sync).toContain("orderId: { $in: [...currentIds] }");
+    expect(sync).toContain('...(resetIndex ? { syncToken } : {})');
+  });
+
   it('normalizes page input without shadowing the pagination helper', () => {
     const service = read('services/baseLinkerOrderIndex.js');
     expect(service).toContain('function normalizePage(value)');

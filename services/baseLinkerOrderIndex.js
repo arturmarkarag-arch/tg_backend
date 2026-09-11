@@ -389,7 +389,7 @@ async function performIndexSync(scope, opts = {}) {
 
   const syncToken = crypto.randomUUID();
   const previousRows = await BaseLinkerOrderIndex.find({ baseLinkerAccountId: accountId })
-    .select('orderId orderIdNumeric orderSortDate sourceType sourceId preview')
+    .select('orderId orderIdNumeric orderSortDate sourceType sourceId preview searchText')
     .lean();
   // Changing the configured queue statuses defines a new queue universe. Do not
   // reinterpret rows from the old scope as upstream transitions.
@@ -397,6 +397,12 @@ async function performIndexSync(scope, opts = {}) {
   const previousIds = new Set(transitionPreviousRows.map((row) => String(row.orderId || '')).filter(Boolean));
   const previousPreviewById = new Map(transitionPreviousRows
     .map((row) => [String(row.orderId || ''), row.preview && typeof row.preview === 'object' ? row.preview : null])
+    .filter(([id]) => id));
+  // Persistence comparison intentionally uses ALL previous rows, including a
+  // scope-reset run. A reset changes queue membership semantics, but unchanged
+  // surviving rows still do not need their full preview re-sent to Atlas.
+  const previousRowById = new Map(previousRows
+    .map((row) => [String(row.orderId || ''), row])
     .filter(([id]) => id));
 
   const intake = await scanIntake(scope);
@@ -452,22 +458,50 @@ async function performIndexSync(scope, opts = {}) {
       imageState.orders.forEach((order, index) => { if (rows[index]) rows[index].preview = order; });
     } catch (_) { /* cache join is supplementary */ }
 
-    await BaseLinkerOrderIndex.bulkWrite(rows.map((row) => ({ updateOne: {
-      filter: { baseLinkerAccountId: accountId, orderId: row.orderId },
-      update: { $set: {
-        baseLinkerAccountId: accountId,
-        orderId: row.orderId,
-        orderIdNumeric: Number(row.orderId),
-        orderSortDate: Number(row.orderSortDate || 0),
-        sourceType: row.sourceType,
-        sourceId: row.sourceId,
-        preview: row.preview,
-        searchText: row.searchText,
-        syncToken,
+    // Do NOT rewrite every durable preview every 30 seconds. The queue poll is a
+    // freshness check, not a reason to re-send unchanged order payloads over the
+    // Render -> Atlas connection. With tens/hundreds of Intake orders that old
+    // behaviour amplified a tiny poll into a large service-initiated egress write.
+    const rowsNeedingFullWrite = rows.filter((row) => {
+      const previous = previousRowById.get(row.orderId);
+      if (!previous) return true;
+      if (Number(previous.orderIdNumeric || 0) !== Number(row.orderId || 0)) return true;
+      if (Number(previous.orderSortDate || 0) !== Number(row.orderSortDate || 0)) return true;
+      if (String(previous.sourceType || '') !== String(row.sourceType || '')) return true;
+      if (String(previous.sourceId || '') !== String(row.sourceId || '')) return true;
+      if (String(previous.searchText || '') !== String(row.searchText || '')) return true;
+      return JSON.stringify(previous.preview ?? null) !== JSON.stringify(row.preview ?? null);
+    });
+
+    if (rowsNeedingFullWrite.length) {
+      await BaseLinkerOrderIndex.bulkWrite(rowsNeedingFullWrite.map((row) => ({ updateOne: {
+        filter: { baseLinkerAccountId: accountId, orderId: row.orderId },
+        update: { $set: {
+          baseLinkerAccountId: accountId,
+          orderId: row.orderId,
+          orderIdNumeric: Number(row.orderId),
+          orderSortDate: Number(row.orderSortDate || 0),
+          sourceType: row.sourceType,
+          sourceId: row.sourceId,
+          preview: row.preview,
+          searchText: row.searchText,
+        } },
+        upsert: true,
+      } })), { ordered: false });
+    }
+
+    // `seenAt` means "this Intake row was observed in the latest authoritative
+    // scan" and is consumed by Commerce reservation provenance. Preserve that
+    // semantic with ONE compact heartbeat command instead of N full preview
+    // rewrites. During an explicit scope reset the same compact command also
+    // marks current rows with the new token before stale rows are deleted.
+    await BaseLinkerOrderIndex.updateMany(
+      { baseLinkerAccountId: accountId, orderId: { $in: [...currentIds] } },
+      { $set: {
         seenAt: now,
+        ...(resetIndex ? { syncToken } : {}),
       } },
-      upsert: true,
-    } })), { ordered: false });
+    );
   }
 
   const transition = await reconcileIndexTransition({ scope, currentOrders, currentIds, previousIds });
