@@ -13,6 +13,7 @@ const { applyAllegroSalesSettings, refreshAllegroSalesSettingsApply } = require(
 const { activateAllegroOffer } = require('../services/commerce/allegroActivation');
 const { previewAllegroOfferUpdate } = require('../services/commerce/allegroOfferUpdatePreview');
 const { applyAllegroOfferContent } = require('../services/commerce/allegroOfferContentUpdate');
+const { previewAllegroPriceSync, applyAllegroPriceSync } = require('../services/commerce/allegroPriceSync');
 const {
   listCatalog,
   getCatalogProduct,
@@ -116,6 +117,22 @@ router.post('/publications/allegro/update-content', asyncHandler(async (req, res
   const result = await applyAllegroOfferContent(req.body || {});
   res.set('Cache-Control', 'no-store');
   res.status(result.state === 'confirmed' ? 200 : 202).json(result);
+}));
+
+// Stage 3D.5: price sync uses Allegro's dedicated bulk price/stock command
+// contract. Preview is read-only; apply batches up to 25 distinct FIXED prices per
+// client-generated commandId and the same business command also polls/reconciles jobs.
+router.post('/publications/allegro/price-sync/preview', asyncHandler(async (req, res) => {
+  const result = await previewAllegroPriceSync(req.body || {});
+  res.set('Cache-Control', 'no-store');
+  res.json(result);
+}));
+
+router.post('/publications/allegro/price-sync', asyncHandler(async (req, res) => {
+  const result = await applyAllegroPriceSync(req.body || {});
+  res.set('Cache-Control', 'no-store');
+  const pending = result.jobs?.some?.((job) => ['reserved', 'sending', 'pending', 'unknown'].includes(job.state));
+  res.status(pending ? 202 : 200).json(result);
 }));
 
 router.get('/catalog', asyncHandler(async (req, res) => {
