@@ -396,7 +396,9 @@ async function reconcileAllegroPickingFromUpstream({ accountId, order, actor = n
     }
     const upstreamChanged = applyUpstreamState(doc, order, systemActor);
     if (changed || upstreamChanged) doc.revision = Number(doc.revision || 0) + 1;
-    if (changed || upstreamChanged) await savePickingDoc(doc);
+    // Persist verification metadata even when products/status did not change.
+    // The user-visible revision changes only for a semantic warehouse change.
+    await savePickingDoc(doc);
     await mirrorStateToIndex(doc, disposition);
     if (changed || upstreamChanged) emitPickingUpdate(doc);
     return publicState(doc);
@@ -676,11 +678,14 @@ async function markPickingOrderSent({ allegroAccountId, orderId, user, expectedR
     if (!readiness.allHandled) throw appError('allegro_picking_items_unhandled', { pendingLines: readiness.pendingLines });
     if (readiness.hasIssues) throw appError('allegro_picking_has_unresolved_issues', { problemLines: readiness.problemLines, missingQty: readiness.missingQty });
     if (!readiness.allPicked) throw appError('allegro_picking_not_ready');
+    const upstreamRevision = clean(order?.revision, 128);
+    if (!upstreamRevision) throw appError('allegro_order_response_invalid');
 
     await allegroRequest(aid, {
       method: 'PUT',
       path: `/order/checkout-forms/${encodeURIComponent(oid)}/fulfillment`,
       body: { status: 'SENT' },
+      query: { 'checkoutForm.revision': upstreamRevision },
       stage: 'warehouse_mark_sent',
       retryPolicy: 'idempotent',
       maxAttempts: 3,

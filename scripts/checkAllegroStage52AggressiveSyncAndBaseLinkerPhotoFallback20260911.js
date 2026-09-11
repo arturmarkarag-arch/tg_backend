@@ -56,7 +56,7 @@ check('Allegro fallback uses offer, GTIN and title without coupling providers', 
 });
 
 check('frontend has an aggressive realtime profile for Allegro', () => {
-  const source = fs.readFileSync(path.join(__dirname, '..', '..', 'tg_frontend-main', 'src', 'realtime', 'realtimePolling.js'), 'utf8');
+  const source = fs.readFileSync(path.join(__dirname, '..', '..', 'client', 'src', 'realtime', 'realtimePolling.js'), 'utf8');
   assert.match(source, /aggressive: Object\.freeze\(\{ connectedMs: 5_000, disconnectedMs: 3_000 \}\)/);
 });
 

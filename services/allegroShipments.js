@@ -9,14 +9,10 @@ const { allegroRequest } = require('./allegroHttpClient');
 const { appError } = require('../utils/errors');
 const { withLock } = require('../utils/lock');
 const { ORDER_STATUS } = require('../domain/warehousePickingState');
-const { classifyUpstream } = require('./allegroPicking');
+const { classifyUpstream, reconcileAllegroPickingFromUpstream } = require('./allegroPicking');
 
 function clean(value, max = 500) {
   return String(value ?? '').trim().slice(0, max);
-}
-
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, Math.max(0, Number(ms) || 0)));
 }
 
 function uniq(values, max = 128) {
@@ -37,6 +33,7 @@ function publicBinding(row) {
     lastError: clean(value.lastError, 1500),
     lastTraceId: clean(value.lastTraceId, 256),
     lastCommandCheckAt: value.lastCommandCheckAt || null,
+    nextCommandCheckAt: value.nextCommandCheckAt || null,
     updatedAt: value.updatedAt || null,
   };
 }
@@ -89,12 +86,18 @@ async function assertShipmentCreationReady(accountId, orderId, user) {
     maxAttempts: 3,
   });
   const disposition = classifyUpstream(current.payload);
+  if (clean(current.payload?.id, 128) !== orderId || !Array.isArray(current.payload?.lineItems)) throw appError('allegro_order_response_invalid');
+  await reconcileAllegroPickingFromUpstream({ accountId, order: current.payload });
   if (disposition === 'cancelled') throw appError('allegro_order_cancelled', { orderId });
   if (disposition === 'returned') throw appError('allegro_order_returned', { orderId });
   if (disposition === 'sent') throw appError('allegro_order_already_sent', { orderId });
   if (disposition === 'suspended') throw appError('allegro_order_suspended', { orderId });
   if (disposition !== 'active') throw appError('allegro_order_not_actionable', { orderId });
-  return picking;
+  const verified = await AllegroPickingOrder.findOne({ allegroAccountId: accountId, orderId });
+  if (verified?.upstreamReviewRequired) throw appError('allegro_upstream_review_required');
+  if (clean(verified?.ownerTelegramId, 128) !== actorId) throw appError('allegro_picking_not_owner');
+  if (verified?.status !== ORDER_STATUS.READY) throw appError('allegro_picking_items_unhandled');
+  return verified;
 }
 
 async function requireShipmentAccount(accountId, { write = false } = {}) {
@@ -144,6 +147,7 @@ async function refreshShipmentDetails(accountId, binding) {
 
 async function checkCreateCommand(accountId, binding) {
   if (!clean(binding?.commandId, 96)) return binding;
+  if (binding.nextCommandCheckAt && new Date(binding.nextCommandCheckAt).getTime() > Date.now()) return binding;
   const result = await allegroRequest(accountId, {
     method: 'GET',
     path: `/shipment-management/shipments/create-commands/${encodeURIComponent(binding.commandId)}`,
@@ -153,9 +157,12 @@ async function checkCreateCommand(accountId, binding) {
   });
   const status = clean(result.payload?.status, 32).toUpperCase();
   binding.lastCommandCheckAt = new Date();
+  binding.nextCommandCheckAt = new Date(Date.now() + Math.max(1000, Number(result.retryAfterMs) || 1000));
   binding.lastTraceId = result.traceId || '';
   if (status === 'SUCCESS') {
+    if (!clean(result.payload?.shipmentId, 128)) throw appError('allegro_order_response_invalid');
     binding.status = 'success';
+    binding.nextCommandCheckAt = null;
     binding.shipmentId = clean(result.payload?.shipmentId, 128);
     binding.lastError = '';
     await binding.save();
@@ -165,6 +172,7 @@ async function checkCreateCommand(accountId, binding) {
   if (['ERROR', 'FAILED', 'FAILURE'].includes(status)) {
     const errors = Array.isArray(result.payload?.errors) ? result.payload.errors : [];
     binding.status = 'error';
+    binding.nextCommandCheckAt = null;
     binding.lastError = clean(errors.map((item) => item?.userMessage || item?.message || item?.details).filter(Boolean).join(' | ') || 'Allegro не створив відправлення.', 1500);
     await binding.save();
     return binding;
@@ -180,15 +188,19 @@ async function getShipmentSummary(accountId, orderId) {
   if (!aid) throw appError('allegro_account_id_required');
   if (!oid) throw appError('allegro_order_id_required');
   await requireShipmentAccount(aid, { write: false });
-  const [binding, tracking] = await Promise.all([
-    AllegroShipmentBinding.findOne({ accountId: aid, orderId: oid }),
-    fetchOrderTracking(aid, oid),
-  ]);
-  return {
-    binding: publicBinding(binding),
-    tracking: tracking.shipments,
-    externalTrackingOnly: tracking.shipments.length > 0 && !clean(binding?.shipmentId, 128),
-  };
+  return withLock(`allegro-shipment:${aid}:${oid}`, async () => {
+    let binding = await AllegroShipmentBinding.findOne({ accountId: aid, orderId: oid });
+    if (binding?.status === 'pending') binding = await checkCreateCommand(aid, binding);
+    if (binding?.status === 'error') throw appError('allegro_shipment_create_failed', { detail: binding.lastError });
+    const pending = binding?.status === 'pending';
+    const tracking = pending ? { shipments: [] } : await fetchOrderTracking(aid, oid);
+    return {
+      ready: Boolean(binding?.shipmentId), pending,
+      binding: publicBinding(binding),
+      tracking: tracking.shipments,
+      externalTrackingOnly: !pending && tracking.shipments.length > 0 && !clean(binding?.shipmentId, 128),
+    };
+  }, { ttlMs: 180_000, waitMs: 8_000 });
 }
 
 async function prepareShipment(accountId, orderId, { user = null } = {}) {
@@ -199,7 +211,6 @@ async function prepareShipment(accountId, orderId, { user = null } = {}) {
   await requireShipmentAccount(aid, { write: true });
 
   return withLock(`allegro-shipment:${aid}:${oid}`, async () => {
-    await assertShipmentCreationReady(aid, oid, user);
     let binding = await AllegroShipmentBinding.findOne({ accountId: aid, orderId: oid });
     if (binding?.shipmentId) {
       await refreshShipmentDetails(aid, binding).catch(() => {});
@@ -214,8 +225,13 @@ async function prepareShipment(accountId, orderId, { user = null } = {}) {
         return { ready: true, pending: false, binding: publicBinding(binding), tracking: tracking.shipments || [] };
       }
       if (binding.status === 'error') throw appError('allegro_shipment_create_failed', { detail: binding.lastError });
+      // The existing command is still processing. Poll it on the next request;
+      // never submit a fresh proposal while its outcome is unresolved.
+      return { ready: false, pending: true, binding: publicBinding(binding), tracking: [] };
     }
 
+    if (binding?.status === 'error') throw appError('allegro_shipment_create_failed', { detail: binding.lastError });
+    await assertShipmentCreationReady(aid, oid, user);
     const trackingBefore = await fetchOrderTracking(aid, oid);
     if (trackingBefore.shipments.length && !binding?.shipmentId) {
       return {
@@ -254,7 +270,7 @@ async function prepareShipment(accountId, orderId, { user = null } = {}) {
       { upsert: true, new: true, setDefaultsOnInsert: true },
     );
 
-    await allegroRequest(aid, {
+    const submitted = await allegroRequest(aid, {
       method: 'POST',
       path: '/shipment-management/shipments/create-commands',
       stage: 'shipment_create',
@@ -263,19 +279,11 @@ async function prepareShipment(accountId, orderId, { user = null } = {}) {
       body: { commandId, input: suggestedInput },
     });
 
-    const delays = [250, 500, 800, 1200, 1600];
-    for (const delay of delays) {
-      await sleep(delay);
-      binding = await checkCreateCommand(aid, binding);
-      if (binding.status === 'success' && binding.shipmentId) {
-        const tracking = await fetchOrderTracking(aid, oid).catch(() => ({ shipments: [] }));
-        return { ready: true, pending: false, binding: publicBinding(binding), tracking: tracking.shipments || [] };
-      }
-      if (binding.status === 'error') throw appError('allegro_shipment_create_failed', { detail: binding.lastError });
-    }
+    binding.nextCommandCheckAt = new Date(Date.now() + Math.max(1000, Number(submitted.retryAfterMs) || 1000));
+    await binding.save();
 
     return { ready: false, pending: true, binding: publicBinding(binding), tracking: [] };
-  }, { ttlMs: 30_000, waitMs: 8_000 });
+  }, { ttlMs: 600_000, waitMs: 8_000 });
 }
 
 async function getShipmentLabel(accountId, orderId) {

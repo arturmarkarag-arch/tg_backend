@@ -19,6 +19,7 @@ const AllegroShipmentBindingSchema = new mongoose.Schema({
   lastError: { type: String, default: '', trim: true, maxlength: 1500 },
   lastTraceId: { type: String, default: '', trim: true, maxlength: 256 },
   lastCommandCheckAt: { type: Date, default: null },
+  nextCommandCheckAt: { type: Date, default: null },
 }, { timestamps: true });
 
 AllegroShipmentBindingSchema.index({ accountId: 1, orderId: 1 }, { unique: true });

@@ -92,7 +92,7 @@ check('manual recovery rebuilds local cache without mutating Allegro', () => {
   assert(orders.includes('async function forceRebootstrapAllegroAccount'));
   assert(orders.includes('state?.initialized === true'));
   assert(orders.includes("bootstrapState: 'complete'"));
-  assert(orders.includes('const result = await bootstrapAccount(account, state)'));
+  assert(orders.includes('const bootstrap = await bootstrapAccount(account, state)'));
   assert(route.includes("router.post('/accounts/:accountId/orders/rebootstrap'"));
 });
 

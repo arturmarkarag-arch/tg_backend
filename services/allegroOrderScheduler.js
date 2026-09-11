@@ -1,14 +1,24 @@
 'use strict';
 
 const { listAllegroAccounts } = require('./allegroAccounts');
-const { syncOneAllegroAccount, getAllegroOrderSyncStates, setAllegroOrderRetryAt } = require('./allegroOrders');
+const { syncOneAllegroAccount, syncAllegroOrderImages, getAllegroOrderSyncStates, setAllegroOrderRetryAt } = require('./allegroOrders');
 const { runAsSchedulerLeader } = require('./schedulerLeader');
 
 const ORDER_POLL_MS = Math.min(60_000, Math.max(3_000, Number(process.env.ALLEGRO_ORDER_POLL_MS) || 5_000));
 const DEFAULT_ERROR_BACKOFF_MS = Math.min(10 * 60_000, Math.max(5_000, Number(process.env.ALLEGRO_ORDER_ERROR_BACKOFF_MS) || 15_000));
 
 let timer = null;
-let running = false;
+const inFlight = new Set();
+const imagesInFlight = new Set();
+
+function scheduleImages(accountId) {
+  if (imagesInFlight.has(accountId)) return;
+  imagesInFlight.add(accountId);
+  // Independent lane: a stalled photo must never delay the next order poll.
+  Promise.resolve().then(() => syncAllegroOrderImages(accountId))
+    .catch((error) => { if (error?.code !== 'lock_busy') console.warn('[allegro-image-scheduler]', error?.code || 'image_sync_failed'); })
+    .finally(() => imagesInFlight.delete(accountId));
+}
 
 function normalizedBackoff(error) {
   const upstream = Number(error?.args?.retryAfterMs || 0);
@@ -38,14 +48,17 @@ async function runAllegroOrderTick() {
   const syncByAccountId = new Map(syncStates.map((row) => [String(row.accountId || ''), row]));
   const results = await Promise.all(enabled.map(async (account) => {
     const accountId = String(account.accountId || '').trim();
+    if (inFlight.has(accountId)) return { accountId, skipped: true, reason: 'account_busy' };
     const sync = syncByAccountId.get(accountId) || {};
     const retryAt = sync?.nextRetryAt ? new Date(sync.nextRetryAt).getTime() : 0;
     if (Number.isFinite(retryAt) && retryAt > Date.now()) {
       return { accountId, skipped: true, reason: 'error_backoff', retryAfter: new Date(retryAt).toISOString() };
     }
+    inFlight.add(accountId);
     try {
       const result = await runAccountTick(account);
-      await setAllegroOrderRetryAt(accountId, null);
+      if (!result?.skipped) await setAllegroOrderRetryAt(accountId, null);
+      if (result?.caughtUp) scheduleImages(accountId);
       return result;
     } catch (error) {
       const backoffMs = normalizedBackoff(error);
@@ -57,6 +70,8 @@ async function runAllegroOrderTick() {
         retryAfterMs: backoffMs,
         retryAfter: retryAtDate.toISOString(),
       };
+    } finally {
+      inFlight.delete(accountId);
     }
   }));
   return {
@@ -69,11 +84,8 @@ async function runAllegroOrderTick() {
 function startAllegroOrderScheduler() {
   if (timer) return timer;
   const tick = async () => {
-    if (running) return;
-    running = true;
     try { await runAllegroOrderTick(); }
     catch (error) { console.error('[allegro-order-scheduler]', error?.stack || error); }
-    finally { running = false; }
   };
   tick();
   timer = setInterval(tick, ORDER_POLL_MS);

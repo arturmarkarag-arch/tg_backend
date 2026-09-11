@@ -23,7 +23,7 @@ check('Allegro order photos fall back through full offer and exact catalog produ
 });
 
 check('photo backfill returns actionable diagnostics', () => {
-  assert(orders.includes('resolvedOffers: imageMap.size'));
+  assert(orders.includes('resolvedOffers += 1'));
   assert(orders.includes('unresolvedOfferIds: unresolvedOfferIds.slice(0, 20)'));
   assert(orders.includes("requiredScope: 'allegro:api:sale:offers:read'"));
 });

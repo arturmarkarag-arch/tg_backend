@@ -38,9 +38,12 @@ const AllegroOrderIndexSchema = new mongoose.Schema({
   preview: { type: mongoose.Schema.Types.Mixed, required: true },
   searchText: { type: String, default: '', maxlength: 8192 },
   seenAt: { type: Date, default: Date.now },
+  nextImageCheckAt: { type: Date, default: null },
 }, { timestamps: true });
 
 AllegroOrderIndexSchema.index({ accountId: 1, checkoutFormId: 1 }, { unique: true });
+AllegroOrderIndexSchema.index({ accountId: 1, workflowStage: 1, seenAt: 1 });
+AllegroOrderIndexSchema.index({ accountId: 1, nextImageCheckAt: 1 });
 AllegroOrderIndexSchema.index({ workflowStage: 1, orderSortDate: -1, checkoutFormId: 1 });
 AllegroOrderIndexSchema.index({ accountId: 1, workflowStage: 1, orderSortDate: -1, checkoutFormId: 1 });
 

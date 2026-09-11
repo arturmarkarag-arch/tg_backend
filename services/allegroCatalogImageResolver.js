@@ -33,7 +33,7 @@ function offerImagesFromPayload(payload) {
 function saleOfferImagesFromPayload(payload, offerId = '') {
   const wanted = clean(offerId, 64);
   const offers = Array.isArray(payload?.offers) ? payload.offers : [];
-  const offer = offers.find((row) => !wanted || clean(row?.id, 64) === wanted) || offers[0] || null;
+  const offer = wanted ? offers.find((row) => clean(row?.id, 64) === wanted) : offers[0];
   if (!offer) return [];
   return normalizeImageUrls([offer?.primaryImage, ...(Array.isArray(offer?.images) ? offer.images : [])]);
 }

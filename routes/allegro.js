@@ -95,6 +95,7 @@ router.get('/status', requireMarketplaceWarehouseAccess, asyncHandler(async (_re
     stage: 5,
     hardeningStage: '5.1',
     workflowApiVersion: 2,
+    synchronizationVersion: 2,
     provider: 'allegro',
     independentProvider: true,
     oauthConfigured: config.oauthConfigured,

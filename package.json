@@ -85,7 +85,8 @@
     "test:allegro:stage2": "node scripts/checkAllegroStage2Contract20260910.js",
     "test:allegro:stage3": "node scripts/checkAllegroStage3Contract20260910.js",
     "test:allegro:stage4": "node scripts/checkAllegroStage4Contract20260911.js",
-    "test:allegro:stage4.2": "node scripts/checkAllegroStage42EnvConfigContract20260911.js"
+    "test:allegro:stage4.2": "node scripts/checkAllegroStage42EnvConfigContract20260911.js",
+    "test:allegro:freshness": "node scripts/checkAllegroFreshness20260911.js && node scripts/checkAllegroRecovery20260911.js"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1030.0",

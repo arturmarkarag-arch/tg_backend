@@ -1,5 +1,7 @@
 'use strict';
 
+const AllegroOfferImage = require('../models/AllegroOfferImage');
+const { ORDER_RECHECK_MS, ORDER_RECHECK_BATCH, IMAGE_FRESH_MS, IMAGE_MISSING_MS, IMAGE_ERROR_MS, IMAGE_BATCH, mapSettledLimit } = require('./allegroFreshnessPolicy');
 const AllegroAccount = require('../models/AllegroAccount');
 const AllegroOrderIndex = require('../models/AllegroOrderIndex');
 const AllegroOrderSyncState = require('../models/AllegroOrderSyncState');
@@ -34,6 +36,7 @@ const EVENT_TYPES_REQUIRING_EXACT_REFRESH = new Set([
   'BUYER_CANCELLED',
   'AUTO_CANCELLED',
   'FULFILLMENT_STATUS_CHANGED',
+  'BUYER_MODIFIED',
 ]);
 
 function clean(value, max = 500) {
@@ -125,7 +128,7 @@ function offerImagesFromPayload(payload) {
 function offerListImagesFromPayload(payload, offerId = '') {
   const wanted = clean(offerId, 128);
   const offers = Array.isArray(payload?.offers) ? payload.offers : [];
-  const offer = offers.find((row) => !wanted || clean(row?.id, 128) === wanted) || offers[0] || null;
+  const offer = wanted ? offers.find((row) => clean(row?.id, 128) === wanted) : offers[0];
   if (!offer) return [];
   return normalizedImageUrls([
     offer?.primaryImage,
@@ -213,126 +216,99 @@ async function fetchOfferImages(accountId, offerId, { stage = 'offer_image_read'
 }
 
 async function resolveOfferImages(account, order, existingPreview = null) {
+  // Ingest never waits for photo HTTP calls. Photos have a separate durable TTL.
   const imageMap = existingOfferImageMap(existingPreview);
-  const lineItems = Array.isArray(order?.lineItems) ? order.lineItems : [];
-  const offerIds = [...new Set(lineItems.map((item) => clean(item?.offer?.id, 128)).filter(Boolean))];
-  const missing = offerIds.filter((offerId) => !imageMap.has(offerId)).slice(0, 50);
-  if (!missing.length) return imageMap;
-
-  const scopeState = capabilityMatrix(account?.scopes);
-  if (scopeState.scopesKnown && scopeState.capabilities.saleOffersRead !== true) return imageMap;
-
-  await Promise.all(missing.map(async (offerId) => {
-    try {
-      const resolved = await fetchOfferImages(account.accountId, offerId, { stage: 'offer_image_read' });
-      if (resolved.images.length) imageMap.set(offerId, resolved.images);
-    } catch (error) {
-      // Photos are enrichment only. Missing/archived offers or missing sale scope
-      // must never block order ingestion or warehouse work.
-      if (![403, 404].includes(upstreamStatus(error))) {
-        console.warn('[allegro] offer image enrichment failed', offerId, error?.message || error);
-      }
-    }
-  }));
+  const offerIds = [...new Set((order?.lineItems || []).map((item) => clean(item?.offer?.id, 128)).filter(Boolean))];
+  const cached = await AllegroOfferImage.find({ accountId: account.accountId, offerId: { $in: offerIds } }).lean();
+  for (const row of cached) {
+    if (row.checkedAt) imageMap.set(row.offerId, normalizedImageUrls(row.images));
+  }
   return imageMap;
 }
 
-async function backfillMissingOrderImages(account, { maxOffers = 50, maxOrders = 100 } = {}) {
+async function backfillMissingOrderImages(account, { maxOffers = IMAGE_BATCH, maxOrders = 100 } = {}) {
+  const empty = { updatedOrders: 0, fetchedOffers: 0, resolvedOffers: 0, unresolvedOffers: 0, missingScope: false };
   const scopeState = capabilityMatrix(account?.scopes);
   if (scopeState.scopesKnown && scopeState.capabilities.saleOffersRead !== true) {
-    return {
-      updatedOrders: 0,
-      fetchedOffers: 0,
-      resolvedOffers: 0,
-      unresolvedOffers: 0,
-      missingScope: true,
-      requiredScope: 'allegro:api:sale:offers:read',
-    };
+    return { ...empty, missingScope: true, requiredScope: 'allegro:api:sale:offers:read' };
   }
-
+  const now = new Date();
   const rows = await AllegroOrderIndex.find({
     accountId: account.accountId,
-    'preview.products': {
-      $elemMatch: {
-        $or: [
-          { image_url: '' },
-          { image_url: { $exists: false } },
-        ],
-      },
-    },
-  }).sort({ orderSortDate: -1 }).limit(Math.max(1, Math.min(250, Number(maxOrders) || 100))).lean();
-  if (!rows.length) return { updatedOrders: 0, fetchedOffers: 0, resolvedOffers: 0, unresolvedOffers: 0, missingScope: false };
-
-  const offerIds = [];
-  for (const row of rows) {
-    for (const product of Array.isArray(row?.preview?.products) ? row.preview.products : []) {
-      const current = normalizedImageUrls([...(Array.isArray(product?.images) ? product.images : []), product?.image_url]);
-      const offerId = clean(product?.auction_id, 128);
-      if (!current.length && offerId && !offerIds.includes(offerId)) offerIds.push(offerId);
-      if (offerIds.length >= Math.max(1, Math.min(100, Number(maxOffers) || 50))) break;
-    }
-    if (offerIds.length >= Math.max(1, Math.min(100, Number(maxOffers) || 50))) break;
-  }
-  if (!offerIds.length) return { updatedOrders: 0, fetchedOffers: 0, resolvedOffers: 0, unresolvedOffers: 0, missingScope: false };
-
-  const imageMap = new Map();
+    workflowStage: { $in: ['processing', 'deferred'] },
+    $or: [{ nextImageCheckAt: null }, { nextImageCheckAt: { $lte: now } }],
+  }).sort({ nextImageCheckAt: 1, orderSortDate: -1 }).limit(Math.min(250, maxOrders)).lean();
+  if (!rows.length) return empty;
+  const offerIds = [...new Set(rows.flatMap((row) => (row.preview?.products || []).map((p) => clean(p.auction_id, 128))).filter(Boolean))];
+  const cached = await AllegroOfferImage.find({ accountId: account.accountId, offerId: { $in: offerIds } }).lean();
+  const cache = new Map(cached.map((row) => [row.offerId, row]));
+  const due = offerIds.filter((id) => !cache.get(id)?.nextCheckAt || new Date(cache.get(id).nextCheckAt) <= now).slice(0, Math.min(100, maxOffers));
   const sources = {};
   const unresolvedOfferIds = [];
-  await Promise.all(offerIds.map(async (offerId) => {
+  let fetchedOffers = 0;
+  let resolvedOffers = 0;
+  let photoError = '';
+  let nextImageRetryAt = null;
+  // Two workers leave capacity for order/picking calls and cannot start 50 requests together.
+  await mapSettledLimit(due, 2, async (offerId) => {
+    if (nextImageRetryAt) return;
+    let fields;
     try {
+      fetchedOffers += 1;
       const resolved = await fetchOfferImages(account.accountId, offerId, { stage: 'offer_image_backfill' });
-      if (resolved.images.length) {
-        imageMap.set(offerId, resolved.images);
-        sources[resolved.source] = Number(sources[resolved.source] || 0) + 1;
-      } else {
-        unresolvedOfferIds.push(offerId);
-      }
+      const checkedAt = new Date();
+      fields = { images: resolved.images, source: resolved.source, checkedAt, lastError: '',
+        nextCheckAt: new Date(checkedAt.getTime() + (resolved.images.length ? IMAGE_FRESH_MS : IMAGE_MISSING_MS)) };
+      sources[resolved.source] = (sources[resolved.source] || 0) + 1;
+      if (!resolved.images.length) unresolvedOfferIds.push(offerId);
+      else resolvedOffers += 1;
     } catch (error) {
+      photoError = clean(error?.code || 'allegro_image_refresh_failed', 160);
       unresolvedOfferIds.push(offerId);
-      if (![403, 404].includes(upstreamStatus(error))) {
-        console.warn('[allegro] offer image backfill failed', offerId, error?.message || error);
-      }
+      // Keep last known photo on a transport failure, but never call it freshly verified.
+      fields = { lastError: photoError, nextCheckAt: new Date(Date.now() + Math.max(IMAGE_ERROR_MS, Number(error?.args?.retryAfterMs) || 0)) };
+      if (Number(error?.args?.retryAfterMs) > 0 || upstreamStatus(error) === 429) nextImageRetryAt = fields.nextCheckAt;
     }
-  }));
-  if (!imageMap.size) {
-    return {
-      updatedOrders: 0,
-      fetchedOffers: offerIds.length,
-      resolvedOffers: 0,
-      unresolvedOffers: unresolvedOfferIds.length,
-      unresolvedOfferIds: unresolvedOfferIds.slice(0, 20),
-      missingScope: false,
-      sources,
-    };
-  }
-
+    const row = await AllegroOfferImage.findOneAndUpdate({ accountId: account.accountId, offerId }, { $set: fields }, { upsert: true, new: true }).lean();
+    cache.set(offerId, row);
+  }).then((results) => {
+    const failure = results.find((r) => r.status === 'rejected');
+    if (failure) throw failure.reason;
+  });
   let updatedOrders = 0;
   for (const row of rows) {
     let changed = false;
-    const preview = { ...(row.preview || {}) };
-    preview.products = (Array.isArray(preview.products) ? preview.products : []).map((product) => {
-      const existingImages = normalizedImageUrls([...(Array.isArray(product?.images) ? product.images : []), product?.image_url]);
-      if (existingImages.length) return product;
-      const images = imageMap.get(clean(product?.auction_id, 128)) || [];
-      if (!images.length) return product;
+    const nextChecks = [];
+    const products = (row.preview?.products || []).map((product) => {
+      const cachedImage = cache.get(clean(product.auction_id, 128));
+      nextChecks.push(cachedImage?.nextCheckAt ? new Date(cachedImage.nextCheckAt).getTime() : now.getTime());
+      if (!cachedImage?.checkedAt) return product;
+      const images = normalizedImageUrls(cachedImage.images);
+      if (JSON.stringify(images) === JSON.stringify(product.images || []) && (product.image_url || '') === (images[0] || '')) return product;
       changed = true;
-      return { ...product, image_url: images[0], images };
+      return { ...product, images, image_url: images[0] || '' };
     });
-    if (!changed) continue;
-    await AllegroOrderIndex.updateOne({ _id: row._id }, { $set: { preview } });
-    updatedOrders += 1;
+    // The photo lane runs independently from order ingestion. Match the offer
+    // identity and patch only image fields, never a snapshot of the product list.
+    if (changed) {
+      for (const product of products) {
+        const cachedImage = cache.get(clean(product.auction_id, 128));
+        if (!cachedImage?.checkedAt) continue;
+        await AllegroOrderIndex.updateOne({ _id: row._id, accountId: account.accountId }, {
+          $set: { 'preview.products.$[product].images': product.images, 'preview.products.$[product].image_url': product.image_url },
+        }, { arrayFilters: [{ 'product.auction_id': product.auction_id }] });
+      }
+    }
+    await AllegroOrderIndex.updateOne({ _id: row._id, accountId: account.accountId, seenAt: row.seenAt }, { $set: {
+      nextImageCheckAt: new Date(nextChecks.length ? Math.min(...nextChecks) : now.getTime() + IMAGE_FRESH_MS),
+    } });
+    if (changed) updatedOrders += 1;
   }
-
-  if (updatedOrders > 0) emitOrdersChanged(account.accountId, { orders: [], removedOrderIds: [], resync: true });
-  return {
-    updatedOrders,
-    fetchedOffers: offerIds.length,
-    resolvedOffers: imageMap.size,
-    unresolvedOffers: unresolvedOfferIds.length,
-    unresolvedOfferIds: unresolvedOfferIds.slice(0, 20),
-    missingScope: false,
-    sources,
-  };
+  photoError = photoError || [...cache.values()].find((row) => row.lastError)?.lastError || '';
+  await AllegroOrderSyncState.updateOne({ accountId: account.accountId }, { $set: { imageError: photoError, nextImageRetryAt } });
+  if (updatedOrders) emitOrdersChanged(account.accountId, { resync: true });
+  return { ...empty, updatedOrders, fetchedOffers, resolvedOffers,
+    unresolvedOffers: unresolvedOfferIds.length, unresolvedOfferIds: unresolvedOfferIds.slice(0, 20), sources };
 }
 
 function compactLineItem(item = {}, imageMap = new Map()) {
@@ -424,6 +400,7 @@ function indexDocument(order, account, event = null, imageMap = new Map()) {
     preview,
     searchText: operationalSearchText(preview),
     seenAt: new Date(),
+    nextImageCheckAt: null,
   };
 }
 
@@ -481,13 +458,15 @@ async function fetchEventStats(accountId) {
 }
 
 async function fetchCheckoutForm(accountId, checkoutFormId) {
-  return allegroRequest(accountId, {
+  const result = await allegroRequest(accountId, {
     method: 'GET',
     path: `/order/checkout-forms/${encodeURIComponent(checkoutFormId)}`,
     stage: 'order_detail_refresh',
     retryPolicy: 'safe',
     maxAttempts: 3,
   });
+  if (clean(result.payload?.id, 128) !== checkoutFormId || !Array.isArray(result.payload?.lineItems)) throw appError('allegro_order_response_invalid');
+  return result;
 }
 
 async function fetchBootstrapActiveOrders(account) {
@@ -511,7 +490,8 @@ async function fetchBootstrapActiveOrders(account) {
       retryPolicy: 'safe',
       maxAttempts: 3,
     });
-    const rows = Array.isArray(result.payload?.checkoutForms) ? result.payload.checkoutForms : [];
+    if (!Array.isArray(result.payload?.checkoutForms)) throw appError('allegro_order_response_invalid');
+    const rows = result.payload.checkoutForms;
     collected.push(...rows);
     const totalCount = Math.max(rows.length, Number(result.payload?.totalCount) || 0);
     offset += rows.length;
@@ -545,8 +525,8 @@ async function bootstrapAccount(account, state) {
     if (result.order) upserted.push(result.order);
   }
 
-  // Any previously cached non-terminal row not present in the authoritative
-  // active snapshot is no longer actionable. This matters for a safe re-bootstrap.
+  // Absence from a filtered list is not proof of deletion. Recheck exact orders
+  // to preserve SENT/CANCELLED history and tolerate changes during pagination.
   const activeIds = [...seen.keys()];
   const staleQuery = {
     accountId: account.accountId,
@@ -554,12 +534,9 @@ async function bootstrapAccount(account, state) {
   };
   if (activeIds.length) staleQuery.checkoutFormId = { $nin: activeIds };
   const staleRows = await AllegroOrderIndex.find(staleQuery).select({ checkoutFormId: 1 }).lean();
-  if (staleRows.length) {
-    for (const row of staleRows) {
-      await require('./allegroPicking').markAllegroPickingMissing({ accountId: account.accountId, orderId: row.checkoutFormId });
-    }
-    await AllegroOrderIndex.deleteMany(staleQuery);
-  }
+  const staleResults = staleRows.length
+    ? await refreshCheckoutForms(account, staleRows.map((row) => row.checkoutFormId), new Map())
+    : [];
 
   const finishedAt = new Date();
   const updated = await AllegroOrderSyncState.findOneAndUpdate(
@@ -573,6 +550,7 @@ async function bootstrapAccount(account, state) {
         bootstrapBarrierEventId: barrier.id,
         bootstrapBarrierOccurredAt: barrier.occurredAt,
         lastBootstrapAt: finishedAt,
+        caughtUp: false,
         lastSuccessfulPollAt: finishedAt,
         lastPollAt: finishedAt,
         lastEventCount: 0,
@@ -593,20 +571,20 @@ async function bootstrapAccount(account, state) {
 
   emitOrdersChanged(account.accountId, {
     orders: upserted,
-    removedOrderIds: staleRows.map((row) => clean(row.checkoutFormId, 128)).filter(Boolean),
+    removedOrderIds: staleResults.filter((row) => row.removed).map((row) => row.checkoutFormId),
     resync: true,
   });
   return { accountId: account.accountId, bootstrapped: true, orders: upserted.length, state: publicSyncState(updated) };
 }
 
-function relevantRefreshPrefix(events) {
+function relevantRefreshPrefix(events, budget = MAX_DETAIL_REFRESHES_PER_TICK) {
   const prefix = [];
   const unique = new Set();
   for (const event of events) {
     const id = checkoutFormIdFromEvent(event);
     const type = clean(event?.type, 80).toUpperCase();
     if (id && EVENT_TYPES_REQUIRING_EXACT_REFRESH.has(type) && !unique.has(id)) {
-      if (unique.size >= MAX_DETAIL_REFRESHES_PER_TICK) break;
+      if (unique.size >= budget) break;
       unique.add(id);
     }
     prefix.push(event);
@@ -615,18 +593,11 @@ function relevantRefreshPrefix(events) {
 }
 
 async function mapLimit(values, limit, worker) {
-  const items = Array.from(values || []);
-  const results = new Array(items.length);
-  let next = 0;
-  const runners = Array.from({ length: Math.min(Math.max(1, limit), items.length) }, async () => {
-    while (next < items.length) {
-      const index = next;
-      next += 1;
-      results[index] = await worker(items[index], index);
-    }
-  });
-  await Promise.all(runners);
-  return results;
+  // Keep the lock until all sibling writes settle, including on failure.
+  const results = await mapSettledLimit(values || [], Math.max(1, limit), worker);
+  const failure = results.find((row) => row.status === 'rejected');
+  if (failure) throw failure.reason;
+  return results.map((row) => row.value);
 }
 
 function eventByCheckoutForm(events) {
@@ -640,7 +611,7 @@ function eventByCheckoutForm(events) {
 }
 
 async function refreshCheckoutForms(account, ids, eventMap) {
-  return mapLimit(ids, Math.min(4, MAX_DETAIL_REFRESHES_PER_TICK), async (id) => {
+  return mapLimit(ids, Math.min(2, MAX_DETAIL_REFRESHES_PER_TICK), async (id) => {
     try {
       const result = await fetchCheckoutForm(account.accountId, id);
       return upsertCheckoutForm(result.payload || {}, account, eventMap.get(id) || null);
@@ -679,14 +650,16 @@ async function pollEventJournal(account, state) {
       retryPolicy: 'safe',
       maxAttempts: 3,
     });
-    let events = Array.isArray(result.payload?.events) ? result.payload.events : [];
+    if (!Array.isArray(result.payload?.events)) throw appError('allegro_order_response_invalid');
+    let events = result.payload.events;
+    if (events.some((event) => !clean(event?.id, 128))) throw appError('allegro_order_response_invalid');
     if (cursorEventId) events = events.filter((event) => clean(event?.id, 128) !== cursorEventId);
     if (!events.length) {
       caughtUp = true;
       break;
     }
 
-    const { prefix, checkoutFormIds } = relevantRefreshPrefix(events);
+    const { prefix, checkoutFormIds } = relevantRefreshPrefix(events, MAX_DETAIL_REFRESHES_PER_TICK - totalRefreshed);
     if (!prefix.length) break;
     const eventMap = eventByCheckoutForm(prefix);
     const refreshed = await refreshCheckoutForms(account, checkoutFormIds, eventMap);
@@ -721,6 +694,8 @@ async function pollEventJournal(account, state) {
         cursorOccurredAt,
         lastPollAt: now,
         lastSuccessfulPollAt: now,
+        caughtUp,
+        ...(caughtUp ? { lastCaughtUpAt: now } : {}),
         lastEventCount: totalEvents,
         lastOrderRefreshCount: totalRefreshed,
         consecutiveFailures: 0,
@@ -815,6 +790,54 @@ async function setAllegroOrderRetryAt(accountId, retryAt = null) {
   );
 }
 
+async function reconcileStaleOrders(account) {
+  const rows = await AllegroOrderIndex.find({
+    accountId: account.accountId,
+    workflowStage: { $in: ['processing', 'deferred'] },
+    $or: [{ seenAt: { $lte: new Date(Date.now() - ORDER_RECHECK_MS) } }, { seenAt: null }],
+  }).sort({ seenAt: 1, checkoutFormId: 1 }).limit(ORDER_RECHECK_BATCH).lean();
+  const results = await refreshCheckoutForms(account, rows.map((row) => row.checkoutFormId), new Map());
+  if (results.length) emitOrdersChanged(account.accountId, { resync: true });
+  await AllegroOrderSyncState.updateOne({ accountId: account.accountId }, { $set: { lastReconcileAt: new Date(), reconcileError: '' } });
+  return results.length;
+}
+
+async function maintainProjection(account, result) {
+  // Drain the journal before spending the account budget on optional enrichment.
+  if (!result.caughtUp) return { ...result, imageBackfill: { skipped: true, reason: 'journal_catching_up' } };
+  let recheckedOrders = 0;
+  try { recheckedOrders = await reconcileStaleOrders(account); }
+  catch (error) {
+    await AllegroOrderSyncState.updateOne({ accountId: account.accountId }, { $set: { reconcileError: clean(error?.code || 'allegro_reconcile_failed', 160) } });
+    // Provider cooldowns must reach the scheduler; do not continue with photos.
+    if (error?.args?.retryAfterMs) throw error;
+  }
+  const state = await AllegroOrderSyncState.findOne({ accountId: account.accountId }).lean();
+  return { ...result, recheckedOrders, state: publicSyncState(state) };
+}
+
+async function syncAllegroOrderImages(accountId) {
+  const id = clean(accountId, 64);
+  const account = await getAllegroAccount(id, { requireEnabled: true, lean: true });
+  if (account.authState !== 'connected') throw appError('allegro_account_authorization_required');
+  return withLock(`allegro-order-images:${id}`, async () => {
+    const state = await AllegroOrderSyncState.findOne({ accountId: id }).lean();
+    if (!state?.caughtUp || state.reconcileError || state.consecutiveFailures > 0
+      || (state.nextRetryAt && new Date(state.nextRetryAt).getTime() > Date.now())
+      || (state.nextImageRetryAt && new Date(state.nextImageRetryAt).getTime() > Date.now())) {
+      return { skipped: true, reason: 'journal_catching_up' };
+    }
+    try {
+      const imageBackfill = await backfillMissingOrderImages(account);
+      return imageBackfill;
+    } catch (error) {
+      const code = clean(error?.code || 'allegro_image_refresh_failed', 160);
+      await AllegroOrderSyncState.updateOne({ accountId: id }, { $set: { imageError: code } });
+      return { error: code };
+    }
+  }, { ttlMs: ORDER_SYNC_LOCK_TTL_MS, waitMs: 0 });
+}
+
 async function forceRebootstrapAllegroAccount(accountId) {
   const id = clean(accountId, 64);
   const account = await getAllegroAccount(id, { requireEnabled: true, lean: true });
@@ -826,9 +849,10 @@ async function forceRebootstrapAllegroAccount(accountId) {
       // the authoritative snapshot is rebuilt. bootstrapAccount only replaces
       // actionable rows after the new SELLER snapshot has been fetched.
       await setAllegroOrderRetryAt(id, null);
-      const result = await bootstrapAccount(account, state);
-      const imageBackfill = await backfillMissingOrderImages(account);
-      return { ...result, imageBackfill };
+      const bootstrap = await bootstrapAccount(account, state);
+      const current = await AllegroOrderSyncState.findOne({ accountId: id }).lean();
+      const result = await pollEventJournal(account, current);
+      return await maintainProjection(account, { ...result, bootstrapped: true, orders: bootstrap.orders });
     } catch (error) {
       // A failed recovery attempt must not destroy the fact that this account
       // had a previously valid projection/cursor. Restore the completed marker
@@ -857,11 +881,15 @@ async function syncOneAllegroAccount(accountId) {
       const lastSuccessAt = safeDate(state?.lastSuccessfulPollAt);
       const staleAfterOutage = state?.initialized === true
         && (!lastSuccessAt || Date.now() - lastSuccessAt.getTime() >= JOURNAL_OUTAGE_REBOOTSTRAP_MS);
-      const result = !state?.initialized || staleAfterOutage
-        ? await bootstrapAccount(account, state)
-        : await pollEventJournal(account, state);
-      const imageBackfill = await backfillMissingOrderImages(account);
-      return { ...result, imageBackfill };
+      let bootstrapped = false;
+      let current = state;
+      if (!state?.initialized || staleAfterOutage) {
+        await bootstrapAccount(account, state);
+        current = await AllegroOrderSyncState.findOne({ accountId: id }).lean();
+        bootstrapped = true;
+      }
+      const result = await pollEventJournal(account, current);
+      return await maintainProjection(account, { ...result, bootstrapped });
     } catch (error) {
       await markSyncFailure(id, error);
       throw error;
@@ -871,12 +899,17 @@ async function syncOneAllegroAccount(accountId) {
 
 async function syncAllegroOrders({ accountId = '' } = {}) {
   const id = clean(accountId, 64);
-  if (id) return { accounts: [await syncOneAllegroAccount(id)] };
+  async function syncWithImages(aid) {
+    const result = await syncOneAllegroAccount(aid);
+    const imageBackfill = await syncAllegroOrderImages(aid).catch((error) => ({ error: error?.code || 'allegro_image_refresh_failed' }));
+    return { ...result, imageBackfill };
+  }
+  if (id) return { accounts: [await syncWithImages(id)] };
   const accounts = await listAllegroAccounts({ includeDisabled: false });
   const enabled = accounts.filter((account) => account.enabled === true && account.authState === 'connected');
   const results = await Promise.all(enabled.map(async (account) => {
     try {
-      return await syncOneAllegroAccount(account.accountId);
+      return await syncWithImages(account.accountId);
     } catch (error) {
       return { accountId: account.accountId, error: error?.code || error?.message || 'allegro_order_sync_failed' };
     }
@@ -889,17 +922,18 @@ function publicSyncState(row) {
   const now = Date.now();
   const initialized = value.initialized === true;
   const bootstrapState = clean(value.bootstrapState, 32) || 'pending';
-  const lastSuccess = safeDate(value.lastSuccessfulPollAt);
+  const lastCaughtUp = safeDate(value.lastCaughtUpAt);
   const nextRetry = safeDate(value.nextRetryAt);
   const consecutiveFailures = Math.max(0, Number(value.consecutiveFailures) || 0);
-  const lagMs = lastSuccess ? Math.max(0, now - lastSuccess.getTime()) : null;
-  const stale = initialized && (!lastSuccess || lagMs >= ORDER_SYNC_STALE_AFTER_MS);
+  const lagMs = lastCaughtUp ? Math.max(0, now - lastCaughtUp.getTime()) : null;
+  const stale = initialized && (!lastCaughtUp || lagMs >= ORDER_SYNC_STALE_AFTER_MS);
   let health = 'pending';
   if (!initialized && bootstrapState === 'running') health = 'bootstrapping';
   else if (!initialized && bootstrapState === 'error') health = 'error';
   else if (nextRetry && nextRetry.getTime() > now) health = 'backoff';
+  else if (initialized && value.caughtUp !== true) health = 'catching_up';
   else if (stale) health = 'stale';
-  else if (consecutiveFailures > 0 || clean(value.lastError, 1500)) health = 'degraded';
+  else if (consecutiveFailures > 0 || clean(value.lastError, 1500) || value.reconcileError) health = 'degraded';
   else if (initialized) health = 'healthy';
   return {
     accountId: clean(value.accountId, 64),
@@ -907,6 +941,12 @@ function publicSyncState(row) {
     bootstrapState,
     health,
     stale,
+    caughtUp: value.caughtUp === true,
+    lastCaughtUpAt: value.lastCaughtUpAt || null,
+    lastReconcileAt: value.lastReconcileAt || null,
+    reconcileError: clean(value.reconcileError, 160),
+    imageError: clean(value.imageError, 160),
+    nextImageRetryAt: value.nextImageRetryAt || null,
     staleAfterMs: ORDER_SYNC_STALE_AFTER_MS,
     lagMs,
     cursorEventId: clean(value.cursorEventId, 128),
@@ -946,6 +986,7 @@ function publicOrderFromRow(row, account = null) {
     allegroAccountColor: clean(account?.color || preview.allegroAccountColor, 32),
     order_id: clean(value.checkoutFormId || preview.order_id, 128),
     revision: clean(value.revision || preview.revision, 128),
+    verifiedAt: value.seenAt || null,
     order_status: clean(value.orderStatus || preview.order_status, 80),
     fulfillment_status: clean(value.fulfillmentStatus || preview.fulfillment_status, 80),
     fulfillment_provider_id: clean(value.fulfillmentProviderId || preview.fulfillment_provider_id, 80),
@@ -1056,6 +1097,7 @@ module.exports = {
   fetchOfferImages,
   backfillMissingOrderImages,
   syncOneAllegroAccount,
+  syncAllegroOrderImages,
   forceRebootstrapAllegroAccount,
   setAllegroOrderRetryAt,
   syncAllegroOrders,

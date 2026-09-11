@@ -255,7 +255,8 @@ function safeMetadata(value) {
 
 async function readPayload(response) {
   if (response.status === 204) return null;
-  const text = await response.text().catch(() => '');
+  // A truncated/aborted body is a transport failure, never an empty success.
+  const text = await response.text();
   if (!text) return null;
   try { return JSON.parse(text); } catch (_) { return { rawText: clean(text, 1000) }; }
 }

@@ -32,10 +32,11 @@ check('order ingest enriches missing product photos without making images a hard
 
 check('existing cached product photos are reused and old Stage 5 rows are backfilled on sync', () => {
   assert(orders.includes('existingOfferImageMap'));
-  assert(orders.includes('const missing = offerIds.filter((offerId) => !imageMap.has(offerId))'));
+  assert(orders.includes('AllegroOfferImage.find'));
+  assert(orders.includes('nextCheckAt'));
   assert(orders.includes('async function backfillMissingOrderImages'));
   assert(orders.includes("{ stage: 'offer_image_backfill' }"));
-  assert(orders.includes('const imageBackfill = await backfillMissingOrderImages(account)'));
+  assert(orders.includes('imageBackfill = await backfillMissingOrderImages(account)'));
 });
 
 check('TTN routes are operational warehouse routes and not admin diagnostics only', () => {
