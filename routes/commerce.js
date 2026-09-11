@@ -6,6 +6,9 @@ const { requireMarketplaceWarehouseAccess } = require('../utils/marketplaceWareh
 const { getCommerceIntegrationRegistry } = require('../services/commerce/integrationRegistry');
 const { previewPublication } = require('../services/commerce/publicationPreview');
 const { resolveAllegroMapping, saveAllegroMapping } = require('../services/commerce/allegroMapping');
+const { createAllegroDraft, refreshAllegroDraft } = require('../services/commerce/allegroDraftOffer');
+const { reconcileAllegroDraft } = require('../services/commerce/allegroDraftReconciliation');
+const { resolveAllegroSalesSettings, saveAllegroSalesSettings } = require('../services/commerce/allegroSalesSettings');
 const {
   listCatalog,
   getCatalogProduct,
@@ -40,6 +43,37 @@ router.post('/publications/allegro/mapping/resolve', asyncHandler(async (req, re
 
 router.put('/publications/allegro/mapping', asyncHandler(async (req, res) => {
   const result = await saveAllegroMapping(req.body || {});
+  res.set('Cache-Control', 'no-store');
+  res.json(result);
+}));
+
+router.post('/publications/allegro/drafts', asyncHandler(async (req, res) => {
+  const result = await createAllegroDraft(req.body || {});
+  res.set('Cache-Control', 'no-store');
+  const status = result.state === 'confirmed' ? ((result.alreadyBound || result.recovered) ? 200 : 201) : 202;
+  res.status(status).json(result);
+}));
+
+router.post('/publications/allegro/drafts/status', asyncHandler(async (req, res) => {
+  const result = await refreshAllegroDraft(req.body || {});
+  res.set('Cache-Control', 'no-store');
+  res.status(result.state === 'confirmed' ? 200 : 202).json(result);
+}));
+
+router.post('/publications/allegro/drafts/reconcile', asyncHandler(async (req, res) => {
+  const result = await reconcileAllegroDraft(req.body || {});
+  res.set('Cache-Control', 'no-store');
+  res.json(result);
+}));
+
+router.post('/publications/allegro/sales-settings/resolve', asyncHandler(async (req, res) => {
+  const result = await resolveAllegroSalesSettings(req.body || {});
+  res.set('Cache-Control', 'no-store');
+  res.json(result);
+}));
+
+router.put('/publications/allegro/sales-settings', asyncHandler(async (req, res) => {
+  const result = await saveAllegroSalesSettings(req.body || {});
   res.set('Cache-Control', 'no-store');
   res.json(result);
 }));

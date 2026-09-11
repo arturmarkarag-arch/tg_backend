@@ -44,7 +44,10 @@ const PROVIDERS = Object.freeze([
       { id: 'shipments.read', label: 'Відправлення / ТТН', operation: 'shipment-management', direction: 'read', implementation: LIVE, capability: 'shipmentsRead', scope: 'allegro:api:shipments:read' },
       { id: 'shipments.write', label: 'Wysyłam z Allegro', operation: 'shipment-management', direction: 'write', implementation: LIVE, capability: 'shipmentsWrite', scope: 'allegro:api:shipments:write' },
       { id: 'shipments.labels.read', label: 'Етикетка WzA', operation: 'shipment-management/label', direction: 'read', implementation: LIVE, capability: 'shipmentsRead', scope: 'allegro:api:shipments:read' },
-      { id: 'offers.publish', label: 'Створення offer', operation: 'POST /sale/product-offers', direction: 'write', implementation: PLANNED, capability: 'saleOffersWrite', scope: 'allegro:api:sale:offers:write' },
+      { id: 'offers.draft.create', label: 'Створення draft offer', operation: 'POST /sale/product-offers (INACTIVE)', direction: 'write', implementation: LIVE, capability: 'saleOffersWrite', scope: 'allegro:api:sale:offers:write', note: 'Stage 3C: idempotent/recoverable create через стабільний external.id; ACTIVE не вмикається.' },
+      { id: 'offers.draft.reconcile', label: 'Звірка draft offer', operation: 'GET /sale/product-offers/{offerId}', direction: 'read', implementation: LIVE, capability: 'saleOffersRead', scope: 'allegro:api:sale:offers:read', note: 'Stage 3D.1: read-back фактичного draft, drift detection та readiness перед налаштуваннями публікації.' },
+      { id: 'offers.sales-settings.read', label: 'Sales Settings для offer', operation: 'GET /sale/shipping-rates + after-sales-service-conditions', direction: 'read', implementation: LIVE, capability: 'saleSettingsRead', scope: 'allegro:api:sale:settings:read', note: 'Stage 3D.2: cennik dostawy, zwroty, reklamacje, gwarancja, handlingTime і location. Вибір зберігається локально; upstream write = 0.' },
+      { id: 'offers.publish', label: 'Активація offer', operation: 'PATCH /sale/product-offers/{offerId} publication.status=ACTIVE', direction: 'write', implementation: PLANNED, capability: 'saleOffersWrite', scope: 'allegro:api:sale:offers:write' },
       { id: 'offers.update', label: 'Редагування offer', operation: 'PATCH /sale/product-offers/{offerId}', direction: 'write', implementation: PLANNED, capability: 'saleOffersWrite', scope: 'allegro:api:sale:offers:write' },
       { id: 'offers.price.write', label: 'Синхронізація ціни', operation: 'price commands', direction: 'write', implementation: PLANNED },
       { id: 'offers.stock.write', label: 'Синхронізація залишку', operation: 'quantity commands', direction: 'write', implementation: PLANNED },
@@ -148,7 +151,7 @@ async function getCommerceIntegrationRegistry() {
   };
 
   return {
-    version: 2,
+    version: 5,
     generatedAt: new Date().toISOString(),
     providers: PROVIDERS.map((provider) => {
       const accounts = accountMap[provider.id] || [];
