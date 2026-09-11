@@ -335,7 +335,14 @@ router.get('/upload-url-pair', staffOnly, asyncHandler(async (req, res) => {
     sign(`${folder}/${filename}`),
     sign(`thumbs/${filename}`),
   ]);
-  res.json({ filename, mainUrl, thumbUrl, cacheControl: UPLOAD_CACHE_CONTROL });
+  res.json({
+    filename,
+    mainUrl,
+    thumbUrl,
+    cacheControl: UPLOAD_CACHE_CONTROL,
+    url: r2PublicUrl(folder, filename),
+    thumbPublicUrl: r2PublicUrl('thumbs', filename),
+  });
 }));
 
 // GET /api/v1/products/upload-url-triple — presigned PUTs for ALL THREE variants

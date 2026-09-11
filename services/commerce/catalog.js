@@ -2,10 +2,21 @@
 
 const mongoose = require('mongoose');
 const CommerceProduct = require('../../models/CommerceProduct');
+const CommerceCategory = require('../../models/CommerceCategory');
 const CommerceInventoryItem = require('../../models/CommerceInventoryItem');
 const ChannelListing = require('../../models/ChannelListing');
 const Product = require('../../models/Product');
 const { appError } = require('../../utils/errors');
+const {
+  normalizeIdentifiers,
+  legacyEanFromIdentifiers,
+  normalizeMedia: normalizeProductMedia,
+  normalizeAttributeValues,
+  normalizePhysical,
+  normalizeCondition,
+  normalizeCategoryId,
+  computeProductMasterReadiness,
+} = require('./productMaster');
 
 const VALID_STATUSES = new Set(['draft', 'active', 'archived']);
 const VALID_CURRENCIES = new Set(['PLN', 'EUR', 'USD', 'GBP', 'CZK']);
@@ -26,24 +37,6 @@ function actorFromRequest(req) {
     telegramId: String(req?.telegramId || user.telegramId || ''),
     name: text(user.name || user.fullName || user.username || '', 200),
   };
-}
-
-function normalizeMedia(raw) {
-  if (!Array.isArray(raw)) return [];
-  const seen = new Set();
-  const media = [];
-  for (const item of raw.slice(0, 30)) {
-    const url = text(typeof item === 'string' ? item : item?.url, 2000);
-    if (!url || seen.has(url)) continue;
-    seen.add(url);
-    media.push({
-      type: 'image',
-      url,
-      alt: text(item?.alt, 300),
-      source: ['catalog', 'warehouse', 'provider'].includes(item?.source) ? item.source : 'catalog',
-    });
-  }
-  return media;
 }
 
 function normalizeAttributes(raw) {
@@ -77,7 +70,7 @@ function normalizeWarehouseBindings(raw) {
   return out;
 }
 
-function normalizePayload(raw = {}, { partial = false } = {}) {
+async function normalizePayload(raw = {}, { partial = false, current = {} } = {}) {
   const patch = {};
   const set = (key, value) => { patch[key] = value; };
 
@@ -87,9 +80,20 @@ function normalizePayload(raw = {}, { partial = false } = {}) {
     set('name', name);
   }
   if (!partial || raw.sku !== undefined) set('sku', text(raw.sku, 120));
-  if (!partial || raw.ean !== undefined) set('ean', text(raw.ean, 120));
-  if (!partial || raw.description !== undefined) set('description', text(raw.description, 20000));
+
+  if (!partial || raw.identifiers !== undefined || raw.ean !== undefined) {
+    const sourceIdentifiers = raw.identifiers !== undefined ? raw.identifiers : current.identifiers;
+    const legacyEan = raw.ean !== undefined ? raw.ean : current.ean;
+    const identifiers = normalizeIdentifiers(sourceIdentifiers, legacyEan);
+    set('identifiers', identifiers);
+    set('ean', legacyEanFromIdentifiers(identifiers, legacyEan));
+  }
+
+  if (!partial || raw.description !== undefined) set('description', text(raw.description, 40000));
   if (!partial || raw.brand !== undefined) set('brand', text(raw.brand, 300));
+  if (!partial || raw.language !== undefined) set('language', text(raw.language || 'pl-PL', 35) || 'pl-PL');
+  if (!partial || raw.condition !== undefined) set('condition', normalizeCondition(raw.condition));
+  if (!partial || raw.categoryId !== undefined) set('categoryId', await normalizeCategoryId(raw.categoryId));
   if (!partial || raw.basePrice !== undefined) {
     const basePrice = Number(raw.basePrice ?? 0);
     if (!Number.isFinite(basePrice) || basePrice < 0) throw appError('validation_failed', { field: 'basePrice' });
@@ -105,8 +109,10 @@ function normalizePayload(raw = {}, { partial = false } = {}) {
     if (!VALID_STATUSES.has(status)) throw appError('validation_failed', { field: 'status' });
     set('status', status);
   }
-  if (!partial || raw.media !== undefined) set('media', normalizeMedia(raw.media));
+  if (!partial || raw.media !== undefined) set('media', normalizeProductMedia(raw.media, raw.name ?? current.name));
   if (!partial || raw.attributes !== undefined) set('attributes', normalizeAttributes(raw.attributes));
+  if (!partial || raw.attributeValues !== undefined) set('attributeValues', normalizeAttributeValues(raw.attributeValues));
+  if (!partial || raw.physical !== undefined) set('physical', normalizePhysical(raw.physical || {}));
   if (!partial || raw.warehouseBindings !== undefined) set('warehouseBindings', normalizeWarehouseBindings(raw.warehouseBindings));
   return patch;
 }
@@ -131,7 +137,8 @@ async function hydrateProducts(rawProducts) {
     .filter((id) => mongoose.isValidObjectId(id))))];
   const commerceIds = docs.map((doc) => doc._id);
 
-  const [sourceRows, inventoryRows, listingRows] = await Promise.all([
+  const categoryIds = [...new Set(docs.map((doc) => String(doc.categoryId || '')).filter((id) => mongoose.isValidObjectId(id)))];
+  const [sourceRows, inventoryRows, listingRows, categoryRows] = await Promise.all([
     sourceProductIds.length
       ? Product.find({ _id: { $in: sourceProductIds } })
         .select('_id name orderNumber barcode quantity status warehouse originalImageUrl localImageUrl imageUrls')
@@ -149,11 +156,13 @@ async function hydrateProducts(rawProducts) {
         },
       },
     ]),
+    categoryIds.length ? CommerceCategory.find({ _id: { $in: categoryIds } }).select('_id name slug parentId status').lean() : [],
   ]);
 
   const sourceById = new Map(sourceRows.map((row) => [String(row._id), row]));
   const inventoryByProductId = new Map(inventoryRows.map((row) => [String(row.commerceProductId), row]));
   const listingsById = new Map(listingRows.map((row) => [String(row._id), row]));
+  const categoryById = new Map(categoryRows.map((row) => [String(row._id), row]));
 
   return docs.map((doc) => {
     const bindings = (doc.warehouseBindings || []).map((binding) => {
@@ -182,17 +191,30 @@ async function hydrateProducts(rawProducts) {
     const inventory = inventoryByProductId.get(String(doc._id)) || null;
     const plain = typeof doc.toObject === 'function' ? doc.toObject() : doc;
     const onHand = Math.max(0, Math.floor(Number(inventory?.onHand || 0)));
-    return {
+    const result = {
       id: String(doc._id),
       sku: plain.sku || '',
       ean: plain.ean || '',
+      identifiers: normalizeIdentifiers(plain.identifiers, plain.ean),
       name: plain.name || '',
       description: plain.description || '',
       brand: plain.brand || '',
+      language: plain.language || 'pl-PL',
+      condition: plain.condition || 'unknown',
+      categoryId: plain.categoryId ? String(plain.categoryId) : '',
+      category: plain.categoryId && categoryById.get(String(plain.categoryId)) ? {
+        id: String(categoryById.get(String(plain.categoryId))._id),
+        name: categoryById.get(String(plain.categoryId)).name || '',
+        slug: categoryById.get(String(plain.categoryId)).slug || '',
+        parentId: categoryById.get(String(plain.categoryId)).parentId ? String(categoryById.get(String(plain.categoryId)).parentId) : '',
+        status: categoryById.get(String(plain.categoryId)).status || 'active',
+      } : null,
       basePrice: Number(plain.basePrice || 0),
       currency: plain.currency || 'PLN',
-      media: Array.isArray(plain.media) ? plain.media : [],
+      media: normalizeProductMedia(plain.media, plain.name),
       attributes: plain.attributes && typeof plain.attributes === 'object' ? plain.attributes : {},
+      attributeValues: normalizeAttributeValues(plain.attributeValues),
+      physical: normalizePhysical(plain.physical || {}),
       status: plain.status || 'draft',
       source: plain.source || 'manual',
       warehouseBindings: bindings,
@@ -215,6 +237,8 @@ async function hydrateProducts(rawProducts) {
       createdAt: plain.createdAt || null,
       updatedAt: plain.updatedAt || null,
     };
+    result.masterReadiness = computeProductMasterReadiness(result);
+    return result;
   });
 }
 
@@ -231,7 +255,7 @@ async function listCatalog(query = {}) {
   }
   if (search) {
     const rx = new RegExp(escapeRegex(search), 'i');
-    filter.$or = [{ name: rx }, { brand: rx }, { sku: rx }, { ean: rx }];
+    filter.$or = [{ name: rx }, { brand: rx }, { sku: rx }, { ean: rx }, { 'identifiers.value': rx }];
   }
 
   const [rows, total] = await Promise.all([
@@ -262,7 +286,7 @@ async function getCatalogProduct(id) {
 
 async function createCatalogProduct(raw, req) {
   const actor = actorFromRequest(req);
-  const payload = normalizePayload(raw || {}, { partial: false });
+  const payload = await normalizePayload(raw || {}, { partial: false });
   const inventoryQuantity = normalizeInventoryQuantity(raw?.inventoryQuantity ?? 0);
   await assertWarehouseBindingsExist(payload.warehouseBindings);
   const doc = new CommerceProduct({
@@ -301,7 +325,7 @@ async function updateCatalogProduct(id, raw, req) {
   if (!mongoose.isValidObjectId(id)) throw appError('commerce_product_not_found');
   const doc = await CommerceProduct.findById(id);
   if (!doc) throw appError('commerce_product_not_found');
-  const patch = normalizePayload(raw || {}, { partial: true });
+  const patch = await normalizePayload(raw || {}, { partial: true, current: doc.toObject() });
   const inventoryQuantity = raw?.inventoryQuantity !== undefined ? normalizeInventoryQuantity(raw.inventoryQuantity) : null;
   if (patch.warehouseBindings) await assertWarehouseBindingsExist(patch.warehouseBindings);
   Object.assign(doc, patch);
@@ -467,9 +491,10 @@ async function importWarehouseProducts(raw, req) {
       name: text(product.name, 500) || `Товар #${product.orderNumber || ''}`.trim(),
       brand: text(product.brand, 300),
       ean: text(product.barcode, 120),
+      identifiers: normalizeIdentifiers([], text(product.barcode, 120)).map((item) => ({ ...item, source: 'warehouse' })),
       basePrice: Math.max(0, Number(product.price || 0)),
       currency: 'PLN',
-      media: imageUrl ? [{ type: 'image', url: imageUrl, alt: text(product.name, 300), source: 'warehouse' }] : [],
+      media: imageUrl ? [{ type: 'image', url: imageUrl, alt: text(product.name, 300), source: 'warehouse', role: 'primary', position: 0 }] : [],
       warehouseBindings: [{ productId: product._id, unitsPerItem: 1, stockBuffer: 0, enabled: true }],
       directWarehouseProductId: product._id,
       status: 'draft',

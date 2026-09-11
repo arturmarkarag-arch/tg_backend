@@ -4,6 +4,7 @@ const express = require('express');
 const { asyncHandler } = require('../utils/errors');
 const { requireMarketplaceWarehouseAccess } = require('../utils/marketplaceWarehouseAccess');
 const { getCommerceIntegrationRegistry } = require('../services/commerce/integrationRegistry');
+const { getCommerceProviderRegistry, executeProviderOperation } = require('../services/commerce/providers/registry');
 const { previewPublication } = require('../services/commerce/publicationPreview');
 const { resolveAllegroMapping, saveAllegroMapping } = require('../services/commerce/allegroMapping');
 const { createAllegroDraft, refreshAllegroDraft } = require('../services/commerce/allegroDraftOffer');
@@ -18,6 +19,7 @@ const { previewAllegroStockSync } = require('../services/commerce/allegroStockSy
 const { applyAllegroStockSync } = require('../services/commerce/allegroStockSyncApply');
 const { lifecyclePreview, manageAllegroLifecycle } = require('../services/commerce/allegroLifecycle');
 const { scanAllegroListingHealth } = require('../services/commerce/allegroListingHealth');
+const { listCategories, createCategory, updateCategory } = require('../services/commerce/categories');
 const {
   listCatalog,
   getCatalogProduct,
@@ -35,6 +37,21 @@ router.get('/integrations', asyncHandler(async (_req, res) => {
   const registry = await getCommerceIntegrationRegistry();
   res.set('Cache-Control', 'no-store');
   res.json(registry);
+}));
+
+router.get('/providers', asyncHandler(async (_req, res) => {
+  const registry = await getCommerceProviderRegistry();
+  res.set('Cache-Control', 'no-store');
+  res.json(registry);
+}));
+
+// Provider Core v1: one provider-neutral dispatch surface. Provider-specific
+// routes below remain compatibility aliases while the UI migrates, but adding a
+// new marketplace no longer requires adding routes to Commerce Core.
+router.post('/providers/:provider/operations/:operation', asyncHandler(async (req, res) => {
+  const execution = await executeProviderOperation(req.params.provider, req.params.operation, req.body || {});
+  res.set('Cache-Control', 'no-store');
+  res.status(execution.httpStatus).json(execution.result);
 }));
 
 
@@ -177,6 +194,21 @@ router.post('/publications/allegro/health', asyncHandler(async (req, res) => {
   const result = await scanAllegroListingHealth(req.body || {});
   res.set('Cache-Control', 'no-store');
   res.json(result);
+}));
+
+router.get('/categories', asyncHandler(async (req, res) => {
+  const categories = await listCategories({ includeArchived: String(req.query.includeArchived || '') === 'true' });
+  res.json({ items: categories });
+}));
+
+router.post('/categories', asyncHandler(async (req, res) => {
+  const category = await createCategory(req.body || {});
+  res.status(201).json(category);
+}));
+
+router.patch('/categories/:id', asyncHandler(async (req, res) => {
+  const category = await updateCategory(req.params.id, req.body || {});
+  res.json(category);
 }));
 
 router.get('/catalog', asyncHandler(async (req, res) => {
