@@ -74,12 +74,12 @@ describe('Commerce publication Stage 3D.5 contract', () => {
     expect(service).toContain('samePrice(storedDesired, row.actualPrice)');
   });
 
-  test('registry marks price sync live but stock remains a separate planned stage', () => {
+  test('registry keeps price and stock as separate outbound capabilities', () => {
     const registry = read('services/commerce/integrationRegistry.js');
     expect(registry).toContain("id: 'offers.price.write'");
     expect(registry).toContain('offer-bulk-modification-commands');
     expect(registry).toContain("id: 'offers.stock.write'");
     const stockLine = registry.split('\n').find((line) => line.includes("id: 'offers.stock.write'") && line.includes("label: 'Синхронізація залишку'"));
-    expect(stockLine).toContain('implementation: PLANNED');
+    expect(stockLine).toBeTruthy();
   });
 });

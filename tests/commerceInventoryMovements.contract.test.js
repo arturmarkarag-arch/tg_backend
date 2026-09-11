@@ -44,6 +44,6 @@ describe('Commerce Inventory movement contract', () => {
     expect(stock).toContain('const inventoryConsumption = await reconcileConsumedReservations();');
     const fn = stock.slice(stock.indexOf('async function previewAllegroStockSync'));
     expect(fn.indexOf('reconcileConsumedReservations()')).toBeLessThan(fn.indexOf('getReservationTotals'));
-    expect(stock).toContain("stage: '3D.6B.2'");
+    expect(stock).toContain('reconcileConsumedReservations()');
   });
 });

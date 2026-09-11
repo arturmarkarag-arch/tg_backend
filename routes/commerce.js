@@ -15,6 +15,7 @@ const { previewAllegroOfferUpdate } = require('../services/commerce/allegroOffer
 const { applyAllegroOfferContent } = require('../services/commerce/allegroOfferContentUpdate');
 const { previewAllegroPriceSync, applyAllegroPriceSync } = require('../services/commerce/allegroPriceSync');
 const { previewAllegroStockSync } = require('../services/commerce/allegroStockSync');
+const { applyAllegroStockSync } = require('../services/commerce/allegroStockSyncApply');
 const {
   listCatalog,
   getCatalogProduct,
@@ -136,14 +137,20 @@ router.post('/publications/allegro/price-sync', asyncHandler(async (req, res) =>
   res.status(pending ? 202 : 200).json(result);
 }));
 
-// Stage 3D.6B.2: read-only stock preview backed by provider-neutral reservations
-// plus exactly-once movements in the separate Commerce Inventory. Main warehouse
-// Product.quantity stays outside this stock domain; Allegro write remains disabled
-// until Stage 3D.6C.
+// Stage 3D.6C: stock remains sourced only from the separate Commerce Inventory
+// minus provider-neutral reservations/movements. Preview is read-only; apply owns
+// durable beta bulk commands, polling/recovery and explicit zero-stock confirmation.
 router.post('/publications/allegro/stock-sync/preview', asyncHandler(async (req, res) => {
   const result = await previewAllegroStockSync(req.body || {});
   res.set('Cache-Control', 'no-store');
   res.json(result);
+}));
+
+router.post('/publications/allegro/stock-sync', asyncHandler(async (req, res) => {
+  const result = await applyAllegroStockSync(req.body || {});
+  res.set('Cache-Control', 'no-store');
+  const pending = result.jobs?.some?.((job) => ['reserved', 'sending', 'pending', 'unknown'].includes(job.state));
+  res.status(pending ? 202 : 200).json(result);
 }));
 
 router.get('/catalog', asyncHandler(async (req, res) => {

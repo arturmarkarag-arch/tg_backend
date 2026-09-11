@@ -229,6 +229,12 @@ async function previewAllegroStockSync(raw = {}) {
       }
 
       const needsChange = errors.length === 0 && !inSync;
+      if (needsChange && reservationLedger.mappingCoverageReady !== true) {
+        errors.push({
+          code: 'commerce_reservation_mapping_incomplete',
+          message: 'Central reservation ledger має unresolved/ambiguous order lines. Stock write fail-closed, доки mapping не буде однозначним.',
+        });
+      }
       const inventoryAccountingRequired = needsChange && !inventoryConsumption.ready;
       if (local.reservation.reserved > 0) {
         warnings.push({
@@ -270,7 +276,10 @@ async function previewAllegroStockSync(raw = {}) {
         endedNeedsReactivation,
         reservation: local.reservation,
         inventoryAccountingRequired,
-        writeReady: false,
+        writeReady: errors.length === 0
+          && reservationLedger.mappingCoverageReady === true
+          && inventoryConsumption.ready === true
+          && !endedNeedsReactivation,
         errors,
         warnings,
       });
@@ -278,8 +287,8 @@ async function previewAllegroStockSync(raw = {}) {
   }
 
   return {
-    stage: '3D.6B.2',
-    mode: 'preview_only',
+    stage: '3D.6C',
+    mode: 'preview_and_apply',
     providerWriteCalls: 0,
     sourceOfTruth: 'commerce_inventory_minus_central_reservations',
     reservationLedgerReady: true,
@@ -295,7 +304,7 @@ async function previewAllegroStockSync(raw = {}) {
       unresolvedHeldRows: reservationLedger.unresolvedHeldRows,
       ambiguousHeldRows: reservationLedger.ambiguousHeldRows,
       mappingCoverageReady: reservationLedger.mappingCoverageReady,
-      writeReady: false,
+      writeReady: reservationLedger.mappingCoverageReady === true && inventoryConsumption.ready === true,
     },
     inventoryConsumption,
     providerCalls,
