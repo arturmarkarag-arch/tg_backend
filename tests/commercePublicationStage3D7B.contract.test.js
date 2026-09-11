@@ -6,5 +6,5 @@ describe('Commerce Publication Stage 3D.7B contract',()=>{
   test('health reconciles all commerce dimensions',()=>{const s=read('services/commerce/allegroListingHealth.js');for(const token of ['contentAndMappingHealth','salesSettingsHealth','effectivePrice','effectiveStock','lifecycleHealth','CommercePublicationJob'])expect(s).toContain(token);});
   test('main warehouse quantity is never health stock source',()=>{const s=read('services/commerce/allegroListingHealth.js');expect(s).not.toContain('Product.quantity');expect(s).toContain('getReservationTotals');});
   test('event journal is diagnostic best effort',()=>{const s=read('services/commerce/allegroListingHealth.js');expect(s).toContain("coverage: 'best_effort_last_24h'");});
-  test('registry exposes final health',()=>{const r=read('services/commerce/providers/allegro.js');expect(r).toContain("id: 'offers.health.read'");expect(r).toContain('Stage 3D.7B');});
+  test('registry exposes final health',()=>{const r=read('services/commerce/integrationRegistry.js');expect(r).toContain("id: 'offers.health.read'");expect(r).toContain('Stage 3D.7B');});
 });
