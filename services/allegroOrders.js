@@ -19,6 +19,7 @@ const BOOTSTRAP_MAX_PAGES = Math.min(100, Math.max(1, Number(process.env.ALLEGRO
 // outage; otherwise an old cursor may no longer be a safe recovery point.
 const JOURNAL_OUTAGE_REBOOTSTRAP_MS = Math.min(59, Math.max(7, Number(process.env.ALLEGRO_ORDER_REBOOTSTRAP_AFTER_DAYS) || 55)) * 24 * 60 * 60 * 1000;
 const ORDER_SYNC_LOCK_TTL_MS = Math.min(60 * 60_000, Math.max(5 * 60_000, Number(process.env.ALLEGRO_ORDER_SYNC_LOCK_TTL_MS) || 15 * 60_000));
+const ORDER_SYNC_STALE_AFTER_MS = Math.min(24 * 60 * 60_000, Math.max(60_000, Number(process.env.ALLEGRO_ORDER_STALE_AFTER_MS) || 5 * 60_000));
 const PAGE_SIZE_VALUES = new Set([10, 20]);
 const ACTIVE_FULFILLMENT_STATUSES = Object.freeze([
   'NEW',
@@ -306,7 +307,11 @@ async function bootstrapAccount(account, state) {
         lastEventCount: 0,
         lastOrderRefreshCount: upserted.length,
         consecutiveFailures: 0,
+        nextRetryAt: null,
         lastError: '',
+        lastErrorCode: '',
+        lastErrorTraceId: '',
+        lastErrorHttpStatus: null,
       },
     },
     { upsert: true, new: true },
@@ -447,7 +452,11 @@ async function pollEventJournal(account, state) {
         lastEventCount: totalEvents,
         lastOrderRefreshCount: totalRefreshed,
         consecutiveFailures: 0,
+        nextRetryAt: null,
         lastError: '',
+        lastErrorCode: '',
+        lastErrorTraceId: '',
+        lastErrorHttpStatus: null,
       },
     },
     { upsert: true, new: true },
@@ -494,8 +503,18 @@ async function markSyncFailure(accountId, error) {
   const id = clean(accountId, 64);
   const now = new Date();
   const message = clean(error?.message || error?.code || 'Allegro order sync failed', 1500);
+  const errorCode = clean(error?.code || error?.args?.upstreamCode || '', 160);
+  const traceId = clean(error?.args?.traceId || error?.allegroDiagnostic?.traceId || '', 256);
+  const statusRaw = Number(error?.args?.upstreamStatus || 0);
+  const httpStatus = Number.isFinite(statusRaw) && statusRaw > 0 ? statusRaw : null;
   const current = await AllegroOrderSyncState.findOne({ accountId: id }).select({ initialized: 1 }).lean();
-  const setFields = { lastPollAt: now, lastError: message };
+  const setFields = {
+    lastPollAt: now,
+    lastError: message,
+    lastErrorCode: errorCode,
+    lastErrorTraceId: traceId,
+    lastErrorHttpStatus: httpStatus,
+  };
   // A journal/network failure after a successful bootstrap must not make the UI
   // claim that initial synchronization itself failed. Only an account that has
   // never completed bootstrap enters bootstrapState=error.
@@ -511,6 +530,46 @@ async function markSyncFailure(accountId, error) {
     ),
     AllegroAccount.updateOne({ accountId: id }, { $set: { lastSyncError: message } }),
   ]);
+}
+
+async function setAllegroOrderRetryAt(accountId, retryAt = null) {
+  const id = clean(accountId, 64);
+  if (!id) return;
+  const date = safeDate(retryAt);
+  await AllegroOrderSyncState.updateOne(
+    { accountId: id },
+    { $set: { nextRetryAt: date } },
+    { upsert: true },
+  );
+}
+
+async function forceRebootstrapAllegroAccount(accountId) {
+  const id = clean(accountId, 64);
+  const account = await getAllegroAccount(id, { requireEnabled: true, lean: true });
+  if (account.authState !== 'connected') throw appError('allegro_account_authorization_required');
+  return withLock(`allegro-order-sync:${id}`, async () => {
+    const state = await AllegroOrderSyncState.findOne({ accountId: id }).lean();
+    try {
+      // Keep the current local projection and the last good cursor valid while
+      // the authoritative snapshot is rebuilt. bootstrapAccount only replaces
+      // actionable rows after the new SELLER snapshot has been fetched.
+      await setAllegroOrderRetryAt(id, null);
+      return await bootstrapAccount(account, state);
+    } catch (error) {
+      // A failed recovery attempt must not destroy the fact that this account
+      // had a previously valid projection/cursor. Restore the completed marker
+      // and let markSyncFailure attach the new diagnostic state.
+      if (state?.initialized === true) {
+        await AllegroOrderSyncState.updateOne(
+          { accountId: id },
+          { $set: { initialized: true, bootstrapState: 'complete' } },
+          { upsert: true },
+        );
+      }
+      await markSyncFailure(id, error);
+      throw error;
+    }
+  }, { ttlMs: ORDER_SYNC_LOCK_TTL_MS, waitMs: 1_000 });
 }
 
 async function syncOneAllegroAccount(accountId) {
@@ -550,19 +609,44 @@ async function syncAllegroOrders({ accountId = '' } = {}) {
 
 function publicSyncState(row) {
   const value = typeof row?.toObject === 'function' ? row.toObject() : (row || {});
+  const now = Date.now();
+  const initialized = value.initialized === true;
+  const bootstrapState = clean(value.bootstrapState, 32) || 'pending';
+  const lastSuccess = safeDate(value.lastSuccessfulPollAt);
+  const nextRetry = safeDate(value.nextRetryAt);
+  const consecutiveFailures = Math.max(0, Number(value.consecutiveFailures) || 0);
+  const lagMs = lastSuccess ? Math.max(0, now - lastSuccess.getTime()) : null;
+  const stale = initialized && (!lastSuccess || lagMs >= ORDER_SYNC_STALE_AFTER_MS);
+  let health = 'pending';
+  if (!initialized && bootstrapState === 'running') health = 'bootstrapping';
+  else if (!initialized && bootstrapState === 'error') health = 'error';
+  else if (nextRetry && nextRetry.getTime() > now) health = 'backoff';
+  else if (stale) health = 'stale';
+  else if (consecutiveFailures > 0 || clean(value.lastError, 1500)) health = 'degraded';
+  else if (initialized) health = 'healthy';
   return {
     accountId: clean(value.accountId, 64),
-    initialized: value.initialized === true,
-    bootstrapState: clean(value.bootstrapState, 32) || 'pending',
+    initialized,
+    bootstrapState,
+    health,
+    stale,
+    staleAfterMs: ORDER_SYNC_STALE_AFTER_MS,
+    lagMs,
     cursorEventId: clean(value.cursorEventId, 128),
     cursorOccurredAt: value.cursorOccurredAt || null,
     lastPollAt: value.lastPollAt || null,
     lastSuccessfulPollAt: value.lastSuccessfulPollAt || null,
+    nextRetryAt: value.nextRetryAt || null,
     lastBootstrapAt: value.lastBootstrapAt || null,
     lastEventCount: Math.max(0, Number(value.lastEventCount) || 0),
     lastOrderRefreshCount: Math.max(0, Number(value.lastOrderRefreshCount) || 0),
-    consecutiveFailures: Math.max(0, Number(value.consecutiveFailures) || 0),
+    consecutiveFailures,
     lastError: clean(value.lastError, 1500),
+    lastErrorCode: clean(value.lastErrorCode, 160),
+    lastErrorTraceId: clean(value.lastErrorTraceId, 256),
+    lastErrorHttpStatus: Number.isFinite(Number(value.lastErrorHttpStatus)) && Number(value.lastErrorHttpStatus) > 0
+      ? Number(value.lastErrorHttpStatus)
+      : null,
   };
 }
 
@@ -672,10 +756,13 @@ module.exports = {
   MAX_DETAIL_REFRESHES_PER_TICK,
   JOURNAL_OUTAGE_REBOOTSTRAP_MS,
   ORDER_SYNC_LOCK_TTL_MS,
+  ORDER_SYNC_STALE_AFTER_MS,
   ACTIVE_FULFILLMENT_STATUSES,
   workflowStageForCheckoutForm,
   compactCheckoutForm,
   syncOneAllegroAccount,
+  forceRebootstrapAllegroAccount,
+  setAllegroOrderRetryAt,
   syncAllegroOrders,
   getAllegroOrderSyncStates,
   getAllegroOrderPage,

@@ -16,12 +16,16 @@ const AllegroOrderSyncStateSchema = new mongoose.Schema({
   bootstrapBarrierEventId: { type: String, default: '', trim: true, maxlength: 128 },
   bootstrapBarrierOccurredAt: { type: Date, default: null },
   lastPollAt: { type: Date, default: null },
+  nextRetryAt: { type: Date, default: null, index: true },
   lastSuccessfulPollAt: { type: Date, default: null, index: true },
   lastBootstrapAt: { type: Date, default: null },
   lastEventCount: { type: Number, default: 0, min: 0 },
   lastOrderRefreshCount: { type: Number, default: 0, min: 0 },
   consecutiveFailures: { type: Number, default: 0, min: 0 },
   lastError: { type: String, default: '', trim: true, maxlength: 1500 },
+  lastErrorCode: { type: String, default: '', trim: true, maxlength: 160 },
+  lastErrorTraceId: { type: String, default: '', trim: true, maxlength: 256 },
+  lastErrorHttpStatus: { type: Number, default: null },
 }, { timestamps: true });
 
 module.exports = mongoose.model('AllegroOrderSyncState', AllegroOrderSyncStateSchema);

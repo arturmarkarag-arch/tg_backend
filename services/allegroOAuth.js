@@ -7,6 +7,7 @@ const AllegroAccount = require('../models/AllegroAccount');
 const AllegroOAuthState = require('../models/AllegroOAuthState');
 const { appError } = require('../utils/errors');
 const { withLock } = require('../utils/lock');
+const { capabilityMatrix } = require('./allegroCapabilities');
 
 const TOKEN_KEY_ENV = 'ALLEGRO_TOKEN_ENCRYPTION_KEY';
 const { currentAllegroConfiguration, publicAllegroConfigurationState } = require('./allegroConfiguration');
@@ -326,17 +327,23 @@ async function saveTokenPair(row, tokenPair, extraSet = {}) {
   const revision = Math.max(0, Number(row.tokenRevision) || 0);
   const filter = { _id: row._id, ...tokenRevisionFilter(row) };
   const scopes = uniqueStrings(tokenPair.scopes?.length ? tokenPair.scopes : row.scopes, 160);
+  const scopeState = capabilityMatrix(scopes);
+  const nextSet = {
+    accessTokenEncrypted: encryptSecret(tokenPair.accessToken, row.accountId, 'access'),
+    refreshTokenEncrypted: encryptSecret(tokenPair.refreshToken, row.accountId, 'refresh'),
+    tokenExpiresAt: tokenPair.expiresAt,
+    tokenRefreshedAt: now,
+    scopes,
+    authState: 'connected',
+    lastConnectionError: '',
+    ...extraSet,
+  };
+  // If Allegro returns an explicit scope set that no longer permits reading
+  // orders, fail closed for this seller. Unknown legacy scope metadata is not
+  // treated as a revocation, but a known under-scoped token cannot stay active.
+  if (scopeState.scopesKnown && scopeState.orderIngestReady === false) nextSet.enabled = false;
   const updated = await AllegroAccount.findOneAndUpdate(filter, {
-    $set: {
-      accessTokenEncrypted: encryptSecret(tokenPair.accessToken, row.accountId, 'access'),
-      refreshTokenEncrypted: encryptSecret(tokenPair.refreshToken, row.accountId, 'refresh'),
-      tokenExpiresAt: tokenPair.expiresAt,
-      tokenRefreshedAt: now,
-      scopes,
-      authState: 'connected',
-      lastConnectionError: '',
-      ...extraSet,
-    },
+    $set: nextSet,
     $setOnInsert: {},
     $inc: { tokenRevision: 1 },
   }, { new: true });
@@ -529,6 +536,23 @@ async function getValidAccessToken(accountId, { requireEnabled = true, forceRefr
   });
 }
 
+
+async function forceRefreshAllegroAccessToken(accountId) {
+  const result = await getValidAccessToken(accountId, {
+    requireEnabled: false,
+    forceRefresh: true,
+    rejectedTokenRevision: null,
+  });
+  const row = result.account;
+  return {
+    accountId: clean(row?.accountId, 64),
+    tokenRevision: Math.max(0, Number(row?.tokenRevision) || 0),
+    tokenExpiresAt: row?.tokenExpiresAt || null,
+    tokenRefreshedAt: row?.tokenRefreshedAt || null,
+    scopes: uniqueStrings(row?.scopes, 160),
+  };
+}
+
 function frontendOAuthRedirect({ outcome = 'error', accountId = '', errorCode = '' } = {}) {
   const config = oauthConfiguration();
   if (!config.webAppUrl) return '';
@@ -551,6 +575,7 @@ module.exports = {
   createOAuthAttempt,
   completeOAuthCallback,
   getValidAccessToken,
+  forceRefreshAllegroAccessToken,
   fetchAllegroIdentity,
   frontendOAuthRedirect,
   tokenLockKey,

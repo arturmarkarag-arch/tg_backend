@@ -4,6 +4,7 @@ const crypto = require('crypto');
 const AllegroAccount = require('../models/AllegroAccount');
 const { publicOAuthConfiguration } = require('./allegroOAuth');
 const { appError } = require('../utils/errors');
+const { capabilityMatrix } = require('./allegroCapabilities');
 
 function clean(value, max = 500) {
   return String(value ?? '').trim().slice(0, max);
@@ -11,6 +12,7 @@ function clean(value, max = 500) {
 
 function publicAllegroAccount(account) {
   const row = typeof account?.toObject === 'function' ? account.toObject() : (account || {});
+  const scopeState = capabilityMatrix(row.scopes);
   return {
     accountId: clean(row.accountId, 64),
     name: clean(row.name, 160),
@@ -21,6 +23,12 @@ function publicAllegroAccount(account) {
     login: clean(row.login, 160),
     marketplaceIds: Array.isArray(row.marketplaceIds) ? row.marketplaceIds.map((value) => clean(value, 80)).filter(Boolean) : [],
     scopes: Array.isArray(row.scopes) ? row.scopes.map((value) => clean(value, 160)).filter(Boolean) : [],
+    capabilities: scopeState.capabilities,
+    scopesKnown: scopeState.scopesKnown,
+    scopeCount: scopeState.scopeCount,
+    orderIngestReady: scopeState.orderIngestReady,
+    missingOrderIngestScopes: scopeState.missingOrderIngestScopes,
+    tokenRevision: Math.max(0, Number(row.tokenRevision) || 0),
     tokenExpiresAt: row.tokenExpiresAt || null,
     tokenRefreshedAt: row.tokenRefreshedAt || null,
     authConnectedAt: row.authConnectedAt || null,
@@ -79,6 +87,17 @@ async function updateAllegroAccount(accountId, patch = {}) {
   if (patch.enabled !== undefined) {
     const nextEnabled = patch.enabled === true;
     if (nextEnabled && row.authState !== 'connected') throw appError('allegro_account_authorization_required');
+    if (nextEnabled) {
+      const scopeState = capabilityMatrix(row.scopes);
+      // Old rows can have unknown scopes if they predate scope persistence. Do
+      // not brick them solely because metadata is missing, but when scopes are
+      // known, never enable order ingestion without orders:read.
+      if (scopeState.scopesKnown && scopeState.orderIngestReady === false) {
+        throw appError('allegro_account_missing_required_scopes', {
+          missingScopes: scopeState.missingOrderIngestScopes,
+        });
+      }
+    }
     row.enabled = nextEnabled;
   }
   await row.save();

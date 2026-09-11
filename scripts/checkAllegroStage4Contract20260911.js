@@ -97,7 +97,9 @@ check('scheduler polls enabled connected accounts with per-account leadership/ba
   assert(scheduler.includes("account.authState === 'connected'"));
   assert(scheduler.includes("`allegro-order-poll:${accountId}`"));
   assert(scheduler.includes('runAsSchedulerLeader'));
-  assert(scheduler.includes('retryAfterByAccount'));
+  assert(scheduler.includes('getAllegroOrderSyncStates'));
+  assert(scheduler.includes('setAllegroOrderRetryAt'));
+  assert(syncModel.includes('nextRetryAt'));
   assert(scheduler.includes('ALLEGRO_ORDER_POLL_MS'));
   assert(scheduler.includes('Promise.all(enabled.map(async (account) =>'));
 });

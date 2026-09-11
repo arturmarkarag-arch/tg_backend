@@ -8,6 +8,7 @@ const {
   createOAuthAttempt,
   completeOAuthCallback,
   frontendOAuthRedirect,
+  forceRefreshAllegroAccessToken,
 } = require('../services/allegroOAuth');
 const {
   getAllegroApiUsage,
@@ -19,6 +20,7 @@ const {
   getAllegroOrderPage,
   getLocalAllegroOrder,
   syncAllegroOrders,
+  forceRebootstrapAllegroAccount,
 } = require('../services/allegroOrders');
 const { isAllegroOrderSchedulerStarted, ORDER_POLL_MS } = require('../services/allegroOrderScheduler');
 
@@ -66,10 +68,16 @@ router.get('/status', asyncHandler(async (_req, res) => {
     ...account,
     orderSync: syncByAccountId.get(String(account.accountId)) || null,
   }));
+  const healthCounts = accountsWithSync.reduce((acc, account) => {
+    const health = String(account?.orderSync?.health || 'pending');
+    acc[health] = (acc[health] || 0) + 1;
+    return acc;
+  }, {});
   res.set('Cache-Control', 'no-store');
   res.json({
     configured: enabled.length > 0,
     stage: 4,
+    hardeningStage: '4.3',
     provider: 'allegro',
     independentProvider: true,
     oauthConfigured: config.oauthConfigured,
@@ -95,6 +103,7 @@ router.get('/status', asyncHandler(async (_req, res) => {
       expired: accounts.filter((account) => account.authState === 'expired').length,
       revoked: accounts.filter((account) => account.authState === 'revoked').length,
       error: accounts.filter((account) => account.authState === 'error').length,
+      orderSyncHealth: healthCounts,
     },
   });
 }));
@@ -134,6 +143,28 @@ router.post('/accounts/:accountId/connection-check', asyncHandler(async (req, re
     },
     requestId: result.requestId || '',
   });
+}));
+
+router.post('/accounts/:accountId/token-refresh', asyncHandler(async (req, res) => {
+  const refreshed = await forceRefreshAllegroAccessToken(req.params.accountId);
+  const accounts = await listAllegroAccounts({ includeDisabled: true });
+  const account = accounts.find((row) => String(row.accountId) === String(req.params.accountId)) || null;
+  res.set('Cache-Control', 'no-store');
+  res.json({
+    ok: true,
+    account,
+    token: {
+      tokenRevision: refreshed.tokenRevision,
+      tokenExpiresAt: refreshed.tokenExpiresAt,
+      tokenRefreshedAt: refreshed.tokenRefreshedAt,
+    },
+  });
+}));
+
+router.post('/accounts/:accountId/orders/rebootstrap', asyncHandler(async (req, res) => {
+  const result = await forceRebootstrapAllegroAccount(req.params.accountId);
+  res.set('Cache-Control', 'no-store');
+  res.json({ ...result, rebootstrap: true, syncedAt: new Date().toISOString() });
 }));
 
 router.get('/orders', asyncHandler(async (req, res) => {

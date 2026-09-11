@@ -27,6 +27,7 @@ const ERRORS = {
   allegro_account_disabled: { status: 409, message: 'Allegro-акаунт вимкнений.' },
   allegro_account_name_required: { status: 400, message: 'Вкажіть нашу назву Allegro-акаунта.' },
   allegro_account_authorization_required: { status: 409, message: 'Спочатку авторизуйте цей Allegro-акаунт через OAuth.' },
+  allegro_account_missing_required_scopes: { status: 409, message: ({ missingScopes = [] } = {}) => `Allegro-акаунт не має потрібних дозволів для роботи із замовленнями${Array.isArray(missingScopes) && missingScopes.length ? `: ${missingScopes.join(', ')}` : '.'}` },
   allegro_account_delete_requires_lifecycle: { status: 409, message: 'Підключений Allegro-акаунт не можна видалити без перевірки активних замовлень і черг.' },
   allegro_oauth_not_configured: { status: 503, message: ({ missing = [] } = {}) =>
                                 `OAuth Allegro ще не налаштовано${Array.isArray(missing) && missing.length ? `: ${missing.join(', ')}` : '.'}` },

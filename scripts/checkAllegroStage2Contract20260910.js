@@ -89,11 +89,13 @@ check('real Allegro identity cannot silently change behind our UUID', () => {
   assert(oauth.includes('accountId: { $ne: row.accountId }'));
 });
 
-check('public Allegro DTO does not expose encrypted tokens or token revision', () => {
+check('public Allegro DTO never exposes encrypted token material', () => {
   const dtoBody = accounts.slice(accounts.indexOf('function publicAllegroAccount'), accounts.indexOf('function oauthConfiguration'));
   assert(!dtoBody.includes('accessTokenEncrypted'));
   assert(!dtoBody.includes('refreshTokenEncrypted'));
-  assert(!dtoBody.includes('tokenRevision'));
+  // tokenRevision is non-secret rotation metadata and is intentionally exposed
+  // for Stage 4.3 diagnostics; token material remains server-only.
+  assert(dtoBody.includes('tokenRevision'));
 });
 
 check('connection check uses the common Stage 3 authenticated HTTP client', () => {
