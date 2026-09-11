@@ -49,9 +49,10 @@ check('current Allegro mapping is revalidated immediately before write', () => {
   assert(service.includes('resolveAllegroMapping({'), 'fresh mapping resolve missing');
   assert(service.includes('commerce_allegro_mapping_not_ready'), 'mapping fail-closed guard missing');
 });
-check('registry exposes draft create only, activation remains planned', () => {
+check('registry exposes draft create and draft service itself never activates', () => {
   assert(registry.match(/id: 'offers\.draft\.create'[\s\S]*implementation: LIVE/), 'draft create not live');
-  assert(registry.match(/id: 'offers\.publish'[\s\S]*implementation: PLANNED/), 'activation must stay planned');
+  assert(service.includes("publication: { status: 'INACTIVE' }"), 'draft must stay INACTIVE');
+  assert(!service.includes("publication: { status: 'ACTIVE' }"), 'draft create must never activate');
 });
 check('credentials never enter commerce publication files', () => {
   assert(!service.includes('tokenEncrypted'), 'token storage leaked');

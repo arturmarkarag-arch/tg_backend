@@ -42,9 +42,11 @@ describe('Commerce publication Stage 3C contract', () => {
     expect(routes).toContain('refreshAllegroDraft');
   });
 
-  test('integration registry marks draft create live but activation planned', () => {
+  test('integration registry marks draft create live and draft service itself never activates', () => {
     const registry = read('services/commerce/integrationRegistry.js');
     expect(registry).toMatch(/id: 'offers\.draft\.create'[\s\S]*implementation: LIVE/);
-    expect(registry).toMatch(/id: 'offers\.publish'[\s\S]*implementation: PLANNED/);
+    const service = read('services/commerce/allegroDraftOffer.js');
+    expect(service).toContain("publication: { status: 'INACTIVE' }");
+    expect(service).not.toContain("publication: { status: 'ACTIVE' }");
   });
 });

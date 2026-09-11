@@ -51,9 +51,9 @@ check('preview exposes saved sales settings', () => {
   assert(preview.includes('salesSettings:'), 'preview sales settings projection missing');
   assert(preview.includes('readyForApply'), 'readyForApply missing');
 });
-check('registry marks sales settings live and activation planned', () => {
+check('registry marks sales settings live while Stage 3D.2 remains upstream read-only', () => {
   assert(registry.match(/id: 'offers\.sales-settings\.read'[\s\S]*implementation: LIVE/), 'sales settings not live');
-  assert(registry.match(/id: 'offers\.publish'[\s\S]*implementation: PLANNED/), 'activation should remain planned');
+  assert(!service.includes("method: 'PATCH'"), 'Stage 3D.2 must not activate/edit offer');
 });
 
 for (const [name, ok, message] of checks) console.log(`${ok ? 'PASS' : 'FAIL'} ${name}${message ? ` — ${message}` : ''}`);

@@ -40,12 +40,13 @@ describe('Commerce publication Stage 3D.2.1 contract', () => {
     expect(service).toContain('readyForActivation: true');
   });
 
-  test('routes expose command/status and activation stays planned', () => {
+  test('routes expose command/status while sales-settings apply remains separate from activation', () => {
     const route = read('routes/commerce.js');
+    const service = read('services/commerce/allegroSalesSettingsApply.js');
     const registry = read('services/commerce/integrationRegistry.js');
     expect(route).toContain("'/publications/allegro/sales-settings/apply'");
     expect(route).toContain("'/publications/allegro/sales-settings/status'");
     expect(registry).toMatch(/id: 'offers\.sales-settings\.apply'[\s\S]*implementation: LIVE/);
-    expect(registry).toMatch(/id: 'offers\.publish'[\s\S]*implementation: PLANNED/);
+    expect(service).not.toContain("publication: { status: 'ACTIVE'");
   });
 });

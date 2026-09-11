@@ -64,7 +64,7 @@ check('preview and registry expose applied readiness while activation remains se
   assert(preview.includes('readyForActivation'), 'preview readiness missing');
   assert(preview.includes('appliedHash'), 'preview applied hash missing');
   assert(registry.match(/id: 'offers\.sales-settings\.apply'[\s\S]*implementation: LIVE/), 'sales settings apply not live');
-  assert(registry.match(/id: 'offers\.publish'[\s\S]*implementation: PLANNED/), 'activation must remain planned');
+  assert(!apply.includes("publication: { status: 'ACTIVE'"), 'sales settings apply must remain separate from activation');
 });
 
 for (const [name, ok, message] of checks) console.log(`${ok ? 'PASS' : 'FAIL'} ${name}${message ? ` — ${message}` : ''}`);

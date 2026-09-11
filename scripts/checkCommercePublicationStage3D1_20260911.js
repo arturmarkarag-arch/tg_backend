@@ -38,9 +38,9 @@ check('reconciliation snapshot is persisted and exposed by preview', () => {
   assert(preview.includes('reconciliation:'), 'preview reconciliation projection missing');
   assert(preview.includes('readyForNextStage'), 'preview readiness missing');
 });
-check('registry marks reconcile live while activation remains planned', () => {
+check('registry marks reconcile live while reconciliation remains read-only', () => {
   assert(registry.match(/id: 'offers\.draft\.reconcile'[\s\S]*implementation: LIVE/), 'reconcile not live');
-  assert(registry.match(/id: 'offers\.publish'[\s\S]*implementation: PLANNED/), 'activation must remain planned');
+  assert(!service.includes("method: 'PATCH'"), '3D.1 reconciliation must remain read-only even after activation is implemented');
 });
 check('read scope is required for reconciliation', () => {
   assert(service.includes('saleOffersRead'), 'saleOffersRead gate missing');

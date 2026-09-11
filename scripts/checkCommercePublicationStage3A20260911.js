@@ -38,9 +38,9 @@ check('ChannelListing has durable unique identity', () => {
   assert(listing.includes('{ identityKey: 1 }'), 'identityKey index missing');
   assert(listing.includes('partialFilterExpression'), 'partial unique index missing');
 });
-check('registry shows live preflight and planned publish', () => {
+check('registry shows live preflight while preflight itself remains non-writing', () => {
   assert(registry.includes("id: 'offers.preflight'"), 'offers.preflight missing');
-  assert(registry.includes("id: 'offers.publish'"), 'offers.publish missing');
+  assert(preview.includes('providerCalls: 0'), 'preflight must remain upstream-write free');
   assert(registry.includes("POST /sale/product-offers"), 'create offer endpoint not documented');
 });
 

@@ -47,12 +47,13 @@ describe('Commerce publication Stage 3D.2 contract', () => {
     expect(service).not.toContain('listing.syncState.desiredHash = settings.desiredHash');
   });
 
-  test('routes and registry expose Stage 3D.2 while activation remains planned', () => {
+  test('routes and registry expose Stage 3D.2 while resolver remains upstream read-only', () => {
     const routes = read('routes/commerce.js');
     const registry = read('services/commerce/integrationRegistry.js');
     expect(routes).toContain("'/publications/allegro/sales-settings/resolve'");
     expect(routes).toContain("'/publications/allegro/sales-settings'");
     expect(registry).toMatch(/id: 'offers\.sales-settings\.read'[\s\S]*implementation: LIVE/);
-    expect(registry).toMatch(/id: 'offers\.publish'[\s\S]*implementation: PLANNED/);
+    const service = read('services/commerce/allegroSalesSettings.js');
+    expect(service).not.toContain("method: 'PATCH'");
   });
 });

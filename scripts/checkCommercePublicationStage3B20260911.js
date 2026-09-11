@@ -52,10 +52,10 @@ check('preflight consumes durable ready mapping', () => {
   assert(preview.includes('catalogProductId'), 'catalog product mapping not exposed');
   assert(preview.includes('categoryId'), 'category mapping not exposed');
 });
-check('registry marks catalog mapping live while publish stays planned', () => {
+check('registry marks catalog mapping live while mapping itself remains read-only upstream', () => {
   assert(registry.includes("id: 'catalog.products.search'"), 'catalog search registry entry missing');
   assert(registry.match(/id: 'catalog\.mapping'[\s\S]*implementation: LIVE/), 'catalog mapping not live');
-  assert(registry.match(/id: 'offers\.publish'[\s\S]*implementation: PLANNED/), 'offer publish must remain planned');
+  assert(!mapping.includes("method: 'PATCH'"), 'mapping must remain upstream read-only');
 });
 check('mapping requires read scope and never exposes credentials', () => {
   assert(mapping.includes('commerce_allegro_mapping_scope_required'), 'sale offers read scope guard missing');
