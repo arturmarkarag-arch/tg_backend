@@ -30,10 +30,10 @@ describe('dedicated BaseLinker role boundary', () => {
     expect(bot).toContain("user.role === 'baselinker'");
   });
 
-  it('hard-isolates authenticated baselinker users to the BaseLinker API namespace', () => {
+  it('hard-isolates authenticated baselinker users to commerce provider namespaces', () => {
     const app = read('app.js');
     expect(app).toContain("req.telegramUser?.role !== 'baselinker'");
-    expect(app).toContain("/^\\/api\\/baselinker");
+    expect(app).toContain('(?:baselinker|allegro|commerce)');
     expect(app).toContain("allowed: ['admin', 'baselinker']");
   });
 });

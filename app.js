@@ -26,6 +26,7 @@ const navBadgesRouter = require('./routes/navBadges');
 const supplementRouter = require('./routes/supplement');
 const baseLinkerRouter = require('./routes/baseLinker');
 const allegroRouter = require('./routes/allegro');
+const commerceRouter = require('./routes/commerce');
 const baseLinkerPrintAgentRouter = require('./routes/baseLinkerPrintAgent');
 const { getPublicMaintenanceState, maintenanceReadOnlyMiddleware } = require('./services/maintenanceState');
 
@@ -108,13 +109,13 @@ function requireAuthForApi(req, res, next) {
 
 app.use(requireAuthForApi);
 
-// Dedicated BaseLinker workers are intentionally isolated from every other
-// authenticated application domain. Public pre-auth endpoints stay public, but
-// once telegramAuth resolved this role the only operational API namespace it may
-// use is /api/baselinker. This is the server-side boundary behind the one-page UI.
+// Dedicated marketplace workers stay isolated from warehouse/admin domains,
+// but the role now operates the whole commerce surface rather than one provider.
+// Provider routes keep their own per-endpoint guards (admin-only diagnostics and
+// settings remain admin-only); this boundary only exposes operational namespaces.
 app.use((req, res, next) => {
   if (req.telegramUser?.role !== 'baselinker') return next();
-  if (/^\/api\/baselinker(?:\/|$)/.test(req.path)) return next();
+  if (/^\/api\/(?:baselinker|allegro|commerce)(?:\/|$)/.test(req.path)) return next();
   const { appError } = require('./utils/errors');
   return next(appError('auth_role_required', { allowed: ['admin', 'baselinker'] }));
 });
@@ -185,6 +186,7 @@ app.use('/api/nav-badges', navBadgesRouter);
 app.use('/api/supplement', supplementRouter);
 app.use('/api/baselinker', baseLinkerRouter);
 app.use('/api/allegro', allegroRouter);
+app.use('/api/commerce', commerceRouter);
 app.use('/api/print-agent', baseLinkerPrintAgentRouter);
 app.use('/api/v1/telegram', telegramV1Router);
 app.use('/api/v1/auth', authV1Router);
