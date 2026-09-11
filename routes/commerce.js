@@ -11,6 +11,7 @@ const { reconcileAllegroDraft } = require('../services/commerce/allegroDraftReco
 const { resolveAllegroSalesSettings, saveAllegroSalesSettings } = require('../services/commerce/allegroSalesSettings');
 const { applyAllegroSalesSettings, refreshAllegroSalesSettingsApply } = require('../services/commerce/allegroSalesSettingsApply');
 const { activateAllegroOffer } = require('../services/commerce/allegroActivation');
+const { previewAllegroOfferUpdate } = require('../services/commerce/allegroOfferUpdatePreview');
 const {
   listCatalog,
   getCatalogProduct,
@@ -98,6 +99,14 @@ router.post('/publications/allegro/activate', asyncHandler(async (req, res) => {
   const result = await activateAllegroOffer(req.body || {});
   res.set('Cache-Control', 'no-store');
   res.status(result.state === 'confirmed' ? 200 : 202).json(result);
+}));
+
+// Stage 3D.4A: read-only diff for an existing ACTIVE offer. Price/stock are
+// deliberately deferred to dedicated sync stages; no upstream write happens here.
+router.post('/publications/allegro/update-preview', asyncHandler(async (req, res) => {
+  const result = await previewAllegroOfferUpdate(req.body || {});
+  res.set('Cache-Control', 'no-store');
+  res.json(result);
 }));
 
 router.get('/catalog', asyncHandler(async (req, res) => {
