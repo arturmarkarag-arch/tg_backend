@@ -34,7 +34,9 @@ check('OAuth state persists only SHA-256 digest and expires via TTL index', () =
 
 check('callback is the only Allegro pre-auth API path', () => {
   assert(app.includes("/^\\/api\\/allegro\\/oauth\\/callback$/"));
-  assert(route.indexOf("router.get('/oauth/callback'") < route.indexOf("router.use(requireTelegramRole('admin'))"));
+  assert(route.includes("router.get('/oauth/callback'"));
+  assert(route.includes("router.post('/accounts/:accountId/oauth/start', requireTelegramRole('admin')"));
+  assert(route.includes("router.get('/orders', requireMarketplaceWarehouseAccess"));
   assert(!app.includes("/^\\/api\\/allegro(?:\\/.*)?$/"));
 });
 

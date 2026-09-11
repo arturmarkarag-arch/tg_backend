@@ -89,7 +89,7 @@ check('normal list/search/pagination routes read Mongo only and never Allegro up
 
 check('manual sync is explicit admin-only functionality rather than a GET side effect', () => {
   assert(route.includes("router.post('/sync'"));
-  assert(route.includes("router.use(requireTelegramRole('admin'))"));
+  assert(route.includes("router.post('/sync', requireTelegramRole('admin')"));
   assert(!route.includes("router.get('/orders', asyncHandler(async (req, res) => {\n  const result = await sync"));
 });
 
@@ -118,11 +118,12 @@ check('a long service outage re-bootstrap protects the 60-day Allegro event rete
   assert(service.includes('Date.now() - lastSuccessAt.getTime()'));
 });
 
-check('Stage 4 startup syncs both order indexes and starts the scheduler after DB readiness', () => {
+check('Stage 5 startup keeps order indexes plus picking state and starts the scheduler after DB readiness', () => {
   assert(startup.includes("require('./models/AllegroOrderSyncState').syncIndexes()"));
   assert(startup.includes("require('./models/AllegroOrderIndex').syncIndexes()"));
+  assert(startup.includes("require('./models/AllegroPickingOrder').syncIndexes()"));
   assert(startup.includes('startAllegroOrderScheduler'));
-  assert(route.includes('stage: 4'));
+  assert(route.includes('stage: 5'));
   assert(errors.includes('allegro_order_bootstrap_too_large'));
   assert(errors.includes('allegro_order_not_found'));
 });

@@ -116,7 +116,7 @@ function compactCheckoutForm(order, account) {
   const fulfillmentProviderId = clean(order?.fulfillment?.provider?.id, 80).toUpperCase();
   const fulfillmentStatus = clean(order?.fulfillment?.status, 80).toUpperCase();
   const orderStatus = clean(order?.status, 80).toUpperCase();
-  const workflowStage = workflowStageForCheckoutForm(order);
+  const upstreamStage = workflowStageForCheckoutForm(order);
   const shipmentSummary = clean(order?.fulfillment?.shipmentSummary?.lineItemsSent, 32).toUpperCase();
   const deliveryMethod = clean(order?.delivery?.method?.name || order?.delivery?.method?.id, 300);
   const marketplaceId = clean(order?.marketplace?.id, 80);
@@ -133,7 +133,7 @@ function compactCheckoutForm(order, account) {
     order_status: orderStatus,
     fulfillment_status: fulfillmentStatus,
     fulfillment_provider_id: fulfillmentProviderId,
-    workflowStage,
+    upstreamStage,
     marketplace_id: marketplaceId,
     date_add: unixSeconds(boughtAt),
     date_confirmed: unixSeconds(order?.payment?.finishedAt || boughtAt),
@@ -167,7 +167,7 @@ function indexDocument(order, account, event = null) {
     fulfillmentStatus: clean(order?.fulfillment?.status, 80).toUpperCase(),
     fulfillmentProviderId: clean(order?.fulfillment?.provider?.id, 80).toUpperCase(),
     marketplaceId: clean(order?.marketplace?.id, 80),
-    workflowStage: preview.workflowStage,
+    upstreamStage: preview.upstreamStage,
     orderSortDate: firstBoughtAt(order) || safeDate(order?.updatedAt),
     upstreamUpdatedAt: safeDate(order?.updatedAt),
     lastEventId: clean(event?.id, 128),
@@ -185,8 +185,10 @@ async function upsertCheckoutForm(order, account, event = null) {
   const provider = clean(order?.fulfillment?.provider?.id, 80).toUpperCase();
 
   // One Fulfillment orders are fulfilled by Allegro warehouse and must never
-  // enter our warehouse queue. If an existing order changes provider, remove it.
+  // enter our warehouse queue. If an existing order changes provider, block any
+  // local picking state first and then remove the operational projection.
   if (provider !== 'SELLER') {
+    await require('./allegroPicking').reconcileAllegroPickingFromUpstream({ accountId: account.accountId, order });
     const removed = await AllegroOrderIndex.deleteOne({ accountId: account.accountId, checkoutFormId: id });
     return { removed: removed.deletedCount > 0, checkoutFormId: id, order: null };
   }
@@ -194,10 +196,24 @@ async function upsertCheckoutForm(order, account, event = null) {
   const doc = indexDocument(order, account, event);
   await AllegroOrderIndex.updateOne(
     { accountId: doc.accountId, checkoutFormId: doc.checkoutFormId },
-    { $set: doc },
+    {
+      $set: doc,
+      // Stage 5 separates upstream fulfillment from our local warehouse shelf.
+      // Upstream sync must never move a worker's deferred/processing order back
+      // and forth just because fulfillment.status changed.
+      $setOnInsert: {
+        workflowStage: doc.upstreamStage === 'cancelled' ? 'cancelled' : doc.upstreamStage === 'sent' ? 'sent' : doc.upstreamStage === 'deferred' ? 'deferred' : 'processing',
+        upstreamReviewRequired: false,
+        warehouseStatus: '',
+        sentBy: '',
+        sentByName: '',
+      },
+    },
     { upsert: true },
   );
-  return { removed: false, checkoutFormId: id, order: doc.preview };
+  await require('./allegroPicking').reconcileAllegroPickingFromUpstream({ accountId: account.accountId, order });
+  const current = await AllegroOrderIndex.findOne({ accountId: doc.accountId, checkoutFormId: doc.checkoutFormId }).lean();
+  return { removed: false, checkoutFormId: id, order: current ? publicOrderFromRow(current, account) : doc.preview };
 }
 
 async function fetchEventStats(accountId) {
@@ -288,7 +304,12 @@ async function bootstrapAccount(account, state) {
   };
   if (activeIds.length) staleQuery.checkoutFormId = { $nin: activeIds };
   const staleRows = await AllegroOrderIndex.find(staleQuery).select({ checkoutFormId: 1 }).lean();
-  if (staleRows.length) await AllegroOrderIndex.deleteMany(staleQuery);
+  if (staleRows.length) {
+    for (const row of staleRows) {
+      await require('./allegroPicking').markAllegroPickingMissing({ accountId: account.accountId, orderId: row.checkoutFormId });
+    }
+    await AllegroOrderIndex.deleteMany(staleQuery);
+  }
 
   const finishedAt = new Date();
   const updated = await AllegroOrderSyncState.findOneAndUpdate(
@@ -378,6 +399,7 @@ async function refreshCheckoutForms(account, ids, eventMap) {
       // documents this as a normal 404 scenario; remove a stale local projection
       // and let the journal/new checkoutForm event become authoritative.
       if (Number(error?.status) === 404) {
+        await require('./allegroPicking').markAllegroPickingMissing({ accountId: account.accountId, orderId: id });
         const removed = await AllegroOrderIndex.deleteOne({ accountId: account.accountId, checkoutFormId: id });
         return { checkoutFormId: id, removed: removed.deletedCount > 0, order: null, upstreamMissing: true };
       }
@@ -486,7 +508,7 @@ function emitOrdersChanged(accountId, payload = {}) {
   try {
     const io = getIO();
     if (!io) return;
-    io.to('staff').emit('allegro_orders_changed', {
+    io.to('marketplace_staff').emit('allegro_orders_changed', {
       provider: 'allegro',
       allegroAccountId: clean(accountId, 64),
       orders: Array.isArray(payload.orders) ? payload.orders : [],
@@ -672,11 +694,16 @@ function publicOrderFromRow(row, account = null) {
     order_status: clean(value.orderStatus || preview.order_status, 80),
     fulfillment_status: clean(value.fulfillmentStatus || preview.fulfillment_status, 80),
     fulfillment_provider_id: clean(value.fulfillmentProviderId || preview.fulfillment_provider_id, 80),
-    workflowStage: clean(value.workflowStage || preview.workflowStage, 32),
+    upstreamStage: clean(value.upstreamStage || preview.upstreamStage, 32),
+    workflowStage: clean(value.workflowStage, 32) || 'processing',
+    upstreamReviewRequired: value.upstreamReviewRequired === true,
+    warehouseStatus: clean(value.warehouseStatus, 80),
+    sentBy: clean(value.sentBy, 128),
+    sentByName: clean(value.sentByName, 240),
   };
 }
 
-async function getAllegroOrderPage({ accountId = '', workflowFilter = 'processing', search = '', page = 1, pageSize = 10 } = {}) {
+async function getAllegroOrderPage({ accountId = '', workflowFilter = 'processing', sentBy = 'all', search = '', page = 1, pageSize = 10 } = {}) {
   const id = clean(accountId, 64);
   const selectedAccount = id ? await getAllegroAccount(id, { lean: true }) : null;
   const normalizedFilter = ['processing', 'deferred', 'sent', 'cancelled', 'updated'].includes(clean(workflowFilter, 32))
@@ -689,23 +716,23 @@ async function getAllegroOrderPage({ accountId = '', workflowFilter = 'processin
   const term = clean(search, 300).toLowerCase();
   if (term) baseMatch.searchText = { $regex: escapedRegex(term), $options: 'i' };
 
-  const countsRows = await AllegroOrderIndex.aggregate([
-    { $match: baseMatch },
-    { $group: { _id: '$workflowStage', count: { $sum: 1 } } },
+  const [countsRows, updatedCount] = await Promise.all([
+    AllegroOrderIndex.aggregate([
+      { $match: baseMatch },
+      { $group: { _id: '$workflowStage', count: { $sum: 1 } } },
+    ]),
+    AllegroOrderIndex.countDocuments({ ...baseMatch, upstreamReviewRequired: true }),
   ]);
-  const workflowCounts = { processing: 0, deferred: 0, sent: 0, cancelled: 0, updated: 0 };
+  const workflowCounts = { processing: 0, deferred: 0, sent: 0, cancelled: 0, updated: Number(updatedCount) || 0 };
   for (const row of countsRows) {
     if (Object.prototype.hasOwnProperty.call(workflowCounts, row._id)) workflowCounts[row._id] = Number(row.count) || 0;
   }
 
   const match = { ...baseMatch };
-  if (normalizedFilter === 'updated') {
-    // Stage 5 introduces local picking review state. Stage 4 has no fake
-    // "updated" shelf, so keep the contract explicit and empty for now.
-    match._id = null;
-  } else {
-    match.workflowStage = normalizedFilter;
-  }
+  if (normalizedFilter === 'updated') match.upstreamReviewRequired = true;
+  else match.workflowStage = normalizedFilter;
+  const normalizedSentBy = clean(sentBy, 128);
+  if (normalizedFilter === 'sent' && normalizedSentBy && normalizedSentBy !== 'all') match.sentBy = normalizedSentBy;
 
   const total = await AllegroOrderIndex.countDocuments(match);
   const pageCount = Math.max(1, Math.ceil(total / limit));
@@ -727,10 +754,19 @@ async function getAllegroOrderPage({ accountId = '', workflowFilter = 'processin
       for (const account of accountRows) accountMap.set(clean(account.accountId, 64), account);
     }
   }
+  const orders = rows.map((row) => publicOrderFromRow(row, accountMap.get(clean(row.accountId, 64)))).filter(Boolean);
+  const refs = orders.map((order) => ({ allegroAccountId: order.allegroAccountId, orderId: order.order_id }));
+  const pickingStates = await require('./allegroPicking').getPickingStates(refs);
+  const sentByRows = await AllegroOrderIndex.aggregate([
+    { $match: { ...(id ? { accountId: id } : {}), workflowStage: 'sent', sentBy: { $ne: '' } } },
+    { $group: { _id: '$sentBy', name: { $first: '$sentByName' }, count: { $sum: 1 } } },
+    { $sort: { name: 1, _id: 1 } },
+  ]);
   return {
-    orders: rows.map((row) => publicOrderFromRow(row, accountMap.get(clean(row.accountId, 64)))).filter(Boolean),
+    orders,
+    pickingStates,
     workflowCounts,
-    sentByOptions: [],
+    sentByOptions: sentByRows.map((row) => ({ value: String(row._id || ''), label: String(row.name || row._id || ''), count: Number(row.count) || 0 })).filter((row) => row.value),
     page: safePage,
     pageCount,
     total,

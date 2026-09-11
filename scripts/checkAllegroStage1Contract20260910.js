@@ -53,8 +53,10 @@ check('Allegro application credentials stay backend-only in env', () => {
   assert(!publicBlock.includes('tokenEncryptionKey:'));
 });
 
-check('Allegro operational page is admin-only and mounted separately', () => {
-  assert(route.includes("router.use(requireTelegramRole('admin'))"));
+check('Allegro provider is mounted separately and warehouse routes are role-guarded', () => {
+  assert(route.includes("requireMarketplaceWarehouseAccess"));
+  assert(route.includes("router.get('/status', requireMarketplaceWarehouseAccess"));
+  assert(route.includes("router.get('/api-usage', requireTelegramRole('admin')"));
   assert(route.includes("router.get('/status'"));
   assert(route.includes("provider: 'allegro'"));
   assert(route.includes('independentProvider: true'));

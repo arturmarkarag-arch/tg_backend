@@ -13,12 +13,23 @@ const AllegroOrderIndexSchema = new mongoose.Schema({
   fulfillmentStatus: { type: String, default: '', trim: true, maxlength: 80, index: true },
   fulfillmentProviderId: { type: String, default: '', trim: true, maxlength: 80, index: true },
   marketplaceId: { type: String, default: '', trim: true, maxlength: 80, index: true },
+  // Upstream Allegro state and our local warehouse shelf are deliberately separate.
+  upstreamStage: {
+    type: String,
+    enum: ['processing', 'deferred', 'sent', 'cancelled'],
+    default: 'processing',
+    index: true,
+  },
   workflowStage: {
     type: String,
     enum: ['processing', 'deferred', 'sent', 'cancelled'],
     default: 'processing',
     index: true,
   },
+  upstreamReviewRequired: { type: Boolean, default: false, index: true },
+  warehouseStatus: { type: String, default: '', trim: true, maxlength: 80, index: true },
+  sentBy: { type: String, default: '', trim: true, maxlength: 128, index: true },
+  sentByName: { type: String, default: '', trim: true, maxlength: 240 },
   orderSortDate: { type: Date, default: null, index: true },
   upstreamUpdatedAt: { type: Date, default: null },
   lastEventId: { type: String, default: '', trim: true, maxlength: 128 },

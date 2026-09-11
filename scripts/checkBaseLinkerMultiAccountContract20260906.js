@@ -135,8 +135,9 @@ check('picking locks and all concrete picking queries are account-scoped', () =>
   assert(files.picking.includes('makeBaseLinkerAccountCaller(accountId,'));
 });
 
-check('one-worker active-order rule remains global by worker identity', () => {
-  assert(files.picking.includes('`baselinker-worker:${actor.by}`'));
+check('one-worker active-order rule remains global across marketplace providers', () => {
+  assert(files.picking.includes('`marketplace-worker:${actor.by}`'));
+  assert(files.picking.includes('AllegroPickingOrder.findOne'));
   assert(files.pickingModel.includes('index({ ownerTelegramId: 1, status: 1 })'));
 });
 

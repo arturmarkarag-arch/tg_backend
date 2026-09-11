@@ -1,6 +1,7 @@
 const crypto = require('crypto');
 const BaseLinkerPickingOrder = require('../models/BaseLinkerPickingOrder');
 const BaseLinkerOrderIndex = require('../models/BaseLinkerOrderIndex');
+const AllegroPickingOrder = require('../models/AllegroPickingOrder');
 const { fetchBaseLinkerOrders } = require('./baseLinkerOrders');
 const { makeBaseLinkerAccountCaller } = require('./baseLinkerClient');
 const { getBaseLinkerAccount } = require('./baseLinkerAccounts');
@@ -919,7 +920,7 @@ async function claimPickingOrder({ baseLinkerAccountId, orderId, user, force = f
 
   // Worker exclusivity + account lifecycle lock + concrete order lock form one
   // ordering: disable/status-config changes cannot race a new ownership claim.
-  return withLock(`baselinker-worker:${actor.by}`, () => (
+  return withLock(`marketplace-worker:${actor.by}`, () => (
     withBaseLinkerAccountLifecycleLock(accountId, async () => {
       const [order, scope, account] = await Promise.all([
         fetchExactOrder(accountId, requestedId),
@@ -940,11 +941,15 @@ async function claimPickingOrder({ baseLinkerAccountId, orderId, user, force = f
         await requireAccountEnabled(accountId);
         let candidate = await BaseLinkerPickingOrder.findOne({ baseLinkerAccountId: accountId, orderId: requestedId });
 
-        const activeOther = await BaseLinkerPickingOrder.findOne({
-          ownerTelegramId: actor.by,
-          ...(candidate?._id ? { _id: { $ne: candidate._id } } : {}),
-          status: { $in: WORKING_STATUSES },
-        }).lean();
+        const [activeOther, activeAllegro] = await Promise.all([
+          BaseLinkerPickingOrder.findOne({
+            ownerTelegramId: actor.by,
+            ...(candidate?._id ? { _id: { $ne: candidate._id } } : {}),
+            status: { $in: WORKING_STATUSES },
+          }).lean(),
+          AllegroPickingOrder.findOne({ ownerTelegramId: actor.by, status: { $in: WORKING_STATUSES } }).lean(),
+        ]);
+        if (activeAllegro) throw appError('marketplace_worker_has_active_order', { provider: 'Allegro', orderId: activeAllegro.orderId });
         if (activeOther) throw appError('baselinker_worker_has_active_order', { orderId: activeOther.orderId });
 
         const now = new Date();

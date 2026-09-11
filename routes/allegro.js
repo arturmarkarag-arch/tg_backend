@@ -2,6 +2,7 @@
 
 const express = require('express');
 const { requireTelegramRole } = require('../middleware/telegramAuth');
+const { requireMarketplaceWarehouseAccess } = require('../utils/marketplaceWarehouseAccess');
 const { asyncHandler } = require('../utils/errors');
 const { listAllegroAccounts, oauthConfiguration, publicAllegroAccount } = require('../services/allegroAccounts');
 const {
@@ -23,6 +24,17 @@ const {
   forceRebootstrapAllegroAccount,
 } = require('../services/allegroOrders');
 const { isAllegroOrderSchedulerStarted, ORDER_POLL_MS } = require('../services/allegroOrderScheduler');
+const {
+  getPickingStates,
+  getMyActivePicking,
+  claimPickingOrder,
+  heartbeatPickingOrder,
+  updatePickingItem,
+  releasePickingOrder,
+  markPickingOrderSent,
+  acknowledgeUpstreamReview,
+  reopenPickingOrder,
+} = require('../services/allegroPicking');
 
 const router = express.Router();
 
@@ -51,9 +63,8 @@ router.get('/oauth/callback', async (req, res, next) => {
   }
 });
 
-router.use(requireTelegramRole('admin'));
 
-router.get('/status', asyncHandler(async (_req, res) => {
+router.get('/status', requireMarketplaceWarehouseAccess, asyncHandler(async (_req, res) => {
   const accounts = await listAllegroAccounts({ includeDisabled: true });
   const config = oauthConfiguration();
   const connected = accounts.filter((account) => account.authState === 'connected');
@@ -76,8 +87,8 @@ router.get('/status', asyncHandler(async (_req, res) => {
   res.set('Cache-Control', 'no-store');
   res.json({
     configured: enabled.length > 0,
-    stage: 4,
-    hardeningStage: '4.3',
+    stage: 5,
+    hardeningStage: '5.0',
     provider: 'allegro',
     independentProvider: true,
     oauthConfigured: config.oauthConfigured,
@@ -108,13 +119,13 @@ router.get('/status', asyncHandler(async (_req, res) => {
   });
 }));
 
-router.get('/api-usage', asyncHandler(async (_req, res) => {
+router.get('/api-usage', requireTelegramRole('admin'), asyncHandler(async (_req, res) => {
   const accounts = await listAllegroAccounts({ includeDisabled: true });
   res.set('Cache-Control', 'no-store');
   res.json(await getAllegroApiUsage(accounts.map((account) => account.accountId)));
 }));
 
-router.get('/errors', asyncHandler(async (req, res) => {
+router.get('/errors', requireTelegramRole('admin'), asyncHandler(async (req, res) => {
   const rows = await listAllegroApiErrors({
     accountId: req.query?.accountId,
     limit: req.query?.limit,
@@ -123,13 +134,13 @@ router.get('/errors', asyncHandler(async (req, res) => {
   res.json({ errors: rows });
 }));
 
-router.post('/accounts/:accountId/oauth/start', asyncHandler(async (req, res) => {
+router.post('/accounts/:accountId/oauth/start', requireTelegramRole('admin'), asyncHandler(async (req, res) => {
   const result = await createOAuthAttempt(req.params.accountId, req.telegramId);
   res.set('Cache-Control', 'no-store');
   res.json(result);
 }));
 
-router.post('/accounts/:accountId/connection-check', asyncHandler(async (req, res) => {
+router.post('/accounts/:accountId/connection-check', requireTelegramRole('admin'), asyncHandler(async (req, res) => {
   const result = await checkAllegroApiConnection(req.params.accountId);
   res.set('Cache-Control', 'no-store');
   res.json({
@@ -145,7 +156,7 @@ router.post('/accounts/:accountId/connection-check', asyncHandler(async (req, re
   });
 }));
 
-router.post('/accounts/:accountId/token-refresh', asyncHandler(async (req, res) => {
+router.post('/accounts/:accountId/token-refresh', requireTelegramRole('admin'), asyncHandler(async (req, res) => {
   const refreshed = await forceRefreshAllegroAccessToken(req.params.accountId);
   const accounts = await listAllegroAccounts({ includeDisabled: true });
   const account = accounts.find((row) => String(row.accountId) === String(req.params.accountId)) || null;
@@ -161,16 +172,17 @@ router.post('/accounts/:accountId/token-refresh', asyncHandler(async (req, res) 
   });
 }));
 
-router.post('/accounts/:accountId/orders/rebootstrap', asyncHandler(async (req, res) => {
+router.post('/accounts/:accountId/orders/rebootstrap', requireTelegramRole('admin'), asyncHandler(async (req, res) => {
   const result = await forceRebootstrapAllegroAccount(req.params.accountId);
   res.set('Cache-Control', 'no-store');
   res.json({ ...result, rebootstrap: true, syncedAt: new Date().toISOString() });
 }));
 
-router.get('/orders', asyncHandler(async (req, res) => {
+router.get('/orders', requireMarketplaceWarehouseAccess, asyncHandler(async (req, res) => {
   const result = await getAllegroOrderPage({
     accountId: req.query?.accountId,
     workflowFilter: req.query?.workflowFilter,
+    sentBy: req.query?.sentBy,
     search: req.query?.search,
     page: req.query?.page,
     pageSize: req.query?.pageSize,
@@ -179,13 +191,62 @@ router.get('/orders', asyncHandler(async (req, res) => {
   res.json({ ...result, fetchedAt: new Date().toISOString() });
 }));
 
-router.get('/accounts/:accountId/orders/:orderId', asyncHandler(async (req, res) => {
+router.get('/accounts/:accountId/orders/:orderId', requireMarketplaceWarehouseAccess, asyncHandler(async (req, res) => {
   const order = await getLocalAllegroOrder(req.params.accountId, req.params.orderId);
+  const key = `${String(req.params.accountId || '').trim()}:${String(req.params.orderId || '').trim()}`;
+  const pickingStates = await getPickingStates([{ allegroAccountId: req.params.accountId, orderId: req.params.orderId }]);
   res.set('Cache-Control', 'no-store');
-  res.json({ order, fetchedAt: new Date().toISOString() });
+  res.json({ order, pickingState: pickingStates[key] || null, fetchedAt: new Date().toISOString() });
 }));
 
-router.post('/sync', asyncHandler(async (req, res) => {
+router.get('/picking/my-active', requireMarketplaceWarehouseAccess, asyncHandler(async (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  res.json({ state: await getMyActivePicking(req.telegramUser) });
+}));
+
+function mutationId(req) {
+  return String(req.body?.clientMutationId || '').trim().slice(0, 160);
+}
+
+const pickingPrefix = '/accounts/:accountId/picking/orders/:orderId';
+router.get(pickingPrefix, requireMarketplaceWarehouseAccess, asyncHandler(async (req, res) => {
+  const key = `${String(req.params.accountId || '').trim()}:${String(req.params.orderId || '').trim()}`;
+  const states = await getPickingStates([{ allegroAccountId: req.params.accountId, orderId: req.params.orderId }]);
+  res.json({ state: states[key] || null });
+}));
+router.post(`${pickingPrefix}/claim`, requireMarketplaceWarehouseAccess, asyncHandler(async (req, res) => {
+  res.json(await claimPickingOrder({ allegroAccountId: req.params.accountId, orderId: req.params.orderId, user: req.telegramUser, force: req.body?.force === true, clientMutationId: mutationId(req) }));
+}));
+router.post(`${pickingPrefix}/heartbeat`, requireMarketplaceWarehouseAccess, asyncHandler(async (req, res) => {
+  res.json(await heartbeatPickingOrder({ allegroAccountId: req.params.accountId, orderId: req.params.orderId, user: req.telegramUser }));
+}));
+router.patch(`${pickingPrefix}/items/:lineKey`, requireMarketplaceWarehouseAccess, asyncHandler(async (req, res) => {
+  res.json(await updatePickingItem({
+    allegroAccountId: req.params.accountId,
+    orderId: req.params.orderId,
+    lineKey: req.params.lineKey,
+    user: req.telegramUser,
+    expectedRevision: req.body?.expectedRevision,
+    state: req.body?.state,
+    pickedQty: req.body?.pickedQty,
+    issueNote: req.body?.issueNote,
+    clientMutationId: mutationId(req),
+  }));
+}));
+router.post(`${pickingPrefix}/release`, requireMarketplaceWarehouseAccess, asyncHandler(async (req, res) => {
+  res.json(await releasePickingOrder({ allegroAccountId: req.params.accountId, orderId: req.params.orderId, user: req.telegramUser, expectedRevision: req.body?.expectedRevision, force: req.body?.force === true, clientMutationId: mutationId(req) }));
+}));
+router.post(`${pickingPrefix}/sent`, requireMarketplaceWarehouseAccess, asyncHandler(async (req, res) => {
+  res.json(await markPickingOrderSent({ allegroAccountId: req.params.accountId, orderId: req.params.orderId, user: req.telegramUser, expectedRevision: req.body?.expectedRevision, clientMutationId: mutationId(req) }));
+}));
+router.post(`${pickingPrefix}/upstream-reviewed`, requireMarketplaceWarehouseAccess, asyncHandler(async (req, res) => {
+  res.json(await acknowledgeUpstreamReview({ allegroAccountId: req.params.accountId, orderId: req.params.orderId, user: req.telegramUser, expectedRevision: req.body?.expectedRevision, clientMutationId: mutationId(req) }));
+}));
+router.post(`${pickingPrefix}/reopen`, requireMarketplaceWarehouseAccess, requireTelegramRole('admin'), asyncHandler(async (req, res) => {
+  res.json(await reopenPickingOrder({ allegroAccountId: req.params.accountId, orderId: req.params.orderId, user: req.telegramUser, expectedRevision: req.body?.expectedRevision, clientMutationId: mutationId(req) }));
+}));
+
+router.post('/sync', requireTelegramRole('admin'), asyncHandler(async (req, res) => {
   const result = await syncAllegroOrders({ accountId: req.body?.accountId });
   res.set('Cache-Control', 'no-store');
   res.json({ ...result, syncedAt: new Date().toISOString() });
