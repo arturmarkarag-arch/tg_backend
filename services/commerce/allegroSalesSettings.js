@@ -179,8 +179,21 @@ function publicSavedSettings(saved = {}) {
   return {
     state: text(saved.state, 40) || 'never',
     readyForApply: saved.readyForApply === true,
+    readyForActivation: saved.readyForActivation === true,
     desiredHash: text(saved.desiredHash, 100),
+    appliedHash: text(saved.appliedHash, 100),
+    appliedAt: saved.appliedAt || null,
+    verifiedAt: saved.verifiedAt || null,
     updatedAt: saved.updatedAt || null,
+    apply: saved.apply && typeof saved.apply === 'object' ? {
+      state: text(saved.apply.state, 40),
+      jobId: text(saved.apply.jobId, 100),
+      operationPath: text(saved.apply.operationPath, 2048),
+      operationId: text(saved.apply.operationId, 200),
+      lastErrorCode: text(saved.apply.lastErrorCode, 200),
+      lastError: text(saved.apply.lastError, 1500),
+      issues: Array.isArray(saved.apply.issues) ? saved.apply.issues.slice(0, 20) : [],
+    } : null,
     shippingRate: saved.shippingRate ? {
       id: text(saved.shippingRate.id, 200),
       name: text(saved.shippingRate.name, 500),
@@ -279,9 +292,11 @@ async function saveAllegroSalesSettings(raw = {}) {
   if (invalidLocation.length) missing.push(`lokalizacja (${invalidLocation.join(', ')})`);
   if (missing.length) throw appError('commerce_allegro_sales_settings_invalid', { missing });
 
+  const previous = savedSalesSettings(listing);
   const settings = {
     state: 'ready_local',
     readyForApply: true,
+    readyForActivation: false,
     shippingRate: { id: shippingRate.id, name: shippingRate.name },
     afterSalesServices: {
       returnPolicy: { id: returnPolicy.id, name: returnPolicy.name },
@@ -290,20 +305,33 @@ async function saveAllegroSalesSettings(raw = {}) {
     },
     delivery: { handlingTime },
     location,
-    appliedAt: null,
-    appliedHash: '',
+    appliedAt: previous.appliedAt || null,
+    appliedHash: text(previous.appliedHash, 100),
+    verifiedAt: previous.verifiedAt || null,
+    apply: previous.apply && typeof previous.apply === 'object' ? previous.apply : null,
     updatedAt: new Date(),
   };
   settings.desiredHash = salesSettingsHash(settings);
+  if (settings.appliedHash && settings.appliedHash === settings.desiredHash) {
+    settings.state = 'applied';
+    settings.readyForActivation = true;
+  } else if (text(previous.desiredHash, 100) === settings.desiredHash && previous.apply && typeof previous.apply === 'object') {
+    // Re-saving identical values must not erase an in-flight/unknown durable
+    // apply job and accidentally make the UI look retryable.
+    settings.state = text(previous.state, 40) || 'ready_local';
+    settings.apply = previous.apply;
+  } else {
+    settings.apply = null;
+  }
 
   const providerData = listing.providerData && typeof listing.providerData === 'object' ? listing.providerData : {};
   const allegro = providerData.allegro && typeof providerData.allegro === 'object' ? providerData.allegro : {};
   providerData.allegro = { ...allegro, salesSettings: settings };
   listing.providerData = providerData;
   listing.markModified('providerData');
-  listing.syncState.state = 'out_of_sync';
+  listing.syncState.state = settings.readyForActivation ? 'in_sync' : 'out_of_sync';
   // Do not overwrite the draft payload hash kept in ChannelListing.syncState.
-  // Sales Settings own a separate desiredHash until the next stage applies them upstream.
+  // Sales Settings own a separate desiredHash until Stage 3D.2.1 applies them upstream.
   listing.syncState.lastError = '';
   await listing.save();
 

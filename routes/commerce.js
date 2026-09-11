@@ -9,6 +9,7 @@ const { resolveAllegroMapping, saveAllegroMapping } = require('../services/comme
 const { createAllegroDraft, refreshAllegroDraft } = require('../services/commerce/allegroDraftOffer');
 const { reconcileAllegroDraft } = require('../services/commerce/allegroDraftReconciliation');
 const { resolveAllegroSalesSettings, saveAllegroSalesSettings } = require('../services/commerce/allegroSalesSettings');
+const { applyAllegroSalesSettings, refreshAllegroSalesSettingsApply } = require('../services/commerce/allegroSalesSettingsApply');
 const {
   listCatalog,
   getCatalogProduct,
@@ -76,6 +77,18 @@ router.put('/publications/allegro/sales-settings', asyncHandler(async (req, res)
   const result = await saveAllegroSalesSettings(req.body || {});
   res.set('Cache-Control', 'no-store');
   res.json(result);
+}));
+
+router.post('/publications/allegro/sales-settings/apply', asyncHandler(async (req, res) => {
+  const result = await applyAllegroSalesSettings(req.body || {});
+  res.set('Cache-Control', 'no-store');
+  res.status(result.state === 'confirmed' ? 200 : 202).json(result);
+}));
+
+router.post('/publications/allegro/sales-settings/status', asyncHandler(async (req, res) => {
+  const result = await refreshAllegroSalesSettingsApply(req.body || {});
+  res.set('Cache-Control', 'no-store');
+  res.status(result.state === 'confirmed' ? 200 : 202).json(result);
 }));
 
 router.get('/catalog', asyncHandler(async (req, res) => {
