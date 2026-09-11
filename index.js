@@ -269,13 +269,11 @@ async function startServer() {
       await require('./models/AllegroApiErrorLog').syncIndexes();
       await require('./models/AllegroOrderSyncState').syncIndexes();
       await require('./models/AllegroOrderIndex').syncIndexes();
-      // Load DB-managed Allegro application settings before OAuth, HTTP Core and
-      // the order scheduler start. If this is the first deploy after Stage 4.1,
-      // a complete legacy env configuration is migrated once into encrypted DB
-      // settings so the old deployment can be removed safely afterwards.
-      await require('./services/allegroConfiguration').loadAllegroConfiguration({ migrateLegacy: true });
+      // Allegro application credentials are deployment configuration (backend env).
+      // Also purge the temporary Stage 4.1 DB copy; seller OAuth tokens remain untouched.
+      await require('./services/allegroConfiguration').loadAllegroConfiguration();
     } catch (err) {
-      console.error('[allegro] migration/index/config load failed', err?.stack || err);
+      console.error('[allegro] migration/index/env-config load failed', err?.stack || err);
     }
 
     // Некритичні TTL-індекси журналів.

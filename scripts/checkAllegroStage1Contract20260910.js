@@ -44,11 +44,9 @@ check('seller OAuth tokens are server-managed and never accepted from admin requ
   assert(!allegroAdmin.match(/req\.body\?\.(accessToken|refreshToken|token)(?:|\?)/));
 });
 
-check('Allegro app config is DB-managed while secrets remain server-only', () => {
-  assert(config.includes("SETTING_KEY = 'allegro.oauth.config.v1'"));
-  assert(config.includes('clientSecretEncrypted'));
-  assert(config.includes('tokenEncryptionKeyEncrypted'));
-  assert(config.includes("rootSecretRaw()"));
+check('Allegro application credentials stay backend-only in env', () => {
+  for (const env of ['ALLEGRO_CLIENT_ID', 'ALLEGRO_CLIENT_SECRET', 'ALLEGRO_REDIRECT_URI', 'ALLEGRO_USER_AGENT', 'ALLEGRO_TOKEN_ENCRYPTION_KEY']) assert(config.includes(env));
+  assert(!allegroAdmin.includes("router.put('/allegro-settings/oauth'"));
   const publicBlock = oauth.slice(oauth.indexOf('function publicOAuthConfiguration()'), oauth.indexOf('function requireOAuthConfiguration()'));
   assert(publicBlock.includes('oauthConfigured: config.oauthConfigured'));
   assert(!publicBlock.includes('clientSecret: config.clientSecret'));

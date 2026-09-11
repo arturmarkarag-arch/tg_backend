@@ -54,12 +54,13 @@ check('minimum planned scopes cover identity, direct orders and shipment workflo
   ]) assert(oauth.includes(scope));
 });
 
-check('OAuth app settings come from encrypted admin configuration with legacy env fallback', () => {
+check('OAuth application configuration comes only from backend env', () => {
   assert(oauth.includes('currentAllegroConfiguration'));
-  assert(config.includes('ALLEGRO_USER_AGENT'));
-  assert(config.includes('ALLEGRO_TOKEN_ENCRYPTION_KEY'));
-  assert(config.includes('ALLEGRO_CLIENT_SECRET'));
-  assert(config.includes("source: 'db'"));
+  for (const env of ['ALLEGRO_CLIENT_ID', 'ALLEGRO_CLIENT_SECRET', 'ALLEGRO_REDIRECT_URI', 'ALLEGRO_USER_AGENT', 'ALLEGRO_TOKEN_ENCRYPTION_KEY']) {
+    assert(config.includes(env));
+  }
+  assert(config.includes("source: 'env'"));
+  assert(!config.includes('findOneAndUpdate'));
 });
 
 check('access and refresh secrets use AES-256-GCM with kind-bound AAD', () => {

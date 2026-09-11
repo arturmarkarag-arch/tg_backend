@@ -6,7 +6,7 @@ const AllegroOAuthState = require('../models/AllegroOAuthState');
 const { appError } = require('../utils/errors');
 const { withLock } = require('../utils/lock');
 
-const TOKEN_KEY_ENV = 'ALLEGRO_TOKEN_ENCRYPTION_KEY'; // legacy env name; runtime config now comes from admin settings
+const TOKEN_KEY_ENV = 'ALLEGRO_TOKEN_ENCRYPTION_KEY';
 const { currentAllegroConfiguration, publicAllegroConfigurationState } = require('./allegroConfiguration');
 const DEFAULT_SCOPES = [
   'allegro:api:profile:read',
@@ -64,11 +64,11 @@ function oauthConfiguration() {
     : 'https://api.allegro.pl';
 
   const missing = [];
-  if (!clientId) missing.push('clientId');
-  if (!clientSecret) missing.push('clientSecret');
-  if (!redirectUri) missing.push('redirectUri');
-  if (!userAgent) missing.push('userAgent');
-  if (!tokenKeyConfigured) missing.push('tokenEncryptionKey');
+  if (!clientId) missing.push('ALLEGRO_CLIENT_ID');
+  if (!clientSecret) missing.push('ALLEGRO_CLIENT_SECRET');
+  if (!redirectUri) missing.push('ALLEGRO_REDIRECT_URI');
+  if (!userAgent) missing.push('ALLEGRO_USER_AGENT');
+  if (!tokenKeyConfigured) missing.push('ALLEGRO_TOKEN_ENCRYPTION_KEY');
   if (!webAppUrl) missing.push('WEB_APP_URL');
 
   return {
@@ -94,16 +94,12 @@ function publicOAuthConfiguration() {
     source: state.source,
     environment: config.environment,
     oauthConfigured: config.oauthConfigured,
-    clientId: state.clientId,
     clientIdConfigured: Boolean(config.clientId),
     clientSecretConfigured: Boolean(config.clientSecret),
     redirectUriConfigured: Boolean(config.redirectUri),
     userAgentConfigured: Boolean(config.userAgent),
     tokenEncryptionConfigured: config.tokenKeyConfigured,
-    secretStorageConfigured: state.secretStorageConfigured,
     webAppUrlConfigured: Boolean(config.webAppUrl),
-    redirectUri: config.redirectUri,
-    userAgent: state.userAgent,
     scopes: config.scopes,
     missing: config.missing,
   };

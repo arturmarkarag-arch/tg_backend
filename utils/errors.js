@@ -43,7 +43,7 @@ const ERRORS = {
   allegro_config_token_key_locked: { status: 409, message: 'Не можна змінити ключ шифрування токенів після авторизації магазинів — чинні токени перестануть розшифровуватися.' },
   allegro_token_encryption_not_configured: { status: 503, message: 'Для Allegro ще не налаштовано ключ шифрування токенів.' },
   allegro_token_encrypt_failed: { status: 500, message: 'Не вдалося безпечно підготувати Allegro-токен до збереження.' },
-  allegro_token_decrypt_failed: { status: 503, message: 'Не вдалося розшифрувати Allegro-токен. Перевірте ключ шифрування в налаштуваннях Allegro.' },
+  allegro_token_decrypt_failed: { status: 503, message: 'Не вдалося розшифрувати Allegro-токен. Перевірте ALLEGRO_TOKEN_ENCRYPTION_KEY на backend.' },
   allegro_oauth_state_invalid: { status: 400, message: 'Спроба підключення Allegro недійсна, вже використана або прострочена. Почніть підключення ще раз.' },
   allegro_oauth_code_required: { status: 400, message: 'Allegro не повернув код авторизації. Почніть підключення ще раз.' },
   allegro_oauth_exchange_failed: { status: 502, message: 'Allegro не прийняв код авторизації. Почніть підключення ще раз.' },
