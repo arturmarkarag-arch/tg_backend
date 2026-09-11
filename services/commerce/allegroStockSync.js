@@ -4,6 +4,7 @@ const mongoose = require('mongoose');
 const ChannelListing = require('../../models/ChannelListing');
 const { getCatalogProductsByIds } = require('./catalog');
 const { effectiveStock } = require('./publicationPreview');
+const { refreshCommerceStockReservations, getReservationTotals } = require('./stockReservations');
 const { stableExternalKey, requestHash } = require('./allegroDraftOffer');
 const { getAllegroAccount } = require('../allegroAccounts');
 const { capabilityMatrix } = require('../allegroCapabilities');
@@ -112,7 +113,7 @@ async function loadLocalRows(items) {
   }));
 }
 
-function localRowValidation(row) {
+function localRowValidation(row, reservation = null) {
   const errors = [];
   const listing = row.listing;
   const product = row.product;
@@ -120,9 +121,14 @@ function localRowValidation(row) {
   if (!listing) errors.push({ code: 'listing_not_found', message: 'Для товару немає Allegro ChannelListing.' });
   if (listing && !text(listing.externalId, 200)) errors.push({ code: 'offer_not_bound', message: 'ChannelListing не має Allegro offerId.' });
 
-  const desiredRaw = product && listing ? effectiveStock(product, listing) : { mode: 'inherit', source: 0, buffer: 0, available: 0 };
+  const reservationInfo = reservation || { reserved: 0, consumed: 0, unknown: 0, held: 0, rows: 0 };
+  const desiredRaw = product && listing
+    ? effectiveStock(product, listing, reservationInfo)
+    : { mode: 'inherit', physicalSource: 0, reservedUnits: 0, source: 0, buffer: 0, available: 0 };
   const desiredStock = {
     available: wholeStock(desiredRaw.available),
+    physicalSource: wholeStock(desiredRaw.physicalSource),
+    reservedUnits: wholeStock(desiredRaw.reservedUnits),
     source: wholeStock(desiredRaw.source),
     buffer: wholeStock(desiredRaw.buffer),
     mode: text(desiredRaw.mode || 'inherit', 40),
@@ -134,11 +140,16 @@ function localRowValidation(row) {
   const externalKey = listing
     ? text(listing?.providerData?.allegro?.draftCreation?.externalKey, 100) || stableExternalKey(listing._id)
     : '';
-  return { errors, desiredStock, externalKey };
+  return { errors, desiredStock, reservation: reservationInfo, externalKey };
 }
 
 async function previewAllegroStockSync(raw = {}) {
   const items = normalizeItems(raw);
+  // Local-only materialization: no Allegro/BaseLinker HTTP call. This refreshes
+  // the provider-neutral reservation ledger from the order projections that the
+  // existing schedulers already keep current.
+  const reservationLedger = await refreshCommerceStockReservations();
+  const reservationTotals = await getReservationTotals(items.map((item) => item.productId));
   const localRows = await loadLocalRows(items);
   const grouped = new Map();
   for (const row of localRows) {
@@ -151,7 +162,10 @@ async function previewAllegroStockSync(raw = {}) {
   for (const [accountId, accountRows] of grouped.entries()) {
     let accountError = null;
     try { await requireStockAccount(accountId); } catch (error) { accountError = error; }
-    const prepared = accountRows.map((row) => ({ row, local: localRowValidation(row) }));
+    const prepared = accountRows.map((row) => ({
+      row,
+      local: localRowValidation(row, reservationTotals.byProductId.get(row.productId)),
+    }));
     let offerByExternal = new Map();
     if (!accountError) {
       const lookup = await fetchOffersByExternalKeys(accountId, prepared.map((item) => item.local.externalKey));
@@ -212,11 +226,23 @@ async function previewAllegroStockSync(raw = {}) {
       }
 
       const needsChange = errors.length === 0 && !inSync;
-      const reservationLedgerRequired = needsChange;
-      if (reservationLedgerRequired) {
+      const inventoryAccountingRequired = needsChange;
+      if (local.reservation.reserved > 0) {
         warnings.push({
-          code: 'commerce_reservation_ledger_required',
-          message: 'Write заблокований до Stage 3D.6B: фізичний Product.quantity зараз не враховує online-order reservations, тому FIXED sync міг би повернути вже проданий stock і створити oversell.',
+          code: 'commerce_active_reservations_subtracted',
+          message: `Central ledger відняв ${wholeStock(local.reservation.reserved)} од. активних online-order reservations перед channel policy.`,
+        });
+      }
+      if (local.reservation.consumed > 0) {
+        warnings.push({
+          code: 'commerce_consumed_reservations_held',
+          message: `Ще ${wholeStock(local.reservation.consumed)} од. shipped orders утримуються як consumed, бо Product.quantity не має movement/reconciliation контракту.`,
+        });
+      }
+      if (inventoryAccountingRequired) {
+        warnings.push({
+          code: 'commerce_inventory_consumption_contract_required',
+          message: 'Reservation ledger уже LIVE, але upstream stock write ще locked: наступний етап має визначити, коли shipped/consumed одиниці вже фізично враховані в Product.quantity, щоб не віднімати їх двічі після ручної інвентаризації.',
         });
       }
 
@@ -237,7 +263,8 @@ async function previewAllegroStockSync(raw = {}) {
         needsChange,
         wouldEndOffer,
         endedNeedsReactivation,
-        reservationLedgerRequired,
+        reservation: local.reservation,
+        inventoryAccountingRequired,
         writeReady: false,
         errors,
         warnings,
@@ -246,18 +273,32 @@ async function previewAllegroStockSync(raw = {}) {
   }
 
   return {
-    stage: '3D.6A',
+    stage: '3D.6B',
     mode: 'preview_only',
     providerWriteCalls: 0,
-    sourceOfTruth: 'warehouse',
-    reservationLedgerReady: false,
+    sourceOfTruth: 'warehouse_minus_central_reservations',
+    reservationLedgerReady: true,
+    inventoryConsumptionReady: false,
+    reservationLedger: {
+      startedAt: reservationLedger.startedAt,
+      lastRefreshAt: reservationLedger.lastRefreshAt,
+      heldRows: reservationLedger.heldRows,
+      heldUnits: reservationLedger.heldUnits,
+      reservedUnits: reservationLedger.reservedUnits,
+      consumedUnits: reservationLedger.consumedUnits,
+      unknownUnits: reservationLedger.unknownUnits,
+      unresolvedHeldRows: reservationLedger.unresolvedHeldRows,
+      ambiguousHeldRows: reservationLedger.ambiguousHeldRows,
+      mappingCoverageReady: reservationLedger.mappingCoverageReady,
+      writeReady: false,
+    },
     providerCalls,
     summary: {
       total: rows.length,
       inSync: rows.filter((row) => row.inSync && !row.errors.length).length,
       changes: rows.filter((row) => row.needsChange).length,
       blocked: rows.filter((row) => row.errors.length > 0).length,
-      writeBlockedByReservations: rows.filter((row) => row.reservationLedgerRequired).length,
+      writeBlockedByInventoryAccounting: rows.filter((row) => row.inventoryAccountingRequired).length,
       wouldEndOffers: rows.filter((row) => row.wouldEndOffer).length,
       requiresReactivation: rows.filter((row) => row.endedNeedsReactivation).length,
     },

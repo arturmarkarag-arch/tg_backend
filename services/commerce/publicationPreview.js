@@ -56,8 +56,12 @@ function effectivePrice(product, listing) {
   return { mode, value: Number.isFinite(value) ? value : 0, currency };
 }
 
-function effectiveStock(product, listing) {
-  const source = Math.max(0, Math.floor(Number(product?.availableStock || 0)));
+function effectiveStock(product, listing, reservation = null) {
+  const physicalSource = Math.max(0, Math.floor(Number(product?.availableStock || 0)));
+  const reservedUnits = Math.max(0, Math.floor(Number(reservation?.held || 0)));
+  // Central reservations are subtracted before channel-specific buffer/cap rules.
+  // A channel policy may publish less than the free warehouse balance, never more.
+  const source = Math.max(0, physicalSource - reservedUnits);
   const mode = listing?.stock?.mode || 'inherit';
   const buffer = Math.max(0, Math.floor(Number(listing?.stock?.buffer || 0)));
   const inherited = Math.max(0, source - buffer);
@@ -68,6 +72,8 @@ function effectiveStock(product, listing) {
     // warehouse quantity after the configured buffer.
     return {
       mode,
+      physicalSource,
+      reservedUnits,
       source,
       buffer,
       requested,
@@ -77,9 +83,9 @@ function effectiveStock(product, listing) {
   }
   if (mode === 'capped') {
     const maxQuantity = Math.max(0, Math.floor(Number(listing?.stock?.maxQuantity || 0)));
-    return { mode, source, buffer, cappedAt: maxQuantity, available: Math.min(inherited, maxQuantity), clamped: false };
+    return { mode, physicalSource, reservedUnits, source, buffer, cappedAt: maxQuantity, available: Math.min(inherited, maxQuantity), clamped: false };
   }
-  return { mode: 'inherit', source, buffer, available: inherited, clamped: false };
+  return { mode: 'inherit', physicalSource, reservedUnits, source, buffer, available: inherited, clamped: false };
 }
 
 function validateAllegroAccount(account) {

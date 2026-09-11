@@ -136,9 +136,10 @@ router.post('/publications/allegro/price-sync', asyncHandler(async (req, res) =>
   res.status(pending ? 202 : 200).json(result);
 }));
 
-// Stage 3D.6A: read-only stock preview. Warehouse remains the source of truth,
-// but upstream writes stay disabled until Stage 3D.6B adds a central reservation
-// ledger for online orders. Without it a FIXED sync could re-add already sold stock.
+// Stage 3D.6B: read-only stock preview backed by the provider-neutral central
+// reservation ledger. Upstream writes still stay disabled until the physical
+// inventory movement/reconciliation contract can prove when consumed units are
+// already reflected in Product.quantity.
 router.post('/publications/allegro/stock-sync/preview', asyncHandler(async (req, res) => {
   const result = await previewAllegroStockSync(req.body || {});
   res.set('Cache-Control', 'no-store');

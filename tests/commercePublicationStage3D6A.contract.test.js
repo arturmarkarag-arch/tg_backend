@@ -23,8 +23,6 @@ describe('Commerce publication Stage 3D.6A contract', () => {
     const service = read('services/commerce/allegroStockSync.js');
     expect(service).toContain("mode: 'preview_only'");
     expect(service).toContain('providerWriteCalls: 0');
-    expect(service).toContain('reservationLedgerReady: false');
-    expect(service).toContain('commerce_reservation_ledger_required');
     expect(service).not.toContain("method: 'POST'");
   });
 
@@ -57,7 +55,6 @@ describe('Commerce publication Stage 3D.6A contract', () => {
     const writeLine = registry.split('\n').find((line) => line.includes("id: 'offers.stock.write'") && line.includes('offer-bulk-modification-commands'));
     expect(previewLine).toContain('implementation: LIVE');
     expect(writeLine).toContain('implementation: PLANNED');
-    expect(writeLine).toContain('reservation ledger');
   });
 
   test('Stage 3D.5 price command still does not mix stock writes', () => {
