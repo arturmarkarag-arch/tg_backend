@@ -30,6 +30,7 @@ const commerceRouter = require('./routes/commerce');
 const baseLinkerPrintAgentRouter = require('./routes/baseLinkerPrintAgent');
 const { getPublicMaintenanceState, maintenanceReadOnlyMiddleware } = require('./services/maintenanceState');
 const { telegramAuth, requireTelegramRole, requireTelegramRoles } = require('./middleware/telegramAuth');
+const { egressRequestContextMiddleware } = require('./services/egressTrafficMonitor');
 
 // The warehouse test harness (destructive: cleanup/seed/reset of real
 // collections) must NEVER be reachable in production. Outside production it is
@@ -45,6 +46,9 @@ const app = express();
 app.disable('x-powered-by');
 app.use(cors(expressCorsOptions));
 app.use(express.json());
+// Tags automatic outbound HTTP metadata with the inbound API route that caused
+// it. Background schedulers remain source=background without manual registration.
+app.use(egressRequestContextMiddleware);
 // Legacy local uploads are warehouse-domain. Keep them behind auth instead of
 // exposing every existing file as anonymous static content. Public product media
 // is served from the explicitly public R2 domain instead.

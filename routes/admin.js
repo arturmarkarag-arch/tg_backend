@@ -801,6 +801,17 @@ router.post('/telegram-groups/:groupId/check-all', telegramAuth, requireTelegram
   res.json(result);
 }));
 
+
+// ── Automatic outbound traffic monitor ────────────────────────────────────────
+// Provider-neutral: transport accounting is installed globally in index.js and
+// discovers destinations from actual sockets. No BaseLinker/Allegro/Gemini list.
+router.get('/egress-traffic', telegramAuth, requireTelegramRole('admin'), asyncHandler(async (req, res) => {
+  const { getEgressTrafficSummary } = require('../services/egressTrafficMonitor');
+  const hours = Math.min(24 * 31, Math.max(1, parseInt(req.query.hours, 10) || 24));
+  res.set('Cache-Control', 'no-store');
+  res.json(await getEgressTrafficSummary({ hours }));
+}));
+
 // ── OpenAI Costs & Usage (Admin Key required) ─────────────────────────────────
 
 async function fetchOpenAIAdmin(path) {

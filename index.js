@@ -3,6 +3,16 @@
 // existing local ../.env contract before initializing the SDK.
 const { Sentry, sentryEnabled } = require('./instrument');
 
+// Install before app/services are required so every outbound connection created
+// by axios/fetch/SDKs/Mongo/Redis is observed automatically. No provider list.
+const {
+  installEgressTrafficMonitor,
+  startEgressTrafficPersistence,
+  flushEgressTraffic,
+  stopEgressTrafficTimers,
+} = require('./services/egressTrafficMonitor');
+installEgressTrafficMonitor();
+
 const http = require('http');
 const mongoose = require('mongoose');
 const app = require('./app');
@@ -44,6 +54,8 @@ async function shutdown(signal, code = 0) {
   hardExit.unref();
   try {
     if (httpServer) await new Promise((resolve) => httpServer.close(resolve));
+    try { await flushEgressTraffic(); } catch (_) { /* best effort */ }
+    stopEgressTrafficTimers();
     await mongoose.connection.close(false);
   } catch (err) {
   } finally {
@@ -93,6 +105,7 @@ async function startServer() {
 
     await mongoose.connect(MONGODB_URI, { useNewUrlParser: true, useUnifiedTopology: true });
     console.log('Connected to MongoDB');
+    startEgressTrafficPersistence();
     await assertDeliveryGroupSchedulesReady();
     await migrateOrdersToSessionIds();
     const parkedOrderMigration = await require('./services/orderUnassignStateMigration').migrateLegacyParkedOrders();
