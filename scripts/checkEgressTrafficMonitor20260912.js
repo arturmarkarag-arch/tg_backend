@@ -25,6 +25,8 @@ check(monitor.includes('socket.bytesWritten'), 'long-lived socket bytes are samp
 check(monitor.includes('installHttpRequestHook(http') && monitor.includes('installHttpRequestHook(https'), 'HTTP/HTTPS endpoint metadata is automatic');
 check(monitor.includes('installFetchHook()'), 'global fetch endpoint metadata is automatic');
 check(monitor.includes("split('?')[0]"), 'query strings are removed before persistence');
+check(monitor.includes("return ':credential'"), 'credential-shaped URL path segments are redacted automatically');
+check(monitor.includes('Re-sanitize persisted hints on read too'), 'older persisted endpoint hints are re-sanitized before admin UI output');
 check(!/authorization|cookie|api[_-]?key|tokenEncrypted/i.test(monitor), 'monitor does not persist auth-specific fields');
 check(!/base\s*linker|allegro|gemini|openai|telegram/i.test(monitor), 'monitor has no provider allowlist/registry');
 check(index.indexOf('installEgressTrafficMonitor();') < index.indexOf("require('./app')"), 'observer installs before app/services load');

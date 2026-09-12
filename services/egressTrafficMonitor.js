@@ -60,7 +60,11 @@ function normalizePathname(pathname) {
     if (/^[0-9a-f]{24}$/i.test(part)) return ':id';
     if (/^[0-9a-f]{8}-[0-9a-f-]{27,}$/i.test(part)) return ':id';
     if (/^\d{7,}$/.test(part)) return ':id';
-    if (/^[A-Za-z0-9_-]{40,}$/.test(part)) return ':key';
+    // Credentials are sometimes embedded directly in a URL path rather than in
+    // auth/query params. Mask any long opaque token and any
+    // "identifier:secret"-shaped segment before it can reach RAM or Mongo.
+    if (/^[^/:]{4,32}:[A-Za-z0-9._~-]{16,}$/.test(part)) return ':credential';
+    if (/^[A-Za-z0-9._~-]{40,}$/.test(part)) return ':key';
     return part.length > 96 ? ':segment' : part;
   });
   return parts.join('/') || '/';
@@ -429,11 +433,22 @@ function aggregateRows(samples, current) {
       if (!hint?.host) continue;
       const key = hostPortKey(hint);
       const list = hintsByHost.get(key) || new Map();
-      const hintKey = `${hint.method}|${hint.path}|${hint.source}`;
+      // Re-sanitize persisted hints on read too. This protects the UI immediately
+      // after deploy even if an older sample was stored by a previous monitor build.
+      const safeMethod = String(hint.method || 'GET').toUpperCase();
+      const safePath = normalizePathname(hint.path || '/');
+      const rawSource = String(hint.source || 'background');
+      const sourceMatch = rawSource.match(/^([A-Za-z]+)\s+(.+)$/);
+      const safeSource = rawSource === 'background'
+        ? 'background'
+        : sourceMatch
+          ? normalizeInternalSource(sourceMatch[1], sourceMatch[2])
+          : normalizeInternalSource('OUT', rawSource);
+      const hintKey = `${safeMethod}|${safePath}|${safeSource}`;
       const agg = list.get(hintKey) || {
-        method: hint.method || 'GET',
-        path: hint.path || '/',
-        source: hint.source || 'background',
+        method: safeMethod,
+        path: safePath,
+        source: safeSource,
         calls: 0,
         estimatedRequestBytes: 0,
       };
