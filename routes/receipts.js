@@ -343,6 +343,16 @@ router.get('/items-gallery', staffOnly, asyncHandler(async (req, res) => {
   }
   const receiptById = new Map(receipts.map((receipt) => [String(receipt._id), receipt]));
   const telegramStateByItemId = await publicationStateMapForItems(rows);
+  // The collapsed gallery needs one lifecycle fact to decide whether Delete may
+  // be offered again after the physical Product was archived. Product.receiptItemId
+  // is the durable identity anchor, so fetch only that anchor + status for this page.
+  const galleryProducts = rowIds.length
+    ? await Product.find({ receiptItemId: { $in: rowIds } }, 'receiptItemId status').lean()
+    : [];
+  const galleryProductStatusByReceiptItemId = new Map(galleryProducts.map((product) => [
+    String(product.receiptItemId || ''),
+    String(product.status || ''),
+  ]));
   const items = rows.map((row) => {
     const receipt = receiptById.get(String(row.receiptId || ''));
     const routing = normalizeReceiptItemRouting(row, receipt);
@@ -365,6 +375,7 @@ router.get('/items-gallery', staffOnly, asyncHandler(async (req, res) => {
       receiptType: receipt?.type || 'regular',
       receiptStatus: receipt?.status || 'draft',
       receiptTargetDeliveryGroupId: receipt?.targetDeliveryGroupId || null,
+      warehouseProductStatus: galleryProductStatusByReceiptItemId.get(String(row._id)) || '',
       supplementState,
       supplementGroupName: supplementGroupNameByWaveId.get(String(displaySupplementOffer?.waveId || '')) || '',
       telegramNewProduct: telegramStateByItemId.get(String(row._id)) || {

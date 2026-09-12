@@ -14,6 +14,13 @@ describe('receipt photo gallery contract', () => {
     expect(gallery).toContain(".sort({ createdAt: -1, _id: -1 })");
   });
 
+  test('gallery exposes only compact warehouse Product status needed by the Delete lifecycle button', () => {
+    const gallery = sliceBetweenOrThrow(source, "router.get('/items-gallery'", "router.get('/:id'", { label: 'receipt gallery route' });
+    expect(gallery).toContain("Product.find({ receiptItemId: { $in: rowIds } }, 'receiptItemId status').lean()");
+    expect(gallery).toContain('warehouseProductStatus');
+    expect(gallery).not.toContain("Product.find({ receiptItemId: { $in: rowIds } }).lean()");
+  });
+
   test('gallery includes receipt context required below a photo and for edit navigation', () => {
     const gallery = sliceBetweenOrThrow(source, "router.get('/items-gallery'", "router.get('/:id'", { label: 'receipt gallery route' });
     expect(gallery).toContain('receiptType');
