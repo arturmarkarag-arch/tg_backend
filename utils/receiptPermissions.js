@@ -7,8 +7,9 @@
  * by per-row edit/routing revisions, so widening permissions never becomes
  * last-write-wins ownership stealing.
  *
- * Deletion deliberately stays narrower: draft rows may be removed by their
- * original receiver or an admin; confirmed rows only by an admin.
+ * Receipt work is team-owned, not receiver-owned. Deletion uses the same staff
+ * boundary as edit/route/confirm: any authenticated admin or warehouse worker may
+ * execute it; lifecycle guards decide whether the row itself is deletable.
  */
 
 const { appError } = require('./errors');
@@ -35,13 +36,9 @@ function assertCanEditItem(user, item, changedFields) {
 }
 
 function assertCanDeleteItem(user, item) {
-  const isAdmin = user && user.role === 'admin';
-  if (item.status === 'confirmed' && !isAdmin) {
-    throw appError('receipt_item_already_confirmed');
-  }
-  if (!isOwnerOrAdmin(user, item)) {
-    throw appError('receipt_item_forbidden_delete');
-  }
+  // `createdBy` is audit provenance only. Receipt rows are shared warehouse work:
+  // both admin and warehouse may delete when the separate lifecycle guard allows it.
+  if (!isReceiptStaff(user)) throw appError('forbidden');
 }
 
 function assertCanConfirmItem(user, item) {

@@ -15,10 +15,10 @@
  *   rollbackItemArtifacts— прибрати все, що позиція створила.
  *
  * ГОЛОВНЕ ПРАВИЛО: правка НІЧОГО не скасовує в замовленнях. Скасування позицій у
- * замовленнях — наслідок ЗНИКНЕННЯ товару (archiveProduct), а зникнути товар тут
- * може лише тоді, коли ним ще ніхто не скористався (describeItemUsage порожній).
- * Якщо товар уже в блоці / замовленні / збиранні — видалення й зміна призначення
- * відмовляються з поясненням, а не архівують товар нишком.
+ * замовленнях — наслідок окремого фізичного archiveProduct. До архівації routed
+ * товар не можна видалити через накладну. Після свідомої архівації receipt-row
+ * можна прибрати, але archived Product та його Order/Picking/Supplement історія
+ * зберігаються: DELETE накладної не переписує фізичні факти заднім числом.
  */
 
 const Block             = require('../models/Block');
@@ -131,6 +131,120 @@ async function describeItemUsage(item, { session = null, mode = 'destructive' } 
   }
 
   return { inUse: reasons.length > 0, reasons };
+}
+
+/**
+ * Окремий lifecycle-контракт саме для DELETE рядка накладної.
+ *
+ * Дозволені лише два стани:
+ *   1) маршрут ще не вибраний — похідних бізнес-процесів бути не повинно;
+ *   2) фізичний warehouse Product уже archived — його забрали з полиці й
+ *      archive command уже зупинив незавершену роботу.
+ *
+ * В archived-гілці ми НЕ вважаємо історичні Order/Picking/Offer записи причиною
+ * блокування: вони є audit facts і залишаються разом із самим archived Product.
+ * Але будь-яка поточна фізична/операційна робота все ще блокує DELETE — це
+ * fail-closed fence на випадок частково зламаного/конкурентного стану.
+ */
+async function describeItemDeleteUsage(item, receipt = null, { session = null } = {}) {
+  const ses = (q) => (session ? q.session(session) : q);
+  const routing = normalizeReceiptItemRouting(item, receipt);
+  const hasRoute = Boolean(routing.warehouse || routing.mandatory || routing.supplement);
+
+  let product = null;
+  if (item.createdProductId) {
+    product = await ses(Product.findById(item.createdProductId, 'status').lean());
+  }
+
+  const archivedProduct = Boolean(product && product.status === 'archived');
+
+  // Archived is an explicit allowed business state regardless of whether an old
+  // ReceiptItem still retains its historical route. Archive is a physical fact:
+  // the Product is already off the shelf. We preserve the Product/history and
+  // only remove the receipt row after proving no CURRENT work survived archive.
+  if (archivedProduct) {
+    const productId = product._id;
+    const reasons = [];
+
+    // Archive normally detaches the Product from every Block in the same tx. Keep
+    // this explicit check so a corrupted/half-migrated row can never be deleted.
+    const block = await ses(Block.findOne({ productIds: productId }, 'blockId').lean());
+    if (block) reasons.push(`архівований товар все ще стоїть у блоці ${block.blockId}`);
+
+    // Only unfinished CURRENT work blocks receipt deletion. Historical packed /
+    // completed rows are intentionally preserved and continue pointing at the
+    // archived Product, which we do not physically delete in this path.
+    const activeOrderCount = await ses(Order.countDocuments({
+      status: { $in: ['new', 'in_progress'] },
+      items: {
+        $elemMatch: {
+          productId,
+          packed: { $ne: true },
+          cancelled: { $ne: true },
+          skipped: { $ne: true },
+          voided: { $ne: true },
+        },
+      },
+    }));
+    if (activeOrderCount > 0) reasons.push(`товар ще має незавершені замовлення (${activeOrderCount})`);
+
+    const activeTaskCount = await ses(PickingTask.countDocuments({
+      productId,
+      status: { $in: ['pending', 'locked'] },
+    }));
+    if (activeTaskCount > 0) reasons.push('товар ще знаходиться в активному збиранні');
+
+    const activeOffers = await ses(SupplementOffer.find({
+      receiptItemId: item._id,
+      waveId: { $ne: null },
+      itemStatus: ITEM_RELATION_STATUS.ACTIVE,
+      status: { $in: ACTIVE_ITEM_STATUSES },
+    }, '_id revision').lean());
+    if (activeOffers.length > 0) {
+      reasons.push('товар ще має активне дозамовлення');
+      const activeRequestCount = await ses(SupplementRequest.countDocuments({
+        $or: activeOffers.map((offer) => ({
+          offerId: offer._id,
+          revision: revisionOf(offer),
+          status: REQUEST_STATUS.ACTIVE,
+        })),
+      }));
+      if (activeRequestCount > 0) reasons.push(`магазини ще мають активні заявки (${activeRequestCount})`);
+    }
+
+    return {
+      inUse: reasons.length > 0,
+      reasons,
+      allowedState: reasons.length ? null : 'archived',
+      // Critical: Product + vector + historical Order/Picking/Supplement links stay.
+      // DELETE removes the receipt row only; archive is the immutable product history.
+      preserveArchivedProduct: true,
+      productId: String(productId),
+    };
+  }
+
+  // Fresh draft / unrouted row: reuse the strict destructive guard so stale
+  // artifacts can never be erased merely because routing fields are empty.
+  if (!hasRoute) {
+    const usage = await describeItemUsage(item, { session, mode: 'destructive' });
+    return {
+      ...usage,
+      allowedState: usage.inUse ? null : 'unrouted',
+      preserveArchivedProduct: false,
+      productId: product ? String(product._id) : null,
+    };
+  }
+
+  // Once a route exists, only a physically archived warehouse Product re-opens
+  // deletion from the receipt. Mandatory/supplement-only rows have no Product and
+  // therefore stay non-deletable after publication.
+  return {
+    inUse: true,
+    reasons: ['товар уже має маршрут і переданий у роботу'],
+    allowedState: null,
+    preserveArchivedProduct: false,
+    productId: product ? String(product._id) : null,
+  };
 }
 
 /**
@@ -330,6 +444,7 @@ module.exports = {
   labelPositionsFromMeta,
   snapshotItem,
   describeItemUsage,
+  describeItemDeleteUsage,
   propagateItemEdit,
   syncCurrentSupplementSnapshots,
   rollbackItemArtifacts,

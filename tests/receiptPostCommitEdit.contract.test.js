@@ -55,8 +55,9 @@ describe('проведена накладна редагується далі', 
     const deleteStart = indexOrThrow(route, "router.delete('/:id/items/:itemId'");
     const confirmStart = indexOrThrow(route, "router.post('/:id/items/:itemId/confirm'", { from: deleteStart });
     const deleteHandler = sliceIndexesOrThrow(route, deleteStart, confirmStart, { label: 'receipt item DELETE' });
-    expect(deleteHandler).toContain('describeItemUsage(item, { session })');
+    expect(deleteHandler).toContain('describeItemDeleteUsage(item, receipt, { session })');
     expect(deleteHandler).toContain("appError('receipt_item_in_use'");
+    expect(deleteHandler).toContain('!usage.preserveArchivedProduct');
     expect(deleteHandler).toContain('rollbackItemArtifacts(item, { session })');
 
     const unconfirmHandler = sliceFromOrThrow(route, "router.post('/:id/items/:itemId/unconfirm'", { label: 'receipt item unconfirm' });

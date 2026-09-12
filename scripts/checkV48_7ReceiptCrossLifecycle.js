@@ -14,7 +14,7 @@ const checks = [
   ['legacy publication remains destructive rollback blocker', sync.includes('legacyOffers.length > 0') && sync.includes('старий publication flow')],
   ['future metadata edit blocks only OPEN/FROZEN modern publication', sync.includes('activeModernOffers') && sync.includes('modernOffers.filter(isActiveItemRevision)') && sync.includes('revision: revisionOf(offer)')],
   ['commercial edits explicitly request future-edit usage semantics', receipts.includes("describeItemUsage(item, { session: txSession, mode: 'edit' })")],
-  ['DELETE always checks destructive usage before rollback', /router\.delete\('\/:id\/items\/:itemId'[\s\S]*?const usage = await describeItemUsage\(item, \{ session \}\);[\s\S]*?rollbackItemArtifacts/.test(receipts)],
+  ['DELETE checks delete-specific lifecycle before any rollback', /router\.delete\('\/:id\/items\/:itemId'[\s\S]*?const usage = await describeItemDeleteUsage\(item, receipt, \{ session \}\);[\s\S]*?!usage\.preserveArchivedProduct[\s\S]*?rollbackItemArtifacts/.test(receipts)],
   ['UNCONFIRM always checks destructive usage before rollback', /router\.post\('\/:id\/items\/:itemId\/unconfirm'[\s\S]*?const usage = await describeItemUsage\(item, \{ session \}\);[\s\S]*?rollbackItemArtifacts/.test(receipts)],
   ['confirmed reroute stays locked', /router\.patch\('\/:id\/items\/:itemId\/routing'[\s\S]*?status: 'draft'/.test(receipts)],
   ['warehouse remainder remains additive', receipts.includes("router.post('/:id/items/:itemId/add-warehouse-remainder'") && receipts.includes('meta: { additive: true, primaryRoutePreserved: true }')],

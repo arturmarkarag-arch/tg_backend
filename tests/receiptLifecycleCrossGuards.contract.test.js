@@ -19,8 +19,9 @@ describe('V48.7 receipt cross-lifecycle guards', () => {
 
   it('runs usage guard before DELETE/UNCONFIRM rollback even if back-references are damaged', () => {
     const deleteRoute = sliceBetweenOrThrow(receipts, "router.delete('/:id/items/:itemId'", "router.patch('/:id/items/:itemId/routing'", { label: 'receipt DELETE before routing' });
-    expect(deleteRoute).toContain('const usage = await describeItemUsage(item, { session });');
-    expect(indexOrThrow(deleteRoute, 'describeItemUsage')).toBeLessThan(indexOrThrow(deleteRoute, 'rollbackItemArtifacts'));
+    expect(deleteRoute).toContain('const usage = await describeItemDeleteUsage(item, receipt, { session });');
+    expect(indexOrThrow(deleteRoute, 'describeItemDeleteUsage')).toBeLessThan(indexOrThrow(deleteRoute, 'rollbackItemArtifacts'));
+    expect(deleteRoute).toContain('!usage.preserveArchivedProduct');
 
     const unconfirmRoute = sliceBetweenOrThrow(receipts, "router.post('/:id/items/:itemId/unconfirm'", "router.get('/:id/supplement-targets'", { label: 'receipt unconfirm route' });
     expect(unconfirmRoute).toContain('const usage = await describeItemUsage(item, { session });');

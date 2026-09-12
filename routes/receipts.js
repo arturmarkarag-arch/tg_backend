@@ -56,6 +56,7 @@ const {
   labelPositionsFromMeta,
   snapshotItem,
   describeItemUsage,
+  describeItemDeleteUsage,
   propagateItemEdit,
   rollbackItemArtifacts,
   hasOpenSupplementWave,
@@ -1539,10 +1540,10 @@ router.post('/:id/items/:itemId/telegram-new-product', staffOnly, asyncHandler(a
 
 // ВИДАЛЕННЯ ПОЗИЦІЇ (DELETE)
 /**
- * Видалити рядок можна і з проведеної накладної — але лише поки товар, який він
- * створив, нікуди не поїхав. Товар у блоці, в замовленні магазину чи в збиранні
- * не зникає через правку паперу: тоді приходить 409 зі списком причин, а забрати
- * товар зі складу можна свідомою архівацією на сторінці Складу.
+ * Видалити рядок можна у двох бізнес-станах: маршрут ще не заданий або фізичний
+ * warehouse Product уже свідомо архівований/знятий з полиці. Routed active item
+ * не видаляється через накладну. Для archived випадку сам Product та історичні
+ * Order/Picking/Supplement факти зберігаються; прибирається лише receipt row.
  */
 router.delete('/:id/items/:itemId', staffOnly, asyncHandler(async (req, res) => {
   const session = await mongoose.connection.startSession();
@@ -1553,7 +1554,7 @@ router.delete('/:id/items/:itemId', staffOnly, asyncHandler(async (req, res) => 
 
     await withReceiptTelegramPublicationLock(req.params.itemId, () => session.withTransaction(async () => {
       removedArtifacts = null; // withTransaction може перезапустити колбек
-      const receipt = await Receipt.findById(req.params.id, '_id status').session(session);
+      const receipt = await Receipt.findById(req.params.id, '_id status type targetDeliveryGroupId').session(session);
       if (!receipt) throw appError('receipt_not_found');
 
       const item = await ReceiptItem.findOne(
@@ -1561,18 +1562,28 @@ router.delete('/:id/items/:itemId', staffOnly, asyncHandler(async (req, res) => 
       ).session(session);
       if (!item) throw appError('receipt_item_not_found');
 
-      // Delete policy stays narrower than edit policy: original receiver/admin for drafts; confirmed rows
-      // is admin-only. Checked inside the txn so a concurrent confirm cannot slip
-      // between the check and the delete.
+      // Receipt rows are shared staff work: admin and warehouse have the same
+      // permission boundary. Checked inside the txn; lifecycle eligibility remains
+      // a separate server-authoritative guard below.
       assertCanDeleteItem(req.user, item);
 
-      // Publication markers/offers are usage too, even if an inconsistent row has
-      // already lost its product back-reference. Never skip the usage gate based
-      // only on createdProductId/createdShopProductId.
-      const usage = await describeItemUsage(item, { session });
+      // DELETE has its own lifecycle contract:
+      //   • no route yet -> destructive rollback is allowed while nothing uses it;
+      //   • archived warehouse Product -> the receipt row may go away, but the
+      //     archived Product and all historical Order/Picking/Supplement facts stay.
+      // Any routed non-archived item is already in work and cannot be deleted.
+      const usage = await describeItemDeleteUsage(item, receipt, { session });
       if (usage.inUse) throw appError('receipt_item_in_use', { reasons: usage.reasons.join('; ') });
-      if (item.createdProductId || item.createdShopProductId) {
+
+      if (!usage.preserveArchivedProduct && (item.createdProductId || item.createdShopProductId)) {
         removedArtifacts = await rollbackItemArtifacts(item, { session });
+      } else if (usage.preserveArchivedProduct) {
+        removedArtifacts = {
+          productId: null,
+          shopProductId: null,
+          offerIds: [],
+          archivedProductPreserved: usage.productId || null,
+        };
       }
 
       telegramCleanup = await enqueueReceiptNewProductCleanup(
