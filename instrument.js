@@ -12,10 +12,6 @@ if (process.env.NODE_ENV !== 'production') {
 
 const Sentry = require('@sentry/node');
 
-function sampleRate(value, fallback) {
-  const parsed = Number(value);
-  return Number.isFinite(parsed) && parsed >= 0 && parsed <= 1 ? parsed : fallback;
-}
 
 function stripUrlDetails(rawUrl) {
   if (!rawUrl) return rawUrl;
@@ -35,8 +31,8 @@ function scrubServerEvent(event) {
   event.request.url = stripUrlDetails(event.request.url);
   event.request.query_string = undefined;
   event.request.cookies = undefined;
-  // Request bodies can contain order/customer/Telegram data. The trace still
-  // keeps route/method/status/timing, which is what we need for performance.
+  // Request bodies can contain order/customer/Telegram data. Error events only
+  // need safe request context; bodies are never sent to Sentry.
   event.request.data = undefined;
 
   if (event.request.headers && typeof event.request.headers === 'object') {
@@ -64,16 +60,14 @@ const explicitlyDisabled = String(process.env.SENTRY_ENABLED || '').toLowerCase(
 const sentryEnabled = Boolean(dsn) && !explicitlyDisabled;
 
 if (sentryEnabled) {
-  const production = process.env.NODE_ENV === 'production';
   Sentry.init({
     dsn,
     environment: process.env.SENTRY_ENVIRONMENT || process.env.NODE_ENV || 'development',
     release: process.env.SENTRY_RELEASE || process.env.RENDER_GIT_COMMIT || undefined,
     sendDefaultPii: false,
-    tracesSampleRate: sampleRate(
-      process.env.SENTRY_TRACES_SAMPLE_RATE,
-      production ? 0.2 : 1.0,
-    ),
+    // Errors-only contract. Performance tracing is intentionally disabled.
+    // Re-enabling transaction sampling requires a separate bandwidth review.
+    beforeSendTransaction: () => null,
     beforeSend: scrubServerEvent,
   });
 }
