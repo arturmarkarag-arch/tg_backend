@@ -80,6 +80,7 @@ if (ENABLE_TEST_API) {
 const publicApiPaths = [
   /^\/api\/v1\/auth\/config$/,
   /^\/api\/v1\/auth\/google$/,
+  /^\/api\/v1\/auth\/google\/link\/bootstrap$/,
   /^\/api\/v1\/auth\/google\/link\/complete$/,
   /^\/api\/v1\/auth\/me$/,
   /^\/api\/v1\/auth\/logout$/,

@@ -133,7 +133,7 @@ function runChecks({ quiet = false } = {}) {
   includesAll(socket, [
     "const Shop = require('./models/Shop')",
     "const { verifySession, isSessionNotRevoked } = require('./utils/jwt')",
-    '!isSessionNotRevoked(jwtIat, dbUser)',
+    '!isSessionNotRevoked(browserSession, dbUser)',
     "socket.join(`user_${socket.telegramId}`)",
     "socket.join('staff')",
     "socket.join('app_users')",

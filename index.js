@@ -40,6 +40,7 @@ const { startTelegramMemberTagScheduler } = require('./services/telegramMemberTa
 const { startBaseLinkerQueueScheduler } = require('./services/baseLinkerQueueScheduler');
 const { startAllegroOrderScheduler } = require('./services/allegroOrderScheduler');
 const { enterMaintenance, isMaintenanceActive } = require('./services/maintenanceState');
+const { assertJwtConfigured } = require('./utils/jwt');
 
 let httpServer = null;
 let shuttingDown = false;
@@ -87,6 +88,7 @@ async function startServer() {
     if (!MONGODB_URI) {
       throw new Error('MONGODB_URI is required in production');
     }
+    assertJwtConfigured();
 
     // Fail-fast: the order-placement de-dup relies on a cross-worker Redis lock.
     // Without REDIS_URL that lock degrades to a per-PROCESS mutex, so running more

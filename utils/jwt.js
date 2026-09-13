@@ -2,41 +2,60 @@ const jwt = require('jsonwebtoken');
 
 const SECRET = process.env.JWT_SECRET || '';
 const EXPIRES_IN = process.env.JWT_EXPIRY || '7d';
+const ALGORITHM = 'HS256';
 
-if (!SECRET) {
+function assertJwtConfigured() {
+  if (!SECRET) throw new Error('JWT_SECRET not configured');
 }
 
-// The session token carries only the telegramId. Role and all profile data are
-// always re-read from the DB on each request, so a role change takes effect
-// immediately and a stolen token cannot embed an elevated role.
-function signSession(telegramId) {
-  if (!SECRET) throw new Error('JWT_SECRET not configured');
-  return jwt.sign({ sub: String(telegramId) }, SECRET, { expiresIn: EXPIRES_IN });
+// Session claims stay deliberately small: account identity + monotonic session
+// version. Role/profile are always re-read from Mongo on every request.
+function signSession(telegramId, sessionVersion = 0) {
+  assertJwtConfigured();
+  return jwt.sign(
+    { sub: String(telegramId), sv: Number(sessionVersion) || 0 },
+    SECRET,
+    { expiresIn: EXPIRES_IN, algorithm: ALGORITHM },
+  );
 }
 
 function verifySession(token) {
   if (!SECRET || !token) return null;
   try {
-    const payload = jwt.verify(token, SECRET);
+    const payload = jwt.verify(token, SECRET, { algorithms: [ALGORITHM] });
     const telegramId = String(payload.sub || '');
-    // `iat` (issued-at, seconds) lets callers reject tokens minted before a
-    // logout (see User.sessionsValidFrom).
-    return telegramId ? { telegramId, iat: Number(payload.iat) || 0 } : null;
+    if (!telegramId) return null;
+    const rawVersion = Number(payload.sv);
+    return {
+      telegramId,
+      sessionVersion: Number.isSafeInteger(rawVersion) && rawVersion >= 0 ? rawVersion : null,
+      iat: Number(payload.iat) || 0,
+    };
   } catch {
     return null;
   }
 }
 
-// True when a token issued at `iatSeconds` is still valid for `user` — i.e. it
-// was issued at/after the user's last logout. A null sessionsValidFrom (never
-// logged out) always passes.
-function isSessionNotRevoked(iatSeconds, user) {
+// New tokens use an exact integer sessionVersion — logout/unlink increments the
+// DB value, instantly invalidating every older browser session without clock
+// precision or grace windows. Legacy tokens (without `sv`) are accepted only
+// through the old timestamp cutoff during the migration window.
+function isSessionNotRevoked(session, user) {
+  if (!session) return false;
+  const currentVersion = Number(user?.sessionVersion) || 0;
+  if (session.sessionVersion !== null && session.sessionVersion !== undefined) {
+    return Number(session.sessionVersion) === currentVersion;
+  }
+
   const cutoff = user?.sessionsValidFrom;
   if (!cutoff) return true;
-  // `iat` is floored to whole seconds, so allow a 1s grace — otherwise a
-  // logout immediately followed by re-login could reject the fresh token.
-  // A genuinely old stolen token is still rejected (its iat is far older).
-  return (Number(iatSeconds) || 0) * 1000 + 1000 >= new Date(cutoff).getTime();
+  return (Number(session.iat) || 0) * 1000 >= new Date(cutoff).getTime();
 }
 
-module.exports = { signSession, verifySession, isSessionNotRevoked };
+module.exports = {
+  signSession,
+  verifySession,
+  isSessionNotRevoked,
+  assertJwtConfigured,
+  ALGORITHM,
+};

@@ -48,9 +48,17 @@ function validateTelegramInitData(initData, botToken) {
     return { valid: false, parsedData, rawData, error: 'Missing hash value' };
   }
 
-  const MAX_AGE_SECONDS = 24 * 60 * 60; // Telegram офіційна рекомендація
-  const authDate = parseInt(rawData.auth_date, 10);
-  if (!authDate || (Date.now() / 1000 - authDate) > MAX_AGE_SECONDS) {
+  const MAX_AGE_SECONDS = 24 * 60 * 60;
+  const MAX_FUTURE_SKEW_SECONDS = 60;
+  const authDate = Number.parseInt(rawData.auth_date, 10);
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  if (!Number.isSafeInteger(authDate) || authDate <= 0) {
+    return { valid: false, error: 'Invalid auth_date', parsedData, rawData };
+  }
+  if (authDate > nowSeconds + MAX_FUTURE_SKEW_SECONDS) {
+    return { valid: false, error: 'initData auth_date is in the future', parsedData, rawData };
+  }
+  if ((nowSeconds - authDate) > MAX_AGE_SECONDS) {
     return { valid: false, error: 'initData expired', parsedData, rawData };
   }
 
@@ -59,11 +67,19 @@ function validateTelegramInitData(initData, botToken) {
   const dataCheckString = buildDataCheckString(rawData);
   const hmac = crypto.createHmac('sha256', secretKey).update(dataCheckString).digest('hex');
 
-  // timingSafeEqual кидає RangeError якщо буфери різної довжини
-  if (providedHash.length !== hmac.length) {
+  // Strict hex validation happens BEFORE Buffer conversion. A 64-character
+  // non-hex string used to pass the string-length check and then make
+  // timingSafeEqual throw RangeError because Buffer.from(..., 'hex') decoded
+  // to a shorter buffer. Invalid anonymous input must be a clean 401, not 500.
+  if (!/^[0-9a-f]{64}$/i.test(providedHash)) {
     return { valid: false, parsedData, rawData, error: 'Hash mismatch' };
   }
-  const ok = crypto.timingSafeEqual(Buffer.from(hmac, 'hex'), Buffer.from(providedHash, 'hex'));
+  const expectedBuffer = Buffer.from(hmac, 'hex');
+  const providedBuffer = Buffer.from(providedHash, 'hex');
+  if (expectedBuffer.length !== 32 || providedBuffer.length !== 32) {
+    return { valid: false, parsedData, rawData, error: 'Hash mismatch' };
+  }
+  const ok = crypto.timingSafeEqual(expectedBuffer, providedBuffer);
 
   return {
     valid: ok,

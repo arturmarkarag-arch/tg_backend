@@ -6,6 +6,8 @@ const Shop = require('./models/Shop');
 const { isRemovedUser } = require('./utils/userAccountState');
 const { validateTelegramInitData } = require('./utils/validateTelegramInitData');
 const { verifySession, isSessionNotRevoked } = require('./utils/jwt');
+const { readSessionCookie } = require('./utils/sessionCookie');
+const LEGACY_BROWSER_COMPAT = process.env.AUTH_LEGACY_BROWSER_COMPAT !== 'false';
 const { pubClient, subClient, isEnabled: redisEnabled } = require('./utils/redis');
 const { hasBaseLinkerPickingAccess } = require('./utils/baseLinkerAccess');
 const { hasMarketplaceWarehouseAccess } = require('./utils/marketplaceWarehouseAccess');
@@ -81,9 +83,9 @@ function initSocket(httpServer) {
   // Auth middleware — verify initData (mini-app) OR session JWT (browser).
   io.use(async (socket, next) => {
     const initData = socket.handshake.auth?.initData;
-    const token = socket.handshake.auth?.token;
+    const token = socket.handshake.auth?.token; // temporary legacy migration fallback
     let telegramId = '';
-    let jwtIat = null;
+    let browserSession = null;
 
     if (initData) {
       const { valid, error } = validateTelegramInitData(initData, process.env.TELEGRAM_BOT_TOKEN);
@@ -98,15 +100,14 @@ function initSocket(httpServer) {
       } catch {
         return next(new Error('Unauthorized: Could not parse user from initData'));
       }
-    } else if (token) {
-      const session = verifySession(token);
+    } else {
+      const cookieToken = readSessionCookie({ headers: socket.handshake.headers || {} });
+      const session = verifySession(cookieToken || (LEGACY_BROWSER_COMPAT ? token : ''));
       if (!session) {
         return next(new Error('Unauthorized: Invalid session token'));
       }
       telegramId = session.telegramId;
-      jwtIat = session.iat;
-    } else {
-      return next(new Error('Unauthorized: initData or token is required'));
+      browserSession = session;
     }
 
     if (!telegramId) {
@@ -119,7 +120,7 @@ function initSocket(httpServer) {
     if (dbUser.botBlocked) {
       return next(new Error('Forbidden: Account blocked'));
     }
-    if (jwtIat !== null && !isSessionNotRevoked(jwtIat, dbUser)) {
+    if (browserSession && !isSessionNotRevoked(browserSession, dbUser)) {
       return next(new Error('Unauthorized: Session revoked'));
     }
     if (!['admin', 'warehouse', 'seller', 'baselinker'].includes(dbUser.role)) {

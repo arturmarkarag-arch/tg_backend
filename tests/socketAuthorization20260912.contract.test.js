@@ -9,7 +9,7 @@ describe('Socket authorization 2026-09-12', () => {
   it('applies browser JWT revocation to Socket.IO too', () => {
     const source = read('socket.js');
     expect(source).toContain("verifySession, isSessionNotRevoked");
-    expect(source).toContain('!isSessionNotRevoked(jwtIat, dbUser)');
+    expect(source).toContain('!isSessionNotRevoked(browserSession, dbUser)');
   });
 
   it('does not expose locks or warehouse topology outside staff', () => {

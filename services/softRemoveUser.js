@@ -118,6 +118,7 @@ async function softRemoveUser({ telegramId, actor = null, groupChatId = '' }) {
               shopId: null,
               shopNumber: '',
             },
+            $inc: { sessionVersion: 1 },
             $push: {
               history: {
                 at: now,

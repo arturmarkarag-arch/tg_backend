@@ -23,9 +23,30 @@ const { getShop, getDeliveryGroup } = require('../../utils/modelCache');
 const { isRemovedUser } = require('../../utils/userAccountState');
 const { buildSellerOrderingStatusReadModel } = require('../../services/readModels/sellerOrderingStatusReadModel');
 const { getTelegramUsernameMap } = require('../../utils/telegramUsername');
+const { createAuthRateLimit } = require('../../middleware/authRateLimit');
 
 const router = express.Router();
 const adminOnly = requireTelegramRole('admin');
+function positiveEnvInt(name, fallback) {
+  const value = Number(process.env[name]);
+  return Number.isSafeInteger(value) && value > 0 ? value : fallback;
+}
+
+const telegramAuthLimit = createAuthRateLimit({
+  name: 'telegram-auth',
+  max: positiveEnvInt('TELEGRAM_AUTH_RATE_MAX', 300),
+  windowMs: positiveEnvInt('TELEGRAM_AUTH_RATE_WINDOW_MS', 5 * 60 * 1000),
+});
+const registrationLimit = createAuthRateLimit({
+  name: 'telegram-registration',
+  max: positiveEnvInt('TELEGRAM_REGISTRATION_RATE_MAX', 120),
+  windowMs: positiveEnvInt('TELEGRAM_REGISTRATION_RATE_WINDOW_MS', 10 * 60 * 1000),
+});
+const googleLinkLimit = createAuthRateLimit({
+  name: 'telegram-google-link',
+  max: positiveEnvInt('TELEGRAM_GOOGLE_LINK_RATE_MAX', 120),
+  windowMs: positiveEnvInt('TELEGRAM_GOOGLE_LINK_RATE_WINDOW_MS', 10 * 60 * 1000),
+});
 
 function normalizePhoneNumber(raw) {
   if (!raw) return '';
@@ -91,7 +112,7 @@ async function resolveDeliveryGroupName(groupId) {
 
 // Builds the public profile payload for an authenticated user. Shared by the
 // Telegram mini-app path (POST /me, initData) and the browser path
-// (GET /api/v1/auth/me, JWT) so both return an identical shape.
+// (GET /api/v1/auth/me, HttpOnly browser session) so both return an identical shape.
 async function buildUserProfile(user) {
   // This function is only used to bootstrap an authenticated app/browser
   // profile, so it is the canonical place to record a real app open.
@@ -182,7 +203,7 @@ async function buildUserProfile(user) {
 }
 
 // POST /api/v1/telegram/validate — перевірити підпис initData
-router.post('/validate', asyncHandler(async (req, res) => {
+router.post('/validate', telegramAuthLimit, asyncHandler(async (req, res) => {
   const initData = getInitDataFromRequest(req);
   if (!initData) throw appError('init_data_required');
 
@@ -197,7 +218,7 @@ router.post('/validate', asyncHandler(async (req, res) => {
 
 // POST /api/v1/telegram/me — перевірити initData І чи є користувач у системі
 // Повертає профіль якщо є, 403 якщо немає, 401 якщо initData невалідна
-router.post('/me', asyncHandler(async (req, res) => {
+router.post('/me', telegramAuthLimit, asyncHandler(async (req, res) => {
   const initData = getInitDataFromRequest(req);
   if (!initData) throw appError('init_data_required');
 
@@ -331,10 +352,10 @@ router.patch('/me/profile', asyncHandler(async (req, res) => {
 // POST /api/v1/telegram/google/link/start — крок 1 безпечної прив'язки Google.
 // Захищено telegramAuth → req.telegramId уже доведений initData (mini-app). Мінтимо
 // одноразовий токен, що несе САМЕ цей telegramId (а не Google). Клієнт відкриє
-// /link-google?t=<token> у системному браузері (Telegram.WebApp.openLink), де
+// /link-google#t=<token> у системному браузері (Telegram.WebApp.openLink), де
 // Google-вхід працює; завершення — на публічному /v1/auth/google/link/complete.
 // Деталі безпеки (reverse-напрямок) — у models/GoogleLinkToken.js.
-router.post('/google/link/start', asyncHandler(async (req, res) => {
+router.post('/google/link/start', googleLinkLimit, asyncHandler(async (req, res) => {
   const telegramId = req.telegramId;
   if (!telegramId) throw appError('auth_required');
   const token = await issueGoogleLinkToken(telegramId);
@@ -343,7 +364,7 @@ router.post('/google/link/start', asyncHandler(async (req, res) => {
 
 // POST /api/v1/telegram/google/unlink — прибрати прив'язку Google від свого акаунта.
 // Removing a sign-in credential ALSO evicts existing browser sessions (bump
-// sessionsValidFrom): otherwise a session bootstrapped via the now-removed Google
+// sessionVersion): otherwise a session bootstrapped via the now-removed Google
 // would linger. The mini-app (initData) is unaffected — the revocation check runs
 // only on the browser/JWT path, so the user keeps managing from Telegram.
 router.post('/google/unlink', asyncHandler(async (req, res) => {
@@ -351,7 +372,10 @@ router.post('/google/unlink', asyncHandler(async (req, res) => {
   if (!telegramId) throw appError('auth_required');
   await User.updateOne(
     { telegramId },
-    { $set: { googleSub: '', googleEmail: '', sessionsValidFrom: new Date() } },
+    {
+      $set: { googleSub: '', googleEmail: '', sessionsValidFrom: new Date() },
+      $inc: { sessionVersion: 1 },
+    },
   );
   res.json({ ok: true });
 }));
@@ -530,7 +554,7 @@ router.post('/mini-app/reset-state', asyncHandler(async (req, res) => {
  * Idempotent-ish: an unspent token for this id is reused instead of minting a
  * new row on every mini-app open.
  */
-router.post('/registration-invite', asyncHandler(async (req, res) => {
+router.post('/registration-invite', registrationLimit, asyncHandler(async (req, res) => {
   const { valid, telegramId, error } = getTelegramAuth(req, process.env.TELEGRAM_BOT_TOKEN);
   if (!valid) throw appError('auth_invalid_init_data', { reason: error });
   if (!telegramId) throw appError('auth_telegram_id_missing');
@@ -591,7 +615,7 @@ router.post('/registration-invite', asyncHandler(async (req, res) => {
   res.json({ eligible: true, regToken, shop: null });
 }));
 
-router.post('/register-request', asyncHandler(async (req, res) => {
+router.post('/register-request', registrationLimit, asyncHandler(async (req, res) => {
   const { firstName, lastName, phoneNumber, shopId, role, regToken } = req.body;
 
   const { valid, telegramId, error } = getTelegramAuth(req, process.env.TELEGRAM_BOT_TOKEN);
