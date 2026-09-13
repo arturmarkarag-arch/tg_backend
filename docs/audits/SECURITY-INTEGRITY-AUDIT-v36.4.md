@@ -73,7 +73,7 @@ Audit focused on:
 Browser JWT remains in `localStorage`. This means any future XSS can read the token. Moving to HttpOnly cookies requires an explicit CSRF/session design and should not be a drive-by patch. Current positives: token carries only telegramId, role/profile are re-read from Mongo on every request, and `sessionsValidFrom` supports global revocation.
 
 ### CSP
-CSP enforcement remains a staged rollout. `Content-Security-Policy-Report-Only` was added on 2026-09-13 with explicit Google, Telegram, Socket.IO/API, scanner, Sentry and image/R2 origins. Inspect production violations using `client/docs/operations/content-security-policy-rollout.md`, then deliberately switch to the enforced header after the documented gate passes.
+CSP enforcement was enabled on 2026-09-13 after a clean production Report-Only pass across the authenticated admin routes, API/Socket.IO traffic, and production images. The allowlist remains explicit for Google, Telegram, Socket.IO/API, scanner, Sentry, and image/R2 origins; rollout evidence and rollback instructions live in `client/docs/operations/content-security-policy-rollout.md`.
 
 ### Mutating GET `/picking/next-task`
 It claims/releases task locks and is therefore not semantically read-only. Migrate client + server to POST, keep a short compatibility window for already-open old frontend bundles, then remove the GET alias.
@@ -92,7 +92,7 @@ Product/search photos are intentionally public-by-URL today. If receipt/evidence
 7. **Render:** do not horizontally scale the web service without `REDIS_URL`. The current `WEB_CONCURRENCY` guard cannot detect multiple separate Render instances.
 8. **Render:** use Render Key Value / Redis for Socket.IO adapter, distributed locks, shared cache and shared rate-limit counters; keep the scheduler leader lock. A dedicated background worker/cron is an optional next simplification.
 9. **Render:** configure `/api/health` as the service health-check path and monitor the JSON `status`, not only HTTP reachability.
-10. **Vercel:** enable Deployment Protection for preview/test deployments. Roll out CSP in Report-Only before enforcement.
+10. **Vercel:** enable Deployment Protection for preview/test deployments. Keep the enforced CSP origin inventory synchronized with runtime integrations.
 
 ## Tests added/strengthened
 
