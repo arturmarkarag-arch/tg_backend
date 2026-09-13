@@ -73,7 +73,7 @@ Audit focused on:
 Browser JWT remains in `localStorage`. This means any future XSS can read the token. Moving to HttpOnly cookies requires an explicit CSRF/session design and should not be a drive-by patch. Current positives: token carries only telegramId, role/profile are re-read from Mongo on every request, and `sessionsValidFrom` supports global revocation.
 
 ### CSP
-CSP is not enforced yet. Google auth, Socket.IO, API and image/R2 origins must first be inventoried. Introduce Content-Security-Policy-Report-Only, inspect violations, then enforce.
+CSP enforcement remains a staged rollout. `Content-Security-Policy-Report-Only` was added on 2026-09-13 with explicit Google, Telegram, Socket.IO/API, scanner, Sentry and image/R2 origins. Inspect production violations using `client/docs/operations/content-security-policy-rollout.md`, then deliberately switch to the enforced header after the documented gate passes.
 
 ### Mutating GET `/picking/next-task`
 It claims/releases task locks and is therefore not semantically read-only. Migrate client + server to POST, keep a short compatibility window for already-open old frontend bundles, then remove the GET alias.

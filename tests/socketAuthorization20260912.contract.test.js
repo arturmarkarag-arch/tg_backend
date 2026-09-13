@@ -8,7 +8,8 @@ const read = (rel) => fs.readFileSync(path.join(__dirname, '..', rel), 'utf8');
 describe('Socket authorization 2026-09-12', () => {
   it('applies browser JWT revocation to Socket.IO too', () => {
     const source = read('socket.js');
-    expect(source).toContain("verifySession, isSessionNotRevoked");
+    expect(source).toContain('verifySession');
+    expect(source).toContain('isSessionNotRevoked');
     expect(source).toContain('!isSessionNotRevoked(browserSession, dbUser)');
   });
 

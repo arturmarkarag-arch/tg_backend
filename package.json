@@ -92,12 +92,14 @@
     "test:commerce:stage3c": "node scripts/checkCommercePublicationStage3C20260911.js",
     "test:commerce:stage3d1": "node scripts/checkCommercePublicationStage3D1_20260911.js",
     "test:security:access-matrix": "node scripts/checkSecurityAccessMatrix20260912.js",
+    "test:security:endpoint-matrix": "node scripts/checkEndpointRoleInventory20260913.js",
     "test:security:contracts": "vitest run tests/securityAccessMatrix20260912.contract.test.js tests/socketAuthorization20260912.contract.test.js --no-file-parallelism"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1030.0",
     "@aws-sdk/s3-request-presigner": "^3.1045.0",
     "@google-cloud/visionai": "^0.1.1",
+    "@sentry/node": "10.73.0",
     "@socket.io/redis-adapter": "^8.3.0",
     "@zxing/library": "^0.19.1",
     "axios": "^1.20.0",
@@ -105,18 +107,17 @@
     "cors": "^2.8.5",
     "dotenv": "^16.3.1",
     "express": "^5.2.1",
-    "google-auth-library": "^9.15.1",
+    "google-auth-library": "^10.6.2",
     "ioredis": "^5.10.1",
     "jsonwebtoken": "^9.0.3",
     "mongoose": "^7.8.12",
     "node-telegram-bot-api": "^2.1.0",
     "openai": "^4.8.0",
     "sharp": "^0.35.4",
-    "socket.io": "^4.8.3",
-    "@sentry/node": "10.73.0"
+    "socket.io": "^4.8.3"
   },
   "devDependencies": {
-    "mongodb-memory-server": "^8.14.0",
+    "mongodb-memory-server": "^11.2.0",
     "nodemon": "^3.0.1",
     "supertest": "^6.3.3",
     "vite": "^8.3.0",
