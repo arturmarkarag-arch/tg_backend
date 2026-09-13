@@ -14,9 +14,11 @@ const {
 } = require('./contract');
 const { stableStringify } = require('./stableJson');
 const { buildInvoiceDraftFromSource } = require('./sourceProviders/registry');
+const { resolveLegalEntity } = require('./legalEntityService');
+const { allocateInvoiceNumber } = require('./invoiceNumbering');
 
 function applyCanonicalDraft(invoice, draft) {
-  for (const field of ['coreVersion', 'type', 'source', 'seller', 'buyer', 'recipient', 'issueDate', 'saleDate', 'currency', 'items', 'totals', 'payment', 'references', 'notes']) {
+  for (const field of ['coreVersion', 'type', 'invoiceNumber', 'source', 'seller', 'buyer', 'recipient', 'issueDate', 'saleDate', 'currency', 'items', 'totals', 'payment', 'references', 'notes']) {
     invoice[field] = draft[field];
   }
 }
@@ -26,13 +28,13 @@ async function previewInvoiceDraftFromSource(providerId, request = {}) {
   return normalizeInvoiceDraft(raw);
 }
 
-async function createInvoiceDraftFromSource(providerId, request = {}, actor = {}) {
-  const draft = await previewInvoiceDraftFromSource(providerId, request);
+async function createInvoiceDraft(draftInput = {}, actor = {}, { idempotencyKey = '' } = {}) {
+  const draft = normalizeInvoiceDraft(draftInput);
   const normalizedActor = normalizeActor(actor);
-  const idempotencyKey = String(request.idempotencyKey || '').trim().slice(0, 240);
+  const key = String(idempotencyKey || '').trim().slice(0, 240);
 
-  if (idempotencyKey) {
-    const existing = await Invoice.findOne({ idempotencyKey });
+  if (key) {
+    const existing = await Invoice.findOne({ idempotencyKey: key });
     if (existing) return existing;
   }
 
@@ -40,17 +42,22 @@ async function createInvoiceDraftFromSource(providerId, request = {}, actor = {}
     return await Invoice.create({
       ...draft,
       status: INVOICE_STATUSES.DRAFT,
-      idempotencyKey,
+      idempotencyKey: key,
       createdBy: normalizedActor,
       updatedBy: normalizedActor,
     });
   } catch (err) {
-    if (err?.code === 11000 && idempotencyKey) {
-      const existing = await Invoice.findOne({ idempotencyKey });
+    if (err?.code === 11000 && key) {
+      const existing = await Invoice.findOne({ idempotencyKey: key });
       if (existing) return existing;
     }
     throw err;
   }
+}
+
+async function createInvoiceDraftFromSource(providerId, request = {}, actor = {}) {
+  const draft = await previewInvoiceDraftFromSource(providerId, request);
+  return createInvoiceDraft(draft, actor, { idempotencyKey: request.idempotencyKey });
 }
 
 async function updateInvoiceDraft(invoiceId, patch = {}, actor = {}) {
@@ -63,8 +70,11 @@ async function updateInvoiceDraft(invoiceId, patch = {}, actor = {}) {
     ...current,
     ...patch,
     source: current.source,
+    // Seller identity belongs to the LegalEntity snapshot chosen at creation.
+    // A generic draft patch cannot silently swap the issuer. A dedicated future
+    // command may rebuild the draft from another LegalEntity before finalization.
+    seller: current.seller,
     items: patch.items ?? current.items,
-    seller: patch.seller ?? current.seller,
     buyer: patch.buyer ?? current.buyer,
     recipient: Object.prototype.hasOwnProperty.call(patch, 'recipient') ? patch.recipient : current.recipient,
     totals: patch.totals ?? current.totals,
@@ -90,6 +100,23 @@ async function finalizeInvoice(invoiceId, actor = {}) {
         const existingSnapshot = await InvoiceSnapshot.findById(invoice.finalizedSnapshotId).session(session);
         result = { invoice, snapshot: existingSnapshot, alreadyFinalized: true };
         return;
+      }
+
+      if (!invoice.seller?.legalEntityId) throw appError('legal_entity_required');
+      const legalEntity = await resolveLegalEntity(invoice.seller.legalEntityId, {
+        allowDefault: false,
+        requireActive: true,
+        session,
+      });
+
+      if (!invoice.invoiceNumber) {
+        const assigned = await allocateInvoiceNumber({
+          legalEntity,
+          invoiceType: invoice.type,
+          issueDate: invoice.issueDate,
+          session,
+        });
+        invoice.invoiceNumber = assigned.invoiceNumber;
       }
 
       const payload = buildSnapshotPayload(invoice.toObject());
@@ -124,6 +151,7 @@ async function finalizeInvoice(invoiceId, actor = {}) {
 
 module.exports = {
   previewInvoiceDraftFromSource,
+  createInvoiceDraft,
   createInvoiceDraftFromSource,
   updateInvoiceDraft,
   finalizeInvoice,

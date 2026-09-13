@@ -1,0 +1,62 @@
+'use strict';
+
+const { previewInvoiceDraftFromSource, createInvoiceDraft } = require('./invoiceService');
+const { normalizeInvoiceDraft, validateFinalizableInvoice } = require('./contract');
+const { resolveLegalEntity, legalEntityToInvoiceParty } = require('./legalEntityService');
+
+function addDays(dateOnly, days) {
+  if (!dateOnly || !/^\d{4}-\d{2}-\d{2}$/.test(dateOnly)) return '';
+  const date = new Date(`${dateOnly}T00:00:00.000Z`);
+  if (Number.isNaN(date.getTime())) return '';
+  date.setUTCDate(date.getUTCDate() + Math.max(0, Number(days) || 0));
+  return date.toISOString().slice(0, 10);
+}
+
+function defaultBankAccount(entity) {
+  const explicit = String(entity.paymentDefaults?.bankAccount || '').replace(/\s+/g, '');
+  if (explicit) return explicit;
+  const accounts = entity.bankAccounts || [];
+  const preferred = accounts.find((entry) => entry.isDefault) || accounts[0];
+  return String(preferred?.account || '').replace(/\s+/g, '');
+}
+
+function applyLegalEntityDefaults(draft, entity) {
+  const raw = typeof entity?.toObject === 'function' ? entity.toObject() : entity || {};
+  const payment = { ...(draft.payment || {}) };
+  if (!payment.method && raw.paymentDefaults?.method) payment.method = raw.paymentDefaults.method;
+  if (!payment.bankAccount) payment.bankAccount = defaultBankAccount(raw);
+  if (!payment.dueDate && draft.issueDate && Number(raw.paymentDefaults?.dueDays || 0) > 0) {
+    payment.dueDate = addDays(draft.issueDate, raw.paymentDefaults.dueDays);
+  }
+
+  return normalizeInvoiceDraft({
+    ...draft,
+    seller: legalEntityToInvoiceParty(raw),
+    currency: draft.currency || raw.defaultCurrency || 'PLN',
+    payment,
+  });
+}
+
+async function prepareInvoiceFromSource({ sourceProvider, sourceRef = {}, input = {}, legalEntityId = '', context = {} } = {}) {
+  const entity = await resolveLegalEntity(legalEntityId, { allowDefault: true, requireActive: true });
+  const draft = await previewInvoiceDraftFromSource(sourceProvider, { sourceRef, input, context });
+  const sourceInput = input?.draft && typeof input.draft === 'object' ? input.draft : input;
+  if (!sourceInput?.currency && entity.defaultCurrency) draft.currency = entity.defaultCurrency;
+  const prepared = applyLegalEntityDefaults(draft, entity);
+  const blockers = validateFinalizableInvoice({ ...prepared, invoiceNumber: prepared.invoiceNumber || '__auto__' })
+    .filter((code) => code !== 'invoice_number_required');
+  return { draft: prepared, blockers, legalEntity: entity };
+}
+
+async function createInvoiceFromSource({ sourceProvider, sourceRef = {}, input = {}, legalEntityId = '', idempotencyKey = '', context = {} } = {}, actor = {}) {
+  const prepared = await prepareInvoiceFromSource({ sourceProvider, sourceRef, input, legalEntityId, context });
+  const invoice = await createInvoiceDraft(prepared.draft, actor, { idempotencyKey });
+  return { invoice, blockers: prepared.blockers, legalEntity: prepared.legalEntity };
+}
+
+module.exports = {
+  addDays,
+  applyLegalEntityDefaults,
+  prepareInvoiceFromSource,
+  createInvoiceFromSource,
+};

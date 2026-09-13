@@ -4,7 +4,7 @@ This is a complete inventory of runtime Express route declarations, discovered r
 A check mark means that the role passes the route-entry auth/role middleware. Resource ownership, shop/group/session
 scope, one-time tokens, rate limits, feature flags, and request validation can still deny a request as noted.
 
-Routes: **405** · anonymous: **18** · seller: **75** · warehouse: **200** · admin: **395**
+Routes: **416** · anonymous: **18** · seller: **75** · warehouse: **200** · admin: **406**
 
 | Endpoint | Anonymous | Seller | Warehouse | Admin | Source | Boundary note |
 |---|:---:|:---:|:---:|:---:|---|---|
@@ -82,7 +82,7 @@ Routes: **405** · anonymous: **18** · seller: **75** · warehouse: **200** · 
 | `GET /api/blocks/:number` | — | — | ✓ | ✓ | `routes/blocks.js:248` | route-entry authorization |
 | `GET /api/blocks/incoming/products` | — | — | ✓ | ✓ | `routes/blocks.js:204` | route-entry authorization |
 | `GET /api/blocks/search/products` | — | — | ✓ | ✓ | `routes/blocks.js:232` | route-entry authorization |
-| `GET /api/bot-status` | — | — | — | ✓ | `app.js:142` | route-entry authorization |
+| `GET /api/bot-status` | — | — | — | ✓ | `app.js:143` | route-entry authorization |
 | `GET /api/commerce/catalog` | — | — | — | ✓ | `routes/commerce.js:214` | provider-worker boundary; among these four roles only admin passes (baselinker is outside the table) |
 | `GET /api/commerce/catalog/:id` | — | — | — | ✓ | `routes/commerce.js:236` | provider-worker boundary; among these four roles only admin passes (baselinker is outside the table) |
 | `GET /api/commerce/catalog/warehouse-products` | — | — | — | ✓ | `routes/commerce.js:220` | provider-worker boundary; among these four roles only admin passes (baselinker is outside the table) |
@@ -95,11 +95,16 @@ Routes: **405** · anonymous: **18** · seller: **75** · warehouse: **200** · 
 | `GET /api/delivery-groups/ordering-status` | — | ✓ | ✓ | ✓ | `routes/deliveryGroups.js:49` | route-entry authorization |
 | `GET /api/delivery-groups/session-summaries` | — | — | — | ✓ | `routes/deliveryGroups.js:147` | route-entry authorization |
 | `GET /api/delivery-groups/summary` | — | — | ✓ | ✓ | `routes/deliveryGroups.js:109` | route-entry authorization |
-| `GET /api/gemini-status` | — | — | — | ✓ | `app.js:160` | route-entry authorization |
-| `GET /api/health` | ✓ | ✓ | ✓ | ✓ | `app.js:130` | public allowlist; endpoint-specific proof/rate limits may still apply |
-| `GET /api/maintenance` | ✓ | ✓ | ✓ | ✓ | `app.js:138` | public allowlist; endpoint-specific proof/rate limits may still apply |
+| `GET /api/gemini-status` | — | — | — | ✓ | `app.js:161` | route-entry authorization |
+| `GET /api/health` | ✓ | ✓ | ✓ | ✓ | `app.js:131` | public allowlist; endpoint-specific proof/rate limits may still apply |
+| `GET /api/invoices` | — | — | — | ✓ | `routes/invoices.js:103` | route-entry authorization |
+| `GET /api/invoices/:id` | — | — | — | ✓ | `routes/invoices.js:118` | route-entry authorization |
+| `GET /api/invoices/legal-entities` | — | — | — | ✓ | `routes/invoices.js:54` | route-entry authorization |
+| `GET /api/invoices/legal-entities/:id` | — | — | — | ✓ | `routes/invoices.js:66` | route-entry authorization |
+| `GET /api/invoices/meta` | — | — | — | ✓ | `routes/invoices.js:46` | route-entry authorization |
+| `GET /api/maintenance` | ✓ | ✓ | ✓ | ✓ | `app.js:139` | public allowlist; endpoint-specific proof/rate limits may still apply |
 | `GET /api/nav-badges` | — | ✓ | ✓ | ✓ | `routes/navBadges.js:91` | route-entry authorization |
-| `GET /api/openai-status` | — | — | — | ✓ | `app.js:146` | route-entry authorization |
+| `GET /api/openai-status` | — | — | — | ✓ | `app.js:147` | route-entry authorization |
 | `GET /api/picking/block-tasks` | — | — | ✓ | ✓ | `routes/picking.js:941` | route-entry authorization |
 | `GET /api/picking/blocks-overview` | — | — | ✓ | ✓ | `routes/picking.js:1024` | route-entry authorization |
 | `GET /api/picking/locked-tasks` | — | — | ✓ | ✓ | `routes/picking.js:1415` | route-entry authorization |
@@ -205,6 +210,8 @@ Routes: **405** · anonymous: **18** · seller: **75** · warehouse: **200** · 
 | `PATCH /api/commerce/catalog/:id` | — | — | — | ✓ | `routes/commerce.js:242` | provider-worker boundary; among these four roles only admin passes (baselinker is outside the table) |
 | `PATCH /api/commerce/categories/:id` | — | — | — | ✓ | `routes/commerce.js:209` | provider-worker boundary; among these four roles only admin passes (baselinker is outside the table) |
 | `PATCH /api/delivery-groups/:id` | — | — | — | ✓ | `routes/deliveryGroups.js:265` | route-entry authorization |
+| `PATCH /api/invoices/:id` | — | — | — | ✓ | `routes/invoices.js:129` | route-entry authorization |
+| `PATCH /api/invoices/legal-entities/:id` | — | — | — | ✓ | `routes/invoices.js:73` | route-entry authorization |
 | `PATCH /api/picking/tasks/:taskId/progress` | — | — | ✓ | ✓ | `routes/picking.js:1122` | route-entry authorization |
 | `PATCH /api/products/:id` | — | — | ✓ | ✓ | `routes/products.js:1459` | route-entry authorization |
 | `PATCH /api/products/reorder` | — | — | ✓ | ✓ | `routes/products.js:961` | route-entry authorization |
@@ -302,6 +309,10 @@ Routes: **405** · anonymous: **18** · seller: **75** · warehouse: **200** · 
 | `POST /api/delivery-groups/:id/broadcast` | — | — | — | ✓ | `routes/deliveryGroups.js:552` | route-entry authorization |
 | `POST /api/delivery-groups/:id/close-ordering-session` | — | — | — | ✓ | `routes/deliveryGroups.js:152` | route-entry authorization |
 | `POST /api/delivery-groups/catalog-reviewed` | — | ✓ | ✓ | ✓ | `routes/deliveryGroups.js:65` | route-entry authorization |
+| `POST /api/invoices` | — | — | — | ✓ | `routes/invoices.js:91` | route-entry authorization |
+| `POST /api/invoices/:id/finalize` | — | — | — | ✓ | `routes/invoices.js:136` | route-entry authorization |
+| `POST /api/invoices/legal-entities` | — | — | — | ✓ | `routes/invoices.js:60` | route-entry authorization |
+| `POST /api/invoices/preview` | — | — | — | ✓ | `routes/invoices.js:80` | route-entry authorization |
 | `POST /api/picking/cancel-start` | — | — | ✓ | ✓ | `routes/picking.js:686` | route-entry authorization |
 | `POST /api/picking/next-task` | — | — | ✓ | ✓ | `routes/picking.js:934` | route-entry authorization |
 | `POST /api/picking/resolve-coverage-gap` | — | — | ✓ | ✓ | `routes/picking.js:768` | route-entry authorization |

@@ -2,8 +2,9 @@
 
 const { addMoney, moneyEquals, normalizeDecimal, normalizeMoney, normalizeQuantity } = require('./decimal');
 const { stableClone } = require('./stableJson');
+const { completeItemAmounts, itemAmountsMatchPricing } = require('./pricing');
 
-const INVOICE_CORE_VERSION = 1;
+const INVOICE_CORE_VERSION = 2;
 const INVOICE_TYPES = Object.freeze({ INVOICE: 'invoice', CORRECTION: 'correction' });
 const INVOICE_STATUSES = Object.freeze({ DRAFT: 'draft', FINALIZED: 'finalized' });
 const PRICE_BASIS = Object.freeze({ NET: 'net', GROSS: 'gross', UNKNOWN: 'unknown' });
@@ -81,7 +82,7 @@ function normalizeAmounts(raw = {}) {
 function normalizeItem(raw = {}, index = 0) {
   const priceBasis = text(raw.priceBasis, 20).toLowerCase() || PRICE_BASIS.UNKNOWN;
   if (!Object.values(PRICE_BASIS).includes(priceBasis)) throw new TypeError(`items[${index}].priceBasis is invalid`);
-  return {
+  const normalized = {
     sourceLineId: text(raw.sourceLineId, 160),
     productRef: text(raw.productRef, 160),
     name: text(raw.name, 500),
@@ -97,6 +98,8 @@ function normalizeItem(raw = {}, index = 0) {
     amounts: normalizeAmounts(raw.amounts || {}),
     metadata: stableClone(raw.metadata || {}),
   };
+  normalized.amounts = completeItemAmounts(normalized);
+  return normalized;
 }
 
 function normalizePayment(raw = {}) {
@@ -135,6 +138,7 @@ function normalizeInvoiceDraft(raw = {}) {
   return {
     coreVersion: INVOICE_CORE_VERSION,
     type,
+    invoiceNumber: text(raw.invoiceNumber || raw.number, 120),
     source: normalizeSource(raw.source || {}),
     seller: normalizeParty(raw.seller || {}),
     buyer: normalizeParty(raw.buyer || {}),
@@ -153,7 +157,9 @@ function normalizeInvoiceDraft(raw = {}) {
 function validateFinalizableInvoice(invoice = {}) {
   const blockers = [];
   if (!Object.values(INVOICE_TYPES).includes(invoice.type)) blockers.push('invoice_type_invalid');
+  if (!invoice.invoiceNumber) blockers.push('invoice_number_required');
   if (!invoice.source?.provider || !invoice.source?.entityType || !invoice.source?.entityId) blockers.push('invoice_source_incomplete');
+  if (!invoice.seller?.legalEntityId) blockers.push('seller_legal_entity_required');
   if (!invoice.seller?.name) blockers.push('seller_name_required');
   if (!invoice.issueDate) blockers.push('issue_date_required');
   if (!/^[A-Z]{3}$/.test(invoice.currency || '')) blockers.push('currency_invalid');
@@ -162,7 +168,7 @@ function validateFinalizableInvoice(invoice = {}) {
   for (const [index, item] of (invoice.items || []).entries()) {
     if (!item.name) blockers.push(`item_${index}_name_required`);
     if (!item.quantity) blockers.push(`item_${index}_quantity_required`);
-    if (!item.unitPrice) blockers.push(`item_${index}_unit_price_required`);
+    if (item.unitPrice === '' || item.unitPrice === null || item.unitPrice === undefined) blockers.push(`item_${index}_unit_price_required`);
     if (!item.priceBasis || item.priceBasis === PRICE_BASIS.UNKNOWN) blockers.push(`item_${index}_price_basis_required`);
     if (!item.vat?.code) blockers.push(`item_${index}_vat_code_required`);
     if (!item.amounts?.net || !item.amounts?.vat || !item.amounts?.gross) {
@@ -170,6 +176,7 @@ function validateFinalizableInvoice(invoice = {}) {
     } else if (!moneyEquals(addMoney([item.amounts.net, item.amounts.vat]), item.amounts.gross)) {
       blockers.push(`item_${index}_amounts_inconsistent`);
     }
+    if (itemAmountsMatchPricing(item) === false) blockers.push(`item_${index}_pricing_amounts_mismatch`);
   }
 
   const totals = invoice.totals || {};
@@ -179,7 +186,7 @@ function validateFinalizableInvoice(invoice = {}) {
     blockers.push('invoice_totals_inconsistent');
   }
 
-  if ((invoice.items || []).length && !blockers.some((code) => /_amounts_(?:required|inconsistent)$/.test(code))) {
+  if ((invoice.items || []).length && !blockers.some((code) => /_amounts_(?:required|inconsistent|mismatch)$/.test(code))) {
     const derived = deriveTotals(invoice.items);
     if (!moneyEquals(derived.net, totals.net) || !moneyEquals(derived.vat, totals.vat) || !moneyEquals(derived.gross, totals.gross)) {
       blockers.push('invoice_totals_do_not_match_items');

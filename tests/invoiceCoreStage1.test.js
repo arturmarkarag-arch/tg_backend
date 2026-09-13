@@ -14,7 +14,7 @@ describe('Invoice Core Stage 1', () => {
     const draft = normalizeInvoiceDraft({
       type: 'invoice',
       source: { provider: 'manual', entityType: 'manual', entityId: 'test-1' },
-      seller: { name: 'Seller Sp. z o.o.', taxId: '1234567890', address: { countryCode: 'PL' } },
+      seller: { legalEntityId: 'le-1', name: 'Seller Sp. z o.o.', taxId: '1234567890', address: { countryCode: 'PL' } },
       buyer: { name: 'Buyer' },
       issueDate: '2026-09-13',
       currency: 'pln',

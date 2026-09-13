@@ -15,7 +15,8 @@ function quantityForItem(item, mode) {
 
 function pricingForItem(item, input = {}) {
   const productId = String(item.productId || '');
-  const override = input.pricingByProductId?.[productId] || {};
+  const lineId = String(item._id || '');
+  const override = input.pricingByLineId?.[lineId] || input.pricingByProductId?.[productId] || {};
   return {
     unitPrice: override.unitPrice ?? item.price ?? '',
     priceBasis: override.priceBasis || input.priceBasis || 'unknown',
@@ -93,7 +94,10 @@ const adapter = createInvoiceSourceAdapter({
   name: 'Warehouse order',
   entityTypes: ['order'],
   description: 'Builds an invoice draft from the warehouse Order domain without guessing VAT or whether source prices are net/gross.',
-  metadata: { quantityModes: Object.values(QUANTITY_MODES) },
+  metadata: {
+    quantityModes: Object.values(QUANTITY_MODES),
+    pricingInputs: ['pricingByLineId', 'pricingByProductId', 'priceBasis', 'defaultVat'],
+  },
   buildDraft: async ({ sourceRef = {}, input = {}, context = {} } = {}) => {
     const orderId = String(sourceRef.entityId || sourceRef.id || '').trim();
     if (!orderId) throw appError('invoice_source_entity_id_required');

@@ -70,6 +70,7 @@ const InvoiceSchema = new mongoose.Schema({
   coreVersion: { type: Number, default: INVOICE_CORE_VERSION, immutable: true },
   type: { type: String, enum: Object.values(INVOICE_TYPES), default: INVOICE_TYPES.INVOICE },
   status: { type: String, enum: Object.values(INVOICE_STATUSES), default: INVOICE_STATUSES.DRAFT },
+  invoiceNumber: { type: String, default: '', trim: true },
   source: { type: SourceSchema, required: true },
   seller: { type: PartySchema, default: () => ({}) },
   buyer: { type: PartySchema, default: () => ({}) },
@@ -94,7 +95,12 @@ const InvoiceSchema = new mongoose.Schema({
 });
 
 InvoiceSchema.index({ 'source.provider': 1, 'source.entityType': 1, 'source.entityId': 1, createdAt: -1 });
+InvoiceSchema.index({ 'seller.legalEntityId': 1, status: 1, createdAt: -1 });
 InvoiceSchema.index({ status: 1, createdAt: -1 });
+InvoiceSchema.index(
+  { 'seller.legalEntityId': 1, invoiceNumber: 1 },
+  { unique: true, partialFilterExpression: { invoiceNumber: { $gt: '' } } },
+);
 InvoiceSchema.index(
   { idempotencyKey: 1 },
   { unique: true, partialFilterExpression: { idempotencyKey: { $gt: '' } } },
