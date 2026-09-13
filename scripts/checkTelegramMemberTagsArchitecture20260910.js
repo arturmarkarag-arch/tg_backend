@@ -112,6 +112,8 @@ check('member-tag method uses the public SDK 2.x API', () => {
   assert.ok(transport.includes('bot.setChatMemberTag({'));
   assert.ok(service.includes("require('./telegramMemberTagTransport')"));
   assert.ok(!transport.includes('bot._request'));
+  assert.ok(service.includes("base.transportSupportsMemberTags = typeof bot.setChatMemberTag === 'function'"));
+  assert.ok(!service.includes("typeof bot._request === 'function'"));
 });
 
 check('member-tag transport is isolated and fails closed if the public method disappears', () => {

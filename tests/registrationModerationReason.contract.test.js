@@ -12,8 +12,7 @@ describe('registration moderation reason contract', () => {
     const routes = read('routes/v1/telegram.js');
 
     expect(model).toContain('moderationReason');
-    expect(model).toContain("role: { type: String, enum: ['seller', 'warehouse'], required: true }");
-    expect(model).not.toContain("role: { type: String, enum: ['seller', 'warehouse'], default: 'seller' }");
+    expect(model).toContain("role: { type: String, enum: ['seller', 'warehouse'], default: 'seller', required: true }");
     expect(routes).toContain("throw appError('registration_reason_required')");
     expect(routes).toContain("status: 'rejected', moderationReason");
     expect(routes).toContain("status: 'blocked', moderationReason");

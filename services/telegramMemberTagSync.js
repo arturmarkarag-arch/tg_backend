@@ -252,7 +252,7 @@ async function getTelegramMemberTagGroupHealth(groupId, { live = true } = {}) {
   const bot = getBot();
   if (!bot) return { ...base, error: 'bot_unavailable' };
   base.botAvailable = true;
-  base.transportSupportsMemberTags = typeof bot._request === 'function';
+  base.transportSupportsMemberTags = typeof bot.setChatMemberTag === 'function';
   if (!base.transportSupportsMemberTags) return { ...base, error: 'telegram_member_tag_transport_unavailable' };
 
   try {
