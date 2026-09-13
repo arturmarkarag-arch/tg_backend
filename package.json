@@ -100,7 +100,7 @@
     "@google-cloud/visionai": "^0.1.1",
     "@socket.io/redis-adapter": "^8.3.0",
     "@zxing/library": "^0.19.1",
-    "axios": "^1.7.2",
+    "axios": "^1.20.0",
     "busboy": "^1.6.0",
     "cors": "^2.8.5",
     "dotenv": "^16.3.1",
@@ -108,11 +108,10 @@
     "google-auth-library": "^9.15.1",
     "ioredis": "^5.10.1",
     "jsonwebtoken": "^9.0.3",
-    "mongoose": "^7.7.0",
-    "multer": "^2.1.1",
+    "mongoose": "^7.8.12",
     "node-telegram-bot-api": "^0.67.0",
     "openai": "^4.8.0",
-    "sharp": "^0.34.5",
+    "sharp": "^0.35.4",
     "socket.io": "^4.8.3",
     "@sentry/node": "10.73.0"
   },
@@ -121,6 +120,11 @@
     "nodemon": "^3.0.1",
     "supertest": "^6.3.3",
     "vitest": "^1.6.1"
+  },
+  "overrides": {
+    "request": {
+      "form-data": "2.5.6"
+    }
   },
   "vitest": {
     "globals": true,
