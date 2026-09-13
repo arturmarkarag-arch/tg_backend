@@ -366,6 +366,8 @@ const ERRORS = {
                                   : reason
                                     ? `Помилка авторизації Telegram: ${reason}`
                                     : 'Невалідні дані авторизації Telegram' },
+  auth_init_data_replayed: { status: 401, message: 'Ця сесія Telegram уже була використана. Закрийте застосунок і відкрийте його знову.' },
+  auth_telegram_session_required: { status: 401, message: 'Сесію Telegram не знайдено. Відкрийте застосунок через Telegram ще раз.' },
   auth_telegram_id_missing: { status: 400, message: 'Не передано Telegram user id' },
   auth_not_registered:      { status: 403, message: 'Користувача не зареєстровано. Зверніться до менеджера або адміністратора.' },
   // Backwards-compat alias used by mini-app client code that switches on `error` value.
@@ -604,8 +606,12 @@ const ERRORS = {
   registration_group_not_configured: { status: 503, message: 'Реєстрацію ще не налаштовано. Напишіть менеджеру або адміністратору.' },
   registration_token_invalid: { status: 403, message: 'Ця кнопка більше не працює. Почніть реєстрацію знову.' },
   registration_pending:     { status: 403, message: 'Ваші дані надіслано адміністратору. Вам більше нічого робити не потрібно.' },
-  registration_blocked:     { status: 403, message: 'Реєстрацію зупинено адміністратором. Зверніться до адміністратора, щоб дізнатися причину.' },
-  registration_rejected:    { status: 403, message: 'Реєстрацію не підтверджено. Ви можете виправити дані та надіслати їх ще раз.' },
+  registration_blocked:     { status: 403, message: ({ reason = '' } = {}) => reason
+                                ? `Реєстрацію зупинено адміністратором. Причина: ${reason}`
+                                : 'Реєстрацію зупинено адміністратором. Зверніться до адміністратора, щоб дізнатися причину.' },
+  registration_rejected:    { status: 403, message: ({ reason = '' } = {}) => reason
+                                ? `Реєстрацію не підтверджено. Причина: ${reason}`
+                                : 'Реєстрацію не підтверджено. Ви можете виправити дані та надіслати їх ще раз.' },
   registration_required_fields: { status: 400, message: 'Вкажіть ваше імʼя та прізвище.' },
   registration_invalid_role:{ status: 400, message: 'Оберіть, ким ви працюєте.' },
   registration_seller_shop_required: { status: 400, message: 'Оберіть магазин.' },
@@ -619,6 +625,7 @@ const ERRORS = {
   registration_not_found:   { status: 404, message: 'Заявку на реєстрацію не знайдено' },
   registration_not_pending: { status: 409, message: 'Заявка вже оброблена (схвалена/відхилена/заблокована)' },
   registration_status_invalid: { status: 400, message: 'Невірний фільтр статусу заявок' },
+  registration_reason_required: { status: 400, message: 'Вкажіть коротку причину для користувача.' },
   registration_role_missing:{ status: 400, message: 'У заявці відсутня роль користувача' },
   registration_group_missing:{ status: 400, message: 'У заявці продавця відсутня група доставки' },
   openai_settings_read_failed:{ status: 500, message: 'Не вдалося прочитати налаштування OpenAI' },

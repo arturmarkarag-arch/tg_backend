@@ -4,7 +4,7 @@ const User = require('../../models/User');
 const RegistrationRequest = require('../../models/RegistrationRequest');
 const { appError, asyncHandler } = require('../../utils/errors');
 const { verifyGoogleIdToken, isConfigured: googleConfigured } = require('../../utils/googleAuth');
-const { signSession, verifySession, isSessionNotRevoked } = require('../../utils/jwt');
+const { signSession, verifySession, verifyTelegramSession, isSessionNotRevoked } = require('../../utils/jwt');
 const {
   bootstrapGoogleLinkToken,
   peekGoogleLinkBrowserSession,
@@ -12,12 +12,16 @@ const {
 } = require('../../services/googleLinkToken');
 const {
   readSessionCookie,
+  readTelegramSessionCookie,
   readGoogleLinkCookie,
   setSessionCookie,
   clearSessionCookie,
+  setTelegramSessionCookie,
+  clearTelegramSessionCookie,
   setGoogleLinkCookie,
   clearGoogleLinkCookie,
 } = require('../../utils/sessionCookie');
+const { bootstrapTelegramSession } = require('../../services/telegramSession');
 const { createAuthRateLimit } = require('../../middleware/authRateLimit');
 const { getBot } = require('../../telegramBot');
 const { buildUserProfile } = require('./telegram');
@@ -39,7 +43,6 @@ const linkAuthLimit = createAuthRateLimit({
   max: positiveEnvInt('AUTH_GOOGLE_LINK_RATE_MAX', 120),
   windowMs: positiveEnvInt('AUTH_GOOGLE_LINK_RATE_WINDOW_MS', 10 * 60 * 1000),
 });
-const LEGACY_BROWSER_COMPAT = process.env.AUTH_LEGACY_BROWSER_COMPAT !== 'false';
 
 router.use((req, res, next) => {
   res.setHeader('Cache-Control', 'no-store');
@@ -54,20 +57,11 @@ async function throwRegistrationState(telegramId, mongoSession = null) {
   if (mongoSession) query = query.session(mongoSession);
   const request = await query.lean();
   if (request?.status === 'pending')  throw appError('registration_pending', { telegramId });
-  if (request?.status === 'blocked')  throw appError('registration_blocked', { telegramId });
-  if (request?.status === 'rejected') throw appError('registration_rejected', { telegramId });
+  if (request?.status === 'blocked')  throw appError('registration_blocked', { telegramId, reason: request.moderationReason || '' });
+  if (request?.status === 'rejected') throw appError('registration_rejected', { telegramId, reason: request.moderationReason || '' });
   throw appError('not_registered', { telegramId });
 }
 
-function bearerToken(req) {
-  if (!LEGACY_BROWSER_COMPAT) return '';
-  const auth = req.headers?.authorization || '';
-  return auth.startsWith('Bearer ') ? auth.slice(7) : '';
-}
-
-function requestSessionToken(req) {
-  return readSessionCookie(req) || bearerToken(req);
-}
 
 function requireBrowserMutationHeader(req) {
   // Cookie auth is protected by SameSite (Strict in production) + CORS and this non-simple custom
@@ -88,6 +82,25 @@ async function resolveBotUsername() {
   }
   return cachedBotUsername;
 }
+
+// Telegram Mini App bootstrap. Raw initData is accepted ONLY here. The first
+// successful use is recorded by SHA-256 digest in Mongo and exchanged for an
+// HttpOnly first-party Telegram session cookie. A valid existing Telegram cookie
+// makes reloads idempotent without consuming/replaying initData again.
+router.post('/telegram/bootstrap', generalAuthLimit, asyncHandler(async (req, res) => {
+  const existing = verifyTelegramSession(readTelegramSessionCookie(req));
+  if (existing) return res.json({ ok: true, telegramId: existing.telegramId });
+
+  const initData = String(req.body?.initData || '');
+  if (!initData) throw appError('init_data_required');
+  const result = await bootstrapTelegramSession(initData, process.env.TELEGRAM_BOT_TOKEN);
+  if (!result.valid) {
+    if (result.replayed) throw appError('auth_init_data_replayed');
+    throw appError('auth_invalid_init_data', { reason: result.error });
+  }
+  setTelegramSessionCookie(res, result.sessionToken);
+  res.json({ ok: true, telegramId: result.telegramId, user: result.parsedData?.user || null });
+}));
 
 router.get('/config', asyncHandler(async (req, res) => {
   res.json({
@@ -112,11 +125,7 @@ router.post('/google', generalAuthLimit, asyncHandler(async (req, res) => {
 
   const signedSession = signSession(user.telegramId, user.sessionVersion);
   setSessionCookie(res, signedSession);
-  const payload = { profile: await buildUserProfile(user) };
-  // One-release migration lane for already-cached old frontends. The new client
-  // sends x-auth-client: cookie-v2 and never receives a JS-visible bearer.
-  if (LEGACY_BROWSER_COMPAT && req.get('x-auth-client') !== 'cookie-v2') payload.token = signedSession;
-  res.json(payload);
+  res.json({ profile: await buildUserProfile(user) });
 }));
 
 // Browser handoff bootstrap. The raw secret arrives ONLY in the URL fragment on
@@ -150,21 +159,9 @@ router.post('/google/link/complete', linkAuthLimit, asyncHandler(async (req, res
   if (!result) throw appError('google_invalid_token');
   if (!result.emailVerified) throw appError('google_email_unverified');
 
-  let browserSecret = readGoogleLinkCookie(req);
-  const cookieV2 = req.get('x-auth-client') === 'cookie-v2';
-  // One-release compatibility for an already-cached old link page. It posts the
-  // one-time token in the JSON body; exchange it server-side into the same new
-  // browser-secret flow. New clients never take this branch.
-  if (!browserSecret && LEGACY_BROWSER_COMPAT) {
-    const legacyToken = String(req.body?.token || '').trim();
-    if (legacyToken) {
-      const bootstrapped = await bootstrapGoogleLinkToken(legacyToken);
-      browserSecret = bootstrapped?.browserSecret || '';
-    }
-  }
+  const browserSecret = readGoogleLinkCookie(req);
   if (!browserSecret) throw appError('google_link_invalid');
-  // Cookie-authenticated completion needs CSRF protection. Legacy bearer-body
-  // completion is self-authorizing and exists only for the rollout window.
+  // Cookie-authenticated completion requires the non-simple CSRF header.
   if (readGoogleLinkCookie(req) && req.get('x-csrf-protection') !== '1') {
     throw appError('auth_csrf_required');
   }
@@ -194,7 +191,6 @@ router.post('/google/link/complete', linkAuthLimit, asyncHandler(async (req, res
         $set: { googleSub: result.sub, googleEmail: result.email },
       };
       if (subChanged) {
-        update.$set.sessionsValidFrom = new Date(); // legacy JWT cutoff during migration
         update.$inc = { sessionVersion: 1 };
       }
 
@@ -218,17 +214,12 @@ router.post('/google/link/complete', linkAuthLimit, asyncHandler(async (req, res
   clearGoogleLinkCookie(res);
   const signedSession = signSession(fresh.telegramId, fresh.sessionVersion);
   setSessionCookie(res, signedSession);
-  const payload = { profile: await buildUserProfile(fresh) };
-  if (LEGACY_BROWSER_COMPAT && !cookieV2) payload.token = signedSession;
-  res.json(payload);
+  res.json({ profile: await buildUserProfile(fresh) });
 }));
 
-// Browser session bootstrap. During the migration window a valid old Bearer JWT
-// is accepted once and immediately upgraded into the new HttpOnly cookie.
+// Browser session bootstrap. HttpOnly cookie is the only browser credential.
 router.get('/me', generalAuthLimit, asyncHandler(async (req, res) => {
-  const cookieToken = readSessionCookie(req);
-  const legacyBearer = cookieToken ? '' : bearerToken(req);
-  const session = verifySession(cookieToken || legacyBearer);
+  const session = verifySession(readSessionCookie(req));
   if (!session) throw appError('auth_required');
 
   const user = await User.findOne({ telegramId: session.telegramId }).lean();
@@ -236,9 +227,6 @@ router.get('/me', generalAuthLimit, asyncHandler(async (req, res) => {
   if (user.botBlocked) throw appError('registration_blocked');
   if (!isSessionNotRevoked(session, user)) throw appError('auth_required');
 
-  if (legacyBearer) {
-    setSessionCookie(res, signSession(user.telegramId, user.sessionVersion));
-  }
   res.json(await buildUserProfile(user));
 }));
 
@@ -246,14 +234,11 @@ router.get('/me', generalAuthLimit, asyncHandler(async (req, res) => {
 // timestamp hole completely; clearing the cookie removes this browser's handle.
 router.post('/logout', generalAuthLimit, asyncHandler(async (req, res) => {
   requireBrowserMutationHeader(req);
-  const session = verifySession(requestSessionToken(req));
+  const session = verifySession(readSessionCookie(req));
   if (session?.telegramId) {
     await User.updateOne(
       { telegramId: session.telegramId },
-      {
-        $inc: { sessionVersion: 1 },
-        $set: { sessionsValidFrom: new Date() }, // legacy JWT cutoff only
-      },
+      { $inc: { sessionVersion: 1 } },
     );
   }
   clearSessionCookie(res);

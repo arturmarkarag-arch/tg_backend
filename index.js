@@ -21,6 +21,7 @@ const { initOpenAI } = require('./openaiClient');
 const { initGemini } = require('./geminiClient');
 const { initSocket } = require('./socket');
 const AppSetting = require('./models/AppSetting');
+const TelegramInitDataUse = require('./models/TelegramInitDataUse');
 const { migrateOrdersToSessionIds } = require('./utils/getOrCreateSession');
 const { ensureShopProductIndexes } = require('./utils/ensureShopProductIndexes');
 const { assertDeliveryGroupSchedulesReady } = require('./utils/deliveryGroupSchedulePreflight');
@@ -107,6 +108,11 @@ async function startServer() {
 
     await mongoose.connect(MONGODB_URI, { useNewUrlParser: true, useUnifiedTopology: true });
     console.log('Connected to MongoDB');
+
+    // Security-critical: one-time Telegram initData bootstrap depends on an
+    // actual UNIQUE digest index, not merely a Mongoose schema declaration.
+    // Fail startup closed if Mongo cannot guarantee replay protection / TTL.
+    await TelegramInitDataUse.createIndexes();
     startEgressTrafficPersistence();
     await assertDeliveryGroupSchedulesReady();
     await migrateOrdersToSessionIds();

@@ -67,24 +67,31 @@ const userModel = read('models/User.js');
 const telegramRoute = read('routes/v1/telegram.js');
 const app = read('app.js');
 const rateLimit = read('middleware/authRateLimit.js');
+const telegramSession = read('services/telegramSession.js');
+const telegramUseModel = read('models/TelegramInitDataUse.js');
+const socket = read('socket.js');
 
-check(jwt.includes("const ALGORITHM = 'HS256'") && jwt.includes("algorithms: [ALGORITHM]") && jwt.includes('sv:'),
-  'browser JWT algorithm is pinned and sessionVersion is signed');
-check(jwt.includes('session.sessionVersion') && jwt.includes('=== currentVersion') && !jwt.includes('+ 1000 >= '),
-  'session revocation uses exact version matching with no one-second grace');
+check(jwt.includes("const ALGORITHM = 'HS256'") && jwt.includes("algorithms: [ALGORITHM]") && jwt.includes("kind: 'browser'") && jwt.includes("kind: 'telegram'"),
+  'browser and Telegram sessions are type-separated and HS256 verification is pinned');
+check(jwt.includes('session.sessionVersion') && jwt.includes('=== currentVersion')
+    && !jwt.includes('sessionsValidFrom') && !userModel.includes('sessionsValidFrom'),
+  'session revocation uses exact version matching with no timestamp/legacy fallback');
 check(userModel.includes('sessionVersion: { type: Number, default: 0'),
   'User persists monotonic browser sessionVersion');
 check(cookies.includes('httpOnly: true') && cookies.includes("sameSite: IS_PRODUCTION ? 'strict' : 'lax'") && cookies.includes('secure: IS_PRODUCTION'),
   'browser session/link cookies are HttpOnly, Strict-SameSite and Secure in production');
-check(cookies.includes("'__Host-zlotoweczka_session'") && cookies.includes("'__Host-zlotoweczka_google_link'"),
-  'production auth cookies use __Host- prefix');
-check(authMiddleware.includes('readSessionCookie(req)') && authMiddleware.includes("req.get('x-csrf-protection') !== '1'"),
-  'protected API prefers HttpOnly cookie and enforces mutation CSRF header');
+check(cookies.includes("'__Host-zlotoweczka_session'") && cookies.includes("'__Host-zlotoweczka_telegram'") && cookies.includes("'__Host-zlotoweczka_google_link'"),
+  'all production auth cookies use __Host- prefix');
+check(authMiddleware.includes('readSessionCookie(req)') && authMiddleware.includes('readTelegramSessionCookie(req)')
+    && authMiddleware.includes("req.get('x-csrf-protection') !== '1'")
+    && !authMiddleware.includes('getInitDataFromRequest') && !authMiddleware.includes('x-telegram-initdata'),
+  'protected API uses first-party HttpOnly cookies only and enforces mutation CSRF header');
 check(authRoute.includes("router.post('/google/link/bootstrap'") && authRoute.includes('setGoogleLinkCookie'),
   'Google link raw handoff is exchanged for a separate HttpOnly cookie secret');
-check(authRoute.includes('AUTH_LEGACY_BROWSER_COMPAT') && authRoute.includes("req.get('x-auth-client') !== 'cookie-v2'")
-    && authRoute.includes('legacyToken') && authMiddleware.includes('AUTH_LEGACY_BROWSER_COMPAT'),
-  'legacy browser compatibility is isolated behind cookie-v2 negotiation and a kill switch');
+check(!authRoute.includes('AUTH_LEGACY_BROWSER_COMPAT') && !authMiddleware.includes('AUTH_LEGACY_BROWSER_COMPAT')
+    && !authRoute.includes('bearerToken(') && !authMiddleware.includes("startsWith('Bearer ')")
+    && authRoute.includes('verifySession(readSessionCookie(req))'),
+  'legacy browser Bearer compatibility is removed; browser auth is cookie-only');
 check(linkService.includes('token: hashSecret(token)') && linkService.includes('browserSessionHash: hashSecret(browserSecret)'),
   'Google link bearer secrets are hashed at rest');
 check(linkModel.includes('browserSessionHash') && linkModel.includes('expiresAt'),
@@ -102,6 +109,25 @@ check(authRoute.includes('AUTH_BROWSER_RATE_MAX') && authRoute.includes('AUTH_GO
   'auth rate limits keep mild defaults but can be tuned from environment');
 check(app.includes("/^\\/api\\/v1\\/auth\\/google\\/link\\/bootstrap$/"),
   'Google link bootstrap is in the exact public pre-auth allowlist');
+
+check(authRoute.includes("router.post('/telegram/bootstrap'") && authRoute.includes('bootstrapTelegramSession')
+    && authRoute.includes('setTelegramSessionCookie'),
+  'raw Telegram initData is accepted only by the one-time bootstrap exchange');
+check(telegramSession.includes("createHash('sha256')") && telegramSession.includes('TelegramInitDataUse.create')
+    && telegramSession.includes("err?.code === 11000"),
+  'Telegram initData replay ledger stores only SHA-256 digest and rejects duplicate consumption');
+check(telegramUseModel.includes('unique: true') && telegramUseModel.includes('expireAfterSeconds: 0'),
+  'Telegram initData replay ledger has unique digest and TTL cleanup');
+const startup = read('index.js');
+check(startup.includes('TelegramInitDataUse.createIndexes()')
+    && startup.indexOf('TelegramInitDataUse.createIndexes()') < startup.indexOf('server.listen('),
+  'Telegram initData replay indexes are fail-fast startup prerequisites before listening');
+check(telegramRoute.includes("telegramIdentity") && !telegramRoute.includes('getTelegramAuth(')
+    && !telegramRoute.includes('getInitDataFromRequest('),
+  'pre-registration routes authenticate from Telegram session cookie, not replayable initData');
+check(socket.includes("auth?.context") && socket.includes('readTelegramSessionCookie')
+    && !socket.includes('validateTelegramInitData') && !socket.includes('auth?.initData'),
+  'Socket.IO Telegram auth uses HttpOnly Telegram session and never raw initData');
 
 console.log(`\nAuth hardening backend 2026-09-13: ${passed}/${passed + failed} PASS`);
 if (failed) process.exit(1);

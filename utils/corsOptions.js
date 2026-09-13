@@ -49,9 +49,8 @@ function corsOrigin(origin, callback) {
 
 // `maxAge` lets the browser cache the preflight result instead of sending an
 // OPTIONS before (almost) every request. The front-end is on app.zlotoweczka
-// and the API on api.zlotoweczka — same-site but cross-ORIGIN, and every call
-// carries Authorization or x-telegram-initdata, so none of them is a "simple"
-// request. Advertise a full day; each browser remains free to clamp that value
+// and the API on api.zlotoweczka — same-site but cross-ORIGIN, and authenticated calls carry cookies plus a non-simple auth/CSRF header, so
+// mutation requests are preflighted rather than relying on ambient cookies alone. Advertise a full day; each browser remains free to clamp that value
 // to its own lower implementation limit (notably inside mobile WebViews).
 const expressCorsOptions = { origin: corsOrigin, credentials: true, maxAge: 86_400 };
 

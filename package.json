@@ -125,5 +125,8 @@
   "vitest": {
     "globals": true,
     "environment": "node"
+  },
+  "engines": {
+    "node": ">=22.12.0"
   }
 }

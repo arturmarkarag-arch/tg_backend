@@ -18,7 +18,7 @@ const bot = fs.readFileSync(path.join(__dirname, 'telegramBot.js'), 'utf8');
   });
 
   it('revokes runtime access and hides group rows', () => {
-    expect(removeService).toContain('sessionsValidFrom: now');
+    expect(removeService).toContain('$inc: { sessionVersion: 1 }');
     expect(removeService).toContain('GroupMember.updateMany');
     expect(removeService).toContain('hiddenAt: now');
     expect(auth).toContain('isRemovedUser(user)');

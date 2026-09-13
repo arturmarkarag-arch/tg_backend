@@ -64,8 +64,9 @@ function enginePackets(payload) {
 }
 
 async function socketPollingOpen(baseUrl, token) {
+  const cookie = `__Host-zlotoweczka_session=${token}`;
   const openUrl = `${baseUrl}/socket.io/?EIO=4&transport=polling&t=${Date.now()}`;
-  const openRes = await fetchWithTimeout(openUrl, {}, { timeoutMs: 3_000, label: 'Socket.IO polling open' });
+  const openRes = await fetchWithTimeout(openUrl, { headers: { cookie } }, { timeoutMs: 3_000, label: 'Socket.IO polling open' });
   const openBody = await openRes.text();
   if (!openRes.ok || !openBody.startsWith('0{')) throw new Error(`Socket.IO polling open failed: status=${openRes.status} body=${openBody.slice(0, 160)}`);
   const handshake = JSON.parse(openBody.slice(1));
@@ -73,17 +74,17 @@ async function socketPollingOpen(baseUrl, token) {
   const pollUrl = `${baseUrl}/socket.io/?EIO=4&transport=polling&sid=${encodeURIComponent(handshake.sid)}`;
   const connectRes = await fetchWithTimeout(pollUrl, {
     method: 'POST',
-    headers: { 'content-type': 'text/plain;charset=UTF-8' },
-    body: `40${JSON.stringify({ token })}`,
+    headers: { 'content-type': 'text/plain;charset=UTF-8', cookie },
+    body: `40${JSON.stringify({ context: 'browser' })}`,
   }, { timeoutMs: 3_000, label: 'Socket.IO authenticated connect packet' });
   if (!connectRes.ok) throw new Error(`Socket.IO connect POST failed: status=${connectRes.status}`);
 
   const deadline = Date.now() + 5_000;
   while (Date.now() < deadline) {
-    const poll = await fetchWithTimeout(`${pollUrl}&t=${Date.now()}`, {}, { timeoutMs: 3_000, label: 'Socket.IO connect ack poll' });
+    const poll = await fetchWithTimeout(`${pollUrl}&t=${Date.now()}`, { headers: { cookie } }, { timeoutMs: 3_000, label: 'Socket.IO connect ack poll' });
     const body = await poll.text();
     for (const packet of enginePackets(body)) {
-      if (packet.startsWith('40')) return { pollUrl, sid: handshake.sid };
+      if (packet.startsWith('40')) return { pollUrl, sid: handshake.sid, cookie };
       if (packet.startsWith('44')) throw new Error(`Socket.IO authentication rejected: ${packet.slice(2)}`);
     }
   }
@@ -93,7 +94,7 @@ async function socketPollingOpen(baseUrl, token) {
 async function socketPollingSend(socket, packet, label) {
   const res = await fetchWithTimeout(socket.pollUrl, {
     method: 'POST',
-    headers: { 'content-type': 'text/plain;charset=UTF-8' },
+    headers: { 'content-type': 'text/plain;charset=UTF-8', cookie: socket.cookie },
     body: packet,
   }, { timeoutMs: 3_000, label });
   if (!res.ok) throw new Error(`${label} failed: status=${res.status}`);
@@ -102,7 +103,7 @@ async function socketPollingSend(socket, packet, label) {
 async function socketPollingWaitEvent(socket, eventName, predicate = () => true, timeoutMs = 5_000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    const poll = await fetchWithTimeout(`${socket.pollUrl}&t=${Date.now()}`, {}, { timeoutMs: Math.min(3_000, Math.max(250, deadline - Date.now())), label: `Socket.IO wait ${eventName}` });
+    const poll = await fetchWithTimeout(`${socket.pollUrl}&t=${Date.now()}`, { headers: { cookie: socket.cookie } }, { timeoutMs: Math.min(3_000, Math.max(250, deadline - Date.now())), label: `Socket.IO wait ${eventName}` });
     const body = await poll.text();
     for (const packet of enginePackets(body)) {
       // Engine.IO ping. Keep the polling transport healthy while waiting.
@@ -273,7 +274,7 @@ async function main() {
       } catch { return false; }
     }, { timeoutMs: 45_000, intervalMs: 250, label: 'real server health' });
 
-    const socketToken = jwt.sign({ sub: adminTelegramId }, jwtSecret, { expiresIn: '5m' });
+    const socketToken = jwt.sign({ sub: adminTelegramId, sv: 0, kind: 'browser' }, jwtSecret, { expiresIn: '5m', algorithm: 'HS256' });
     const socket = await socketPollingOpen(`http://127.0.0.1:${port}`, socketToken);
     await socketPollingSend(socket, `42${JSON.stringify(['join_picking_group', String(groupId)])}`, 'Socket.IO join picking group');
 
@@ -291,7 +292,7 @@ async function main() {
     );
     const reviewed = await fetchWithTimeout(`http://127.0.0.1:${port}/api/delivery-groups/catalog-reviewed`, {
       method: 'POST',
-      headers: { authorization: `Bearer ${socketToken}`, 'content-type': 'application/json' },
+      headers: { cookie: `__Host-zlotoweczka_session=${socketToken}`, 'content-type': 'application/json', 'x-csrf-protection': '1' },
       body: JSON.stringify({ productCount: 0 }),
     }, { timeoutMs: 5_000, label: 'real boot POST catalog-reviewed socket trigger' });
     if (!reviewed.ok) throw new Error(`Socket trigger route failed: status=${reviewed.status} body=${(await reviewed.text()).slice(0, 160)}`);

@@ -4,10 +4,8 @@ const { moveProductBetweenBlocks } = require('./services/blockMoveCommand');
 const User = require('./models/User');
 const Shop = require('./models/Shop');
 const { isRemovedUser } = require('./utils/userAccountState');
-const { validateTelegramInitData } = require('./utils/validateTelegramInitData');
-const { verifySession, isSessionNotRevoked } = require('./utils/jwt');
-const { readSessionCookie } = require('./utils/sessionCookie');
-const LEGACY_BROWSER_COMPAT = process.env.AUTH_LEGACY_BROWSER_COMPAT !== 'false';
+const { verifySession, verifyTelegramSession, isSessionNotRevoked } = require('./utils/jwt');
+const { readSessionCookie, readTelegramSessionCookie } = require('./utils/sessionCookie');
 const { pubClient, subClient, isEnabled: redisEnabled } = require('./utils/redis');
 const { hasBaseLinkerPickingAccess } = require('./utils/baseLinkerAccess');
 const { hasMarketplaceWarehouseAccess } = require('./utils/marketplaceWarehouseAccess');
@@ -80,32 +78,24 @@ function initSocket(httpServer) {
   } else {
   }
 
-  // Auth middleware — verify initData (mini-app) OR session JWT (browser).
+  // Auth middleware — both transports are now first-party HttpOnly cookies.
+  // Telegram selects its cookie explicitly with handshake.auth.context so a
+  // WebView that also has a browser cookie can never be authenticated as the
+  // wrong account. Raw initData is never sent over Socket.IO.
   io.use(async (socket, next) => {
-    const initData = socket.handshake.auth?.initData;
-    const token = socket.handshake.auth?.token; // temporary legacy migration fallback
+    const isTelegramContext = String(socket.handshake.auth?.context || '').toLowerCase() === 'telegram';
     let telegramId = '';
     let browserSession = null;
 
-    if (initData) {
-      const { valid, error } = validateTelegramInitData(initData, process.env.TELEGRAM_BOT_TOKEN);
-      if (!valid) {
-        return next(new Error(`Unauthorized: ${error || 'Invalid initData'}`));
-      }
-      try {
-        const params = new URLSearchParams(initData);
-        const user = JSON.parse(params.get('user') || '{}');
-        telegramId = String(user.id || '');
-        socket.userName = [user.first_name, user.last_name].filter(Boolean).join(' ').trim() || telegramId;
-      } catch {
-        return next(new Error('Unauthorized: Could not parse user from initData'));
-      }
+    if (isTelegramContext) {
+      const telegramSession = verifyTelegramSession(
+        readTelegramSessionCookie({ headers: socket.handshake.headers || {} }),
+      );
+      if (!telegramSession) return next(new Error('Unauthorized: Invalid Telegram session'));
+      telegramId = telegramSession.telegramId;
     } else {
-      const cookieToken = readSessionCookie({ headers: socket.handshake.headers || {} });
-      const session = verifySession(cookieToken || (LEGACY_BROWSER_COMPAT ? token : ''));
-      if (!session) {
-        return next(new Error('Unauthorized: Invalid session token'));
-      }
+      const session = verifySession(readSessionCookie({ headers: socket.handshake.headers || {} }));
+      if (!session) return next(new Error('Unauthorized: Invalid browser session'));
       telegramId = session.telegramId;
       browserSession = session;
     }

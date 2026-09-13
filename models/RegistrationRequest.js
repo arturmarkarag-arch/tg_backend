@@ -13,8 +13,11 @@ const RegistrationRequestSchema = new mongoose.Schema(
     // shopName/shopCity were dropped — always resolved at read time via Shop.findById(shopId)
     // so renaming a shop does not leave stale strings on pending requests.
     deliveryGroupId: { type: String, default: '' },
-    role: { type: String, enum: ['seller', 'warehouse'], default: 'seller' },
+    role: { type: String, enum: ['seller', 'warehouse'], required: true },
     status: { type: String, enum: ['pending', 'approved', 'rejected', 'blocked'], default: 'pending' },
+    // Human-readable reason shown back to the applicant after reject/block.
+    // Never store technical stack/error details here; admins write this text for the user.
+    moderationReason: { type: String, default: '', trim: true, maxlength: 500 },
     meta: { type: mongoose.Schema.Types.Mixed, default: {} },
   },
   { timestamps: true }

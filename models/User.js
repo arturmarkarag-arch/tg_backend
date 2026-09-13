@@ -44,12 +44,9 @@ const UserSchema = new mongoose.Schema(
     accountState: { type: String, enum: ['active', 'removed'], default: 'active' },
     removedAt: { type: Date, default: null },
     removedByTelegramId: { type: String, default: '' },
-    // Browser-session revocation. New sessions carry this monotonic integer as
-    // JWT claim `sv`; logout/unlink increments it, invalidating every older
-    // browser session without relying on timestamp precision. `sessionsValidFrom`
-    // is retained temporarily only for validating pre-migration JWTs.
+    // Browser-session revocation. Sessions carry this monotonic integer as JWT
+    // claim `sv`; logout/unlink increments it, invalidating every older session.
     sessionVersion: { type: Number, default: 0, min: 0 },
-    sessionsValidFrom: { type: Date, default: null },
     botLastActivityAt: { type: Date, default: null },
     botLastSessionAt: { type: Date, default: null },
     // Real application open marker. Updated whenever an authenticated profile is

@@ -15,6 +15,7 @@ const Order = require('../models/Order');
 const ClearedCart = require('../models/ClearedCart');
 const { errorHandler } = require('../utils/errors');
 const { signSession } = require('../utils/jwt');
+const { SESSION_COOKIE_NAME } = require('../utils/sessionCookie');
 const { telegramAuth } = require('../middleware/telegramAuth');
 const calls = [];
 let rows;
@@ -109,7 +110,7 @@ function query(model, filter = {}, fields, single = false) {
   };
   return chain;
 }
-const auth = (tid = 'admin') => ({ Authorization: `Bearer ${signSession(tid)}` });
+const auth = (tid = 'admin') => ({ Cookie: `${SESSION_COOKIE_NAME}=${signSession(tid)}` });
 const forbidden = ['cartState', 'history', 'googleSub', 'sessionsValidFrom', 'permissions', 'isWarehouseManager', 'isOnline', 'lastActive', 'miniAppState', 'lastOrderAt', 'cartItemCount'];
 function expectNarrow(row) { for (const field of forbidden) expect(row).not.toHaveProperty(field); }
 

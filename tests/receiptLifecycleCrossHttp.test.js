@@ -10,6 +10,7 @@ const { MongoMemoryReplSet } = require('mongodb-memory-server');
 
 const app = require('../app');
 const { signSession } = require('../utils/jwt');
+const { SESSION_COOKIE_NAME } = require('../utils/sessionCookie');
 const User = require('../models/User');
 const Receipt = require('../models/Receipt');
 const ReceiptItem = require('../models/ReceiptItem');
@@ -41,8 +42,8 @@ beforeAll(async () => {
   await mongoose.connect(mongod.getUri());
   admin = await User.create({ telegramId: '-990000000001', role: 'admin', firstName: 'Receipt', lastName: 'Guard' });
   worker = await User.create({ telegramId: '-990000000002', role: 'warehouse', firstName: 'Other', lastName: 'Worker' });
-  auth = `Bearer ${signSession(admin.telegramId)}`;
-  workerAuth = `Bearer ${signSession(worker.telegramId)}`;
+  auth = `${SESSION_COOKIE_NAME}=${signSession(admin.telegramId)}`;
+  workerAuth = `${SESSION_COOKIE_NAME}=${signSession(worker.telegramId)}`;
 }, 180_000);
 
 afterAll(async () => {
@@ -149,19 +150,19 @@ function publishToGroup(group) {
 }
 
 function post(url) {
-  return request(app).post(url).set('Authorization', auth);
+  return request(app).post(url).set('Cookie', auth).set('x-csrf-protection', '1');
 }
 function del(url) {
-  return request(app).delete(url).set('Authorization', auth);
+  return request(app).delete(url).set('Cookie', auth).set('x-csrf-protection', '1');
 }
 function patch(url) {
-  return request(app).patch(url).set('Authorization', auth);
+  return request(app).patch(url).set('Cookie', auth).set('x-csrf-protection', '1');
 }
 function workerPatch(url) {
-  return request(app).patch(url).set('Authorization', workerAuth);
+  return request(app).patch(url).set('Cookie', workerAuth).set('x-csrf-protection', '1');
 }
 function workerPost(url) {
-  return request(app).post(url).set('Authorization', workerAuth);
+  return request(app).post(url).set('Cookie', workerAuth).set('x-csrf-protection', '1');
 }
 
 async function createMirror(product) {
@@ -190,7 +191,7 @@ describe('receipt lifecycle HTTP cross guards', () => {
     });
     await Block.create({ blockId: 901, productIds: [product._id, direct._id] });
 
-    const board = await request(app).get('/api/blocks/901').set('Authorization', auth);
+    const board = await request(app).get('/api/blocks/901').set('Cookie', auth);
     expect(board.status).toBe(200);
     const byId = new Map(board.body.productIds.map((row) => [String(row._id), row]));
     expect(String(byId.get(String(product._id)).receiptItemId)).toBe(String(item._id));
@@ -198,13 +199,13 @@ describe('receipt lifecycle HTTP cross guards', () => {
 
     const linkedContext = await request(app)
       .get(`/api/receipts/product-context/${product._id}`)
-      .set('Authorization', auth);
+      .set('Cookie', auth);
     expect(linkedContext.status).toBe(200);
     expect(String(linkedContext.body.item._id)).toBe(String(item._id));
 
     const directContext = await request(app)
       .get(`/api/receipts/product-context/${direct._id}`)
-      .set('Authorization', auth);
+      .set('Cookie', auth);
     expect(directContext.status).toBe(404);
     expect(directContext.body.error).toBe('receipt_item_not_found');
   });
@@ -564,7 +565,7 @@ describe('receipt lifecycle HTTP cross guards', () => {
 
     const pending = await request(app)
       .get('/api/receipts/supplement-batches/pending')
-      .set('Authorization', auth);
+      .set('Cookie', auth);
     expect(pending.status).toBe(200);
     expect(Math.max(...pending.body.targets.map((target) => Number(target.readyCount || 0)), 0)).toBe(0);
   });

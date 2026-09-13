@@ -7,6 +7,7 @@
 
 const GroupMember = require('../models/GroupMember');
 const User = require('../models/User');
+const { descriptionOf, retryAfterSecondsOf } = require('../utils/telegramDeliveryPolicy');
 
 const PRESENT_STATUSES = ['member', 'administrator', 'creator', 'restricted'];
 const ABSENT_ERROR_RE = /user not found|PARTICIPANT_ID_INVALID|USER_ID_INVALID|user_not_participant/i;
@@ -15,12 +16,11 @@ const CALL_SPACING_MS = 150;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 function describeError(err) {
-  return String(err?.response?.body?.description || err?.message || err || '');
+  return descriptionOf(err);
 }
 
 function retryAfterSeconds(err) {
-  const n = Number(err?.response?.body?.parameters?.retry_after);
-  return Number.isFinite(n) && n > 0 ? n : 0;
+  return retryAfterSecondsOf(err) || 0;
 }
 
 /**

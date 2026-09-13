@@ -2,6 +2,16 @@
 
 const { checkOneGroup } = require('../services/groupMemberAudit');
 
+
+
+function telegramV2Error(description, { errorCode = 500, retryAfter = null } = {}) {
+  const err = new Error(description);
+  err.description = description;
+  err.errorCode = errorCode;
+  if (retryAfter != null) err.retryAfter = retryAfter;
+  return err;
+}
+
 function telegramError(description, retryAfter = null) {
   const err = new Error(description);
   err.response = { body: { description } };
@@ -31,6 +41,36 @@ describe('groupMemberAudit.checkOneGroup', () => {
     const result = await checkOneGroup(bot, '-1001', '42');
     expect(result).toMatchObject({ known: true, present: false, status: 'not_found' });
   });
+
+
+  it('understands node-telegram-bot-api 2.x error shape for deterministic absence', async () => {
+    const bot = { getChatMember: vi.fn().mockRejectedValue(
+      telegramV2Error('Bad Request: user not found', { errorCode: 400 }),
+    ) };
+    const result = await checkOneGroup(bot, '-1001', '42');
+    expect(result).toMatchObject({ known: true, present: false, status: 'not_found' });
+  });
+
+  it('honours SDK 2.x retryAfter on 429 before retrying membership lookup', async () => {
+    vi.useFakeTimers();
+    try {
+      const bot = {
+        getChatMember: vi.fn()
+          .mockRejectedValueOnce(telegramV2Error('Too Many Requests: retry after 1', { errorCode: 429, retryAfter: 1 }))
+          .mockResolvedValueOnce({ status: 'member', user: { id: 42 } }),
+      };
+
+      const pending = checkOneGroup(bot, '-1001', '42');
+      await vi.advanceTimersByTimeAsync(2_000);
+      const result = await pending;
+
+      expect(bot.getChatMember).toHaveBeenCalledTimes(2);
+      expect(result).toMatchObject({ known: true, present: true, status: 'member' });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
 
   it('Telegram/API failure stays unknown and must not become left', async () => {
     const bot = { getChatMember: vi.fn().mockRejectedValue(telegramError('ETIMEDOUT')) };

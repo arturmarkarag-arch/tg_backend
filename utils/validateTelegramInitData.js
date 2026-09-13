@@ -17,13 +17,6 @@ function parseTelegramInitData(initData) {
   return { parsedData, rawData };
 }
 
-function getInitDataFromRequest(req) {
-  if (!req) return null;
-  // initData приймається ТІЛЬКИ з заголовків — не з query/body,
-  // щоб уникнути витоку в nginx/Vercel access logs та браузерну історію
-  return req.headers?.['x-telegram-initdata'] || req.headers?.['x-telegram-init-data'] || null;
-}
-
 function getTelegramId(parsedData) {
   if (!parsedData) return '';
   return String(parsedData.user?.id || '');
@@ -89,20 +82,8 @@ function validateTelegramInitData(initData, botToken) {
   };
 }
 
-function getTelegramAuth(req, botToken) {
-  const initData = getInitDataFromRequest(req);
-  const validation = validateTelegramInitData(initData, botToken);
-  return {
-    ...validation,
-    initData,
-    telegramId: getTelegramId(validation.parsedData),
-  };
-}
-
 module.exports = {
   validateTelegramInitData,
   parseTelegramInitData,
-  getInitDataFromRequest,
   getTelegramId,
-  getTelegramAuth,
 };

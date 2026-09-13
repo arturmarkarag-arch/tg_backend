@@ -132,7 +132,7 @@ function runChecks({ quiet = false } = {}) {
   const socket = read('socket.js');
   includesAll(socket, [
     "const Shop = require('./models/Shop')",
-    "const { verifySession, isSessionNotRevoked } = require('./utils/jwt')",
+    "const { verifySession, verifyTelegramSession, isSessionNotRevoked } = require('./utils/jwt')",
     '!isSessionNotRevoked(browserSession, dbUser)',
     "socket.join(`user_${socket.telegramId}`)",
     "socket.join('staff')",
@@ -147,7 +147,7 @@ function runChecks({ quiet = false } = {}) {
     "io.to('staff').emit('picking_tasks_positions_updated'",
   ], 'socket boundary');
   noRegex(socket, /socket\.broadcast\.emit\(['"]item_locked['"]/, 'socket lock leakage');
-  pass('Socket JWT revocation + warehouse lock/topology isolation');
+  pass('Socket first-party session revocation + warehouse lock/topology isolation');
 
   const socketScope = read('utils/socketScope.js');
   includesAll(socketScope, [

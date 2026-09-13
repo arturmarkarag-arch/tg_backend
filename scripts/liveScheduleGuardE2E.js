@@ -62,6 +62,7 @@ const User = require('../models/User');
 const Counter = require('../models/Counter');
 const AppSetting = require('../models/AppSetting');
 const { signSession } = require('../utils/jwt');
+const { SESSION_COOKIE_NAME } = require('../utils/sessionCookie');
 const { buildScheduleGuardTestSchedules } = require('./helpers/perGroupTestSchedule');
 const { fetchWithTimeout, assertNoActiveGlobalHarnessLease, acquireGlobalHarnessLease, waitForStableZero, fingerprintCollections, compareFingerprints, createProgressWatchdog } = require('./helpers/liveHarnessSafety');
 const {
@@ -128,7 +129,7 @@ async function api(method, urlPath, body) {
   watchdog?.touch('http', `${method} ${urlPath}`);
   const res = await fetchWithTimeout(`${baseUrl}${urlPath}`, {
     method,
-    headers: { 'content-type': 'application/json', authorization: `Bearer ${signSession(ADMIN_TELEGRAM_ID)}` },
+    headers: { 'content-type': 'application/json', cookie: `${SESSION_COOKIE_NAME}=${signSession(ADMIN_TELEGRAM_ID)}`, 'x-csrf-protection': '1' },
     body: body === undefined ? undefined : JSON.stringify(body),
   }, { label: `${method} ${urlPath}`, parentSignal: watchdog?.signal });
   const text = await res.text();

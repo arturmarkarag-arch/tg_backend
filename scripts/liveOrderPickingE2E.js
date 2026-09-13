@@ -112,6 +112,7 @@ const { buildOpenClosedTestSchedules } = require('./helpers/perGroupTestSchedule
 const { getOrCreateSessionId, getOrCreateNextSessionId } = require('../utils/getOrCreateSession');
 const { buildPickingTasksFromOrders } = require('../services/taskBuilder');
 const { signSession } = require('../utils/jwt');
+const { SESSION_COOKIE_NAME } = require('../utils/sessionCookie');
 const { auditSessionClosure } = require('../services/sessionClosure');
 const { auditSessionCoverage } = require('../services/sessionCoverage');
 const { archiveOrphanedOutOfStockProducts } = require('../services/pickingService');
@@ -493,7 +494,8 @@ async function tokenFor(user) {
 
 async function api(method, urlPath, user = null, body = undefined) {
   const headers = { 'content-type': 'application/json' };
-  if (user) headers.authorization = `Bearer ${await tokenFor(user)}`;
+  if (user) headers.cookie = `${SESSION_COOKIE_NAME}=${await tokenFor(user)}`;
+  if (user && !['GET', 'HEAD', 'OPTIONS'].includes(String(method).toUpperCase())) headers['x-csrf-protection'] = '1';
   watchdog?.touch('http', `${method} ${urlPath.split('?')[0]}`);
   const res = await fetchWithTimeout(`${baseUrl}${urlPath}`, {
     method,

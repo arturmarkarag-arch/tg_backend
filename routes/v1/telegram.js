@@ -1,6 +1,6 @@
 const express = require('express');
-const { validateTelegramInitData, getInitDataFromRequest, getTelegramId, getTelegramAuth } = require('../../utils/validateTelegramInitData');
 const { requireTelegramRole } = require('../../middleware/telegramAuth');
+const { telegramIdentity } = require('../../middleware/telegramIdentity');
 const User = require('../../models/User');
 const RegistrationRequest = require('../../models/RegistrationRequest');
 const DeliveryGroup = require('../../models/DeliveryGroup');
@@ -202,29 +202,17 @@ async function buildUserProfile(user) {
   };
 }
 
-// POST /api/v1/telegram/validate — перевірити підпис initData
-router.post('/validate', telegramAuthLimit, asyncHandler(async (req, res) => {
-  const initData = getInitDataFromRequest(req);
-  if (!initData) throw appError('init_data_required');
-
-  const { valid, parsedData, error } = validateTelegramInitData(initData, process.env.TELEGRAM_BOT_TOKEN);
-  if (!valid) throw appError('auth_invalid_init_data', { reason: error });
-
-  const telegramId = parsedData.user?.id;
-  if (!telegramId) throw appError('auth_telegram_id_missing');
-
-  res.json({ telegramId: String(telegramId), user: parsedData.user || null });
+// Compatibility identity probe. Raw Telegram initData has already been
+// consumed by /auth/telegram/bootstrap; this endpoint validates only the
+// first-party HttpOnly Telegram session cookie.
+router.post('/validate', telegramAuthLimit, telegramIdentity, asyncHandler(async (req, res) => {
+  res.json({ telegramId: String(req.telegramId) });
 }));
 
-// POST /api/v1/telegram/me — перевірити initData І чи є користувач у системі
-// Повертає профіль якщо є, 403 якщо немає, 401 якщо initData невалідна
-router.post('/me', telegramAuthLimit, asyncHandler(async (req, res) => {
-  const initData = getInitDataFromRequest(req);
-  if (!initData) throw appError('init_data_required');
-
-  const auth = getTelegramAuth(req, process.env.TELEGRAM_BOT_TOKEN);
-  const { valid, telegramId, error } = auth;
-  if (!valid) throw appError('auth_invalid_init_data', { reason: error });
+// Profile bootstrap for both registered and pre-registration Mini App users.
+// Identity comes from the one-time-exchanged Telegram session cookie.
+router.post('/me', telegramAuthLimit, telegramIdentity, asyncHandler(async (req, res) => {
+  const telegramId = String(req.telegramId || '');
   if (!telegramId) throw appError('auth_telegram_id_missing');
 
   const user = await User.findOne({ telegramId }).lean();
@@ -234,8 +222,8 @@ router.post('/me', telegramAuthLimit, asyncHandler(async (req, res) => {
       status: { $in: ['pending', 'blocked', 'rejected'] },
     }).lean();
     if (request?.status === 'pending')  throw appError('registration_pending');
-    if (request?.status === 'blocked')  throw appError('registration_blocked');
-    if (request?.status === 'rejected') throw appError('registration_rejected');
+    if (request?.status === 'blocked')  throw appError('registration_blocked', { reason: request.moderationReason || '' });
+    if (request?.status === 'rejected') throw appError('registration_rejected', { reason: request.moderationReason || '' });
     throw appError('not_registered');
   }
 
@@ -373,7 +361,7 @@ router.post('/google/unlink', asyncHandler(async (req, res) => {
   await User.updateOne(
     { telegramId },
     {
-      $set: { googleSub: '', googleEmail: '', sessionsValidFrom: new Date() },
+      $set: { googleSub: '', googleEmail: '' },
       $inc: { sessionVersion: 1 },
     },
   );
@@ -545,8 +533,8 @@ router.post('/mini-app/reset-state', asyncHandler(async (req, res) => {
  * for a legitimate member of the work group.
  *
  * Security is unchanged from the /start path — same gate, different doorway:
- *   • the id comes from validated initData (Telegram signs it; the URL is never
- *     trusted for identity),
+ *   • the id comes from the first-party Telegram session created by the one-time
+ *     signed initData bootstrap; the URL/body is never trusted for identity,
  *   • membership is re-checked LIVE via getChatMember (fail-closed),
  *   • the minted token is bound to that same id, single-use, 24h,
  *   • /register-request still re-runs BOTH checks before creating anything.
@@ -554,9 +542,8 @@ router.post('/mini-app/reset-state', asyncHandler(async (req, res) => {
  * Idempotent-ish: an unspent token for this id is reused instead of minting a
  * new row on every mini-app open.
  */
-router.post('/registration-invite', registrationLimit, asyncHandler(async (req, res) => {
-  const { valid, telegramId, error } = getTelegramAuth(req, process.env.TELEGRAM_BOT_TOKEN);
-  if (!valid) throw appError('auth_invalid_init_data', { reason: error });
+router.post('/registration-invite', registrationLimit, telegramIdentity, asyncHandler(async (req, res) => {
+  const telegramId = String(req.telegramId || '');
   if (!telegramId) throw appError('auth_telegram_id_missing');
 
   // Already in the system → nothing to invite; the client should just re-auth.
@@ -567,9 +554,19 @@ router.post('/registration-invite', registrationLimit, asyncHandler(async (req, 
 
   // Blocked applicants must not be handed a fresh token to retry with.
   const request = await RegistrationRequest.findOne(
-    { telegramId, status: { $in: ['pending', 'blocked'] } }, 'status',
+    { telegramId, status: { $in: ['pending', 'blocked'] } }, 'status moderationReason',
   ).lean();
-  if (request) return res.json({ eligible: false, reason: request.status });
+  if (request) {
+    const supportAdmins = request.status === 'blocked'
+      ? toPublicSupportAdmins(await getSupportAdmins())
+      : [];
+    return res.json({
+      eligible: false,
+      reason: request.status,
+      moderationReason: request.moderationReason || '',
+      supportAdmins,
+    });
+  }
 
   const membership = await checkUserInAllowedGroup(telegramId);
   if (!membership.allowed) {
@@ -594,7 +591,8 @@ router.post('/registration-invite', registrationLimit, asyncHandler(async (req, 
         // real reason instead. Falling back to a personal token is wrong too: it
         // would silently let them register onto some other shop.
         if (!doc?.isActive || !doc.deliveryGroupId) {
-          return res.json({ eligible: false, reason: 'shop_inactive' });
+          const supportAdmins = toPublicSupportAdmins(await getSupportAdmins());
+          return res.json({ eligible: false, reason: 'shop_inactive', supportAdmins });
         }
         return res.json({
           eligible: true,
@@ -616,13 +614,11 @@ router.post('/registration-invite', registrationLimit, asyncHandler(async (req, 
   res.json({ eligible: true, regToken, shop: null });
 }));
 
-router.post('/register-request', registrationLimit, asyncHandler(async (req, res) => {
+router.post('/register-request', registrationLimit, telegramIdentity, asyncHandler(async (req, res) => {
   const { firstName, lastName, phoneNumber, shopId, role, regToken } = req.body;
   const cleanFirstName = String(firstName || '').trim();
   const cleanLastName = String(lastName || '').trim();
-
-  const { valid, telegramId, error } = getTelegramAuth(req, process.env.TELEGRAM_BOT_TOKEN);
-  if (!valid) throw appError('auth_invalid_init_data', { reason: error });
+  const telegramId = String(req.telegramId || '');
   if (!telegramId) throw appError('auth_telegram_id_missing');
 
   if (!cleanFirstName || !cleanLastName || !role) throw appError('registration_required_fields');
@@ -673,7 +669,7 @@ router.post('/register-request', registrationLimit, asyncHandler(async (req, res
   // the transaction below, so a later failure doesn't lose it for nothing.
   let staleRejectedId = null;
   if (existingRequest) {
-    if (existingRequest.status === 'blocked')  throw appError('registration_blocked');
+    if (existingRequest.status === 'blocked')  throw appError('registration_blocked', { reason: existingRequest.moderationReason || '' });
     if (existingRequest.status === 'rejected') staleRejectedId = existingRequest._id;
     else throw appError('registration_request_exists');
   }
@@ -879,27 +875,35 @@ router.post('/register-requests/:id/approve', adminOnly, asyncHandler(async (req
   res.json({ message: 'Заявку схвалено', telegramId: createdUser.telegramId, role: createdUser.role });
 }));
 
+function moderationReasonFromBody(req) {
+  return String(req.body?.reason || '').trim().slice(0, 500);
+}
+
 router.post('/register-requests/:id/reject', adminOnly, asyncHandler(async (req, res) => {
   const request = await RegistrationRequest.findById(req.params.id).lean();
   if (!request) throw appError('registration_not_found');
   if (request.status !== 'pending') throw appError('registration_not_pending');
-  await RegistrationRequest.findByIdAndUpdate(req.params.id, { status: 'rejected' });
-  res.json({ message: 'Заявку відхилено', telegramId: request.telegramId });
+  const moderationReason = moderationReasonFromBody(req);
+  if (!moderationReason) throw appError('registration_reason_required');
+  await RegistrationRequest.findByIdAndUpdate(req.params.id, { status: 'rejected', moderationReason });
+  res.json({ message: 'Заявку відхилено', telegramId: request.telegramId, moderationReason });
 }));
 
 router.post('/register-requests/:id/block', adminOnly, asyncHandler(async (req, res) => {
   const request = await RegistrationRequest.findById(req.params.id).lean();
   if (!request) throw appError('registration_not_found');
   if (request.status !== 'pending') throw appError('registration_not_pending');
-  await RegistrationRequest.findByIdAndUpdate(req.params.id, { status: 'blocked' });
-  res.json({ message: 'Заявку заблоковано', telegramId: request.telegramId });
+  const moderationReason = moderationReasonFromBody(req);
+  if (!moderationReason) throw appError('registration_reason_required');
+  await RegistrationRequest.findByIdAndUpdate(req.params.id, { status: 'blocked', moderationReason });
+  res.json({ message: 'Заявку заблоковано', telegramId: request.telegramId, moderationReason });
 }));
 
 router.post('/register-requests/:id/unblock', adminOnly, asyncHandler(async (req, res) => {
   const request = await RegistrationRequest.findById(req.params.id).lean();
   if (!request) throw appError('registration_not_found');
   if (request.status !== 'blocked') throw appError('registration_not_pending');
-  await RegistrationRequest.findByIdAndUpdate(req.params.id, { status: 'pending' });
+  await RegistrationRequest.findByIdAndUpdate(req.params.id, { status: 'pending', moderationReason: '' });
   res.json({ message: 'Заявку розблоковано', telegramId: request.telegramId });
 }));
 

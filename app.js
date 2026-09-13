@@ -79,6 +79,7 @@ if (ENABLE_TEST_API) {
 
 const publicApiPaths = [
   /^\/api\/v1\/auth\/config$/,
+  /^\/api\/v1\/auth\/telegram\/bootstrap$/,
   /^\/api\/v1\/auth\/google$/,
   /^\/api\/v1\/auth\/google\/link\/bootstrap$/,
   /^\/api\/v1\/auth\/google\/link\/complete$/,
@@ -89,7 +90,7 @@ const publicApiPaths = [
   // Self-service invite for a group member who opened the mini-app without a
   // ?regToken. Necessarily pre-registration (the caller has no User row yet),
   // so it cannot sit behind telegramAuth. It authenticates the caller itself
-  // via signed initData and re-checks group membership live before minting.
+  // via the first-party Telegram proof session and re-checks group membership live before minting.
   /^\/api\/v1\/telegram\/registration-invite$/,
   /^\/api\/v1\/telegram\/me$/,
   /^\/api\/shops\/cities$/,

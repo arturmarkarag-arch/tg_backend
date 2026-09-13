@@ -93,6 +93,7 @@ const { isOrderingOpen, getOrderingWindowOpenAt } = require('../utils/orderingSc
 const { buildOpenClosedTestSchedules } = require('./helpers/perGroupTestSchedule');
 const { getOrCreateSessionId } = require('../utils/getOrCreateSession');
 const { signSession } = require('../utils/jwt');
+const { SESSION_COOKIE_NAME } = require('../utils/sessionCookie');
 const { auditSessionClosure } = require('../services/sessionClosure');
 const { reconcileLateOrderStrict } = require('../services/lateOrderReconcile');
 const { archiveOrphanedOutOfStockProducts } = require('../services/pickingService');
@@ -291,7 +292,8 @@ async function tokenFor(user) { return signSession(str(user.telegramId)); }
 async function api(method, urlPath, user, body, label = `${method} ${urlPath.split('?')[0]}`) {
   const t = Date.now();
   const headers = { 'content-type': 'application/json' };
-  if (user) headers.authorization = `Bearer ${await tokenFor(user)}`;
+  if (user) headers.cookie = `${SESSION_COOKIE_NAME}=${await tokenFor(user)}`;
+  if (user && !['GET', 'HEAD', 'OPTIONS'].includes(String(method).toUpperCase())) headers['x-csrf-protection'] = '1';
   const res = await fetchWithTimeout(`${baseUrl}${urlPath}`, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) }, {
     label,
     timeoutMs: HTTP_TIMEOUT_MS,

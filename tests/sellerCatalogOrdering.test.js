@@ -10,6 +10,7 @@ const { MongoMemoryServer } = require('mongodb-memory-server');
 
 const app = require('../app');
 const { signSession } = require('../utils/jwt');
+const { SESSION_COOKIE_NAME } = require('../utils/sessionCookie');
 const User = require('../models/User');
 const Product = require('../models/Product');
 const Block = require('../models/Block');
@@ -34,7 +35,7 @@ beforeAll(async () => {
     firstName: 'Catalog',
     lastName: 'Test',
   });
-  auth = `Bearer ${signSession(admin.telegramId)}`;
+  auth = `${SESSION_COOKIE_NAME}=${signSession(admin.telegramId)}`;
 }, 180_000);
 
 afterAll(async () => {
@@ -56,7 +57,7 @@ beforeEach(async () => {
 });
 
 function get(url) {
-  return request(app).get(url).set('Authorization', auth);
+  return request(app).get(url).set('Cookie', auth);
 }
 
 function createProduct(orderNumber, overrides = {}) {
@@ -141,7 +142,7 @@ describe('seller ordinary catalogue HTTP ordering', () => {
       firstName: 'Seller',
       shopId: shop._id,
     });
-    const sellerAuth = `Bearer ${signSession(seller.telegramId)}`;
+    const sellerAuth = `${SESSION_COOKIE_NAME}=${signSession(seller.telegramId)}`;
     const orderingSessionId = await getOrCreateSessionId(String(group._id), openSchedule);
     const cutoff = getOrderingWindowOpenAt(openSchedule);
     const beforeCutoff = new Date(cutoff.getTime() - 60_000);
@@ -202,22 +203,22 @@ describe('seller ordinary catalogue HTTP ordering', () => {
 
     const page = await request(app)
       .get('/api/v1/products/catalog?limit=10&offset=0')
-      .set('Authorization', sellerAuth)
+      .set('Cookie', sellerAuth)
       .expect(200);
     expect(page.body.items.map((item) => item.orderNumber)).toEqual([100, 130, 140]);
     expect(page.body).toMatchObject({ total: 3, hasMore: false });
 
     await request(app)
       .get(`/api/v1/products/catalog/${sameSessionSupplement._id}/position`)
-      .set('Authorization', sellerAuth)
+      .set('Cookie', sellerAuth)
       .expect(404);
     await request(app)
       .get(`/api/v1/products/catalog/${postCutoff._id}/position`)
-      .set('Authorization', sellerAuth)
+      .set('Cookie', sellerAuth)
       .expect(404);
     const otherPosition = await request(app)
       .get(`/api/v1/products/catalog/${otherSession._id}/position`)
-      .set('Authorization', sellerAuth)
+      .set('Cookie', sellerAuth)
       .expect(200);
     expect(otherPosition.body).toEqual({ position: 2, total: 3 });
 
@@ -227,7 +228,7 @@ describe('seller ordinary catalogue HTTP ordering', () => {
     try {
       await request(app)
         .get('/api/v1/products/catalog?limit=10&offset=0')
-        .set('Authorization', sellerAuth)
+        .set('Cookie', sellerAuth)
         .expect(500);
     } finally {
       sessionLookup.mockRestore();

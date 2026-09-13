@@ -113,7 +113,6 @@ async function softRemoveUser({ telegramId, actor = null, groupChatId = '' }) {
               accountState: 'removed',
               removedAt: now,
               removedByTelegramId: String(actor?.telegramId || ''),
-              sessionsValidFrom: now,
               // Ensure every role has zero operational ownership after removal.
               shopId: null,
               shopNumber: '',

@@ -44,6 +44,7 @@ const { getOrCreateSessionId } = require('../utils/getOrCreateSession');
 const AppSetting = require('../models/AppSetting');
 const ReceiptItemLog = require('../models/ReceiptItemLog');
 const { signSession } = require('../utils/jwt');
+const { SESSION_COOKIE_NAME } = require('../utils/sessionCookie');
 const {
   fetchWithTimeout,
   assertNoActiveGlobalHarnessLease,
@@ -95,7 +96,7 @@ async function saveManifest(phase) {
 async function token() { return signSession(String(admin.telegramId)); }
 async function api(method, route, { json, fields } = {}) {
   watchdog?.touch('http', `${method} ${route}`);
-  const headers = { authorization: `Bearer ${await token()}` };
+  const headers = { cookie: `${SESSION_COOKIE_NAME}=${await token()}`, 'x-csrf-protection': '1' };
   let body;
   if (fields) {
     const fd = new FormData();

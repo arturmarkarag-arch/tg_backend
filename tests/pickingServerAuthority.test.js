@@ -10,6 +10,7 @@ const { MongoMemoryReplSet } = require('mongodb-memory-server');
 
 const app = require('../app');
 const { signSession } = require('../utils/jwt');
+const { SESSION_COOKIE_NAME } = require('../utils/sessionCookie');
 const User = require('../models/User');
 const DeliveryGroup = require('../models/DeliveryGroup');
 const OrderingSession = require('../models/OrderingSession');
@@ -36,7 +37,7 @@ beforeAll(async () => {
     firstName: 'Picking',
     lastName: 'Authority',
   });
-  auth = `Bearer ${signSession(worker.telegramId)}`;
+  auth = `${SESSION_COOKIE_NAME}=${signSession(worker.telegramId)}`;
 }, 180_000);
 
 afterAll(async () => {
@@ -115,11 +116,11 @@ async function createProduct(orderNumber) {
 }
 
 function get(url) {
-  return request(app).get(url).set('Authorization', auth);
+  return request(app).get(url).set('Cookie', auth);
 }
 
 function post(url) {
-  return request(app).post(url).set('Authorization', auth);
+  return request(app).post(url).set('Cookie', auth).set('x-csrf-protection', '1');
 }
 
 describe('V48.13 server-authoritative picking lifecycle', () => {

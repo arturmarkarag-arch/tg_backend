@@ -1,47 +1,34 @@
 const User = require('../models/User');
-const { getTelegramAuth, getInitDataFromRequest } = require('../utils/validateTelegramInitData');
-const { verifySession, isSessionNotRevoked } = require('../utils/jwt');
-const { readSessionCookie } = require('../utils/sessionCookie');
+const { verifySession, verifyTelegramSession, isSessionNotRevoked } = require('../utils/jwt');
+const { readSessionCookie, readTelegramSessionCookie } = require('../utils/sessionCookie');
 const { appError } = require('../utils/errors');
 const { isRemovedUser } = require('../utils/userAccountState');
-const LEGACY_BROWSER_COMPAT = process.env.AUTH_LEGACY_BROWSER_COMPAT !== 'false';
 
-// Accepts either Telegram Mini App initData (x-telegram-initdata header) OR a
-// browser HttpOnly session cookie (with a temporary legacy Bearer fallback). Whichever path matches, the
-// request ends up with the same req.telegramId / req.telegramUser so every
-// downstream requireTelegramRoles(...) keeps working unchanged.
+// Two first-party HttpOnly session transports converge here:
+// - x-auth-context: telegram -> Telegram proof session cookie (created once from
+//   signed initData by /auth/telegram/bootstrap);
+// - default/browser          -> Google/browser session cookie with sessionVersion.
+// Raw Telegram initData is NEVER accepted here and therefore cannot be replayed
+// against arbitrary API endpoints.
 async function telegramAuth(req, res, next) {
-  const hasInitData = !!getInitDataFromRequest(req);
-
+  const isTelegramContext = String(req.get('x-auth-context') || '').toLowerCase() === 'telegram';
   let telegramId = '';
-  let initData = null;
-  let parsedData = null;
-  let browserSession = null; // set only on the browser session path
+  let browserSession = null;
 
-  if (hasInitData) {
-    // Mini-app path — unchanged. A present-but-invalid initData still fails
-    // here (we do NOT fall through to JWT) so mini-app error semantics hold.
-    const result = getTelegramAuth(req, process.env.TELEGRAM_BOT_TOKEN);
-    if (!result.valid) {
-      return next(appError('auth_invalid_init_data', { reason: result.error }));
+  if (isTelegramContext) {
+    const telegramSession = verifyTelegramSession(readTelegramSessionCookie(req));
+    if (!telegramSession) return next(appError('auth_telegram_session_required'));
+    if (!['GET', 'HEAD', 'OPTIONS'].includes(String(req.method || '').toUpperCase())
+        && req.get('x-csrf-protection') !== '1') {
+      return next(appError('auth_csrf_required'));
     }
-    if (!result.telegramId) {
-      return next(appError('auth_telegram_id_missing'));
-    }
-    telegramId = result.telegramId;
-    initData = result.initData;
-    parsedData = result.parsedData;
+    telegramId = telegramSession.telegramId;
+    req.telegramSession = telegramSession;
   } else {
-    // Browser path — prefer the HttpOnly cookie. Bearer remains a temporary
-    // migration fallback for already-open clients from the previous release.
     const cookieToken = readSessionCookie(req);
-    const authHeader = req.headers?.authorization || '';
-    const bearer = LEGACY_BROWSER_COMPAT && authHeader.startsWith('Bearer ') ? authHeader.slice(7) : '';
-    const session = verifySession(cookieToken || bearer);
-    if (!session) {
-      return next(appError('auth_required'));
-    }
-    if (cookieToken && !['GET', 'HEAD', 'OPTIONS'].includes(String(req.method || '').toUpperCase())
+    const session = verifySession(cookieToken);
+    if (!session) return next(appError('auth_required'));
+    if (!['GET', 'HEAD', 'OPTIONS'].includes(String(req.method || '').toUpperCase())
         && req.get('x-csrf-protection') !== '1') {
       return next(appError('auth_csrf_required'));
     }
@@ -49,24 +36,13 @@ async function telegramAuth(req, res, next) {
     browserSession = session;
   }
 
-  // Authentication needs identity, role, assignment and revocation only.
   const user = await User.findOne({ telegramId })
-    .select('_id telegramId role firstName lastName phoneNumber shopNumber shopId accountState botBlocked sessionVersion sessionsValidFrom createdAt updatedAt')
+    .select('_id telegramId role firstName lastName phoneNumber shopNumber shopId accountState botBlocked sessionVersion createdAt updatedAt')
     .lean();
-  if (!user || isRemovedUser(user)) {
-    return next(appError('not_registered'));
-  }
-  // Blocked users must not retain access via either transport.
-  if (user.botBlocked) {
-    return next(appError('registration_blocked'));
-  }
-  // Browser session version must match the current DB version.
-  if (browserSession && !isSessionNotRevoked(browserSession, user)) {
-    return next(appError('auth_required'));
-  }
+  if (!user || isRemovedUser(user)) return next(appError('not_registered'));
+  if (user.botBlocked) return next(appError('registration_blocked'));
+  if (browserSession && !isSessionNotRevoked(browserSession, user)) return next(appError('auth_required'));
 
-  req.telegramInitData = initData;
-  req.telegramParsedData = parsedData;
   req.telegramUser = user;
   req.telegramId = telegramId;
   next();
@@ -79,22 +55,12 @@ function requireTelegramRole(role) {
 function requireTelegramRoles(roles) {
   const allowed = Array.isArray(roles) ? roles : [roles];
   return async function (req, res, next) {
-    if (!req.telegramId) {
-      return next(appError('auth_required'));
-    }
-
+    if (!req.telegramId) return next(appError('auth_required'));
     const user = req.telegramUser;
-    if (!user || !allowed.includes(user.role)) {
-      return next(appError('auth_role_required', { allowed }));
-    }
-
+    if (!user || !allowed.includes(user.role)) return next(appError('auth_role_required', { allowed }));
     req.user = user;
     next();
   };
 }
 
-module.exports = {
-  telegramAuth,
-  requireTelegramRole,
-  requireTelegramRoles,
-};
+module.exports = { telegramAuth, requireTelegramRole, requireTelegramRoles };

@@ -10,7 +10,6 @@ const DeliveryGroup = require('../models/DeliveryGroup');
 const PickingTask = require('../models/PickingTask');
 const Block = require('../models/Block');
 const { roundMoney } = require('../utils/money');
-const { getTelegramAuth } = require('../utils/validateTelegramInitData');
 const { telegramAuth, requireTelegramRoles } = require('../middleware/telegramAuth');
 const { getIO } = require('../socket');
 const { isOrderingOpen, getOrderingWindowOpenAt } = require('../utils/orderingSchedule');
@@ -749,18 +748,12 @@ router.post('/', asyncHandler(async (req, res) => {
 }));
 
 async function placeOrderImpl(req, res) {
-  const { initData, buyerTelegramId, items, shippingAddress, contactInfo, emojiType, idempotencyKey } = req.body;
+  const { buyerTelegramId, items, shippingAddress, contactInfo, emojiType, idempotencyKey } = req.body;
 
-  // Identity is established by the flexible telegramAuth middleware (initData OR
-  // browser JWT). Fall back to re-validating body initData only if it isn't.
-  let telegramId = String(req.telegramId || '');
-  if (!telegramId) {
-    const validation = getTelegramAuth(req, process.env.TELEGRAM_BOT_TOKEN);
-    if (!validation.valid || !validation.telegramId) {
-      throw appError('order_invalid_initdata');
-    }
-    telegramId = String(validation.telegramId);
-  }
+  // Identity is established before this router by the first-party browser or
+  // Telegram HttpOnly session. Order payloads can never supply/override it.
+  const telegramId = String(req.telegramId || '');
+  if (!telegramId) throw appError('auth_required');
 
   if (buyerTelegramId && String(buyerTelegramId) !== telegramId) {
     throw appError('order_buyer_mismatch');
