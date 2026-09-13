@@ -1,0 +1,13 @@
+Invoice Core Stage 3 — KSeF Online Provider
+
+Apply over Stage 2.
+After applying, run npm ci before starting the backend because Stage 3 adds @ksefuj/validator@0.3.0.
+Required secret for KSeF credentials: KSEF_CREDENTIAL_ENCRYPTION_KEY (minimum 32 UTF-8 bytes).
+No KSeF credentials are included in this patch.
+
+Validation commands:
+  npm run test:invoice:stage1:static
+  npm run test:invoice:stage2:static
+  npm run test:invoice:stage3:static
+  npm run test:invoice:stage3
+  npm run test:security:endpoint-matrix

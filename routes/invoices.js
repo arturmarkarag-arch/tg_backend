@@ -4,6 +4,11 @@ const express = require('express');
 const mongoose = require('mongoose');
 const Invoice = require('../models/Invoice');
 const InvoiceSnapshot = require('../models/InvoiceSnapshot');
+const {
+  createConnection: createKsefConnection, listConnections: listKsefConnections, updateConnection: updateKsefConnection, rotateToken: rotateKsefToken,
+} = require('../services/invoices/ksef/connections');
+const { checkConnection: checkKsefConnection } = require('../services/invoices/ksef/auth');
+const { validateInvoiceForKsef, submitInvoiceToKsef, getSubmissionStatus: getKsefSubmissionStatus } = require('../services/invoices/ksef/submissions');
 const { asyncHandler, appError } = require('../utils/errors');
 const { requireTelegramRole } = require('../middleware/telegramAuth');
 const { getInvoiceSourceRegistry } = require('../services/invoices/sourceProviders/registry');
@@ -77,6 +82,37 @@ router.patch('/legal-entities/:id', asyncHandler(async (req, res) => {
   res.json(entity);
 }));
 
+
+router.get('/ksef/connections', asyncHandler(async (req, res) => {
+  const items = await listKsefConnections({ legalEntityId: req.query.legalEntityId || '', includeDisabled: String(req.query.includeDisabled || 'true') !== 'false' });
+  noStore(res);
+  res.json({ items });
+}));
+
+router.post('/ksef/connections', asyncHandler(async (req, res) => {
+  const connection = await createKsefConnection(req.body || {});
+  noStore(res);
+  res.status(201).json(connection);
+}));
+
+router.patch('/ksef/connections/:connectionId', asyncHandler(async (req, res) => {
+  const connection = await updateKsefConnection(req.params.connectionId, req.body || {});
+  noStore(res);
+  res.json(connection);
+}));
+
+router.post('/ksef/connections/:connectionId/token', asyncHandler(async (req, res) => {
+  const connection = await rotateKsefToken(req.params.connectionId, req.body?.token);
+  noStore(res);
+  res.json(connection);
+}));
+
+router.post('/ksef/connections/:connectionId/check', asyncHandler(async (req, res) => {
+  const result = await checkKsefConnection(req.params.connectionId);
+  noStore(res);
+  res.json(result);
+}));
+
 router.post('/preview', asyncHandler(async (req, res) => {
   const result = await prepareInvoiceFromSource({
     sourceProvider: req.body?.sourceProvider,
@@ -113,6 +149,28 @@ router.get('/', asyncHandler(async (req, res) => {
   ]);
   noStore(res);
   res.json({ items, page, pageSize, total });
+}));
+
+
+router.post('/:id/fiscal/ksef/validate', asyncHandler(async (req, res) => {
+  const id = requireObjectId(req.params.id, 'invoice_id_invalid');
+  const result = await validateInvoiceForKsef(id);
+  noStore(res);
+  res.json(result);
+}));
+
+router.post('/:id/fiscal/ksef/submit', asyncHandler(async (req, res) => {
+  const id = requireObjectId(req.params.id, 'invoice_id_invalid');
+  const result = await submitInvoiceToKsef(id, { environment: req.body?.environment || 'test' });
+  noStore(res);
+  res.status(result.alreadySubmitted ? 200 : 202).json(result);
+}));
+
+router.get('/:id/fiscal/ksef/status', asyncHandler(async (req, res) => {
+  const id = requireObjectId(req.params.id, 'invoice_id_invalid');
+  const result = await getKsefSubmissionStatus(id, { environment: req.query.environment || 'test', refresh: String(req.query.refresh || 'true') !== 'false' });
+  noStore(res);
+  res.json(result);
 }));
 
 router.get('/:id', asyncHandler(async (req, res) => {

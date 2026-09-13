@@ -97,7 +97,9 @@
     "test:invoice:stage1": "vitest run tests/invoiceCoreStage1.test.js tests/invoiceCoreStage1.contract.test.js --no-file-parallelism",
     "test:invoice:stage1:static": "node scripts/checkInvoiceCoreStage1.js",
     "test:invoice:stage2": "vitest run tests/invoiceCoreStage2.test.js tests/invoiceCoreStage2.contract.test.js --no-file-parallelism",
-    "test:invoice:stage2:static": "node scripts/checkInvoiceCoreStage2.js"
+    "test:invoice:stage2:static": "node scripts/checkInvoiceCoreStage2.js",
+    "test:invoice:stage3": "node tests/invoiceKsefStage3.pure.js && node tests/invoiceKsefStage3.xsd.js",
+    "test:invoice:stage3:static": "node scripts/checkInvoiceKsefStage3.js"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1030.0",
@@ -118,7 +120,8 @@
     "node-telegram-bot-api": "^2.1.0",
     "openai": "^4.8.0",
     "sharp": "^0.35.4",
-    "socket.io": "^4.8.3"
+    "socket.io": "^4.8.3",
+    "@ksefuj/validator": "0.3.0"
   },
   "devDependencies": {
     "mongodb-memory-server": "^11.2.0",

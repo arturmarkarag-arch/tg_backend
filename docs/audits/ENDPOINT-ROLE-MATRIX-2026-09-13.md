@@ -4,7 +4,7 @@ This is a complete inventory of runtime Express route declarations, discovered r
 A check mark means that the role passes the route-entry auth/role middleware. Resource ownership, shop/group/session
 scope, one-time tokens, rate limits, feature flags, and request validation can still deny a request as noted.
 
-Routes: **416** · anonymous: **18** · seller: **75** · warehouse: **200** · admin: **406**
+Routes: **424** · anonymous: **18** · seller: **75** · warehouse: **200** · admin: **414**
 
 | Endpoint | Anonymous | Seller | Warehouse | Admin | Source | Boundary note |
 |---|:---:|:---:|:---:|:---:|---|---|
@@ -97,11 +97,13 @@ Routes: **416** · anonymous: **18** · seller: **75** · warehouse: **200** · 
 | `GET /api/delivery-groups/summary` | — | — | ✓ | ✓ | `routes/deliveryGroups.js:109` | route-entry authorization |
 | `GET /api/gemini-status` | — | — | — | ✓ | `app.js:161` | route-entry authorization |
 | `GET /api/health` | ✓ | ✓ | ✓ | ✓ | `app.js:131` | public allowlist; endpoint-specific proof/rate limits may still apply |
-| `GET /api/invoices` | — | — | — | ✓ | `routes/invoices.js:103` | route-entry authorization |
-| `GET /api/invoices/:id` | — | — | — | ✓ | `routes/invoices.js:118` | route-entry authorization |
-| `GET /api/invoices/legal-entities` | — | — | — | ✓ | `routes/invoices.js:54` | route-entry authorization |
-| `GET /api/invoices/legal-entities/:id` | — | — | — | ✓ | `routes/invoices.js:66` | route-entry authorization |
-| `GET /api/invoices/meta` | — | — | — | ✓ | `routes/invoices.js:46` | route-entry authorization |
+| `GET /api/invoices` | — | — | — | ✓ | `routes/invoices.js:139` | route-entry authorization |
+| `GET /api/invoices/:id` | — | — | — | ✓ | `routes/invoices.js:176` | route-entry authorization |
+| `GET /api/invoices/:id/fiscal/ksef/status` | — | — | — | ✓ | `routes/invoices.js:169` | route-entry authorization |
+| `GET /api/invoices/ksef/connections` | — | — | — | ✓ | `routes/invoices.js:86` | route-entry authorization |
+| `GET /api/invoices/legal-entities` | — | — | — | ✓ | `routes/invoices.js:59` | route-entry authorization |
+| `GET /api/invoices/legal-entities/:id` | — | — | — | ✓ | `routes/invoices.js:71` | route-entry authorization |
+| `GET /api/invoices/meta` | — | — | — | ✓ | `routes/invoices.js:51` | route-entry authorization |
 | `GET /api/maintenance` | ✓ | ✓ | ✓ | ✓ | `app.js:139` | public allowlist; endpoint-specific proof/rate limits may still apply |
 | `GET /api/nav-badges` | — | ✓ | ✓ | ✓ | `routes/navBadges.js:91` | route-entry authorization |
 | `GET /api/openai-status` | — | — | — | ✓ | `app.js:147` | route-entry authorization |
@@ -210,8 +212,9 @@ Routes: **416** · anonymous: **18** · seller: **75** · warehouse: **200** · 
 | `PATCH /api/commerce/catalog/:id` | — | — | — | ✓ | `routes/commerce.js:242` | provider-worker boundary; among these four roles only admin passes (baselinker is outside the table) |
 | `PATCH /api/commerce/categories/:id` | — | — | — | ✓ | `routes/commerce.js:209` | provider-worker boundary; among these four roles only admin passes (baselinker is outside the table) |
 | `PATCH /api/delivery-groups/:id` | — | — | — | ✓ | `routes/deliveryGroups.js:265` | route-entry authorization |
-| `PATCH /api/invoices/:id` | — | — | — | ✓ | `routes/invoices.js:129` | route-entry authorization |
-| `PATCH /api/invoices/legal-entities/:id` | — | — | — | ✓ | `routes/invoices.js:73` | route-entry authorization |
+| `PATCH /api/invoices/:id` | — | — | — | ✓ | `routes/invoices.js:187` | route-entry authorization |
+| `PATCH /api/invoices/ksef/connections/:connectionId` | — | — | — | ✓ | `routes/invoices.js:98` | route-entry authorization |
+| `PATCH /api/invoices/legal-entities/:id` | — | — | — | ✓ | `routes/invoices.js:78` | route-entry authorization |
 | `PATCH /api/picking/tasks/:taskId/progress` | — | — | ✓ | ✓ | `routes/picking.js:1122` | route-entry authorization |
 | `PATCH /api/products/:id` | — | — | ✓ | ✓ | `routes/products.js:1459` | route-entry authorization |
 | `PATCH /api/products/reorder` | — | — | ✓ | ✓ | `routes/products.js:961` | route-entry authorization |
@@ -309,10 +312,15 @@ Routes: **416** · anonymous: **18** · seller: **75** · warehouse: **200** · 
 | `POST /api/delivery-groups/:id/broadcast` | — | — | — | ✓ | `routes/deliveryGroups.js:552` | route-entry authorization |
 | `POST /api/delivery-groups/:id/close-ordering-session` | — | — | — | ✓ | `routes/deliveryGroups.js:152` | route-entry authorization |
 | `POST /api/delivery-groups/catalog-reviewed` | — | ✓ | ✓ | ✓ | `routes/deliveryGroups.js:65` | route-entry authorization |
-| `POST /api/invoices` | — | — | — | ✓ | `routes/invoices.js:91` | route-entry authorization |
-| `POST /api/invoices/:id/finalize` | — | — | — | ✓ | `routes/invoices.js:136` | route-entry authorization |
-| `POST /api/invoices/legal-entities` | — | — | — | ✓ | `routes/invoices.js:60` | route-entry authorization |
-| `POST /api/invoices/preview` | — | — | — | ✓ | `routes/invoices.js:80` | route-entry authorization |
+| `POST /api/invoices` | — | — | — | ✓ | `routes/invoices.js:127` | route-entry authorization |
+| `POST /api/invoices/:id/finalize` | — | — | — | ✓ | `routes/invoices.js:194` | route-entry authorization |
+| `POST /api/invoices/:id/fiscal/ksef/submit` | — | — | — | ✓ | `routes/invoices.js:162` | route-entry authorization |
+| `POST /api/invoices/:id/fiscal/ksef/validate` | — | — | — | ✓ | `routes/invoices.js:155` | route-entry authorization |
+| `POST /api/invoices/ksef/connections` | — | — | — | ✓ | `routes/invoices.js:92` | route-entry authorization |
+| `POST /api/invoices/ksef/connections/:connectionId/check` | — | — | — | ✓ | `routes/invoices.js:110` | route-entry authorization |
+| `POST /api/invoices/ksef/connections/:connectionId/token` | — | — | — | ✓ | `routes/invoices.js:104` | route-entry authorization |
+| `POST /api/invoices/legal-entities` | — | — | — | ✓ | `routes/invoices.js:65` | route-entry authorization |
+| `POST /api/invoices/preview` | — | — | — | ✓ | `routes/invoices.js:116` | route-entry authorization |
 | `POST /api/picking/cancel-start` | — | — | ✓ | ✓ | `routes/picking.js:686` | route-entry authorization |
 | `POST /api/picking/next-task` | — | — | ✓ | ✓ | `routes/picking.js:934` | route-entry authorization |
 | `POST /api/picking/resolve-coverage-gap` | — | — | ✓ | ✓ | `routes/picking.js:768` | route-entry authorization |

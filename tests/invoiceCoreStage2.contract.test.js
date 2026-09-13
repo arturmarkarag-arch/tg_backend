@@ -22,10 +22,12 @@ describe('Invoice Core Stage 2 architecture contract', () => {
     expect(service).toContain('invoice_finalized_immutable');
   });
 
-  it('keeps KSeF adapter planned-only until Stage 3', () => {
+  it('keeps KSeF implementation outside the Stage 2 creation layer', () => {
     const ksef = read('services/invoices/fiscalProviders/ksef.js');
-    expect(ksef).toContain('IMPLEMENTATION.PLANNED');
-    expect(ksef).not.toContain('axios');
-    expect(ksef).not.toContain('/sessions/online');
+    const creation = read('services/invoices/invoiceCreationService.js');
+    expect(ksef).toContain('createFiscalProviderAdapter');
+    expect(ksef).toContain("id: 'ksef'");
+    expect(creation).not.toContain('fiscalProviders/ksef');
+    expect(creation).not.toContain('services/invoices/ksef');
   });
 });

@@ -16,12 +16,13 @@ describe('Invoice Core Stage 1 architecture contract', () => {
     expect(service).not.toContain('fiscalProviders/ksef');
   });
 
-  it('registers KSeF as planned without network implementation', () => {
+  it('keeps KSeF behind the fiscal-provider adapter boundary as later stages evolve', () => {
     const ksef = read('services/invoices/fiscalProviders/ksef.js');
-    expect(ksef).toContain('IMPLEMENTATION.PLANNED');
-    expect(ksef).toContain("plannedSchema: 'FA(3)'");
-    expect(ksef).not.toContain('axios');
-    expect(ksef).not.toContain('/sessions/');
+    const service = read('services/invoices/invoiceService.js');
+    expect(ksef).toContain('createFiscalProviderAdapter');
+    expect(ksef).toContain("id: 'ksef'");
+    expect(service).not.toContain('fiscalProviders/ksef');
+    expect(service).not.toContain('services/invoices/ksef');
   });
 
   it('does not infer VAT or net/gross semantics from Warehouse Order price', () => {
