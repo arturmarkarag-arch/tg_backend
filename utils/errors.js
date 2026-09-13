@@ -118,6 +118,14 @@ const ERRORS = {
   validation_failed:        { status: 400, message: ({ field } = {}) => field
                                 ? `Невалідне значення поля «${field}»`
                                 : 'Невалідні дані запиту' },
+  invoice_not_found: { status: 404, message: 'Фактуру не знайдено.' },
+  invoice_finalized_immutable: { status: 409, message: 'Фактуру вже фіналізовано. Історичний документ не можна змінювати; потрібен окремий документ/корекція.' },
+  invoice_not_finalizable: { status: 409, message: ({ blockers = [] } = {}) => `Фактура ще не готова до фіналізації${Array.isArray(blockers) && blockers.length ? `: ${blockers.join(', ')}` : '.'}` },
+  invoice_source_provider_not_supported: { status: 400, message: 'Invoice Source Provider не зареєстрований.' },
+  invoice_source_entity_id_required: { status: 400, message: 'Не вказано ідентифікатор джерела фактури.' },
+  invoice_source_quantity_mode_required: { status: 400, message: 'Для Warehouse Order треба явно вибрати quantityMode: ordered або fulfilled.' },
+  invoice_fiscal_provider_not_supported: { status: 400, message: 'Fiscal Provider не зареєстрований.' },
+  invoice_fiscal_provider_not_live: { status: 409, message: 'Цей Fiscal Provider ще не має live-реалізації.' },
   commerce_product_name_required: { status: 400, message: 'Вкажіть назву товару Commerce Catalog.' },
   commerce_product_not_found: { status: 404, message: 'Товар Commerce Catalog не знайдено.' },
   commerce_product_sku_duplicate: { status: 409, message: 'Товар з таким SKU вже існує в Commerce Catalog.' },
