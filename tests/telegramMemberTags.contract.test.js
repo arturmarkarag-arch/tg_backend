@@ -66,16 +66,13 @@ describe('Telegram shop member tags contract', () => {
     expect(calls).toEqual([]);
   });
 
-  it('maps setChatMemberTag through the existing SDK generic request transport', async () => {
+  it('maps setChatMemberTag through the public SDK 2.x method', async () => {
     const calls = [];
     const bot = {
-      _request: async (...args) => { calls.push(args); return true; },
+      setChatMemberTag: async (...args) => { calls.push(args); return true; },
     };
     await setChatMemberTag(bot, '-100123', 123456, '#Poznań');
-    expect(calls).toEqual([[
-      'setChatMemberTag',
-      { form: { chat_id: '-100123', user_id: 123456, tag: '#Poznań' } },
-    ]]);
+    expect(calls).toEqual([[{ chat_id: '-100123', user_id: 123456, tag: '#Poznań' }]]);
   });
 
   it('paces writes conservatively and honors Telegram retry_after as a group cooldown', () => {

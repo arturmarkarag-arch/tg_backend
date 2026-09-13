@@ -131,7 +131,12 @@ check('history survives physical ReceiptItem deletion via ledger fallback', cont
 check('runtime lifecycle does not write embedded ReceiptItem.telegramNewProduct', !/ReceiptItem\.(?:updateOne|findOneAndUpdate|updateMany)[\s\S]{0,500}telegramNewProduct/.test(service + '\n' + receipts));
 check('legacy embedded state is explicitly compatibility-only', service.includes('New lifecycle state lives in TelegramPublication/Binding/Event'));
 
-check('Bot client has bounded request timeout', bot.includes("new TelegramBot(token, { request: { timeout: TELEGRAM_REQUEST_TIMEOUT_MS } })"));
+check('Bot v2 adapter has bounded requests and disables ambiguous SDK retries', contains(
+  bot,
+  'new TelegramBotV2Adapter(token',
+  'timeoutMs: TELEGRAM_REQUEST_TIMEOUT_MS',
+  'maxRetries: 0',
+));
 
 console.log(`\nTelegram new-products architecture gate: ${passed} passed, ${failures.length} failed`);
 if (failures.length) {

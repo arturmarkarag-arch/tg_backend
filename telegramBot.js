@@ -1,4 +1,4 @@
-const TelegramBot = require('node-telegram-bot-api');
+const { TelegramBotV2Adapter } = require('./services/telegramBotV2Adapter');
 const User = require('./models/User');
 const BotInteractionLog = require('./models/BotInteractionLog');
 const RegistrationRequest = require('./models/RegistrationRequest');
@@ -12,6 +12,7 @@ const { getSupportAdmins, toPublicSupportAdmins } = require('./utils/telegramSup
 const { isRemovedUser, activeUserFilter } = require('./utils/userAccountState');
 const { trackMemberFromMessage, handleChatMemberUpdate, setMemberPhoto } = require('./services/groupMemberSync');
 const { getAllowedGroupIds } = require('./utils/telegramGroupSettings');
+const { checkMembershipAcrossGroups } = require('./services/registrationMembershipGate');
 const { getTelegramMemberTagGroupIds } = require('./utils/telegramMemberTagGroupSettings');
 const { emitUserAndStaff } = require('./utils/socketScope');
 const {
@@ -165,7 +166,8 @@ function getWebhookConfig() {
 // Feed an update delivered to the Express webhook route into the bot's event
 // machinery — emits the same events handlers below listen for.
 function handleWebhookUpdate(update) {
-  if (bot && update) bot.processUpdate(update);
+  if (bot && update) return bot.processUpdate(update);
+  return Promise.resolve();
 }
 
 const roleCommands = {
@@ -238,10 +240,9 @@ async function sendNotInAnnouncementsGroupMessage(chatId) {
   }
 
   const lines = [
-    '❗ <b>Вас не знайдено в робочій групі «Оголошення».</b>',
+    '❗ <b>Вас ще немає в групі «Оголошення».</b>',
     '',
-    'Для доступу до системи ви <b>обов’язково</b> маєте бути учасником цієї групи.',
-    'Попросіть менеджера або адміністратора додати вас до «Оголошення».',
+    'Попросіть менеджера або адміністратора додати вас до групи.',
   ];
 
   if (admins.length) {
@@ -250,9 +251,8 @@ async function sendNotInAnnouncementsGroupMessage(chatId) {
       lines.push(`• <a href="${admin.url}">${escapeHtml(admin.name)}</a>`);
     }
     lines.push('', 'Натисніть на ім’я адміністратора або кнопку нижче — Telegram одразу відкриє чат.');
-  } else {
-    lines.push('', 'Після додавання поверніться до бота та натисніть /start ще раз.');
   }
+  lines.push('', 'Після додавання поверніться до бота та натисніть /start ще раз.');
 
   const options = { parse_mode: 'HTML', disable_web_page_preview: true };
   if (admins.length) {
@@ -265,6 +265,26 @@ async function sendNotInAnnouncementsGroupMessage(chatId) {
   }
 
   return bot.sendMessage(chatId, lines.join('\n'), options);
+}
+
+async function sendRegistrationCheckProblemMessage(chatId, reason) {
+  if (reason === 'not_in_group') {
+    return sendNotInAnnouncementsGroupMessage(chatId);
+  }
+
+  const groupNotConfigured = reason === 'group_not_configured';
+  const text = groupNotConfigured
+    ? [
+        '❗ <b>Реєстрацію ще не налаштовано.</b>',
+        '',
+        'Напишіть менеджеру або адміністратору. Вони перевірять налаштування групи «Оголошення».',
+      ].join('\n')
+    : [
+        '❗ <b>Не вдалося виконати перевірку.</b>',
+        '',
+        'Можливо, виникла тимчасова проблема зі зв’язком. Спробуйте натиснути /start ще раз.',
+      ].join('\n');
+  return bot.sendMessage(chatId, text, { parse_mode: 'HTML' });
 }
 
 // In-flight de-dup: a single join can arrive via BOTH the `new_chat_members`
@@ -403,30 +423,22 @@ async function deleteWelcomeFor(telegramId) {
   }
 }
 
-// Live membership gate for registration. Returns true only if the user is a
-// CURRENT member of at least one allowed group (member/administrator/creator).
-// `restricted` (muted/limited) and `left`/`kicked` are rejected. Fail-closed:
-// any API error (bot not in the group, network) counts as "not a member".
-// Precondition: the bot must be a member (ideally admin) of each allowed group.
-async function isUserInAllowedGroup(telegramId) {
-  if (!bot || !telegramId) return false;
+// Live membership gate for registration. It deliberately returns a reason:
+// a Telegram/API failure is not the same as a confirmed absence. `restricted`
+// is still group membership and is treated consistently with the admin audit.
+async function checkUserInAllowedGroup(telegramId) {
+  if (!bot || !telegramId) return { allowed: false, reason: 'check_failed' };
   let groupIds = [];
   try {
     groupIds = await getAllowedGroupIds();
   } catch (e) {
-    return false;
+    return { allowed: false, reason: 'check_failed' };
   }
-  if (!groupIds.length) return false;
+  return checkMembershipAcrossGroups({ bot, telegramId, groupIds });
+}
 
-  for (const groupId of groupIds) {
-    try {
-      const member = await bot.getChatMember(groupId, Number(telegramId));
-      if (['member', 'administrator', 'creator'].includes(member?.status)) return true;
-    } catch (e) {
-      // Fail-closed for THIS group; keep checking the rest.
-    }
-  }
-  return false;
+async function isUserInAllowedGroup(telegramId) {
+  return (await checkUserInAllowedGroup(telegramId)).allowed;
 }
 
 function getPhotoUrl(photoUrl) {
@@ -548,8 +560,9 @@ async function handleShopInvite(chatId, code, user) {
   // Newcomer branch: same gate as any other registration — live group membership
   // decides, the invite only fixes WHICH shop. Nothing is consumed here; the
   // token is burnt in the transaction that creates the user.
-  if (!(await isUserInAllowedGroup(chatId))) {
-    await sendNotInAnnouncementsGroupMessage(chatId);
+  const membership = await checkUserInAllowedGroup(chatId);
+  if (!membership.allowed) {
+    await sendRegistrationCheckProblemMessage(chatId, membership.reason);
     return;
   }
 
@@ -643,7 +656,10 @@ async function initBot(token) {
   try {
     // Manual mode — updates arrive via the Express webhook route, not getUpdates.
     const { TELEGRAM_REQUEST_TIMEOUT_MS } = require('./utils/telegramTransportPolicy');
-    bot = new TelegramBot(token, { request: { timeout: TELEGRAM_REQUEST_TIMEOUT_MS } });
+    bot = new TelegramBotV2Adapter(token, {
+      timeoutMs: TELEGRAM_REQUEST_TIMEOUT_MS,
+      maxRetries: 0,
+    });
     status.connected = true;
     status.mode = 'webhook';
     status.startedAt = new Date().toISOString();
@@ -762,6 +778,7 @@ async function initBot(token) {
           // The Telegram id (chatId / ctx.from.id) is authenticated by Telegram
           // — not spoofable.
           let regToken = null;
+          let membership = null;
           const hasTokenInLink = startPayload && startPayload.toLowerCase() !== 'register';
 
           if (hasTokenInLink) {
@@ -770,18 +787,22 @@ async function initBot(token) {
             // anyone else.
             const owned = await peekRegistrationToken(startPayload, chatId);
             if (!owned || !owned.telegramId) {
-              await bot.sendMessage(chatId, 'Це посилання для реєстрації недійсне або призначене не для вас. Відкрийте персональне посилання, яке бот надіслав саме вам у робочій групі.');
+              await bot.sendMessage(chatId, 'Ця кнопка більше не працює або була надіслана іншій людині. Натисніть /start, щоб почати реєстрацію знову.');
               return;
             }
             // A token proves who the registration link belongs to, NOT current
             // membership. Someone may leave «Оголошення» after receiving it, so
             // /start still performs the same live gate before offering Open.
-            if (!(await isUserInAllowedGroup(chatId))) {
-              await sendNotInAnnouncementsGroupMessage(chatId);
+            membership = await checkUserInAllowedGroup(chatId);
+            if (!membership.allowed) {
+              await sendRegistrationCheckProblemMessage(chatId, membership.reason);
               return;
             }
             regToken = owned.token;
-          } else if (await isUserInAllowedGroup(chatId)) {
+          } else {
+            membership = await checkUserInAllowedGroup(chatId);
+          }
+          if (!hasTokenInLink && membership?.allowed) {
             // Plain /start (no token in the link) by a live group member → mint
             // THEIR OWN token, bound to their id, so a member who came without a
             // link can still register as themselves.
@@ -789,7 +810,7 @@ async function initBot(token) {
           }
 
           if (!regToken) {
-            await sendNotInAnnouncementsGroupMessage(chatId);
+            await sendRegistrationCheckProblemMessage(chatId, membership?.reason || 'check_failed');
             return;
           }
 
@@ -809,11 +830,12 @@ async function initBot(token) {
 
       if (text === '/miniapp') {
         if (!user) {
-          if (await isUserInAllowedGroup(chatId)) {
+          const membership = await checkUserInAllowedGroup(chatId);
+          if (membership.allowed) {
             const regToken = await issueRegistrationToken(chatId);
             await sendRegistrationButton(chatId, regToken);
           } else {
-            await sendNotInAnnouncementsGroupMessage(chatId);
+            await sendRegistrationCheckProblemMessage(chatId, membership.reason);
           }
           return;
         }
@@ -852,11 +874,12 @@ async function initBot(token) {
 
       if (!user) {
         if (isGroupChat) return;
-        if (await isUserInAllowedGroup(chatId)) {
+        const membership = await checkUserInAllowedGroup(chatId);
+        if (membership.allowed) {
           const regToken = await issueRegistrationToken(chatId);
           await sendRegistrationButton(chatId, regToken);
         } else {
-          await sendNotInAnnouncementsGroupMessage(chatId);
+          await sendRegistrationCheckProblemMessage(chatId, membership.reason);
         }
         return;
       }
@@ -1025,7 +1048,7 @@ async function initBot(token) {
         } else if (action === 'regreq_reject') {
           await RegistrationRequest.findByIdAndUpdate(requestId, { status: 'rejected' });
           await bot.answerCallbackQuery(query.id, { text: 'Заявку відхилено', show_alert: false });
-          await sendMessageWithRetry(request.telegramId, '❌ Ваша заявка на реєстрацію була відхилена.');
+          await sendMessageWithRetry(request.telegramId, '❌ Реєстрацію не підтверджено. Перевірте дані та надішліть їх ще раз.');
         } else {
           await bot.answerCallbackQuery(query.id);
           return;
@@ -1097,6 +1120,7 @@ module.exports = {
   markBotBlocked: handleBotBlocked,
   sendAdminNotification,
   sendRegistrationApprovedMessage,
+  checkUserInAllowedGroup,
   isUserInAllowedGroup,
   deleteWelcomeFor,
   recheckAndRepushWelcome,

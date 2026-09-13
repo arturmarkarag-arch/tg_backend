@@ -1,6 +1,5 @@
 const fs = require('fs');
 const path = require('path');
-const { describe, it, expect } = require('vitest');
 
 const route = fs.readFileSync(path.join(__dirname, 'routes/deliveryGroups.js'), 'utf8');
 const source = fs.readFileSync(path.join(__dirname, 'services/readModels/currentSessionShopProductsReadModel.js'), 'utf8');

@@ -1,6 +1,5 @@
 const fs = require('fs');
 const path = require('path');
-const { describe, it, expect } = require('vitest');
 
 const botSource = fs.readFileSync(path.join(__dirname, 'telegramBot.js'), 'utf8');
 const adminSource = fs.readFileSync(path.join(__dirname, 'routes/admin.js'), 'utf8');
@@ -29,6 +28,7 @@ const telegramRoute = fs.readFileSync(path.join(__dirname, 'routes/v1/telegram.j
 
   it('registration-invite returns configured support admins for not_in_group', () => {
     expect(telegramRoute).toContain("reason: 'not_in_group', supportAdmins");
-    expect(telegramRoute).toContain("appError('registration_not_in_group', { supportAdmins })");
+    expect(telegramRoute).toContain("'registration_not_in_group'");
+    expect(telegramRoute).toContain('throw appError(errorCode, { supportAdmins })');
   });
 });

@@ -10,12 +10,15 @@ const RETRYABLE_NETWORK_CODES = new Set([
   'ENETUNREACH',
   'EHOSTUNREACH',
   'EPIPE',
+  'EFETCH',
+  'ETIMEOUT',
 ]);
 
 function statusCodeOf(error) {
   const raw = error?.response?.statusCode
     ?? error?.response?.status
     ?? error?.response?.body?.error_code
+    ?? error?.errorCode
     ?? null;
   const n = Number(raw);
   return Number.isFinite(n) ? n : null;
@@ -24,6 +27,7 @@ function statusCodeOf(error) {
 function descriptionOf(error) {
   return String(
     error?.response?.body?.description
+    || error?.description
     || error?.message
     || error?.code
     || 'telegram_send_failed',
@@ -32,6 +36,8 @@ function descriptionOf(error) {
 
 function retryAfterSecondsOf(error) {
   const raw = error?.response?.body?.parameters?.retry_after
+    ?? error?.parameters?.retry_after
+    ?? error?.retryAfter
     ?? error?.response?.headers?.['retry-after']
     ?? error?.response?.headers?.['Retry-After'];
   const n = Number(raw);
@@ -39,7 +45,9 @@ function retryAfterSecondsOf(error) {
 }
 
 function migrateToChatIdOf(error) {
-  const raw = error?.response?.body?.parameters?.migrate_to_chat_id;
+  const raw = error?.response?.body?.parameters?.migrate_to_chat_id
+    ?? error?.parameters?.migrate_to_chat_id
+    ?? error?.migrateToChatId;
   return raw === null || raw === undefined || raw === '' ? '' : String(raw);
 }
 

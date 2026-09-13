@@ -1,10 +1,9 @@
 'use strict';
 
 /**
- * Compatibility adapter for Bot API methods newer than the public method list in
- * node-telegram-bot-api 0.67.x. The installed SDK already exposes a generic
- * _request(path, options) transport internally, so we reuse its configured
- * timeout/baseApiUrl/proxy/error handling instead of maintaining a second HTTP stack.
+ * Rate-limited boundary around the public setChatMemberTag method in
+ * node-telegram-bot-api 2.x. Keeping pacing here avoids coupling domain logic to
+ * SDK transport details.
  *
  * Telegram does not publish a method-specific setChatMemberTag flood-control
  * budget. Production has demonstrated 429 responses during bulk reconcile, so tag
@@ -53,18 +52,16 @@ function deferMemberTagWritesUntil(chatId, until) {
 }
 
 async function setChatMemberTag(bot, chatId, userId, tag) {
-  if (!bot || typeof bot._request !== 'function') {
-    const error = new Error('Telegram SDK generic request transport is unavailable');
+  if (!bot || typeof bot.setChatMemberTag !== 'function') {
+    const error = new Error('Telegram SDK setChatMemberTag method is unavailable');
     error.code = 'ETELEGRAMTRANSPORT';
     throw error;
   }
   await waitForMemberTagWriteSlot(chatId);
-  return bot._request('setChatMemberTag', {
-    form: {
-      chat_id: String(chatId),
-      user_id: Number(userId),
-      tag: String(tag ?? ''),
-    },
+  return bot.setChatMemberTag({
+    chat_id: String(chatId),
+    user_id: Number(userId),
+    tag: String(tag ?? ''),
   });
 }
 

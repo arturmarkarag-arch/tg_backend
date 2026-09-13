@@ -2,7 +2,6 @@
 
 const fs = require('fs');
 const path = require('path');
-const { describe, expect, it } = require('vitest');
 const { sliceBetweenOrThrow } = require('./helpers/sourceContract');
 
 const root = path.resolve(__dirname, '..');

@@ -105,19 +105,18 @@ check('group removal cleanup never touches admin titles or manually changed tags
   assert.ok(!service.includes('setChatAdministratorCustomTitle'));
 });
 
-check('new member-tag method reuses existing SDK transport without upgrading proven bot SDK', () => {
+check('member-tag method uses the public SDK 2.x API', () => {
   const transport = read('services/telegramMemberTagTransport.js');
   const service = read('services/telegramMemberTagSync.js');
-  assert.strictEqual(pkg.dependencies['node-telegram-bot-api'], '^0.67.0');
-  assert.ok(transport.includes("bot._request('setChatMemberTag'"));
-  assert.ok(transport.includes('form: {'));
+  assert.strictEqual(pkg.dependencies['node-telegram-bot-api'], '^2.1.0');
+  assert.ok(transport.includes('bot.setChatMemberTag({'));
   assert.ok(service.includes("require('./telegramMemberTagTransport')"));
-  assert.ok(!service.includes('bot.setChatMemberTag'));
+  assert.ok(!transport.includes('bot._request'));
 });
 
-check('compatibility transport is isolated and fails closed if generic SDK transport disappears', () => {
+check('member-tag transport is isolated and fails closed if the public method disappears', () => {
   const transport = read('services/telegramMemberTagTransport.js');
-  assert.ok(transport.includes("typeof bot._request !== 'function'"));
+  assert.ok(transport.includes("typeof bot.setChatMemberTag !== 'function'"));
   assert.ok(transport.includes("error.code = 'ETELEGRAMTRANSPORT'"));
 });
 

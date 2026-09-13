@@ -53,13 +53,17 @@ Rows created by the old V3/V4 coupling are not trusted after the settings split.
 
 ## Telegram transport
 
-The project keeps the existing `node-telegram-bot-api ^0.67.0` runtime.
+The project uses `node-telegram-bot-api ^2.1.0` behind the local
+`TelegramBotV2Adapter`. The adapter preserves the application's established
+positional call surface while mapping requests onto the SDK's wire-shaped 2.x API.
+SDK-level automatic retries are disabled because durable application ledgers own
+retry timing and ambiguity handling.
 
 `services/telegramMemberTagTransport.js` is the isolated compatibility boundary for the Bot API method and calls:
 
-`bot._request('setChatMemberTag', { form: { chat_id, user_id, tag } })`
+`bot.setChatMemberTag({ chat_id, user_id, tag })`
 
-The adapter reuses the bot instance's existing transport and fails closed if `_request` becomes unavailable.
+The transport uses the public SDK method and fails closed if it becomes unavailable.
 
 ## Invalidation sources
 

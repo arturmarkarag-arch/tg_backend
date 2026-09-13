@@ -33,6 +33,30 @@ describe('Telegram new-product semantic lifecycle', () => {
     expect(limited.retryAfterSeconds).toBe(17);
   });
 
+  it('recognizes structured node-telegram-bot-api 2.x errors', () => {
+    const error = Object.assign(new Error('429: Too Many Requests'), {
+      code: 'ETELEGRAM',
+      errorCode: 429,
+      description: 'Too Many Requests',
+      parameters: { retry_after: 17, migrate_to_chat_id: -1009876543210 },
+      retryAfter: 17,
+      migrateToChatId: -1009876543210,
+    });
+    const classification = classifyTelegramSendError(error);
+    expect(classification.kind).toBe('rate_limited');
+    expect(classification.retryAfterSeconds).toBe(17);
+    expect(classification.migrateToChatId).toBe('-1009876543210');
+  });
+
+  it('recognizes SDK 2.x fetch and timeout failures as ambiguous network errors', () => {
+    for (const code of ['EFETCH', 'ETIMEOUT']) {
+      const classification = classifyTelegramSendError(Object.assign(new Error(code), { code }));
+      expect(classification.kind).toBe('network_error');
+      expect(classification.retryable).toBe(true);
+      expect(classification.ambiguous).toBe(true);
+    }
+  });
+
   it('does not classify a missing bot instance as an ambiguous create', () => {
     const error = new Error('telegram bot is not initialized');
     error.code = 'EBOTUNAVAILABLE';

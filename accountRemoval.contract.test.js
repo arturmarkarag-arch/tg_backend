@@ -1,6 +1,5 @@
 const fs = require('fs');
 const path = require('path');
-const { describe, it, expect } = require('vitest');
 
 const userModel = fs.readFileSync(path.join(__dirname, 'models/User.js'), 'utf8');
 const removeService = fs.readFileSync(path.join(__dirname, 'services/softRemoveUser.js'), 'utf8');

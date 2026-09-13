@@ -5,7 +5,7 @@ const User = require('../../models/User');
 const RegistrationRequest = require('../../models/RegistrationRequest');
 const DeliveryGroup = require('../../models/DeliveryGroup');
 const Shop = require('../../models/Shop');
-const { sendAdminNotification, sendRegistrationApprovedMessage, isUserInAllowedGroup, deleteWelcomeFor } = require('../../telegramBot');
+const { sendAdminNotification, sendRegistrationApprovedMessage, checkUserInAllowedGroup, deleteWelcomeFor } = require('../../telegramBot');
 const { resolveAndCreateUser } = require('../../services/createUserFromRequest');
 const { consumeRegistrationToken, issueRegistrationToken, peekRegistrationToken } = require('../../services/registrationToken');
 const RegistrationToken = require('../../models/RegistrationToken');
@@ -571,9 +571,10 @@ router.post('/registration-invite', registrationLimit, asyncHandler(async (req, 
   ).lean();
   if (request) return res.json({ eligible: false, reason: request.status });
 
-  if (!(await isUserInAllowedGroup(telegramId))) {
+  const membership = await checkUserInAllowedGroup(telegramId);
+  if (!membership.allowed) {
     const supportAdmins = toPublicSupportAdmins(await getSupportAdmins());
-    return res.json({ eligible: false, reason: 'not_in_group', supportAdmins });
+    return res.json({ eligible: false, reason: membership.reason, supportAdmins });
   }
 
   // The client passes back the token it already holds (from ?regToken=). If it is
@@ -617,20 +618,28 @@ router.post('/registration-invite', registrationLimit, asyncHandler(async (req, 
 
 router.post('/register-request', registrationLimit, asyncHandler(async (req, res) => {
   const { firstName, lastName, phoneNumber, shopId, role, regToken } = req.body;
+  const cleanFirstName = String(firstName || '').trim();
+  const cleanLastName = String(lastName || '').trim();
 
   const { valid, telegramId, error } = getTelegramAuth(req, process.env.TELEGRAM_BOT_TOKEN);
   if (!valid) throw appError('auth_invalid_init_data', { reason: error });
   if (!telegramId) throw appError('auth_telegram_id_missing');
 
-  if (!firstName || !lastName || !role) throw appError('registration_required_fields');
+  if (!cleanFirstName || !cleanLastName || !role) throw appError('registration_required_fields');
   if (!['seller', 'warehouse'].includes(role)) throw appError('registration_invalid_role');
 
   // ── Registration gate (defense in depth) ────────────────────────────────────
-  // 1. LIVE membership: only current members of an allowed group (fail-closed —
-  //    any getChatMember error counts as "not a member").
-  if (!(await isUserInAllowedGroup(telegramId))) {
+  // 1. LIVE membership: only current members of an allowed group. A Telegram
+  //    failure stays a separate retryable error and is never reported as absence.
+  const membership = await checkUserInAllowedGroup(telegramId);
+  if (!membership.allowed) {
     const supportAdmins = toPublicSupportAdmins(await getSupportAdmins());
-    throw appError('registration_not_in_group', { supportAdmins });
+    const errorCode = membership.reason === 'group_not_configured'
+      ? 'registration_group_not_configured'
+      : membership.reason === 'check_failed'
+        ? 'registration_group_check_failed'
+        : 'registration_not_in_group';
+    throw appError(errorCode, { supportAdmins });
   }
   // 2. One-time invite token, minted server-side either for THIS telegramId
   //    (personal, from the group link / bot button) or for a SHOP (an admin's
@@ -705,8 +714,8 @@ router.post('/register-request', registrationLimit, asyncHandler(async (req, res
           session,
           telegramId,
           role: 'seller',
-          firstName,
-          lastName,
+          firstName: cleanFirstName,
+          lastName: cleanLastName,
           phoneNumber: cleanPhone,
           shopId: String(shop._id),
         });
@@ -745,8 +754,8 @@ router.post('/register-request', registrationLimit, asyncHandler(async (req, res
       }
       const created = await RegistrationRequest.create([{
         telegramId,
-        firstName,
-        lastName,
+        firstName: cleanFirstName,
+        lastName: cleanLastName,
         phoneNumber: cleanPhone,
         shopId: null,
         deliveryGroupId: '',
@@ -762,8 +771,8 @@ router.post('/register-request', registrationLimit, asyncHandler(async (req, res
 
   const message = `📥 Нова заявка на реєстрацію (Склад):\n` +
     `Telegram ID: ${telegramId}\n` +
-    `Імʼя: ${firstName}\n` +
-    `Прізвище: ${lastName}\n` +
+    `Імʼя: ${cleanFirstName}\n` +
+    `Прізвище: ${cleanLastName}\n` +
     (cleanPhone ? `Телефон: ${cleanPhone}\n` : '') +
     `Роль: Склад\n` +
     `Запит створено: ${formatWarsawDateTime(new Date())}`;
