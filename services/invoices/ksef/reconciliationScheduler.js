@@ -2,6 +2,7 @@
 
 const FiscalSubmission = require('../../../models/FiscalSubmission');
 const { runAsSchedulerLeader } = require('../../schedulerLeader');
+const { recordOperationalEventBestEffort } = require('./operationalTelemetry');
 const { reconcileSubmissionById, errorSnapshot } = require('./submissions');
 const { retryAfterMs, retryDelayMs: policyRetryDelayMs } = require('./reconciliationPolicy');
 
@@ -141,7 +142,7 @@ function startKsefReconciliationScheduler() {
   if (String(process.env.KSEF_RECONCILIATION_ENABLED || 'true').toLowerCase() === 'false') return null;
   const tick = async () => {
     try { await runKsefReconciliationTick(); }
-    catch (error) { console.error('[ksef-reconciliation-scheduler]', error?.stack || error); }
+    catch (error) { console.error('[ksef-reconciliation-scheduler]', error?.stack || error); recordOperationalEventBestEffort({ kind: 'scheduler_error', severity: 'error', resourceType: 'reconciliation_scheduler', code: error?.code || 'ksef_reconciliation_scheduler_failed', message: error?.message || String(error) }); }
   };
   tick();
   timer = setInterval(tick, TICK_MS);

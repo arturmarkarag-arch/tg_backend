@@ -85,7 +85,6 @@ describe('per-group ordering schedule contracts', () => {
       'routes/orders.js',
       'routes/products.js',
       'services/shopTopologyCommand.js',
-      'routes/users.js',
       'routes/picking.js',
       'routes/v1/telegram.js',
     ]) {

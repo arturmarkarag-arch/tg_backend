@@ -16,6 +16,13 @@ async function loadPublicKeys(environment, { force = false } = {}) {
   cache.set(environment, { items, expiresAt: Date.now() + CACHE_MS });
   return items;
 }
+function getPublicKeyCacheStatus(environment = '') {
+  const entries = environment ? [[String(environment), cache.get(String(environment))]] : [...cache.entries()];
+  return entries.filter(([, value]) => value).map(([env, value]) => ({
+    environment: env, itemCount: Array.isArray(value.items) ? value.items.length : 0,
+    expiresAt: value.expiresAt ? new Date(value.expiresAt) : null, cached: true,
+  }));
+}
 async function getPublicKey(environment, usage, { force = false, now = new Date() } = {}) {
   const items = await loadPublicKeys(environment, { force });
   const ts = now.getTime();
@@ -26,4 +33,4 @@ async function getPublicKey(environment, usage, { force = false, now = new Date(
   if (!item?.certificate || !item?.publicKeyId) throw appError('ksef_public_key_not_found', { usage });
   return { ...item, publicKey: certificateDerToPublicKey(item.certificate) };
 }
-module.exports = { loadPublicKeys, getPublicKey, invalidatePublicKeys };
+module.exports = { loadPublicKeys, getPublicKey, invalidatePublicKeys, getPublicKeyCacheStatus };

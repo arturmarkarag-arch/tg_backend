@@ -41,7 +41,7 @@ async function openOnlineSessionWithKeyRecovery(environment, accessToken) {
   }
 }
 
-async function sendInvoice(environment, accessToken, session, xml, { offlineMode = false } = {}) {
+async function sendInvoice(environment, accessToken, session, xml, { offlineMode = false, hashOfCorrectedInvoice = '' } = {}) {
   const encrypted = encryptInvoiceXml(xml, session.symmetricKey, session.initializationVector);
   const response = await ksefRequest(environment, `/sessions/online/${encodeURIComponent(session.sessionReferenceNumber)}/invoices`, {
     method: 'POST', token: accessToken,
@@ -52,6 +52,7 @@ async function sendInvoice(environment, accessToken, session, xml, { offlineMode
       encryptedInvoiceSize: encrypted.encryptedInvoiceSize,
       encryptedInvoiceContent: encrypted.encryptedInvoiceContent,
       offlineMode: offlineMode === true,
+      ...(hashOfCorrectedInvoice ? { hashOfCorrectedInvoice: String(hashOfCorrectedInvoice) } : {}),
     },
   });
   if (!response.body?.referenceNumber) throw appError('ksef_send_response_invalid');

@@ -66,6 +66,11 @@ function harness(accounts = {}) {
       './baseLinkerAccounts': { listBaseLinkerAccounts, getBaseLinkerAccount, saveAccountQueue },
       './baseLinkerClient': { makeBaseLinkerAccountCaller },
       './baseLinkerAccountValidation': { refreshBaseLinkerAccountMetadata },
+      './baseLinkerAccountLifecycle': {
+        withBaseLinkerAccountLifecycleLock: async (_accountId, fn) => fn(),
+        assertBaseLinkerAccountLifecycleIdle: async () => ({ total: 0 }),
+        refreshBaseLinkerLifecycleTruth: async () => ({ trackedReverifyPending: 0 }),
+      },
       '../utils/errors': {
         appError: (code) => Object.assign(new Error(code), { code, status: 400 }),
       },

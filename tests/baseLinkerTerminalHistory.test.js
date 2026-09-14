@@ -1,5 +1,6 @@
 const fs = require('fs');
 const path = require('path');
+const { sliceBetweenOrThrow } = require('./helpers/sourceContract');
 
 const root = path.join(__dirname, '..');
 const read = (rel) => fs.readFileSync(path.join(root, rel), 'utf8');
@@ -14,13 +15,19 @@ describe('BaseLinker terminal history contract', () => {
     expect(index).not.toContain('BASELINKER_TERMINAL_REFRESH_MS');
   });
 
-  it('materializes transitions only after an Intake row departs and is reread exactly', () => {
+  it('treats departure from a complete Intake scan as non-actionable without an exact-read storm', () => {
     const index = read('services/baseLinkerOrderIndex.js');
-    expect(index).toContain('const departedIds = [...previousIds].filter((id) => !currentIds.has(id))');
-    expect(index).toContain('const order = await exactOrder(scope, id)');
-    expect(index).toContain('classifyUpstreamOrder(order, scope)');
-    expect(index).toContain('reconcilePickingFromUpstreamChanges');
-    expect(index).toContain('knownAdmittedOrderIds: untrackedDeparted');
+    const transition = sliceBetweenOrThrow(
+      index,
+      'async function reconcileIndexTransition',
+      'async function performIndexSync',
+      { label: 'reconcileIndexTransition' },
+    );
+    expect(transition).toContain('const departedIds = [...previousIds].filter((id) => !currentIds.has(id))');
+    expect(transition).toContain('const trackedDepartedRows = await BaseLinkerPickingOrder.find({');
+    expect(transition).toContain('removedOrderIds: trackedDepartedIds');
+    expect(transition).toContain('reconcilePickingFromUpstreamChanges');
+    expect(transition).not.toContain('exactOrder(');
   });
 
   it('keeps Sent/Cancelled history in local picking state with local retention', () => {

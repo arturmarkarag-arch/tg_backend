@@ -10,7 +10,7 @@ describe('read-only session materialization contract', () => {
   it('picking readiness/queue/shift reads do not create OrderingSession documents', () => {
     const picking = read('routes/picking.js');
     expect(picking).toContain('findCurrentSessionId(dgId, group.orderingSchedule)');
-    expect(picking).toContain('findCurrentSessionId(String(deliveryGroupId), groupDoc.orderingSchedule)');
+    expect(picking).toContain('findCurrentSessionId(String(deliveryGroupId), group.orderingSchedule)');
     expect(indexOrThrow(picking, "presentationMode === 'upcoming_preflight'")).toBeLessThan(
       indexOrThrow(picking, 'releaseWorkerAndStaleLocks(user.telegramId, deliveryGroupId'),
     );
@@ -25,8 +25,8 @@ describe('read-only session materialization contract', () => {
 
     expect(orders).toContain('const currentSessionId = await findCurrentSessionId(groupId, group.orderingSchedule)');
     expect(orders).toContain('orderingSessionId: sessionId');
-    expect(products).toContain('const orderingSessionId = await findCurrentSessionId(String(group._id), group.orderingSchedule)');
-    expect(products).toContain('orderingSessionId: String(orderingSessionId)');
+    expect(products).toContain('const orderingSessionId = await findCurrentSessionId(String(shop.deliveryGroupId), group.orderingSchedule)');
+    expect(products).toContain('orderingSessionId: orderingSessionId ? String(orderingSessionId) : null');
     expect(currentShopStatus).toContain('findCurrentSessionId(String(group._id), group.orderingSchedule)');
     expect(shopProducts).toContain('findCurrentSessionId(String(group._id), group.orderingSchedule)');
     expect(groupSessions).toContain('findCurrentSessionId(');

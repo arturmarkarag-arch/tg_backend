@@ -7,6 +7,7 @@ const {
   deriveWorkingStatus,
 } = require('../services/baseLinkerPicking');
 const { t } = require('../utils/errors');
+const { sliceBetweenOrThrow } = require('./helpers/sourceContract');
 
 function read(rel) {
   return fs.readFileSync(path.join(__dirname, '..', rel), 'utf8');
@@ -36,9 +37,9 @@ describe('BaseLinker local picking workflow', () => {
     expect(picking).toContain('setBaseLinkerOrderStatus');
     expect(commands).toContain("callApi('setOrderStatus'");
     expect(commands).toContain("if (typeof callApi !== 'function') throw appError('baselinker_account_id_required')");
-    expect(commands).toContain('order_id: id');
+    expect(commands).toContain('order_id: order');
     expect(commands).toContain('status_id: status');
-    expect(router).toContain('sole upstream mutation is "Sent"');
+    expect(picking).toContain('await setBaseLinkerOrderStatus({ orderId: id, statusId: scope.sentStatusId }');
     expect(`${picking}
 ${commands}
 ${router}`).not.toMatch(/(?:callBaseLinker|callApi)\(['"](?:addOrder|deleteOrder|setOrderFields|setOrderPayment)/i);
@@ -116,11 +117,10 @@ ${router}`).not.toMatch(/(?:callBaseLinker|callApi)\(['"](?:addOrder|deleteOrder
     expect(picking).toContain('packedSummary');
   });
 
-  it('uses Intake status as the warehouse admission gate and exact-rereads unconfirmed orders too', () => {
+  it('uses Intake status as the warehouse admission gate and exact-rereads confirmed BaseLinker orders only', () => {
     const picking = read('services/baseLinkerPicking.js');
     const router = read('routes/baseLinker.js');
-    expect(picking).toMatch(/orderId:\s*id,[\s\S]{0,200}includeUnconfirmed:\s*true,[\s\S]{0,100}maxPages:\s*1/);
-    expect(router).toContain('includeUnconfirmed: true');
+    expect(picking).toMatch(/orderId:\s*id,[\s\S]{0,200}includeUnconfirmed:\s*false,[\s\S]{0,100}maxPages:\s*1/);
     expect(router).not.toContain("req.query.includeUnconfirmed === '1'");
     expect(picking).toContain("appError('baselinker_order_not_returned'");
   });
@@ -185,10 +185,12 @@ ${router}`).not.toMatch(/(?:callBaseLinker|callApi)\(['"](?:addOrder|deleteOrder
     expect(picking).not.toContain('baselinker_picking_group_mismatch');
   });
 
-  it('centralizes picking statuses and preserves completion when ownership is released', () => {
-    const domain = read('domain/baseLinkerPickingState.js');
+  it('centralizes picking statuses in the provider-neutral warehouse state and keeps the BaseLinker compatibility import', () => {
+    const compat = read('domain/baseLinkerPickingState.js');
+    const domain = read('domain/warehousePickingState.js');
     const model = read('models/BaseLinkerPickingOrder.js');
     const picking = read('services/baseLinkerPicking.js');
+    expect(compat).toContain("module.exports = require('./warehousePickingState')");
     expect(domain).toContain('function deriveWorkingStatus');
     expect(domain).toContain("if (allPicked(items)) return ORDER_STATUS.READY");
     expect(domain).toContain("return ORDER_STATUS.READY_WITH_ISSUE");
@@ -198,7 +200,7 @@ ${router}`).not.toMatch(/(?:callBaseLinker|callApi)\(['"](?:addOrder|deleteOrder
   });
 
   it('separates operational shelf from ownership so claiming Deferred cannot make the card disappear', () => {
-    const domain = read('domain/baseLinkerPickingState.js');
+    const domain = read('domain/warehousePickingState.js');
     const model = read('models/BaseLinkerPickingOrder.js');
     const picking = read('services/baseLinkerPicking.js');
     expect(domain).toContain('WORKFLOW_STAGE');
@@ -212,7 +214,7 @@ ${router}`).not.toMatch(/(?:callBaseLinker|callApi)\(['"](?:addOrder|deleteOrder
   });
 
   it('has only current issue states and contains no legacy BaseLinker reason fallback', () => {
-    const domain = read('domain/baseLinkerPickingState.js');
+    const domain = read('domain/warehousePickingState.js');
     const picking = read('services/baseLinkerPicking.js');
     expect(domain).toContain("const CURRENT_ISSUE_STATES = Object.freeze(['shortage', 'not_found'])");
     expect(domain).not.toContain('LEGACY_ISSUE_STATES');
@@ -235,8 +237,14 @@ ${router}`).not.toMatch(/(?:callBaseLinker|callApi)\(['"](?:addOrder|deleteOrder
 
   it('never rewrites a real upstream status to Intake merely because the order was packed locally', () => {
     const picking = read('services/baseLinkerPicking.js');
-    expect(picking).not.toContain("doc.upstreamDisposition = 'intake'");
-    expect(picking).toContain('applyUpstreamDisposition(doc, order, scope, actor)');
+    const packed = sliceBetweenOrThrow(
+      picking,
+      'async function markPickingOrderPacked',
+      'async function markPickingOrderSent',
+      { label: 'markPickingOrderPacked' },
+    );
+    expect(packed).not.toContain("upstreamDisposition = 'intake'");
+    expect(picking).toContain('applyUpstreamDisposition(doc, order, scope, actor');
   });
 
 });

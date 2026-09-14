@@ -2,6 +2,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 const access = require('../utils/baseLinkerAccess');
+const marketplaceAccess = require('../utils/marketplaceWarehouseAccess');
 
 function createHarness(user) {
   let middleware;
@@ -12,13 +13,22 @@ function createHarness(user) {
       on(event, fn) { if (event === 'connection') onConnection = fn; }
     } },
     './models/Block': {},
+    './models/Shop': { findById: () => ({ select: () => ({ lean: async () => null }) }) },
     './services/blockMoveCommand': {},
     './models/User': { findOne: () => ({ lean: async () => user }) },
     './utils/userAccountState': { isRemovedUser: () => false },
-    './utils/validateTelegramInitData': { validateTelegramInitData: () => ({ valid: true }) },
-    './utils/jwt': {},
+    './utils/jwt': {
+      verifySession: () => ({ telegramId: '123', sessionVersion: 0 }),
+      verifyTelegramSession: () => ({ telegramId: '123' }),
+      isSessionNotRevoked: () => true,
+    },
+    './utils/sessionCookie': {
+      readSessionCookie: () => 'browser-token',
+      readTelegramSessionCookie: () => 'telegram-token',
+    },
     './utils/redis': { isEnabled: () => false },
     './utils/baseLinkerAccess': access,
+    './utils/marketplaceWarehouseAccess': marketplaceAccess,
     '@socket.io/redis-adapter': {},
     './utils/corsOptions': {},
   };
@@ -32,9 +42,7 @@ function createHarness(user) {
   }, { filename: 'socket.js' });
   module.exports.initSocket({});
   const socket = {
-    handshake: { auth: {
-      initData: new URLSearchParams({ user: JSON.stringify({ id: 123 }) }).toString(),
-    } },
+    handshake: { auth: {}, headers: {} },
     join: vi.fn(), on: vi.fn(),
   };
   return { socket, middleware: () => middleware(socket, (error) => { if (error) throw error; }), connect: () => onConnection(socket) };

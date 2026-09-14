@@ -105,7 +105,17 @@
     "test:invoice:stage5": "node tests/invoiceKsefStage5.pure.js",
     "test:invoice:stage5:static": "node scripts/checkInvoiceKsefStage5.js",
     "test:invoice:stage5b": "node tests/invoiceKsefStage5B.pure.js",
-    "test:invoice:stage5b:static": "node scripts/checkInvoiceKsefStage5B.js"
+    "test:invoice:stage5b:static": "node scripts/checkInvoiceKsefStage5B.js",
+    "test:invoice:stage6": "node tests/invoiceKsefStage6.pure.js",
+    "test:invoice:stage6:static": "node scripts/checkInvoiceKsefStage6.js",
+    "test:invoice:stage6b": "node tests/invoiceKsefStage6B.pure.js",
+    "test:invoice:stage6b:static": "node scripts/checkInvoiceKsefStage6B.js",
+    "test:invoice:stage7": "node tests/invoiceKsefStage7.pure.js",
+    "test:invoice:stage7:static": "node scripts/checkInvoiceKsefStage7.js",
+    "test:invoice:stage8:static": "node scripts/checkInvoiceKsefStage8.js",
+    "test:invoice:stage8": "node tests/invoiceKsefStage8.pure.js && node tests/invoiceKsefStage8.xsd.js",
+    "test:invoice:stage9:static": "node scripts/checkInvoiceKsefStage9.js",
+    "test:invoice:stage9": "node tests/invoiceKsefStage9.pure.js"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1030.0",

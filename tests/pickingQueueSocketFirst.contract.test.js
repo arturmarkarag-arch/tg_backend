@@ -9,10 +9,10 @@ const read = (rel) => fs.readFileSync(path.join(ROOT, rel), 'utf8');
 describe('picking queue socket-first refresh contract', () => {
   it('publishes one canonical lightweight queue invalidation event', () => {
     const service = read('services/pickingService.js');
-    expect(service).toContain("io?.emit('picking_queue_changed'");
+    expect(service).toContain("io?.to('staff').emit('picking_queue_changed'");
     expect(service).toContain('deliveryGroupId: groupId');
     expect(service).toContain('orderingSessionId: String(orderingSessionId');
-    expect(service).not.toContain("io?.emit('picking_queue_changed', {\n      buyerTelegramId");
+    expect(service).toContain("function notifyPickingQueueChanged({ deliveryGroupId = '', orderingSessionId = '', taskId = '', reason = 'changed' } = {})");
   });
 
   it('covers the queue mutations that previously depended on the 5s poll', () => {
@@ -30,7 +30,8 @@ describe('picking queue socket-first refresh contract', () => {
     const service = read('services/pickingService.js');
     expect(service).toContain('Order.bulkWrite(');
     expect(service).toContain('Order.updateMany(');
-    expect(service).toContain("Order.find({ _id: { $in: orderIds } }, '_id buyerTelegramId'");
+    expect(service).toContain("'items.productId': productId");
+    expect(service).toContain("'buyerTelegramId'");
   });
 
   it('keeps releaseOtherLocksOfWorker return compatibility while notifying affected groups', () => {

@@ -26,14 +26,18 @@ describe('розсилка «замовлення відкрито»', () => {
       appUrl,
     });
     expect(text).toContain('Четвер');
-    expect(text).toContain('Доставка — четвер, 13.08.');
-    expect(text).toContain('Замовлення закриються завтра о 07:30.');
+    expect(text).toContain('Замовлення відкрито — Четвер');
+    expect(text).toContain('Перейдить за посиланням');
+    expect(text).not.toContain('Доставка —');
+    expect(text).not.toContain('закриються завтра');
     expect(text).toContain(appUrl);
   });
 
   it('приватка — тільки дедлайн, без дати доставки і без назви групи', () => {
     const text = buildPrivateText({ closeLabel: 'завтра о 07:30', appUrl });
-    expect(text).toContain('Закриються завтра о 07:30.');
+    expect(text).toContain('Замовлення відкрито');
+    expect(text).toContain('Перейдить за посиланням');
+    expect(text).not.toContain('Четвер');
     expect(text).not.toContain('Доставка');
     expect(text).not.toContain('13.08');
   });
@@ -43,9 +47,9 @@ describe('розсилка «замовлення відкрито»', () => {
       groupName: 'Четвер', deliveryLabel: 'четвер, 13.08', closeLabel: 'завтра о 07:30', appUrl: '',
     });
     const priv = buildPrivateText({ closeLabel: 'завтра о 07:30', appUrl: '' });
-    // Порожній URL не лишає по собі висячого рядка в кінці.
-    expect(group.endsWith('зробіть замовлення.')).toBe(true);
-    expect(priv.endsWith('зробіть замовлення.')).toBe(true);
+    // Поточний compact template лишає CTA-стрілки останнім рядком, якщо URL не налаштовано.
+    expect(group.endsWith('👇👇👇')).toBe(true);
+    expect(priv.endsWith('👇👇👇')).toBe(true);
   });
 
   it('фраза закриття збирається з now-відносного лейбла, а не з назви дня', () => {

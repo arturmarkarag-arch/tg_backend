@@ -12,8 +12,8 @@ describe('BaseLinker ID-index pagination contract', () => {
     expect(route).toContain('getIndexedOrderPage');
     expect(route).toContain('pageSize: req.query.pageSize');
     expect(route).toContain('workflowFilter: req.query.workflowFilter');
-    expect(index).toContain('BaseLinkerOrderIndex.find({})');
-    expect(index).toContain('rowIdsByStage');
+    expect(index).toContain('BaseLinkerOrderIndex.find(mongoFilter)');
+    expect(index).toContain('rowKeysByStage');
   });
 
   it('reads visible Intake rows from the shared sanitized server projection with zero worker-side BaseLinker I/O', () => {
@@ -29,7 +29,7 @@ describe('BaseLinker ID-index pagination contract', () => {
   it('renders already-tracked shelves from the local PickingOrder business state', () => {
     const index = read('services/baseLinkerOrderIndex.js');
     expect(index).toContain('function orderFromPicking');
-    expect(index).toContain('BaseLinkerPickingOrder.find({}).lean()');
+    expect(index).toContain('BaseLinkerPickingOrder.find(mongoFilter).lean()');
     for (const stage of ['processing', 'deferred', 'sent', 'cancelled', 'updated']) expect(index).toContain(stage);
     expect(index).toContain("=== 'packed' || String(doc?.status || '') === 'packed') return 'processing'");
     expect(index).toContain("safeWorkflow === 'sent'");

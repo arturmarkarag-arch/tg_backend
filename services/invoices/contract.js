@@ -79,7 +79,7 @@ function normalizeAmounts(raw = {}) {
   };
 }
 
-function normalizeItem(raw = {}, index = 0) {
+function normalizeItem(raw = {}, index = 0, { allowNegativeQuantity = false } = {}) {
   const priceBasis = text(raw.priceBasis, 20).toLowerCase() || PRICE_BASIS.UNKNOWN;
   if (!Object.values(PRICE_BASIS).includes(priceBasis)) throw new TypeError(`items[${index}].priceBasis is invalid`);
   const normalized = {
@@ -88,7 +88,7 @@ function normalizeItem(raw = {}, index = 0) {
     name: text(raw.name, 500),
     quantity: raw.quantity === '' || raw.quantity === null || raw.quantity === undefined
       ? ''
-      : normalizeQuantity(raw.quantity, { field: `items[${index}].quantity` }),
+      : normalizeQuantity(raw.quantity, { field: `items[${index}].quantity`, allowNegative: allowNegativeQuantity }),
     unit: text(raw.unit, 40) || 'szt.',
     unitPrice: raw.unitPrice === '' || raw.unitPrice === null || raw.unitPrice === undefined
       ? ''
@@ -126,7 +126,7 @@ function deriveTotals(items) {
 function normalizeInvoiceDraft(raw = {}) {
   const type = text(raw.type, 40).toLowerCase() || INVOICE_TYPES.INVOICE;
   if (!Object.values(INVOICE_TYPES).includes(type)) throw new TypeError('Invoice type is invalid');
-  const items = Array.isArray(raw.items) ? raw.items.map(normalizeItem) : [];
+  const items = Array.isArray(raw.items) ? raw.items.map((item, index) => normalizeItem(item, index, { allowNegativeQuantity: type === INVOICE_TYPES.CORRECTION })) : [];
   const derivedTotals = deriveTotals(items);
   const explicitTotals = normalizeAmounts(raw.totals || {});
   const totals = {
@@ -184,6 +184,21 @@ function validateFinalizableInvoice(invoice = {}) {
     blockers.push('invoice_totals_required');
   } else if (!moneyEquals(addMoney([totals.net, totals.vat]), totals.gross)) {
     blockers.push('invoice_totals_inconsistent');
+  }
+
+  if (invoice.type === INVOICE_TYPES.CORRECTION) {
+    const ref = invoice.references?.correction;
+    if (!ref || typeof ref !== 'object') blockers.push('correction_reference_required');
+    else {
+      if (!ref.originalInvoiceId) blockers.push('correction_original_invoice_required');
+      if (!ref.originalSnapshotId) blockers.push('correction_original_snapshot_required');
+      if (!ref.originalInvoiceNumber) blockers.push('correction_original_number_required');
+      if (!ref.originalIssueDate) blockers.push('correction_original_issue_date_required');
+      if (!ref.originalFiscalReference) blockers.push('correction_original_fiscal_reference_required');
+      if (!String(ref.reason || '').trim()) blockers.push('correction_reason_required');
+      if (!['1', '2', '3'].includes(String(ref.correctionType || ''))) blockers.push('correction_type_invalid');
+      if (String(ref.lineMode || '') !== 'delta') blockers.push('correction_line_mode_invalid');
+    }
   }
 
   if ((invoice.items || []).length && !blockers.some((code) => /_amounts_(?:required|inconsistent|mismatch)$/.test(code))) {

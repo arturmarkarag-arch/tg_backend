@@ -2,6 +2,7 @@
 
 const { appError } = require('../../../utils/errors');
 const { getEnvironment } = require('./config');
+const { recordHttpFailure } = require('./operationalTelemetry');
 
 function extractProviderCode(body) {
   const values = [body?.exception?.exceptionCode, body?.exceptionCode, body?.code, body?.status?.code];
@@ -60,9 +61,11 @@ async function ksefRequest(environment, path, {
     const parsed = responseType === 'text' ? text : parseJsonText(text);
     return { status: response.status, body: parsed, headers: response.headers };
   } catch (error) {
-    if (error?.name === 'AbortError') throw appError('ksef_api_timeout');
-    if (error?.code && String(error.code).startsWith('ksef_')) throw error;
-    throw appError('ksef_api_unavailable', { cause: String(error?.message || error).slice(0, 500) });
+    let normalized = error;
+    if (error?.name === 'AbortError') normalized = appError('ksef_api_timeout');
+    else if (!(error?.code && String(error.code).startsWith('ksef_'))) normalized = appError('ksef_api_unavailable', { cause: String(error?.message || error).slice(0, 500) });
+    recordHttpFailure({ environment: env.id, method, path, error: normalized });
+    throw normalized;
   } finally { clearTimeout(timer); }
 }
 

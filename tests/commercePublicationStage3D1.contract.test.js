@@ -40,6 +40,6 @@ describe('Commerce publication Stage 3D.1 contract', () => {
     expect(routes).toContain("'/publications/allegro/drafts/reconcile'");
     expect(routes).toContain('reconcileAllegroDraft');
     expect(registry).toMatch(/id: 'offers\.draft\.reconcile'[\s\S]*direction: 'read'[\s\S]*implementation: LIVE/);
-    expect(registry).toMatch(/id: 'offers\.publish'[\s\S]*implementation: PLANNED/);
+    expect(registry).toMatch(/id: 'offers\.publish'[\s\S]*implementation: LIVE/);
   });
 });

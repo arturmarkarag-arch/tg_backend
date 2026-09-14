@@ -26,7 +26,7 @@ describe('Commerce publication Stage 3D.4A contract', () => {
     const service = read('services/commerce/allegroOfferUpdatePreview.js');
     expect(service).toContain("'3D.5'");
     expect(service).toContain("'3D.6'");
-    expect(service).toContain('specialized');
+    expect(service).toContain('спеціалізованим sync');
   });
 
   test('category/product/parameter drift requires mapping review', () => {
@@ -55,10 +55,11 @@ describe('Commerce publication Stage 3D.4A contract', () => {
     expect(route).toContain('previewAllegroOfferUpdate');
   });
 
-  test('integration registry distinguishes preview from future content write', () => {
+  test('integration registry keeps content preview separate from live content/price/stock writes', () => {
     const registry = read('services/commerce/providers/allegro.js');
     expect(registry).toContain("id: 'offers.update.preview'");
     expect(registry).toContain("id: 'offers.update'");
-    expect(registry).toContain('Price/stock');
+    expect(registry).toContain("id: 'offers.price.write'");
+    expect(registry).toContain("id: 'offers.stock.write'");
   });
 });

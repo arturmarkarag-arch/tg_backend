@@ -40,7 +40,9 @@ describe('session status UI/server consistency contract', () => {
 
   it('picking group badges are live while the picking UI is visible', () => {
     const page = readClient('routes/MiniAppPage.jsx');
-    expect(page).toContain('refetchInterval: needsPickingGroups ? 5000 : false');
+    expect(page).toContain("const deliveryGroupsPollInterval = useRealtimePollInterval({");
+    expect(page).toContain("profile: 'critical'");
+    expect(page).toContain('refetchInterval: deliveryGroupsPollInterval');
     expect(page).toContain('staleTime: needsPickingGroups ? 0 : 5 * 60 * 1000');
   });
   it('session numbering is wired into the real upsert-item path and has a safe backfill', () => {

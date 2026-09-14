@@ -1,6 +1,7 @@
 'use strict';
 const fs = require('fs');
 const path = require('path');
+const { indexOrThrow, sliceFromOrThrow } = require('./helpers/sourceContract');
 const root = path.join(__dirname, '..');
 const read = (rel) => fs.readFileSync(path.join(root, rel), 'utf8');
 
@@ -42,8 +43,8 @@ describe('Commerce Inventory movement contract', () => {
   test('stock preview reconciles movements before reservation totals', () => {
     const stock = read('services/commerce/allegroStockSync.js');
     expect(stock).toContain('const inventoryConsumption = await reconcileConsumedReservations();');
-    const fn = stock.slice(stock.indexOf('async function previewAllegroStockSync'));
-    expect(fn.indexOf('reconcileConsumedReservations()')).toBeLessThan(fn.indexOf('getReservationTotals'));
+    const fn = sliceFromOrThrow(stock, 'async function previewAllegroStockSync', { label: 'previewAllegroStockSync' });
+    expect(indexOrThrow(fn, 'reconcileConsumedReservations()')).toBeLessThan(indexOrThrow(fn, 'getReservationTotals'));
     expect(stock).toContain('reconcileConsumedReservations()');
   });
 });

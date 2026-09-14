@@ -52,13 +52,15 @@ describe('V48.14 ordering/picking time authority contract', () => {
 
   it('read-only snapshot and queue stats expose the same server readiness timestamp', () => {
     const picking = read('routes/picking.js');
+    const queueReadModel = read('services/readModels/pickingQueueStatsReadModel.js');
     const snapshot = sliceBetweenOrThrow(picking, 'async function buildReadOnlyPickingSessionSnapshot', '\nasync function buildTaskResponse', { label: 'read-only picking snapshot' });
     expect(snapshot).toContain('getPickingReadiness(group.orderingSchedule, now)');
     expect(snapshot).toContain('pickingReadyAt: readiness.pickingReadyAt.toISOString()');
     const queue = routeBlock(picking, "router.get('/queue-stats'", "router.post('/tasks/:taskId/complete'");
-    expect(queue).toContain('getPickingReadiness(groupDoc.orderingSchedule, statusNow)');
-    expect(queue).toContain('pickingReadyAt');
-    expect(queue).toContain('serverNow');
+    expect(queue).toContain('buildPickingQueueStatsReadModel');
+    expect(queueReadModel).toContain('getPickingReadiness(group.orderingSchedule, now)');
+    expect(queueReadModel).toContain('serverNow = readiness.serverNow.toISOString()');
+    expect(queueReadModel).toContain('pickingReadyAt = readiness.pickingReadyAt.toISOString()');
   });
 
   it('ordering scheduler runs immediately and then aligns to real minute boundaries', () => {

@@ -1,6 +1,7 @@
 'use strict';
 const fs = require('fs');
 const path = require('path');
+const { sliceBetweenOrThrow } = require('./helpers/sourceContract');
 const root = path.join(__dirname, '..');
 const read = (rel) => fs.readFileSync(path.join(root, rel), 'utf8');
 
@@ -56,7 +57,7 @@ describe('Commerce publication Stage 3D.6A contract', () => {
 
   test('Stage 3D.5 price command still does not mix stock writes', () => {
     const service = read('services/commerce/allegroPriceSync.js');
-    const fn = service.slice(service.indexOf('function modificationForJob'), service.indexOf('function isAmbiguous'));
+    const fn = sliceBetweenOrThrow(service, 'function modificationForJob', 'function isAmbiguous', { label: 'price modificationForJob' });
     expect(fn).toContain('prices: {');
     expect(fn).not.toContain('stock:');
   });

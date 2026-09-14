@@ -4,7 +4,7 @@ This is a complete inventory of runtime Express route declarations, discovered r
 A check mark means that the role passes the route-entry auth/role middleware. Resource ownership, shop/group/session
 scope, one-time tokens, rate limits, feature flags, and request validation can still deny a request as noted.
 
-Routes: **440** · anonymous: **18** · seller: **75** · warehouse: **200** · admin: **430**
+Routes: **474** · anonymous: **18** · seller: **75** · warehouse: **200** · admin: **464**
 
 | Endpoint | Anonymous | Seller | Warehouse | Admin | Source | Boundary note |
 |---|:---:|:---:|:---:|:---:|---|---|
@@ -18,7 +18,7 @@ Routes: **440** · anonymous: **18** · seller: **75** · warehouse: **200** · 
 | `DELETE /api/blocks/:number` | — | — | ✓ | ✓ | `routes/blocks.js:395` | route-entry authorization |
 | `DELETE /api/blocks/:number/products/:productId` | — | — | ✓ | ✓ | `routes/blocks.js:323` | route-entry authorization |
 | `DELETE /api/delivery-groups/:id` | — | — | — | ✓ | `routes/deliveryGroups.js:478` | route-entry authorization |
-| `DELETE /api/products/:id` | — | — | ✓ | ✓ | `routes/products.js:1677` | route-entry authorization |
+| `DELETE /api/products/:id` | — | — | ✓ | ✓ | `routes/products.js:1678` | route-entry authorization |
 | `DELETE /api/products/orphan-photo` | — | — | ✓ | ✓ | `routes/products.js:384` | route-entry authorization |
 | `DELETE /api/receipts/:id` | — | — | ✓ | ✓ | `routes/receipts.js:729` | route-entry authorization |
 | `DELETE /api/receipts/:id/items/:itemId` | — | — | ✓ | ✓ | `routes/receipts.js:1559` | route-entry authorization |
@@ -28,7 +28,7 @@ Routes: **440** · anonymous: **18** · seller: **75** · warehouse: **200** · 
 | `DELETE /api/supplement/:offerId/request` | — | ✓ | — | ✓ | `routes/supplement.js:281` | route-entry authorization |
 | `DELETE /api/supplement/requests/:requestId` | — | ✓ | — | ✓ | `routes/supplement.js:259` | route-entry authorization |
 | `DELETE /api/users/:telegramId` | — | — | — | ✓ | `routes/users.js:275` | route-entry authorization |
-| `DELETE /api/v1/products/:id` | — | — | ✓ | ✓ | `routes/products.js:1677` | route-entry authorization |
+| `DELETE /api/v1/products/:id` | — | — | ✓ | ✓ | `routes/products.js:1678` | route-entry authorization |
 | `DELETE /api/v1/products/orphan-photo` | — | — | ✓ | ✓ | `routes/products.js:384` | route-entry authorization |
 | `DELETE /api/v1/telegram/register-requests/:id` | — | — | — | ✓ | `routes/v1/telegram.js:910` | route-entry authorization |
 | `DELETE /api/vision-search/logs` | — | — | — | ✓ | `routes/visionSearch.js:456` | route-entry authorization |
@@ -97,19 +97,34 @@ Routes: **440** · anonymous: **18** · seller: **75** · warehouse: **200** · 
 | `GET /api/delivery-groups/summary` | — | — | ✓ | ✓ | `routes/deliveryGroups.js:109` | route-entry authorization |
 | `GET /api/gemini-status` | — | — | — | ✓ | `app.js:161` | route-entry authorization |
 | `GET /api/health` | ✓ | ✓ | ✓ | ✓ | `app.js:131` | public allowlist; endpoint-specific proof/rate limits may still apply |
-| `GET /api/invoices` | — | — | — | ✓ | `routes/invoices.js:266` | route-entry authorization |
-| `GET /api/invoices/:id` | — | — | — | ✓ | `routes/invoices.js:332` | route-entry authorization |
-| `GET /api/invoices/:id/fiscal/ksef/status` | — | — | — | ✓ | `routes/invoices.js:304` | route-entry authorization |
-| `GET /api/invoices/:id/fiscal/ksef/upo` | — | — | — | ✓ | `routes/invoices.js:318` | route-entry authorization |
-| `GET /api/invoices/ksef/certificate-enrollments` | — | — | — | ✓ | `routes/invoices.js:179` | route-entry authorization |
-| `GET /api/invoices/ksef/certificate-enrollments/:enrollmentId` | — | — | — | ✓ | `routes/invoices.js:195` | route-entry authorization |
-| `GET /api/invoices/ksef/certificate-limits` | — | — | — | ✓ | `routes/invoices.js:172` | route-entry authorization |
-| `GET /api/invoices/ksef/connections` | — | — | — | ✓ | `routes/invoices.js:113` | route-entry authorization |
-| `GET /api/invoices/ksef/offline-certificates` | — | — | — | ✓ | `routes/invoices.js:220` | route-entry authorization |
-| `GET /api/invoices/ksef/xades-credentials` | — | — | — | ✓ | `routes/invoices.js:144` | route-entry authorization |
-| `GET /api/invoices/legal-entities` | — | — | — | ✓ | `routes/invoices.js:86` | route-entry authorization |
-| `GET /api/invoices/legal-entities/:id` | — | — | — | ✓ | `routes/invoices.js:98` | route-entry authorization |
-| `GET /api/invoices/meta` | — | — | — | ✓ | `routes/invoices.js:78` | route-entry authorization |
+| `GET /api/invoices` | — | — | — | ✓ | `routes/invoices.js:523` | route-entry authorization |
+| `GET /api/invoices/:id` | — | — | — | ✓ | `routes/invoices.js:622` | route-entry authorization |
+| `GET /api/invoices/:id/fiscal/ksef/pdf-visualization` | — | — | — | ✓ | `routes/invoices.js:590` | route-entry authorization |
+| `GET /api/invoices/:id/fiscal/ksef/status` | — | — | — | ✓ | `routes/invoices.js:575` | route-entry authorization |
+| `GET /api/invoices/:id/fiscal/ksef/upo` | — | — | — | ✓ | `routes/invoices.js:608` | route-entry authorization |
+| `GET /api/invoices/:id/fiscal/ksef/xml` | — | — | — | ✓ | `routes/invoices.js:597` | route-entry authorization |
+| `GET /api/invoices/business-counterparties` | — | — | — | ✓ | `routes/invoices.js:330` | route-entry authorization |
+| `GET /api/invoices/ksef/certificate-enrollments` | — | — | — | ✓ | `routes/invoices.js:265` | route-entry authorization |
+| `GET /api/invoices/ksef/certificate-enrollments/:enrollmentId` | — | — | — | ✓ | `routes/invoices.js:281` | route-entry authorization |
+| `GET /api/invoices/ksef/certificate-limits` | — | — | — | ✓ | `routes/invoices.js:258` | route-entry authorization |
+| `GET /api/invoices/ksef/connections` | — | — | — | ✓ | `routes/invoices.js:199` | route-entry authorization |
+| `GET /api/invoices/ksef/inbound-documents` | — | — | — | ✓ | `routes/invoices.js:409` | route-entry authorization |
+| `GET /api/invoices/ksef/inbound-documents/:documentId` | — | — | — | ✓ | `routes/invoices.js:421` | route-entry authorization |
+| `GET /api/invoices/ksef/inbound-documents/:documentId/business-links` | — | — | — | ✓ | `routes/invoices.js:433` | route-entry authorization |
+| `GET /api/invoices/ksef/inbound-documents/:documentId/xml` | — | — | — | ✓ | `routes/invoices.js:457` | route-entry authorization |
+| `GET /api/invoices/ksef/inbound-exports` | — | — | — | ✓ | `routes/invoices.js:382` | route-entry authorization |
+| `GET /api/invoices/ksef/inbound-exports/:exportId` | — | — | — | ✓ | `routes/invoices.js:395` | route-entry authorization |
+| `GET /api/invoices/ksef/inbound-syncs` | — | — | — | ✓ | `routes/invoices.js:348` | route-entry authorization |
+| `GET /api/invoices/ksef/offline-certificates` | — | — | — | ✓ | `routes/invoices.js:306` | route-entry authorization |
+| `GET /api/invoices/ksef/ops/events` | — | — | — | ✓ | `routes/invoices.js:172` | route-entry authorization |
+| `GET /api/invoices/ksef/ops/issues` | — | — | — | ✓ | `routes/invoices.js:158` | route-entry authorization |
+| `GET /api/invoices/ksef/ops/readiness` | — | — | — | ✓ | `routes/invoices.js:152` | route-entry authorization |
+| `GET /api/invoices/ksef/technical-corrections/:correctionId` | — | — | — | ✓ | `routes/invoices.js:482` | route-entry authorization |
+| `GET /api/invoices/ksef/technical-corrections/:correctionId/upo` | — | — | — | ✓ | `routes/invoices.js:489` | route-entry authorization |
+| `GET /api/invoices/ksef/xades-credentials` | — | — | — | ✓ | `routes/invoices.js:230` | route-entry authorization |
+| `GET /api/invoices/legal-entities` | — | — | — | ✓ | `routes/invoices.js:124` | route-entry authorization |
+| `GET /api/invoices/legal-entities/:id` | — | — | — | ✓ | `routes/invoices.js:136` | route-entry authorization |
+| `GET /api/invoices/meta` | — | — | — | ✓ | `routes/invoices.js:116` | route-entry authorization |
 | `GET /api/maintenance` | ✓ | ✓ | ✓ | ✓ | `app.js:139` | public allowlist; endpoint-specific proof/rate limits may still apply |
 | `GET /api/nav-badges` | — | ✓ | ✓ | ✓ | `routes/navBadges.js:91` | route-entry authorization |
 | `GET /api/openai-status` | — | — | — | ✓ | `app.js:147` | route-entry authorization |
@@ -128,17 +143,17 @@ Routes: **440** · anonymous: **18** · seller: **75** · warehouse: **200** · 
 | `GET /api/picking/shift-board/worker-history` | — | — | — | ✓ | `routes/picking.js:1728` | route-entry authorization |
 | `GET /api/print-agent/jobs/:jobId/payload` | — | — | — | — | `routes/baseLinkerPrintAgent.js:49` | Print Agent token, not a user role |
 | `GET /api/product-feedback` | — | — | ✓ | ✓ | `routes/productFeedback.js:63` | route-entry authorization |
-| `GET /api/products` | — | — | ✓ | ✓ | `routes/products.js:660` | route-entry authorization |
-| `GET /api/products/:id` | — | — | ✓ | ✓ | `routes/products.js:1234` | route-entry authorization |
-| `GET /api/products/:id/position` | — | — | ✓ | ✓ | `routes/products.js:597` | route-entry authorization |
-| `GET /api/products/:id/who-ordered` | — | — | ✓ | ✓ | `routes/products.js:1157` | route-entry authorization |
+| `GET /api/products` | — | — | ✓ | ✓ | `routes/products.js:661` | route-entry authorization |
+| `GET /api/products/:id` | — | — | ✓ | ✓ | `routes/products.js:1235` | route-entry authorization |
+| `GET /api/products/:id/position` | — | — | ✓ | ✓ | `routes/products.js:598` | route-entry authorization |
+| `GET /api/products/:id/who-ordered` | — | — | ✓ | ✓ | `routes/products.js:1158` | route-entry authorization |
 | `GET /api/products/catalog` | — | ✓ | ✓ | ✓ | `routes/products.js:515` | route-entry authorization |
-| `GET /api/products/catalog/:id/position` | — | ✓ | ✓ | ✓ | `routes/products.js:556` | route-entry authorization |
-| `GET /api/products/check` | — | — | ✓ | ✓ | `routes/products.js:821` | route-entry authorization |
+| `GET /api/products/catalog/:id/position` | — | ✓ | ✓ | ✓ | `routes/products.js:557` | route-entry authorization |
+| `GET /api/products/check` | — | — | ✓ | ✓ | `routes/products.js:822` | route-entry authorization |
 | `GET /api/products/drafts` | — | — | ✓ | ✓ | `routes/products.js:463` | route-entry authorization |
-| `GET /api/products/new-list` | — | ✓ | ✓ | ✓ | `routes/products.js:923` | route-entry authorization |
-| `GET /api/products/pending` | — | — | ✓ | ✓ | `routes/products.js:852` | route-entry authorization |
-| `GET /api/products/proxy-image` | — | — | ✓ | ✓ | `routes/products.js:1208` | route-entry authorization |
+| `GET /api/products/new-list` | — | ✓ | ✓ | ✓ | `routes/products.js:924` | route-entry authorization |
+| `GET /api/products/pending` | — | — | ✓ | ✓ | `routes/products.js:853` | route-entry authorization |
+| `GET /api/products/proxy-image` | — | — | ✓ | ✓ | `routes/products.js:1209` | route-entry authorization |
 | `GET /api/products/upload-url` | — | — | ✓ | ✓ | `routes/products.js:303` | route-entry authorization |
 | `GET /api/products/upload-url-pair` | — | — | ✓ | ✓ | `routes/products.js:332` | route-entry authorization |
 | `GET /api/products/upload-url-public` | — | ✓ | ✓ | ✓ | `routes/products.js:404` | route-entry authorization |
@@ -184,17 +199,17 @@ Routes: **440** · anonymous: **18** · seller: **75** · warehouse: **200** · 
 | `GET /api/v1/orders/conflicts` | — | — | ✓ | ✓ | `routes/orders.js:339` | route entry only; ownership/shop/session checks run in handler |
 | `GET /api/v1/orders/current-items` | — | ✓ | — | ✓ | `routes/orders.js:596` | route entry only; ownership/shop/session checks run in handler |
 | `GET /api/v1/orders/transit/active` | — | — | ✓ | ✓ | `routes/orders.js:648` | route entry only; ownership/shop/session checks run in handler |
-| `GET /api/v1/products` | — | — | ✓ | ✓ | `routes/products.js:660` | route-entry authorization |
-| `GET /api/v1/products/:id` | — | — | ✓ | ✓ | `routes/products.js:1234` | route-entry authorization |
-| `GET /api/v1/products/:id/position` | — | — | ✓ | ✓ | `routes/products.js:597` | route-entry authorization |
-| `GET /api/v1/products/:id/who-ordered` | — | — | ✓ | ✓ | `routes/products.js:1157` | route-entry authorization |
+| `GET /api/v1/products` | — | — | ✓ | ✓ | `routes/products.js:661` | route-entry authorization |
+| `GET /api/v1/products/:id` | — | — | ✓ | ✓ | `routes/products.js:1235` | route-entry authorization |
+| `GET /api/v1/products/:id/position` | — | — | ✓ | ✓ | `routes/products.js:598` | route-entry authorization |
+| `GET /api/v1/products/:id/who-ordered` | — | — | ✓ | ✓ | `routes/products.js:1158` | route-entry authorization |
 | `GET /api/v1/products/catalog` | — | ✓ | ✓ | ✓ | `routes/products.js:515` | route-entry authorization |
-| `GET /api/v1/products/catalog/:id/position` | — | ✓ | ✓ | ✓ | `routes/products.js:556` | route-entry authorization |
-| `GET /api/v1/products/check` | — | — | ✓ | ✓ | `routes/products.js:821` | route-entry authorization |
+| `GET /api/v1/products/catalog/:id/position` | — | ✓ | ✓ | ✓ | `routes/products.js:557` | route-entry authorization |
+| `GET /api/v1/products/check` | — | — | ✓ | ✓ | `routes/products.js:822` | route-entry authorization |
 | `GET /api/v1/products/drafts` | — | — | ✓ | ✓ | `routes/products.js:463` | route-entry authorization |
-| `GET /api/v1/products/new-list` | — | ✓ | ✓ | ✓ | `routes/products.js:923` | route-entry authorization |
-| `GET /api/v1/products/pending` | — | — | ✓ | ✓ | `routes/products.js:852` | route-entry authorization |
-| `GET /api/v1/products/proxy-image` | — | — | ✓ | ✓ | `routes/products.js:1208` | route-entry authorization |
+| `GET /api/v1/products/new-list` | — | ✓ | ✓ | ✓ | `routes/products.js:924` | route-entry authorization |
+| `GET /api/v1/products/pending` | — | — | ✓ | ✓ | `routes/products.js:853` | route-entry authorization |
+| `GET /api/v1/products/proxy-image` | — | — | ✓ | ✓ | `routes/products.js:1209` | route-entry authorization |
 | `GET /api/v1/products/upload-url` | — | — | ✓ | ✓ | `routes/products.js:303` | route-entry authorization |
 | `GET /api/v1/products/upload-url-pair` | — | — | ✓ | ✓ | `routes/products.js:332` | route-entry authorization |
 | `GET /api/v1/products/upload-url-public` | — | ✓ | ✓ | ✓ | `routes/products.js:404` | route-entry authorization |
@@ -218,14 +233,16 @@ Routes: **440** · anonymous: **18** · seller: **75** · warehouse: **200** · 
 | `PATCH /api/commerce/catalog/:id` | — | — | — | ✓ | `routes/commerce.js:242` | provider-worker boundary; among these four roles only admin passes (baselinker is outside the table) |
 | `PATCH /api/commerce/categories/:id` | — | — | — | ✓ | `routes/commerce.js:209` | provider-worker boundary; among these four roles only admin passes (baselinker is outside the table) |
 | `PATCH /api/delivery-groups/:id` | — | — | — | ✓ | `routes/deliveryGroups.js:265` | route-entry authorization |
-| `PATCH /api/invoices/:id` | — | — | — | ✓ | `routes/invoices.js:343` | route-entry authorization |
-| `PATCH /api/invoices/ksef/connections/:connectionId` | — | — | — | ✓ | `routes/invoices.js:125` | route-entry authorization |
-| `PATCH /api/invoices/ksef/offline-certificates/:certificateId` | — | — | — | ✓ | `routes/invoices.js:237` | route-entry authorization |
-| `PATCH /api/invoices/ksef/xades-credentials/:credentialId` | — | — | — | ✓ | `routes/invoices.js:159` | route-entry authorization |
-| `PATCH /api/invoices/legal-entities/:id` | — | — | — | ✓ | `routes/invoices.js:105` | route-entry authorization |
+| `PATCH /api/invoices/:id` | — | — | — | ✓ | `routes/invoices.js:633` | route-entry authorization |
+| `PATCH /api/invoices/business-counterparties/:id` | — | — | — | ✓ | `routes/invoices.js:342` | route-entry authorization |
+| `PATCH /api/invoices/ksef/connections/:connectionId` | — | — | — | ✓ | `routes/invoices.js:211` | route-entry authorization |
+| `PATCH /api/invoices/ksef/inbound-syncs/:syncId` | — | — | — | ✓ | `routes/invoices.js:364` | route-entry authorization |
+| `PATCH /api/invoices/ksef/offline-certificates/:certificateId` | — | — | — | ✓ | `routes/invoices.js:323` | route-entry authorization |
+| `PATCH /api/invoices/ksef/xades-credentials/:credentialId` | — | — | — | ✓ | `routes/invoices.js:245` | route-entry authorization |
+| `PATCH /api/invoices/legal-entities/:id` | — | — | — | ✓ | `routes/invoices.js:143` | route-entry authorization |
 | `PATCH /api/picking/tasks/:taskId/progress` | — | — | ✓ | ✓ | `routes/picking.js:1122` | route-entry authorization |
-| `PATCH /api/products/:id` | — | — | ✓ | ✓ | `routes/products.js:1459` | route-entry authorization |
-| `PATCH /api/products/reorder` | — | — | ✓ | ✓ | `routes/products.js:961` | route-entry authorization |
+| `PATCH /api/products/:id` | — | — | ✓ | ✓ | `routes/products.js:1460` | route-entry authorization |
+| `PATCH /api/products/reorder` | — | — | ✓ | ✓ | `routes/products.js:962` | route-entry authorization |
 | `PATCH /api/receipts/:id` | — | — | ✓ | ✓ | `routes/receipts.js:912` | route-entry authorization |
 | `PATCH /api/receipts/:id/items/:itemId` | — | — | ✓ | ✓ | `routes/receipts.js:1179` | route-entry authorization |
 | `PATCH /api/receipts/:id/items/:itemId/routing` | — | — | ✓ | ✓ | `routes/receipts.js:1889` | route-entry authorization |
@@ -240,8 +257,8 @@ Routes: **440** · anonymous: **18** · seller: **75** · warehouse: **200** · 
 | `PATCH /api/users/:telegramId/shop` | — | — | — | ✓ | `routes/users.js:186` | route-entry authorization |
 | `PATCH /api/v1/orders/:id` | — | ✓ | ✓ | ✓ | `routes/orders.js:1700` | route entry only; ownership/shop/session checks run in handler |
 | `PATCH /api/v1/orders/:id/snapshot` | — | — | ✓ | ✓ | `routes/orders.js:1157` | route entry only; ownership/shop/session checks run in handler |
-| `PATCH /api/v1/products/:id` | — | — | ✓ | ✓ | `routes/products.js:1459` | route-entry authorization |
-| `PATCH /api/v1/products/reorder` | — | — | ✓ | ✓ | `routes/products.js:961` | route-entry authorization |
+| `PATCH /api/v1/products/:id` | — | — | ✓ | ✓ | `routes/products.js:1460` | route-entry authorization |
+| `PATCH /api/v1/products/reorder` | — | — | ✓ | ✓ | `routes/products.js:962` | route-entry authorization |
 | `PATCH /api/v1/telegram/me/profile` | — | ✓ | ✓ | ✓ | `routes/v1/telegram.js:306` | route-entry authorization |
 | `PATCH /api/v1/telegram/me/shop` | — | ✓ | ✓ | ✓ | `routes/v1/telegram.js:239` | route-entry authorization |
 | `PATCH /api/vision-search/logs/:id` | — | — | ✓ | ✓ | `routes/visionSearch.js:444` | route-entry authorization |
@@ -320,23 +337,40 @@ Routes: **440** · anonymous: **18** · seller: **75** · warehouse: **200** · 
 | `POST /api/delivery-groups/:id/broadcast` | — | — | — | ✓ | `routes/deliveryGroups.js:552` | route-entry authorization |
 | `POST /api/delivery-groups/:id/close-ordering-session` | — | — | — | ✓ | `routes/deliveryGroups.js:152` | route-entry authorization |
 | `POST /api/delivery-groups/catalog-reviewed` | — | ✓ | ✓ | ✓ | `routes/deliveryGroups.js:65` | route-entry authorization |
-| `POST /api/invoices` | — | — | — | ✓ | `routes/invoices.js:254` | route-entry authorization |
-| `POST /api/invoices/:id/finalize` | — | — | — | ✓ | `routes/invoices.js:350` | route-entry authorization |
-| `POST /api/invoices/:id/fiscal/ksef/offline24/prepare` | — | — | — | ✓ | `routes/invoices.js:290` | route-entry authorization |
-| `POST /api/invoices/:id/fiscal/ksef/reconcile` | — | — | — | ✓ | `routes/invoices.js:311` | route-entry authorization |
-| `POST /api/invoices/:id/fiscal/ksef/submit` | — | — | — | ✓ | `routes/invoices.js:297` | route-entry authorization |
-| `POST /api/invoices/:id/fiscal/ksef/validate` | — | — | — | ✓ | `routes/invoices.js:282` | route-entry authorization |
-| `POST /api/invoices/ksef/certificate-enrollments` | — | — | — | ✓ | `routes/invoices.js:188` | route-entry authorization |
-| `POST /api/invoices/ksef/certificate-enrollments/:enrollmentId/reconcile` | — | — | — | ✓ | `routes/invoices.js:201` | route-entry authorization |
-| `POST /api/invoices/ksef/certificates/:certificateSerialNumber/revoke` | — | — | — | ✓ | `routes/invoices.js:207` | route-entry authorization |
-| `POST /api/invoices/ksef/connections` | — | — | — | ✓ | `routes/invoices.js:119` | route-entry authorization |
-| `POST /api/invoices/ksef/connections/:connectionId/check` | — | — | — | ✓ | `routes/invoices.js:137` | route-entry authorization |
-| `POST /api/invoices/ksef/connections/:connectionId/token` | — | — | — | ✓ | `routes/invoices.js:131` | route-entry authorization |
-| `POST /api/invoices/ksef/offline-certificates` | — | — | — | ✓ | `routes/invoices.js:230` | route-entry authorization |
-| `POST /api/invoices/ksef/xades-credentials` | — | — | — | ✓ | `routes/invoices.js:153` | route-entry authorization |
-| `POST /api/invoices/ksef/xades-credentials/:credentialId/check` | — | — | — | ✓ | `routes/invoices.js:165` | route-entry authorization |
-| `POST /api/invoices/legal-entities` | — | — | — | ✓ | `routes/invoices.js:92` | route-entry authorization |
-| `POST /api/invoices/preview` | — | — | — | ✓ | `routes/invoices.js:243` | route-entry authorization |
+| `POST /api/invoices` | — | — | — | ✓ | `routes/invoices.js:511` | route-entry authorization |
+| `POST /api/invoices/:id/corrections` | — | — | — | ✓ | `routes/invoices.js:539` | route-entry authorization |
+| `POST /api/invoices/:id/finalize` | — | — | — | ✓ | `routes/invoices.js:640` | route-entry authorization |
+| `POST /api/invoices/:id/fiscal/ksef/offline24/prepare` | — | — | — | ✓ | `routes/invoices.js:561` | route-entry authorization |
+| `POST /api/invoices/:id/fiscal/ksef/reconcile` | — | — | — | ✓ | `routes/invoices.js:582` | route-entry authorization |
+| `POST /api/invoices/:id/fiscal/ksef/submit` | — | — | — | ✓ | `routes/invoices.js:568` | route-entry authorization |
+| `POST /api/invoices/:id/fiscal/ksef/technical-correction/prepare` | — | — | — | ✓ | `routes/invoices.js:546` | route-entry authorization |
+| `POST /api/invoices/:id/fiscal/ksef/validate` | — | — | — | ✓ | `routes/invoices.js:553` | route-entry authorization |
+| `POST /api/invoices/business-counterparties` | — | — | — | ✓ | `routes/invoices.js:336` | route-entry authorization |
+| `POST /api/invoices/ksef/certificate-enrollments` | — | — | — | ✓ | `routes/invoices.js:274` | route-entry authorization |
+| `POST /api/invoices/ksef/certificate-enrollments/:enrollmentId/reconcile` | — | — | — | ✓ | `routes/invoices.js:287` | route-entry authorization |
+| `POST /api/invoices/ksef/certificates/:certificateSerialNumber/revoke` | — | — | — | ✓ | `routes/invoices.js:293` | route-entry authorization |
+| `POST /api/invoices/ksef/connections` | — | — | — | ✓ | `routes/invoices.js:205` | route-entry authorization |
+| `POST /api/invoices/ksef/connections/:connectionId/check` | — | — | — | ✓ | `routes/invoices.js:223` | route-entry authorization |
+| `POST /api/invoices/ksef/connections/:connectionId/token` | — | — | — | ✓ | `routes/invoices.js:217` | route-entry authorization |
+| `POST /api/invoices/ksef/inbound-documents/:documentId/business-links/:linkId/reject` | — | — | — | ✓ | `routes/invoices.js:451` | route-entry authorization |
+| `POST /api/invoices/ksef/inbound-documents/:documentId/business-links/confirm` | — | — | — | ✓ | `routes/invoices.js:445` | route-entry authorization |
+| `POST /api/invoices/ksef/inbound-documents/:documentId/business-links/refresh` | — | — | — | ✓ | `routes/invoices.js:439` | route-entry authorization |
+| `POST /api/invoices/ksef/inbound-documents/:documentId/fetch` | — | — | — | ✓ | `routes/invoices.js:427` | route-entry authorization |
+| `POST /api/invoices/ksef/inbound-syncs` | — | — | — | ✓ | `routes/invoices.js:358` | route-entry authorization |
+| `POST /api/invoices/ksef/inbound-syncs/:syncId/export` | — | — | — | ✓ | `routes/invoices.js:401` | route-entry authorization |
+| `POST /api/invoices/ksef/inbound-syncs/:syncId/reset-cursor` | — | — | — | ✓ | `routes/invoices.js:376` | route-entry authorization |
+| `POST /api/invoices/ksef/inbound-syncs/:syncId/run` | — | — | — | ✓ | `routes/invoices.js:370` | route-entry authorization |
+| `POST /api/invoices/ksef/offline-certificates` | — | — | — | ✓ | `routes/invoices.js:316` | route-entry authorization |
+| `POST /api/invoices/ksef/ops/cleanup` | — | — | — | ✓ | `routes/invoices.js:193` | route-entry authorization |
+| `POST /api/invoices/ksef/ops/issues/:kind/:id/retry` | — | — | — | ✓ | `routes/invoices.js:166` | route-entry authorization |
+| `POST /api/invoices/ksef/ops/probe` | — | — | — | ✓ | `routes/invoices.js:181` | route-entry authorization |
+| `POST /api/invoices/ksef/ops/recover-stale-leases` | — | — | — | ✓ | `routes/invoices.js:187` | route-entry authorization |
+| `POST /api/invoices/ksef/technical-corrections/:correctionId/reconcile` | — | — | — | ✓ | `routes/invoices.js:475` | route-entry authorization |
+| `POST /api/invoices/ksef/technical-corrections/:correctionId/submit` | — | — | — | ✓ | `routes/invoices.js:468` | route-entry authorization |
+| `POST /api/invoices/ksef/xades-credentials` | — | — | — | ✓ | `routes/invoices.js:239` | route-entry authorization |
+| `POST /api/invoices/ksef/xades-credentials/:credentialId/check` | — | — | — | ✓ | `routes/invoices.js:251` | route-entry authorization |
+| `POST /api/invoices/legal-entities` | — | — | — | ✓ | `routes/invoices.js:130` | route-entry authorization |
+| `POST /api/invoices/preview` | — | — | — | ✓ | `routes/invoices.js:500` | route-entry authorization |
 | `POST /api/picking/cancel-start` | — | — | ✓ | ✓ | `routes/picking.js:686` | route-entry authorization |
 | `POST /api/picking/next-task` | — | — | ✓ | ✓ | `routes/picking.js:934` | route-entry authorization |
 | `POST /api/picking/resolve-coverage-gap` | — | — | ✓ | ✓ | `routes/picking.js:768` | route-entry authorization |
@@ -355,13 +389,13 @@ Routes: **440** · anonymous: **18** · seller: **75** · warehouse: **200** · 
 | `POST /api/product-feedback` | — | ✓ | ✓ | ✓ | `routes/productFeedback.js:23` | route-entry authorization |
 | `POST /api/product-feedback/:id/reject` | — | — | ✓ | ✓ | `routes/productFeedback.js:91` | route-entry authorization |
 | `POST /api/product-feedback/:id/resolve` | — | — | ✓ | ✓ | `routes/productFeedback.js:78` | route-entry authorization |
-| `POST /api/products` | — | — | ✓ | ✓ | `routes/products.js:1408` | route-entry authorization |
-| `POST /api/products/:id/describe` | — | — | ✓ | ✓ | `routes/products.js:1701` | route-entry authorization |
+| `POST /api/products` | — | — | ✓ | ✓ | `routes/products.js:1409` | route-entry authorization |
+| `POST /api/products/:id/describe` | — | — | ✓ | ✓ | `routes/products.js:1702` | route-entry authorization |
 | `POST /api/products/ask-group-price` | — | ✓ | ✓ | ✓ | `routes/products.js:430` | route-entry authorization |
-| `POST /api/products/block-upload-photos` | — | — | ✓ | ✓ | `routes/products.js:1246` | route-entry authorization |
-| `POST /api/products/broadcast` | — | ✓ | ✓ | ✓ | `routes/products.js:989` | route-entry authorization |
-| `POST /api/products/receive` | — | — | ✓ | ✓ | `routes/products.js:1342` | route-entry authorization |
-| `POST /api/products/report-missing` | — | ✓ | ✓ | ✓ | `routes/products.js:1010` | route-entry authorization |
+| `POST /api/products/block-upload-photos` | — | — | ✓ | ✓ | `routes/products.js:1247` | route-entry authorization |
+| `POST /api/products/broadcast` | — | ✓ | ✓ | ✓ | `routes/products.js:990` | route-entry authorization |
+| `POST /api/products/receive` | — | — | ✓ | ✓ | `routes/products.js:1343` | route-entry authorization |
+| `POST /api/products/report-missing` | — | ✓ | ✓ | ✓ | `routes/products.js:1011` | route-entry authorization |
 | `POST /api/receipts` | — | — | ✓ | ✓ | `routes/receipts.js:876` | route-entry authorization |
 | `POST /api/receipts/:id/commit` | — | — | ✓ | ✓ | `routes/receipts.js:2450` | route-entry authorization |
 | `POST /api/receipts/:id/items` | — | — | ✓ | ✓ | `routes/receipts.js:949` | route-entry authorization |
@@ -411,13 +445,13 @@ Routes: **440** · anonymous: **18** · seller: **75** · warehouse: **200** · 
 | `POST /api/v1/orders/remove-item` | — | ✓ | ✓ | ✓ | `routes/orders.js:1984` | route entry only; ownership/shop/session checks run in handler |
 | `POST /api/v1/orders/set-item-qty` | — | ✓ | ✓ | ✓ | `routes/orders.js:1911` | route entry only; ownership/shop/session checks run in handler |
 | `POST /api/v1/orders/upsert-item` | — | ✓ | ✓ | ✓ | `routes/orders.js:1707` | route entry only; ownership/shop/session checks run in handler |
-| `POST /api/v1/products` | — | — | ✓ | ✓ | `routes/products.js:1408` | route-entry authorization |
-| `POST /api/v1/products/:id/describe` | — | — | ✓ | ✓ | `routes/products.js:1701` | route-entry authorization |
+| `POST /api/v1/products` | — | — | ✓ | ✓ | `routes/products.js:1409` | route-entry authorization |
+| `POST /api/v1/products/:id/describe` | — | — | ✓ | ✓ | `routes/products.js:1702` | route-entry authorization |
 | `POST /api/v1/products/ask-group-price` | — | ✓ | ✓ | ✓ | `routes/products.js:430` | route-entry authorization |
-| `POST /api/v1/products/block-upload-photos` | — | — | ✓ | ✓ | `routes/products.js:1246` | route-entry authorization |
-| `POST /api/v1/products/broadcast` | — | ✓ | ✓ | ✓ | `routes/products.js:989` | route-entry authorization |
-| `POST /api/v1/products/receive` | — | — | ✓ | ✓ | `routes/products.js:1342` | route-entry authorization |
-| `POST /api/v1/products/report-missing` | — | ✓ | ✓ | ✓ | `routes/products.js:1010` | route-entry authorization |
+| `POST /api/v1/products/block-upload-photos` | — | — | ✓ | ✓ | `routes/products.js:1247` | route-entry authorization |
+| `POST /api/v1/products/broadcast` | — | ✓ | ✓ | ✓ | `routes/products.js:990` | route-entry authorization |
+| `POST /api/v1/products/receive` | — | — | ✓ | ✓ | `routes/products.js:1343` | route-entry authorization |
+| `POST /api/v1/products/report-missing` | — | ✓ | ✓ | ✓ | `routes/products.js:1011` | route-entry authorization |
 | `POST /api/v1/telegram/google/link/start` | — | ✓ | ✓ | ✓ | `routes/v1/telegram.js:346` | route-entry authorization |
 | `POST /api/v1/telegram/google/unlink` | — | ✓ | ✓ | ✓ | `routes/v1/telegram.js:358` | route-entry authorization |
 | `POST /api/v1/telegram/me` | ✓ | ✓ | ✓ | ✓ | `routes/v1/telegram.js:214` | public allowlist; endpoint-specific proof/rate limits may still apply |

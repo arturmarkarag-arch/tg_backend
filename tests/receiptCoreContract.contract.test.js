@@ -73,10 +73,12 @@ describe('receipt core contract', () => {
 
   test('photo gallery carries display, inline-preparation and edit-navigation context', () => {
     const gallery = sliceBetweenOrThrow(route, "router.get('/items-gallery'", "router.get('/:id'", { label: 'receipt gallery route' });
+    const galleryFields = sliceBetweenOrThrow(route, 'const RECEIPT_GALLERY_FIELDS =', ';', { label: 'receipt gallery projection' });
     for (const field of [
       'receiptId', 'photoUrl', 'originalPhotoUrl', 'totalQty', 'destination',
       'routingVersion', 'routing', 'price', 'qtyPerPackage', 'status', 'createdBy',
-    ]) expect(gallery).toContain(field);
+    ]) expect(galleryFields).toContain(field);
+    expect(gallery).toContain('ReceiptItem.find(query, RECEIPT_GALLERY_FIELDS)');
     expect(gallery).toContain('receiptType');
     expect(gallery).toContain('receiptTargetDeliveryGroupId');
   });

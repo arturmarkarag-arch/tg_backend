@@ -66,6 +66,6 @@ describe('V48.S3.1 supplement metadata authority contracts', () => {
   it('withdraws supplement only when the corrected route loses supplement', () => {
     const correction = read('services/receiptRoutingCorrectionCommand.js');
     expect(correction).toContain('livePrevious.supplement && !normalizedNext.supplement');
-    expect(correction).toContain('if (normalizedNext.supplement)');
+    expect(correction).toContain('if (item.routing.supplement)');
   });
 });

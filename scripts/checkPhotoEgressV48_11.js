@@ -48,10 +48,11 @@ must(/\/interactions/.test(gemini)
 must(/steps/.test(gemini) && /model_output/.test(gemini) && /step\.content/.test(gemini),
   'Interactions response text is parsed from model_output steps');
 
-const proxyHasFetch = /router\.get\('\/proxy-image'[\s\S]*axios\.get\(url, \{ responseType: 'arraybuffer'/.test(products);
-const proxyHasSend = /router\.get\('\/proxy-image'[\s\S]*res\.send\(Buffer\.from\(upstream\.data\)\)/.test(products);
-must(proxyHasFetch && proxyHasSend,
-  '/products/proxy-image remains an explicit R2→Render→browser byte proxy for canvas/CORS');
+const proxyUsesSafeFetch = products.includes("const { fetchAllowedImage } = require('../utils/safeImageProxy');")
+  && /router\.get\('\/proxy-image'[\s\S]*fetchAllowedImage\(url\)/.test(products);
+const proxySendsValidatedBody = /router\.get\('\/proxy-image'[\s\S]*res\.send\(body\)/.test(products);
+must(proxyUsesSafeFetch && proxySendsValidatedBody,
+  '/products/proxy-image remains an explicit SSRF-safe server proxy for canvas/CORS');
 
 must(/const embeddingInFlight = new Map\(\)/.test(productEmbedding)
   && /embeddingInFlight\.get\(key\)/.test(productEmbedding)

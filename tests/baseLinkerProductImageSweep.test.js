@@ -3,6 +3,7 @@
 const fs = require('fs');
 const path = require('path');
 const { orderFromTrackedDoc } = require('../services/baseLinkerProductImageSweep');
+const { indexOrThrow } = require('./helpers/sourceContract');
 
 describe('BaseLinker tracked product image sweep', () => {
   it('rebuilds the documented product identity from a durable tracked order', () => {
@@ -60,7 +61,7 @@ describe('BaseLinker tracked product image sweep', () => {
     expect(sweep).toContain('maxRequests: Math.min(5');
     expect(sweep).toContain('AppSetting.findOneAndUpdate');
     expect(scheduler).toContain('await sweepTrackedProductImages(accountId)');
-    expect(scheduler.indexOf('await sweepTrackedProductImages(accountId)'))
-      .toBeGreaterThan(scheduler.indexOf('runAsSchedulerLeader('));
+    expect(indexOrThrow(scheduler, 'await sweepTrackedProductImages(accountId)'))
+      .toBeGreaterThan(indexOrThrow(scheduler, 'runAsSchedulerLeader('));
   });
 });

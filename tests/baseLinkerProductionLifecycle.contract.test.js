@@ -13,7 +13,7 @@ describe('BaseLinker production lifecycle contract', () => {
     const release = sliceBetweenOrThrow(
       picking,
       'async function releasePickingOrder',
-      'async function markPickingOrderPacked',
+      'async function assertBaseLinkerPrintAllowedCached',
       { label: 'releasePickingOrder' },
     );
     expect(release).not.toContain('verifyTrackedPickingOrderUpstream');

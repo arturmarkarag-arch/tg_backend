@@ -19,7 +19,9 @@ describe('BaseLinker minimal Intake index contract', () => {
     expect(model).not.toContain('upstreamDisposition:');
     expect(model).not.toContain('dateInStatus:');
     expect(model).not.toMatch(/\border\s*:/);
-    for (const forbidden of ['products:', 'customer', 'delivery_address', 'email:', 'phone:']) expect(model).not.toContain(forbidden);
+    for (const forbiddenField of ['products', 'customer', 'delivery_address', 'email', 'phone']) {
+      expect(model).not.toMatch(new RegExp(`\\b${forbiddenField}\\s*:`));
+    }
   });
 
   it('scans only the configured Intake status using status_id + id_from pagination', () => {

@@ -57,10 +57,10 @@ describe('Commerce publication Stage 3D.4.1 contract', () => {
   test('publication preview exposes durable content update state', () => {
     const preview = read('services/commerce/providers/allegro.js');
     expect(preview).toContain('contentUpdate:');
-    expect(preview).toContain('canRetry: listing.providerData.allegro.contentUpdate.canRetry === true');
+    expect(preview).toContain('canRetry: state.contentUpdate.canRetry === true');
   });
 
-  test('integration registry marks content update live while price stock remain planned', () => {
+  test('integration registry keeps content, price and stock writes as separate live operations', () => {
     const registry = read('services/commerce/providers/allegro.js');
     expect(registry).toContain("id: 'offers.update'");
     expect(registry).toContain('safe contentPatch');

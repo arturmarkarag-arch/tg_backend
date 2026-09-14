@@ -55,7 +55,7 @@ describe('exact ordering-session isolation', () => {
 
     const picking = read('routes/picking.js');
     expect(picking).toContain('orderingSessionId: String(currentSessionId)');
-    expect(picking).toContain('orderingSessionId: currentSessionId ? String(currentSessionId) : null');
+    expect(picking).toContain('orderingSessionId: sessionId ? String(sessionId) : null');
   });
 
   it('current-session shop status does not project session-less cartState as work', () => {

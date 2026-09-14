@@ -56,7 +56,7 @@ describe('V48.7 receipt cross-lifecycle guards', () => {
     const remainderStart = indexOrThrow(receipts, "router.post('/:id/items/:itemId/add-warehouse-remainder'", { from: correctionStart });
     const correctionRoute = sliceIndexesOrThrow(receipts, correctionStart, remainderStart, { label: 'confirmed routing-correction route' });
     expect(correctionRoute).toContain('correctReceiptItemRouting');
-    expect(correctionRoute).toContain("reason: 'routing_corrected'");
+    expect(correctionRoute).toContain("reason: String(body.reason || 'routing_corrected')");
 
     const confirmStart = indexOrThrow(receipts, "router.post('/:id/items/:itemId/confirm'", { from: remainderStart });
     const remainderRoute = sliceIndexesOrThrow(receipts, remainderStart, confirmStart, { label: 'warehouse remainder route' });

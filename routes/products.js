@@ -533,6 +533,7 @@ router.get('/catalog', registeredOnly, asyncHandler(async (req, res) => {
       id: product._id,
       title: getProductTitle(product),
       name: product.name || '',
+      status: product.status || '',
       price: product.price,
       quantityPerPackage: product.quantityPerPackage || 0,
       barcode: product.barcode || '',

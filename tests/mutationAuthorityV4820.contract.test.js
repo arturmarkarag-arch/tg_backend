@@ -54,7 +54,7 @@ describe('V48.20 Mutation Authority contract', () => {
 
     expect(command).toContain('if (!result.assignmentChanged && !result.orderChanged) return result');
     expect(command).toContain("emit('shop_status_changed', { groupId })");
-    expect(command).toContain("io.emit('delivery_groups_updated')");
+    expect(command).toContain("io.to('app_users').emit('delivery_groups_updated')");
     expect(command).toContain('result.orderChanged && result.sellerTelegramId');
     expect(migration).toContain('assignmentChanged: oldShopId !== newShopId');
     expect(migration).toContain('prevGroupId = oldShopFull?.deliveryGroupId');
@@ -112,7 +112,7 @@ describe('V48.20 Mutation Authority contract', () => {
     expect(command).toContain('OrderingSession.findOne(');
     expect(command).toContain('getOpenDateWarsaw');
     expect(command).not.toContain('getOrCreateSessionId');
-    expect(command).toContain("io.emit('delivery_groups_updated')");
+    expect(command).toContain("io.to('app_users').emit('delivery_groups_updated')");
   });
 
   it('Product -> Block membership writes live only in canonical membership modules', () => {

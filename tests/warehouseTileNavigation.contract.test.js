@@ -7,9 +7,11 @@ const receipts = read('routes/receipts.js');
 
 describe('warehouse tile navigation server contract', () => {
   test('block and incoming reads expose photos plus the receiving-link identity', () => {
-    expect(blocks).toContain("const BLOCK_PRODUCT_FIELDS = 'imageUrls localImageUrl originalImageUrl receiptItemId'");
+    expect(blocks).toContain("const BLOCK_PRODUCT_FIELDS = 'imageUrls localImageUrl receiptItemId'");
     expect(blocks).toContain('.select(BLOCK_PRODUCT_FIELDS)');
     expect(blocks).toContain('attachReceiptItemLinks');
+    expect(blocks).toContain('thumbnailUrl: toShelfThumbnailUrl(sourceImage)');
+    expect(blocks).not.toContain("const BLOCK_PRODUCT_FIELDS = 'imageUrls localImageUrl originalImageUrl receiptItemId'");
     expect(blocks).not.toContain("const BLOCK_PRODUCT_FIELDS = 'name");
   });
 

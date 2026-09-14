@@ -7,10 +7,12 @@ const { indexOrThrow, sliceBetweenOrThrow } = require('./helpers/sourceContract'
 describe('receipt photo gallery contract', () => {
   test('gallery is read-only, projects the fields used by inline preparation, and is newest-first', () => {
     const gallery = sliceBetweenOrThrow(source, "router.get('/items-gallery'", "router.get('/:id'", { label: 'receipt gallery route' });
+    const galleryFields = sliceBetweenOrThrow(source, 'const RECEIPT_GALLERY_FIELDS =', ';', { label: 'receipt gallery projection' });
     for (const field of [
       'receiptId', 'photoUrl', 'originalPhotoUrl', 'totalQty', 'routingVersion',
       'routing', 'price', 'qtyPerPackage', 'status', 'createdBy',
-    ]) expect(gallery).toContain(field);
+    ]) expect(galleryFields).toContain(field);
+    expect(gallery).toContain('ReceiptItem.find(query, RECEIPT_GALLERY_FIELDS)');
     expect(gallery).toContain(".sort({ createdAt: -1, _id: -1 })");
   });
 

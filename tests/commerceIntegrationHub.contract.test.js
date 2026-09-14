@@ -27,7 +27,7 @@ describe('Commerce Hub integration registry', () => {
   it('exposes operational marketplace namespaces to the dedicated commerce worker role only', () => {
     const app = read('app.js');
     expect(app).toContain("req.telegramUser?.role !== 'baselinker'");
-    expect(app).toMatch(/api\\\/(?:baselinker\|allegro\|commerce)/);
+    expect(app).toContain("if (/^\\/api\\/(?:baselinker|allegro|commerce)(?:\\/|$)/.test(req.path)) return next();");
     expect(app).toContain("allowed: ['admin', 'baselinker']");
   });
 });

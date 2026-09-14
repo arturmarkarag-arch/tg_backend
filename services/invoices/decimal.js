@@ -59,10 +59,15 @@ function normalizeMoney(value, { allowNegative = false, field = 'money' } = {}) 
   return scaledIntToDecimal(scaled, 2);
 }
 
-function normalizeQuantity(value, { field = 'quantity' } = {}) {
-  const parsed = parseDecimal(value, { maxScale: 6, allowNegative: false, field });
+function normalizeQuantity(value, { field = 'quantity', allowNegative = false } = {}) {
+  const parsed = parseDecimal(value, { maxScale: 6, allowNegative, field });
   if (!parsed) return '';
-  if (decimalToScaledInt(parsed.normalized, 6, { field }) <= 0n) throw new TypeError(`${field} must be greater than zero`);
+  const scaled = decimalToScaledInt(parsed.normalized, 6, { allowNegative, field });
+  if (allowNegative) {
+    if (scaled === 0n) throw new TypeError(`${field} must not be zero`);
+  } else if (scaled <= 0n) {
+    throw new TypeError(`${field} must be greater than zero`);
+  }
   return parsed.normalized;
 }
 

@@ -66,20 +66,30 @@ async function updateInvoiceDraft(invoiceId, patch = {}, actor = {}) {
   if (invoice.status !== INVOICE_STATUSES.DRAFT) throw appError('invoice_finalized_immutable');
 
   const current = invoice.toObject();
+  const correctionLocked = current.type === 'correction' && current.references?.correction;
+  const requestedReferences = patch.references ?? current.references;
+  const references = correctionLocked
+    ? { ...(requestedReferences || {}), correction: current.references.correction }
+    : requestedReferences;
   const merged = {
     ...current,
     ...patch,
+    type: correctionLocked ? current.type : (patch.type ?? current.type),
     source: current.source,
     // Seller identity belongs to the LegalEntity snapshot chosen at creation.
     // A generic draft patch cannot silently swap the issuer. A dedicated future
     // command may rebuild the draft from another LegalEntity before finalization.
     seller: current.seller,
     items: patch.items ?? current.items,
-    buyer: patch.buyer ?? current.buyer,
-    recipient: Object.prototype.hasOwnProperty.call(patch, 'recipient') ? patch.recipient : current.recipient,
+    // Stage 8 common KOR is financial/item-only. Party identity corrections need
+    // Podmiot1K/Podmiot2K provider semantics and cannot leak through generic PATCH.
+    buyer: correctionLocked ? current.buyer : (patch.buyer ?? current.buyer),
+    recipient: correctionLocked
+      ? current.recipient
+      : (Object.prototype.hasOwnProperty.call(patch, 'recipient') ? patch.recipient : current.recipient),
     totals: patch.totals ?? current.totals,
     payment: patch.payment ?? current.payment,
-    references: patch.references ?? current.references,
+    references,
   };
   const normalized = normalizeInvoiceDraft(merged);
   applyCanonicalDraft(invoice, normalized);

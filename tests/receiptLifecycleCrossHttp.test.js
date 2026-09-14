@@ -265,7 +265,7 @@ describe('receipt lifecycle HTTP cross guards', () => {
     expect(mirror.quantityPerPackage).toBe(24);
   });
 
-  it('non-owner may prepare shared commercial fields but cannot route or unconfirm the item', async () => {
+  it('receipt work is team-owned: other warehouse staff may edit/unconfirm, while confirmed routing stays lifecycle-locked', async () => {
     const { receipt, item } = await seedConfirmed();
 
     const sharedEdit = await workerPatch(`/api/receipts/${receipt._id}/items/${item._id}`).field('price', '2.5');
@@ -274,12 +274,12 @@ describe('receipt lifecycle HTTP cross guards', () => {
     const route = await workerPatch(`/api/receipts/${receipt._id}/items/${item._id}/routing`).send({
       warehouse: true, mandatory: false, supplement: false,
     });
-    expect(route.status).toBe(403);
-    expect(route.body.error).toBe('receipt_item_forbidden_edit');
+    expect(route.status).toBe(409);
+    expect(route.body.error).toBe('receipt_route_locked');
 
     const rollback = await workerPost(`/api/receipts/${receipt._id}/items/${item._id}/unconfirm`);
-    expect(rollback.status).toBe(403);
-    expect(rollback.body.error).toBe('receipt_item_forbidden_confirm');
+    expect(rollback.status).toBe(200);
+    expect((await ReceiptItem.findById(item._id).lean()).status).toBe('draft');
   });
 
   it('blocks destructive rollback but keeps commercial metadata editable after deferred publication', async () => {

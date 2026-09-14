@@ -218,7 +218,7 @@ describe('user directory HTTP contracts', () => {
   });
 
   it('delegates assignments to the canonical command and returns a narrow user response', async () => {
-    const response = await request(app).patch('/api/users/late/shop').send({ shopId: String(shopB) }).set(auth()).expect(200);
+    const response = await request(app).patch('/api/users/late/shop').send({ shopId: String(shopB) }).set(auth()).set('x-csrf-protection', '1').expect(200);
     expect(assign).toHaveBeenCalledWith(expect.objectContaining({ telegramId: 'late', shopId: String(shopB) }));
     expect(response.body.shopId).toBe(String(shopB));
     expect(response.body.shopName).toBe('Магазин Б');
@@ -229,7 +229,7 @@ describe('user directory HTTP contracts', () => {
     const write = vi.spyOn(User, 'updateOne');
     const history = await request(app).get('/api/users/late/cleared-carts').set(auth()).expect(200);
     expect(history.body[0]).toMatchObject({ restorable: false, itemCount: 1 });
-    const result = await request(app).post(`/api/users/late/cleared-carts/${oid(9000)}/restore`).set(auth()).send({ mode: 'replace' }).expect(409);
+    const result = await request(app).post(`/api/users/late/cleared-carts/${oid(9000)}/restore`).set(auth()).set('x-csrf-protection', '1').send({ mode: 'replace' }).expect(409);
     expect(result.body.error).toBe('cleared_cart_legacy_unrestorable');
     expect(write).not.toHaveBeenCalled();
     expect(rows.ClearedCart[0].restoredAt).toBeUndefined();

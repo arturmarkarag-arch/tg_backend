@@ -47,7 +47,9 @@ describe('picking upcoming-session readiness contract', () => {
     expect(groups).toContain('nextOrderingOpenAt: presentations[index]?.nextOrderingOpenAt');
     expect(picking).toContain("if (presentationMode === 'upcoming_preflight')");
     expect(picking).toContain('upcomingPreflight: true');
-    expect(picking).toContain('presentationMode, nextOrderingOpenAt, windowOpen, windowCloseAt, windowMessage');
+    expect(picking).toContain('const baseEnvelope = {');
+    expect(picking).toContain('presentationMode,');
+    expect(picking).toContain('nextOrderingOpenAt: nextOrderingOpenAt.toISOString()');
   });
 
   it('checks readiness before any session-creating or lock-mutating operation', () => {

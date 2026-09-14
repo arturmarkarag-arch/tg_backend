@@ -2,14 +2,11 @@
 
 const fs = require('fs');
 const path = require('path');
+const { sliceBetweenOrThrow } = require('./helpers/sourceContract');
 
 const root = path.join(__dirname, '..');
 const read = (rel) => fs.readFileSync(path.join(root, rel), 'utf8');
-const between = (source, start, end) => {
-  const a = source.indexOf(start);
-  const b = source.indexOf(end, a + start.length);
-  return a >= 0 && b >= 0 ? source.slice(a, b) : '';
-};
+const between = (source, start, end) => sliceBetweenOrThrow(source, start, end, { label: `${start} -> ${end}` });
 
 describe('2026-09-10 Sentry production regression contract', () => {
   it('keeps DeliveryGroup available on the who-ordered cache-miss path', () => {

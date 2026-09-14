@@ -40,6 +40,9 @@ function createFiscalProviderAdapter(definition = {}) {
     if (capabilities[CAPABILITIES.UPO] && typeof definition.getUpo !== 'function') {
       throw new TypeError(`Fiscal provider ${id} with UPO capability must implement getUpo()`);
     }
+    if (capabilities[CAPABILITIES.RECEIVE] && typeof definition.receive !== 'function') {
+      throw new TypeError(`Fiscal provider ${id} with RECEIVE capability must implement receive()`);
+    }
   }
 
   return Object.freeze({
@@ -56,6 +59,7 @@ function createFiscalProviderAdapter(definition = {}) {
     reconcile: definition.reconcile || null,
     prepareOffline: definition.prepareOffline || null,
     getUpo: definition.getUpo || null,
+    receive: definition.receive || null,
     metadata: Object.freeze({ ...(definition.metadata || {}) }),
   });
 }

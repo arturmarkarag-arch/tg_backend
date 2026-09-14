@@ -1,0 +1,45 @@
+'use strict';
+const fs = require('fs');
+const path = require('path');
+const ROOT = path.resolve(__dirname, '..');
+const read = (rel) => fs.readFileSync(path.join(ROOT, rel), 'utf8');
+const exists = (rel) => fs.existsSync(path.join(ROOT, rel));
+const checks = [];
+function check(name, fn) { try { if (!fn()) throw new Error('condition false'); checks.push([name, true]); } catch (e) { checks.push([name, false, e.message]); } }
+
+check('Invoice Core already models correction as separate invoice type', () => /CORRECTION:\s*'correction'/.test(read('services/invoices/contract.js')));
+check('correction numbering uses dedicated correctionSeries', () => /invoiceType === 'correction' \? numbering\.correctionSeries/.test(read('services/invoices/invoiceNumbering.js')));
+check('provider-neutral correction service exists', () => exists('services/invoices/corrections.js'));
+check('business correction requires finalized immutable original', () => /INVOICE_STATUSES\.FINALIZED/.test(read('services/invoices/corrections.js')) && /InvoiceSnapshot\.findById/.test(read('services/invoices/corrections.js')));
+check('business correction requires accepted original fiscal reference', () => /state: 'accepted'/.test(read('services/invoices/corrections.js')) && /providerData\.ksefNumber/.test(read('services/invoices/corrections.js')));
+check('correction reference stays provider-neutral in Invoice snapshot', () => /originalFiscalProvider/.test(read('services/invoices/corrections.js')) && /originalFiscalReference/.test(read('services/invoices/corrections.js')));
+check('common KOR explicitly uses delta line mode', () => /lineMode: 'delta'/.test(read('services/invoices/corrections.js')));
+check('generic correction PATCH cannot swap original correction reference', () => /correctionLocked/.test(read('services/invoices/invoiceService.js')) && /correction: current\.references\.correction/.test(read('services/invoices/invoiceService.js')));
+check('generic correction PATCH cannot swap buyer identity', () => /buyer: correctionLocked \? current\.buyer/.test(read('services/invoices/invoiceService.js')));
+check('signed delta quantity is allowed only for correction drafts', () => /allowNegativeQuantity: type === INVOICE_TYPES\.CORRECTION/.test(read('services/invoices/contract.js')) && /allowNegative = false/.test(read('services/invoices/decimal.js')) && /scaled === 0n/.test(read('services/invoices/decimal.js')));
+check('finalization validates correction origin and reason/type', () => /correction_original_fiscal_reference_required/.test(read('services/invoices/contract.js')) && /correction_reason_required/.test(read('services/invoices/contract.js')) && /correction_type_invalid/.test(read('services/invoices/contract.js')));
+check('FA3 adapter supports VAT and KOR without changing core type names', () => /const invoiceKind = correctionRef \? 'KOR' : 'VAT'/.test(read('services/invoices/ksef/fa3.js')));
+check('FA3 KOR maps reason and correction type', () => /<PrzyczynaKorekty>/.test(read('services/invoices/ksef/fa3.js')) && /<TypKorekty>/.test(read('services/invoices/ksef/fa3.js')));
+check('FA3 KOR references original issue date number and KSeF number using FA(3) marker+value pair', () => /DataWystFaKorygowanej/.test(read('services/invoices/ksef/fa3.js')) && /NrFaKorygowanej/.test(read('services/invoices/ksef/fa3.js')) && /<NrKSeF>1<\/NrKSeF><NrKSeFFaKorygowanej>/.test(read('services/invoices/ksef/fa3.js')));
+check('real KOR XSD/WASM smoke is wired into Stage 8 test command', () => exists('tests/invoiceKsefStage8.xsd.js') && /validateFa3Xml\(xml\)/.test(read('tests/invoiceKsefStage8.xsd.js')) && /TypKorekty>99/.test(read('tests/invoiceKsefStage8.xsd.js')) && JSON.parse(read('package.json')).scripts?.['test:invoice:stage8']?.includes('invoiceKsefStage8.xsd.js'));
+check('technical correction has separate durable model', () => exists('models/KsefTechnicalCorrection.js'));
+check('one technical correction per rejected original submission is DB-enforced', () => /originalSubmissionId: 1 \}, \{ unique: true \}/.test(read('models/KsefTechnicalCorrection.js')));
+check('technical correction stores original and corrected hashes separately', () => /originalHashBase64/.test(read('models/KsefTechnicalCorrection.js')) && /correctedArtifact/.test(read('models/KsefTechnicalCorrection.js')));
+check('technical correction is offline-only and rejected-only', () => /original\.mode !== 'offline24'/.test(read('services/invoices/ksef/technicalCorrections.js')) && /original\.state !== 'rejected'/.test(read('services/invoices/ksef/technicalCorrections.js')));
+check('technical correction refuses unchanged XML artifact hash', () => /ksef_technical_correction_artifact_unchanged/.test(read('services/invoices/ksef/technicalCorrections.js')));
+check('technical correction send sets offlineMode and hashOfCorrectedInvoice', () => /offlineMode: true/.test(read('services/invoices/ksef/technicalCorrections.js')) && /hashOfCorrectedInvoice: row\.originalHashBase64/.test(read('services/invoices/ksef/technicalCorrections.js')));
+check('online transport conditionally supports hashOfCorrectedInvoice', () => /hashOfCorrectedInvoice/.test(read('services/invoices/ksef/online.js')));
+check('ambiguous technical send never blindly replays POST', () => /pd\.invoiceReferenceNumber \|\| pd\.sessionReferenceNumber/.test(read('services/invoices/ksef/technicalCorrections.js')) && /reconcileTechnicalCorrectionRow\(row\)/.test(read('services/invoices/ksef/technicalCorrections.js')));
+check('ambiguous recovery matches corrected artifact hash in existing session', () => /selectInvoiceHashMatches/.test(read('services/invoices/ksef/technicalCorrections.js')) && /correctedArtifact\?\.hashBase64/.test(read('services/invoices/ksef/technicalCorrections.js')));
+check('technical correction terminal no-match goes manual review', () => /isTerminalSessionStatus/.test(read('services/invoices/ksef/technicalCorrections.js')) && /state = 'manual_review'/.test(read('services/invoices/ksef/technicalCorrections.js')));
+check('technical correction UPO is byte-hash verified', () => /getInvoiceUpo/.test(read('services/invoices/ksef/technicalCorrections.js')) && /providerHashBase64/.test(read('services/invoices/ksef/technicalCorrections.js')) && /sha256/.test(read('services/invoices/ksef/technicalCorrections.js')));
+check('technical correction content is hidden from routine API', () => /delete value\.correctedArtifact\.content/.test(read('services/invoices/ksef/technicalCorrections.js')) && /delete value\.receipt\.contentBase64/.test(read('services/invoices/ksef/technicalCorrections.js')));
+check('business correction creation route exists behind admin-only invoice router', () => /router\.use\(adminOnly\)/.test(read('routes/invoices.js')) && /\/:id\/corrections/.test(read('routes/invoices.js')));
+check('technical correction prepare submit reconcile and UPO routes exist', () => /technical-correction\/prepare/.test(read('routes/invoices.js')) && /technical-corrections\/:correctionId\/submit/.test(read('routes/invoices.js')) && /technical-corrections\/:correctionId\/reconcile/.test(read('routes/invoices.js')) && /technical-corrections\/:correctionId\/upo/.test(read('routes/invoices.js')));
+check('critical startup sync includes technical correction model', () => /invoice_ksef_corrections/.test(read('index.js')) && /KsefTechnicalCorrection/.test(read('index.js')));
+check('Stage 8 does not mutate warehouse Product Receipt or Order models', () => !/models\/(?:Product|Receipt|ReceiptItem|Order)/.test(read('services/invoices/corrections.js')) && !/models\/(?:Product|Receipt|ReceiptItem|Order)/.test(read('services/invoices/ksef/technicalCorrections.js')));
+
+for (const [name, ok, detail] of checks) console.log(`${ok ? 'PASS' : 'FAIL'} ${name}${detail ? `: ${detail}` : ''}`);
+const failed = checks.filter((x) => !x[1]);
+if (failed.length) process.exit(1);
+console.log(`Invoice KSeF Stage 8 static contract passed: ${checks.length}/${checks.length}`);

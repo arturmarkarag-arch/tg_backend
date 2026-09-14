@@ -125,7 +125,7 @@ describe('receipt routing v38 contract', () => {
 
   test('automatic ordinary-window freeze remains legacy-only; modern Wave freezes explicitly', () => {
     expect(supplement).toContain('freezeOffersForActiveOrderingWindows');
-    expect(supplement).toContain("status: 'open', waveId: null");
+    expect(supplement).toContain('status: ITEM_STATUS.OPEN, waveId: null');
     expect(supplementScheduler).toContain('freezeOffersForActiveOrderingWindows(now)');
     expect(supplementRoute).toContain("router.post('/waves/:waveId/freeze'");
     expect(supplementRoute).toContain('freezeWave(req.params.waveId');

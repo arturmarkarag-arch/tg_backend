@@ -116,7 +116,7 @@ function run() {
   assert.equal(paymentMethodCode('card'), '2');
 
   // Stage 3 fails closed instead of guessing unsupported legal/tax scenarios.
-  assert.ok(providerBlockers({ ...snapshot, type: 'correction' }).includes('ksef_stage3_correction_not_supported'));
+  assert.ok(providerBlockers({ ...snapshot, type: 'credit_note' }).includes('ksef_invoice_type_not_supported'));
   assert.ok(providerBlockers({ ...snapshot, currency: 'EUR' }).includes('ksef_stage3_currency_not_supported'));
   assert.ok(providerBlockers({ ...snapshot, buyer: { ...snapshot.buyer, taxId: '1234567890' } }).includes('ksef_stage3_buyer_nip_invalid'));
   const unsupportedVat = sampleSnapshot({ items: [{ ...snapshot.items[0], vat: { code: '0', rate: '0' } }] });

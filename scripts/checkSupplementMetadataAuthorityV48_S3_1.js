@@ -50,11 +50,10 @@ check('ShopProduct shared edits write through canonical receipt command', () => 
   yes(shopProducts.includes('syncReceiptItemCommercialMetadataFromProduct'), 'linked mirror path missing command');
   yes(shopProducts.includes('syncReceiptItemCommercialMetadataFromShopProduct'), 'shop-owned path missing command');
 });
-check('receipt-derived price correction has the same active-order side effect from every UI', () => {
-  yes(sync.includes("require('../utils/repriceActiveOrders')"), 'receipt propagation must own repricing');
-  yes(sync.includes('await repriceActiveOrders(product._id, Number(item.price), { session })'), 'transactional active-order repricing missing');
-  yes(products.includes('&& !receiptCommercialChanged'), 'Product route must not double-reprice receipt-derived edits');
-  yes(shopProducts.includes('&& !receiptCommercialChanged'), 'ShopProduct route must not double-reprice receipt-derived edits');
+check('receipt-derived price correction preserves existing Order line price snapshots from every UI', () => {
+  yes(!sync.includes('repriceActiveOrders'), 'Receipt propagation must never reprice existing Orders');
+  yes(products.includes('&& !receiptCommercialChanged'), 'Product route must skip repricing for receipt-derived edits');
+  yes(shopProducts.includes('&& !receiptCommercialChanged'), 'ShopProduct route must skip repricing for receipt-derived edits');
 });
 check('commercial command never owns routing or request cancellation', () => {
   no(command.includes('CorrectReceiptItemRouting'), 'commercial command must not route');

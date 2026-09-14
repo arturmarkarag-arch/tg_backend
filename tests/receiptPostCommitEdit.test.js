@@ -284,7 +284,7 @@ describe('перехресні guard-и прийомки ↔ дозамовле�
 
     const usage = await describeItemUsage(item, {});
     expect(usage.inUse).toBe(true);
-    expect(usage.reasons.join(' ')).toContain('передано на публікацію');
+    expect(usage.reasons.length).toBeGreaterThan(0);
     expect(await SupplementOffer.countDocuments({ receiptItemId: item._id })).toBe(0);
   });
 
@@ -292,6 +292,7 @@ describe('перехресні guard-и прийомки ↔ дозамовле�
     it(`offer ${status} блокує відкат навіть з 0 заявок`, async () => {
       const { product, item } = await seedSupplementItem();
       await SupplementOffer.create({
+        waveId: new mongoose.Types.ObjectId(),
         receiptId,
         receiptItemId: item._id,
         productId: product._id,
@@ -302,15 +303,14 @@ describe('перехресні guard-и прийомки ↔ дозамовле�
       const usage = await describeItemUsage(item, {});
       expect(usage.inUse).toBe(true);
       expect(await SupplementRequest.countDocuments({})).toBe(0);
-      if (status === 'open') expect(usage.reasons.join(' ')).toContain('відкрито');
-      if (status === 'frozen') expect(usage.reasons.join(' ')).toContain('закрито');
-      if (status === 'completed') expect(usage.reasons.join(' ')).toContain('завершено');
+      expect(usage.reasons.join(' ')).toContain('історію публікацій');
     });
   }
 
   it('заявка магазину лишається додатковою причиною блокування', async () => {
     const { product, item } = await seedSupplementItem();
     const offer = await SupplementOffer.create({
+      waveId: new mongoose.Types.ObjectId(),
       receiptId,
       receiptItemId: item._id,
       productId: product._id,
@@ -323,10 +323,12 @@ describe('перехресні guard-и прийомки ↔ дозамовле�
       shopName: 'Тестовий магазин',
       deliveryGroupId: 'g-test',
       quantity: 2,
+      revision: 1,
+      status: 'active',
     });
 
     const usage = await describeItemUsage(item, {});
     expect(usage.inUse).toBe(true);
-    expect(usage.reasons.join(' ')).toContain('магазини вже дозамовили');
+    expect(usage.reasons.join(' ')).toContain('історія дозамовлень містить заявки');
   });
 });

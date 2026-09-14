@@ -2,7 +2,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { sliceBetweenOrThrow } = require('./helpers/sourceContract');
+const { indexOrThrow, sliceBetweenOrThrow } = require('./helpers/sourceContract');
 
 const root = path.resolve(__dirname, '..');
 const read = (rel) => fs.readFileSync(path.join(root, rel), 'utf8');
@@ -31,7 +31,7 @@ describe('receipt DELETE lifecycle 2026-09-12', () => {
     expect(sync).toContain("product.status === 'archived'");
     expect(sync).toContain("allowedState: reasons.length ? null : 'archived'");
     expect(sync).toContain("reasons: ['товар уже має маршрут і переданий у роботу']");
-    expect(sync.indexOf('if (archivedProduct)')).toBeLessThan(sync.indexOf('if (!hasRoute)'));
+    expect(indexOrThrow(sync, 'if (archivedProduct)')).toBeLessThan(indexOrThrow(sync, 'if (!hasRoute)'));
   });
 
   it('fails closed if an archived product still has active physical or operational work', () => {

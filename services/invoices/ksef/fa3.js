@@ -20,7 +20,7 @@ function normalizeRate(item) {
 }
 function providerBlockers(snapshot = {}) {
   const blockers = [];
-  if (snapshot.type !== 'invoice') blockers.push('ksef_stage3_correction_not_supported');
+  if (!['invoice', 'correction'].includes(snapshot.type)) blockers.push('ksef_invoice_type_not_supported');
   if (snapshot.currency !== 'PLN') blockers.push('ksef_stage3_currency_not_supported');
   if (!snapshot.invoiceNumber) blockers.push('invoice_number_required');
   if (!snapshot.issueDate) blockers.push('issue_date_required');
@@ -33,6 +33,13 @@ function providerBlockers(snapshot = {}) {
   if (snapshot.buyer?.taxId && String(snapshot.buyer?.address?.countryCode || 'PL').toUpperCase() === 'PL'
       && (String(snapshot.buyer?.taxIdType || '').toLowerCase() !== 'nip' || !isValidPolishNip(snapshot.buyer.taxId))) {
     blockers.push('ksef_stage3_buyer_nip_invalid');
+  }
+  if (snapshot.type === 'correction') {
+    const ref = snapshot.references?.correction;
+    if (!ref?.originalInvoiceNumber || !ref?.originalIssueDate || !ref?.originalFiscalReference) blockers.push('ksef_correction_original_reference_required');
+    if (!String(ref?.reason || '').trim()) blockers.push('ksef_correction_reason_required');
+    if (!['1', '2', '3'].includes(String(ref?.correctionType || ''))) blockers.push('ksef_correction_type_invalid');
+    if (String(ref?.lineMode || '') !== 'delta') blockers.push('ksef_correction_line_mode_not_supported');
   }
   for (const [i, item] of (snapshot.items || []).entries()) {
     if (!SUPPORTED_RATES.has(normalizeRate(item))) blockers.push(`ksef_item_${i}_vat_rate_not_supported`);
@@ -107,11 +114,16 @@ function generateFa3Xml(snapshot = {}, { systemInfo = 'Zlotoweczka ERP', generat
   } else {
     payment = `<Platnosc>${snapshot.payment?.dueDate ? `<TerminPlatnosci><Termin>${xml(snapshot.payment.dueDate)}</Termin></TerminPlatnosci>` : ''}<FormaPlatnosci>${paymentCode}</FormaPlatnosci>${paymentCode === '6' && snapshot.payment?.bankAccount ? `<RachunekBankowy><NrRB>${xml(snapshot.payment.bankAccount)}</NrRB></RachunekBankowy>` : ''}</Platnosc>`;
   }
-  const orderRef = snapshot.source?.externalNumber ? `<WarunkiTransakcji><Zamowienia><NrZamowienia>${xml(snapshot.source.externalNumber)}</NrZamowienia></Zamowienia></WarunkiTransakcji>` : '';
+  const orderRef = snapshot.type === 'invoice' && snapshot.source?.externalNumber ? `<WarunkiTransakcji><Zamowienia><NrZamowienia>${xml(snapshot.source.externalNumber)}</NrZamowienia></Zamowienia></WarunkiTransakcji>` : '';
   const footer = snapshot.notes ? `<Stopka><Informacje><StopkaFaktury>${xml(snapshot.notes)}</StopkaFaktury></Informacje></Stopka>` : '';
   const generatedAtValue = new Date(generatedAt || Date.now()).toISOString().replace(/\.\d{3}Z$/, 'Z');
+  const correctionRef = snapshot.type === 'correction' ? snapshot.references?.correction : null;
+  const correctionBlock = correctionRef
+    ? `<PrzyczynaKorekty>${xml(correctionRef.reason)}</PrzyczynaKorekty><TypKorekty>${xml(correctionRef.correctionType)}</TypKorekty><DaneFaKorygowanej><DataWystFaKorygowanej>${xml(correctionRef.originalIssueDate)}</DataWystFaKorygowanej><NrFaKorygowanej>${xml(correctionRef.originalInvoiceNumber)}</NrFaKorygowanej><NrKSeF>1</NrKSeF><NrKSeFFaKorygowanej>${xml(correctionRef.originalFiscalReference)}</NrKSeFFaKorygowanej></DaneFaKorygowanej>`
+    : '';
+  const invoiceKind = correctionRef ? 'KOR' : 'VAT';
 
-  return `<?xml version="1.0" encoding="UTF-8"?><Faktura xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns="${FA3_NAMESPACE}"><Naglowek><KodFormularza kodSystemowy="${KSEF_SCHEMA.systemCode}" wersjaSchemy="${KSEF_SCHEMA.schemaVersion}">${KSEF_SCHEMA.value}</KodFormularza><WariantFormularza>3</WariantFormularza><DataWytworzeniaFa>${generatedAtValue}</DataWytworzeniaFa><SystemInfo>${xml(systemInfo)}</SystemInfo></Naglowek><Podmiot1><DaneIdentyfikacyjne><NIP>${xml(normalizeTaxId(snapshot.seller.taxId))}</NIP><Nazwa>${xml(snapshot.seller.name)}</Nazwa></DaneIdentyfikacyjne><Adres><KodKraju>PL</KodKraju><AdresL1>${xml(sellerAddress)}</AdresL1></Adres></Podmiot1><Podmiot2><DaneIdentyfikacyjne>${partyId(snapshot.buyer)}<Nazwa>${xml(snapshot.buyer.name)}</Nazwa></DaneIdentyfikacyjne><Adres><KodKraju>${xml(snapshot.buyer.address?.countryCode || 'PL')}</KodKraju><AdresL1>${xml(buyerAddress)}</AdresL1></Adres><JST>2</JST><GV>2</GV></Podmiot2><Fa><KodWaluty>PLN</KodWaluty><P_1>${xml(snapshot.issueDate)}</P_1><P_2>${xml(snapshot.invoiceNumber)}</P_2>${saleDate}${taxSummary.join('')}<P_15>${xml(snapshot.totals.gross)}</P_15><Adnotacje><P_16>2</P_16><P_17>2</P_17><P_18>2</P_18><P_18A>2</P_18A><Zwolnienie><P_19N>1</P_19N></Zwolnienie><NoweSrodkiTransportu><P_22N>1</P_22N></NoweSrodkiTransportu><P_23>2</P_23><PMarzy><P_PMarzyN>1</P_PMarzyN></PMarzy></Adnotacje><RodzajFaktury>VAT</RodzajFaktury>${rows}${payment}${orderRef}</Fa>${footer}</Faktura>`;
+  return `<?xml version="1.0" encoding="UTF-8"?><Faktura xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema" xmlns="${FA3_NAMESPACE}"><Naglowek><KodFormularza kodSystemowy="${KSEF_SCHEMA.systemCode}" wersjaSchemy="${KSEF_SCHEMA.schemaVersion}">${KSEF_SCHEMA.value}</KodFormularza><WariantFormularza>3</WariantFormularza><DataWytworzeniaFa>${generatedAtValue}</DataWytworzeniaFa><SystemInfo>${xml(systemInfo)}</SystemInfo></Naglowek><Podmiot1><DaneIdentyfikacyjne><NIP>${xml(normalizeTaxId(snapshot.seller.taxId))}</NIP><Nazwa>${xml(snapshot.seller.name)}</Nazwa></DaneIdentyfikacyjne><Adres><KodKraju>PL</KodKraju><AdresL1>${xml(sellerAddress)}</AdresL1></Adres></Podmiot1><Podmiot2><DaneIdentyfikacyjne>${partyId(snapshot.buyer)}<Nazwa>${xml(snapshot.buyer.name)}</Nazwa></DaneIdentyfikacyjne><Adres><KodKraju>${xml(snapshot.buyer.address?.countryCode || 'PL')}</KodKraju><AdresL1>${xml(buyerAddress)}</AdresL1></Adres><JST>2</JST><GV>2</GV></Podmiot2><Fa><KodWaluty>PLN</KodWaluty><P_1>${xml(snapshot.issueDate)}</P_1><P_2>${xml(snapshot.invoiceNumber)}</P_2>${saleDate}${taxSummary.join('')}<P_15>${xml(snapshot.totals.gross)}</P_15><Adnotacje><P_16>2</P_16><P_17>2</P_17><P_18>2</P_18><P_18A>2</P_18A><Zwolnienie><P_19N>1</P_19N></Zwolnienie><NoweSrodkiTransportu><P_22N>1</P_22N></NoweSrodkiTransportu><P_23>2</P_23><PMarzy><P_PMarzyN>1</P_PMarzyN></PMarzy></Adnotacje><RodzajFaktury>${invoiceKind}</RodzajFaktury>${correctionBlock}${rows}${payment}${orderRef}</Fa>${footer}</Faktura>`;
 }
 
 module.exports = { FA3_NAMESPACE, SUPPORTED_RATES, providerBlockers, generateFa3Xml, divideDecimal, paymentMethodCode };

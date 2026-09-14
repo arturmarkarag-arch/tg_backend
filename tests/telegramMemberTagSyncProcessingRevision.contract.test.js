@@ -2,6 +2,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const { sliceBetweenOrThrow } = require('./helpers/sourceContract');
 
 const source = fs.readFileSync(path.join(__dirname, '..', 'services', 'telegramMemberTagSync.js'), 'utf8');
 
@@ -12,9 +13,12 @@ describe('Telegram member-tag processing revision fence', () => {
   });
 
   it('does not persist processingRevision with a redundant updateOne before per-row isolation', () => {
-    const drainStart = source.indexOf('async function drainDueTelegramMemberTagSync');
-    const processCall = source.indexOf('results.push(await processTelegramMemberTagSync(row))', drainStart);
-    const claimLane = source.slice(drainStart, processCall);
+    const claimLane = sliceBetweenOrThrow(
+      source,
+      'async function drainDueTelegramMemberTagSync',
+      'results.push(await processTelegramMemberTagSync(row))',
+      { label: 'telegram member-tag claim lane' },
+    );
     expect(claimLane).not.toContain("{ $set: { processingRevision: row.processingRevision } }");
     expect(claimLane).not.toContain('TelegramMemberTagSync.updateOne(');
   });

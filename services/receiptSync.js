@@ -30,8 +30,7 @@ const ShopProduct       = require('../models/ShopProduct');
 const SupplementOffer   = require('../models/SupplementOffer');
 const SupplementRequest = require('../models/SupplementRequest');
 
-const { syncMirror, upsertShopOwnedFromReceiptItem } = require('../utils/upsertShopProduct');
-const { repriceActiveOrders } = require('../utils/repriceActiveOrders');
+const { syncMirror, pushSharedFieldsToMirror, upsertShopOwnedFromReceiptItem } = require('../utils/upsertShopProduct');
 const { labelPositionsFromPhotoMeta, photoCommentsText } = require('../utils/receiptPhotoMeta');
 const { ITEM_STATUS, ITEM_RELATION_STATUS, ACTIVE_ITEM_STATUSES, REQUEST_STATUS, revisionOf, isActiveItemRevision } = require('../utils/supplementState');
 const { sourceSnapshotFromReceiptItem } = require('./supplementWaveService');
@@ -318,62 +317,72 @@ async function propagateItemEdit(item, prev, { session = null } = {}) {
   out.supplementChanges = supplementSync.changes;
 
   const routing = normalizeReceiptItemRouting(item);
-  if (needsWarehouseProduct(routing)) {
-    // Позиція без товару — ще не підтверджена. Товар створить підтвердження.
-    if (!item.createdProductId) return out;
+  const warehouseOwnedNow = needsWarehouseProduct(routing);
+
+  // Existing physical Product identity wins over the CURRENT routing projection.
+  // Transitional/legacy rows may already own a Product even after their modern
+  // routing moved to supplement/mandatory-only. Commercial corrections must keep
+  // that already-created artifact truthful, but must never create a new warehouse
+  // Product merely because a non-warehouse row was edited.
+  if (item.createdProductId) {
     const q = Product.findById(item.createdProductId);
     const product = await (session ? q.session(session) : q);
-    if (!product) return out;
-
-    if (item.price !== prev.price && item.price != null) {
-      product.price = item.price;
-      // Commercial price authority must have identical side effects regardless of
-      // whether the edit came from Receipt, warehouse Product or ShopProduct view.
-      // Active ordinary Orders are part of the same price epoch; finalized Orders
-      // remain immutable by repriceActiveOrders contract.
-      await repriceActiveOrders(product._id, Number(item.price), { session });
-    }
-    if (item.name !== prev.name) product.name = item.name || '';
-    if (item.aiDescription !== prev.aiDescription) product.aiDescription = item.aiDescription || '';
-    if (item.qtyPerPackage !== prev.qtyPerPackage && item.qtyPerPackage) {
-      product.quantityPerPackage = item.qtyPerPackage;
-    }
-
-    // New receipt routing treats totalQty as reference metadata only. Do not
-    // pretend it equals warehouse leftovers (mandatory/supplement may consume an
-    // unknown part before the item becomes normally orderable). Legacy rows keep
-    // their historical delta-sync behavior.
-    if (Number(item.routingVersion || 0) < 1) {
-      const delta = Number(item.totalQty || 0) - Number(prev.totalQty || 0);
-      if (delta !== 0) {
-        const next = Number(product.quantity || 0) + delta;
-        product.quantity = Math.max(0, next);
-        out.quantityDelta = delta;
-        out.quantityClamped = next < 0;
+    if (product) {
+      if (item.price !== prev.price && item.price != null) {
+        product.price = item.price;
+        // Receipt corrections update catalog/product truth only. Order line prices
+        // are immutable commercial snapshots once an Order exists.
       }
-    }
+      if (item.name !== prev.name) product.name = item.name || '';
+      if (item.aiDescription !== prev.aiDescription) product.aiDescription = item.aiDescription || '';
+      if (item.qtyPerPackage !== prev.qtyPerPackage && item.qtyPerPackage) {
+        product.quantityPerPackage = item.qtyPerPackage;
+      }
 
-    if (photoChanged) {
-      product.imageUrls = [item.photoUrl];
-      product.imageNames = [item.photoName];
-      product.originalImageUrl = item.originalPhotoUrl || '';
-      if (vectorStale) out.reembed = 'warehouse';
-    }
-    if (photoChanged || labelsChanged) {
-      product.labelPositions = nextLabelPositions;
-      product.notes = photoCommentsText(item.photoMeta);
-    }
-    if (item.aiDescription && !product.aiDescription) product.aiDescription = item.aiDescription;
+      // New receipt routing treats totalQty as reference metadata only. Do not
+      // pretend it equals warehouse leftovers. Legacy rows keep historical delta
+      // sync, but only while the item still belongs to warehouse inventory.
+      if (warehouseOwnedNow && Number(item.routingVersion || 0) < 1) {
+        const delta = Number(item.totalQty || 0) - Number(prev.totalQty || 0);
+        if (delta !== 0) {
+          const next = Number(product.quantity || 0) + delta;
+          product.quantity = Math.max(0, next);
+          out.quantityDelta = delta;
+          out.quantityClamped = next < 0;
+        }
+      }
 
-    await product.save({ session });
-    // Дзеркало ShopProduct тримається тим самим викликом, що й скрізь у складі:
-    // створити якщо немає, потім протягнути спільні поля.
-    await syncMirror(product, { session });
+      if (photoChanged) {
+        product.imageUrls = [item.photoUrl];
+        product.imageNames = [item.photoName];
+        product.originalImageUrl = item.originalPhotoUrl || '';
+        if (vectorStale) out.reembed = 'warehouse';
+      }
+      if (photoChanged || labelsChanged) {
+        product.labelPositions = nextLabelPositions;
+        product.notes = photoCommentsText(item.photoMeta);
+      }
+      if (item.aiDescription && !product.aiDescription) product.aiDescription = item.aiDescription;
 
-    out.productId = String(product._id);
-    out.reembedDoc = out.reembed ? product : null;
-    return out;
+      await product.save({ session });
+      if (warehouseOwnedNow) {
+        // Current warehouse ownership requires a mirror and keeps it current.
+        await syncMirror(product, { session });
+      } else {
+        // Transitional non-warehouse rows may still have a historical mirror.
+        // Update it if it exists, but do not create a new mirror for this route.
+        await pushSharedFieldsToMirror(product, { session });
+      }
+
+      out.productId = String(product._id);
+      out.reembedDoc = out.reembed ? product : null;
+      return out;
+    }
   }
+
+  // A warehouse-routed draft without a Product is not confirmed yet; confirmation
+  // owns Product creation. A metadata edit must not manufacture one here.
+  if (warehouseOwnedNow) return out;
 
   // Standalone receipt-owned ShopProduct covers BOTH Mandatory-only and
   // Supplement-only routes. `destination` is legacy compatibility only and must

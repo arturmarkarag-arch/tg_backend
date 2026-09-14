@@ -3,19 +3,20 @@
 const { CAPABILITIES, IMPLEMENTATION, createFiscalProviderAdapter } = require('./contract');
 const { validateInvoiceForKsef, prepareOffline24Invoice, submitInvoiceToKsef, getSubmissionStatus, reconcileInvoiceSubmission, getSubmissionUpo } = require('../ksef/submissions');
 const { KSEF_SCHEMA } = require('../ksef/config');
+const { runInboundSync } = require('../ksef/inboundSync');
 
 module.exports = createFiscalProviderAdapter({
   id: 'ksef',
   name: 'KSeF',
   jurisdiction: 'PL',
   implementation: IMPLEMENTATION.LIVE,
-  description: 'Polish KSeF 2.x fiscal provider. Stage 5A adds fail-closed offline24 preparation with imported Offline certificates and QR I/II verification links; inbound sync remains separate.',
+  description: 'Polish KSeF 2.x fiscal provider. Outbound online/offline24 plus Stage 6 provider-neutral inbound received-invoice synchronization.',
   capabilities: {
     [CAPABILITIES.VALIDATE]: true,
     [CAPABILITIES.SUBMIT]: true,
     [CAPABILITIES.STATUS]: true,
     [CAPABILITIES.RECONCILE]: true,
-    [CAPABILITIES.RECEIVE]: false,
+    [CAPABILITIES.RECEIVE]: true,
     [CAPABILITIES.OFFLINE]: true,
     [CAPABILITIES.UPO]: true,
   },
@@ -28,6 +29,7 @@ module.exports = createFiscalProviderAdapter({
     return prepareOffline24Invoice(invoiceId, { environment });
   },
   getUpo: ({ invoiceId, environment, refresh = true }) => getSubmissionUpo(invoiceId, { environment, refresh }),
+  receive: ({ syncId }) => runInboundSync(syncId),
   metadata: {
     apiFamily: 'KSeF API v2',
     schema: KSEF_SCHEMA,
@@ -36,5 +38,6 @@ module.exports = createFiscalProviderAdapter({
     stage3Limits: { currencies: ['PLN'], invoiceTypes: ['invoice'], vatRates: ['23', '8', '5'] },
     stage4: { reconciliation: 'durable-get-only', upo: 'per-invoice-verified-sha256' },
     stage5: { offline24: 'local-prepare-then-upload', offlineCertificate: 'manual-import-encrypted-at-rest', qr: ['KOD I', 'KOD II'] },
+    stage6: { inbound: 'Subject2 PermanentStorage HWM', localArtifact: 'sha256-verified immutable XML', hydration: 'rate-safe scheduler', highVolume: 'TarGz export with encrypted/plain part integrity' },
   },
 });

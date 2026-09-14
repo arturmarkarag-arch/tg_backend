@@ -41,6 +41,9 @@ const { startTelegramMemberTagScheduler } = require('./services/telegramMemberTa
 const { startBaseLinkerQueueScheduler } = require('./services/baseLinkerQueueScheduler');
 const { startAllegroOrderScheduler } = require('./services/allegroOrderScheduler');
 const { startKsefReconciliationScheduler } = require('./services/invoices/ksef/reconciliationScheduler');
+const { startKsefInboundScheduler } = require('./services/invoices/ksef/inboundScheduler');
+const { startKsefOperationalScheduler } = require('./services/invoices/ksef/operationalScheduler');
+const { recoverStaleKsefLeases, cleanupKsefOperationalState } = require('./services/invoices/ksef/operations');
 const { enterMaintenance, isMaintenanceActive } = require('./services/maintenanceState');
 const { assertJwtConfigured } = require('./utils/jwt');
 
@@ -264,6 +267,56 @@ async function startServer() {
       models: [require('./models/User')],
     });
 
+
+    await syncCritical({
+      key: 'invoice_ksef_inbound',
+      title: 'Не створилися критичні індекси inbound KSeF',
+      whatBroke: 'Не підтверджено дедуплікацію отриманих фактур KSeF та унікальний Durable HWM cursor на юридичну особу/середовище.',
+      howToFix: [
+        'Перевірте db.inboundfiscaldocuments.getIndexes(), db.ksefinboundsyncstates.getIndexes() і db.ksefinboundexports.getIndexes().',
+        'Для inboundfiscaldocuments має бути UNIQUE provider+legalEntityId+environment+providerDocumentId.',
+        'Для ksefinboundsyncstates має бути UNIQUE legalEntityId+environment+subjectType.',
+        'Для ksefinboundexports мають бути UNIQUE exportId/exportKey та environment+referenceNumber.',
+        'Для businesscounterparties має бути UNIQUE identity index по countryCode+taxIdType+taxId.',
+        'Для inboundfiscalbusinesslinks має бути UNIQUE document+target і не більше одного confirmed counterparty на документ.',
+        'Виправте дублікати, після чого перезапустіть сервер.',
+      ],
+      models: [
+        require('./models/InboundFiscalDocument'),
+        require('./models/KsefInboundSyncState'),
+        require('./models/KsefInboundExport'),
+        require('./models/BusinessCounterparty'),
+        require('./models/InboundFiscalBusinessLink'),
+      ],
+    });
+
+    await syncCritical({
+      key: 'invoice_ksef_corrections',
+      title: 'Не створилися критичні індекси KSeF corrections',
+      whatBroke: 'Не підтверджено durable identity технічної корекції offline-фактури.',
+      howToFix: [
+        'Перевірте db.kseftechnicalcorrections.getIndexes().',
+        'originalSubmissionId має бути UNIQUE: для однієї відхиленої offline submission може існувати лише одна durable technical correction.',
+        'Виправте дублікати й перезапустіть сервер.',
+      ],
+      models: [require('./models/KsefTechnicalCorrection')],
+    });
+
+    // KSeF operational telemetry is diagnostic/TTL data. Its index must be
+    // created when possible, but a transient telemetry-index failure must not
+    // take the entire ERP down or block legal-document processing.
+    try {
+      await require('./models/KsefOperationalEvent').syncIndexes();
+    } catch (err) {
+      console.error('[ksef-operations] telemetry index sync failed', err?.stack || err);
+    }
+
+    // Restart recovery is intentionally local/GET-safe. An inbound export that
+    // died while POST may have been in flight becomes ambiguous_submit and is
+    // never replayed automatically.
+    await recoverStaleKsefLeases({ source: 'startup' });
+    await cleanupKsefOperationalState();
+
     // BaseLinker Print Agent queue/status indexes are operational but not
     // boot-critical: a transient index problem must not take the whole ERP down.
     try {
@@ -344,6 +397,8 @@ async function startServer() {
       startBaseLinkerQueueScheduler();
       startAllegroOrderScheduler();
       startKsefReconciliationScheduler();
+      startKsefInboundScheduler();
+      startKsefOperationalScheduler();
     }
 
     server.on('error', (err) => {

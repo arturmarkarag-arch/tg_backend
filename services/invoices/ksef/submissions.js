@@ -514,6 +514,95 @@ async function submitInvoiceToKsef(invoiceId, { environment = 'test' } = {}) {
   }
 }
 
+
+function buildPdfVisualizationPayload({ invoice, submission, artifact, environment }) {
+  const env = normalizeEnvironment(environment);
+  const providerData = submission?.providerData || {};
+  const offline = providerData.offline || {};
+  const ksefNumber = String(providerData.ksefNumber || '').trim();
+  const sellerNip = String(invoice?.seller?.taxId || '').replace(/\D/g, '');
+  const issueDate = String(invoice?.issueDate || '').trim();
+  const hashBase64 = String(artifact?.hashBase64 || artifact?.xmlHashBase64 || '').trim();
+
+  let qrCode = String(offline?.qrI?.url || '').trim();
+  if (!qrCode && sellerNip && issueDate && hashBase64) {
+    qrCode = buildInvoiceVerificationUrl({
+      environment: env,
+      sellerNip,
+      issueDate,
+      invoiceHashBase64: hashBase64,
+    });
+  }
+
+  const accepted = submission?.state === 'accepted' && Boolean(ksefNumber);
+  return {
+    invoiceId: String(invoice?._id || ''),
+    environment: env,
+    mode: String(submission?.mode || 'preview'),
+    state: String(submission?.state || invoice?.status || 'finalized'),
+    nrKSeF: ksefNumber || 'PODGLĄD',
+    qrCode: qrCode || '',
+    qr2Code: String(offline?.qrII?.url || '').trim(),
+    acDate: providerData.permanentStorageDate || submission?.acceptedAt || null,
+    watermark: accepted ? '' : 'PODGLĄD',
+    hasUpo: Boolean(submission?.receipt?.receivedAt),
+    xmlSha256Hex: String(artifact?.sha256Hex || artifact?.xmlSha256Hex || ''),
+    xmlSize: Number(artifact?.size || artifact?.xmlSize || 0),
+  };
+}
+
+async function getInvoicePdfVisualization(invoiceId, { environment = 'test' } = {}) {
+  const env = normalizeEnvironment(environment);
+  const { invoice, snapshot } = await getFinalizedInvoice(invoiceId);
+  const submission = await FiscalSubmission.findOne({
+    snapshotId: snapshot._id,
+    provider: 'ksef',
+    environment: env,
+  }).lean();
+
+  // Once a fiscal artifact exists, its persisted hashes are the source of truth
+  // for visualization metadata. Only invoices that have never been submitted
+  // need a fresh FA(3) render from the immutable InvoiceSnapshot.
+  let artifact = submission?.artifact || null;
+  if (!artifact?.hashBase64 || !artifact?.sha256Hex) artifact = await buildArtifact(invoiceId);
+
+  return buildPdfVisualizationPayload({ invoice, submission, artifact, environment: env });
+}
+
+async function getInvoiceKsefXml(invoiceId, { environment = 'test' } = {}) {
+  const env = normalizeEnvironment(environment);
+  const { snapshot } = await getFinalizedInvoice(invoiceId);
+  const submission = await FiscalSubmission.findOne({
+    snapshotId: snapshot._id,
+    provider: 'ksef',
+    environment: env,
+  }).lean();
+
+  // Prefer the exact immutable XML that was actually submitted. This avoids
+  // rebuilding a legal artifact with a newer serializer after the fact.
+  let content = String(submission?.artifact?.content || '');
+  let expectedSha256Hex = String(submission?.artifact?.sha256Hex || '').trim().toLowerCase();
+  let expectedHashBase64 = String(submission?.artifact?.hashBase64 || '').trim();
+
+  if (!content) {
+    const artifact = await buildArtifact(invoiceId);
+    content = String(artifact.xml || '');
+    expectedSha256Hex = String(artifact.xmlSha256Hex || '').trim().toLowerCase();
+    expectedHashBase64 = String(artifact.xmlHashBase64 || '').trim();
+  }
+  if (!content) throw appError('ksef_invoice_artifact_missing');
+
+  const bytes = Buffer.from(content, 'utf8');
+  const sha256Hex = crypto.createHash('sha256').update(bytes).digest('hex');
+  const hashBase64 = crypto.createHash('sha256').update(bytes).digest('base64');
+  if ((expectedSha256Hex && expectedSha256Hex !== sha256Hex)
+    || (expectedHashBase64 && expectedHashBase64 !== hashBase64)) {
+    throw appError('ksef_invoice_artifact_hash_mismatch');
+  }
+
+  return { content: bytes, sha256Hex, hashBase64, size: bytes.length, schema: KSEF_SCHEMA };
+}
+
 async function getSubmissionStatus(invoiceId, { environment = 'test', refresh = true } = {}) {
   const env = normalizeEnvironment(environment);
   const { invoice } = await getFinalizedInvoice(invoiceId);
@@ -559,6 +648,9 @@ module.exports = {
   getSubmissionStatus,
   reconcileInvoiceSubmission,
   getSubmissionUpo,
+  getInvoicePdfVisualization,
+  getInvoiceKsefXml,
+  buildPdfVisualizationPayload,
   buildArtifact,
   refreshSubmissionStatus,
   reconcileSubmissionById,

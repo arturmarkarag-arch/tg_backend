@@ -41,7 +41,7 @@ describe('multi-seller + shop-owned order contract', () => {
   test('dedicated conflict repair is an explicit audited ownership override', () => {
     expect(conflictRoute).toContain('allowFrozenOrderTransfer: true');
     expect(conflictRoute).toContain('allowFrozenOrderPark: true');
-    expect(migrate).toContain('ownershipRepair: Boolean(ownership.frozen && allowFrozenOrderTransfer)');
-    expect(unassign).toContain('ownershipRepair: Boolean(ownership.frozen && allowFrozenOrderPark)');
+    expect(migrate).toContain('ownershipRepair: Boolean(ownership?.frozen && allowFrozenOrderTransfer)');
+    expect(unassign).toContain('ownershipRepair: Boolean(ownership?.frozen && allowFrozenOrderPark)');
   });
 });
