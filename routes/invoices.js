@@ -64,6 +64,7 @@ const {
 } = require('../services/invoices/ksef/submissions');
 const { asyncHandler, appError } = require('../utils/errors');
 const { requireTelegramRole } = require('../middleware/telegramAuth');
+const { invoiceKsefWriteGuard } = require('../services/invoices/invoiceKsefWriteState');
 const { getInvoiceSourceRegistry } = require('../services/invoices/sourceProviders/registry');
 const { getFiscalProviderAdapter, getFiscalProviderRegistry } = require('../services/invoices/fiscalProviders/registry');
 const {
@@ -93,6 +94,7 @@ const {
 const router = express.Router();
 const adminOnly = requireTelegramRole('admin');
 router.use(adminOnly);
+router.use(invoiceKsefWriteGuard);
 
 function actorFromReq(req) {
   const user = req.telegramUser || {};

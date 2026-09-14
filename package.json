@@ -4,8 +4,8 @@
   "private": true,
   "type": "commonjs",
   "scripts": {
-    "dev": "nodemon index.js",
-    "start": "node index.js",
+    "dev": "nodemon --exec \"node --import ./instrument.js\" index.js",
+    "start": "node --import ./instrument.js index.js",
     "test": "vitest run",
     "load-test": "node load-test.js",
     "test:live:e2e:preflight": "node -r ../dev-use-test-db.js scripts/liveOrderPickingE2E.js",

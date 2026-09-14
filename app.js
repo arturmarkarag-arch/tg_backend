@@ -30,6 +30,7 @@ const commerceRouter = require('./routes/commerce');
 const invoicesRouter = require('./routes/invoices');
 const baseLinkerPrintAgentRouter = require('./routes/baseLinkerPrintAgent');
 const { getPublicMaintenanceState, maintenanceReadOnlyMiddleware } = require('./services/maintenanceState');
+const { getPublicInvoiceKsefWriteState } = require('./services/invoices/invoiceKsefWriteState');
 const { telegramAuth, requireTelegramRole, requireTelegramRoles } = require('./middleware/telegramAuth');
 const { egressRequestContextMiddleware } = require('./services/egressTrafficMonitor');
 
@@ -130,9 +131,13 @@ app.use((req, res, next) => {
 
 app.get('/api/health', (req, res) => {
   const maintenance = getPublicMaintenanceState();
+  const invoiceKsef = getPublicInvoiceKsefWriteState();
   res.json({
-    status: maintenance.active ? 'maintenance' : 'ok',
+    status: maintenance.active ? 'maintenance' : (invoiceKsef.blocked ? 'degraded' : 'ok'),
     maintenance: { active: maintenance.active, mode: maintenance.mode, since: maintenance.since },
+    domains: {
+      invoiceKsef: { blocked: invoiceKsef.blocked, mode: invoiceKsef.mode, since: invoiceKsef.since },
+    },
   });
 });
 

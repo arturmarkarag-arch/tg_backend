@@ -45,6 +45,7 @@ const { startKsefInboundScheduler } = require('./services/invoices/ksef/inboundS
 const { startKsefOperationalScheduler } = require('./services/invoices/ksef/operationalScheduler');
 const { recoverStaleKsefLeases, cleanupKsefOperationalState } = require('./services/invoices/ksef/operations');
 const { enterMaintenance, isMaintenanceActive } = require('./services/maintenanceState');
+const { blockInvoiceKsefWrites, areInvoiceKsefWritesBlocked } = require('./services/invoices/invoiceKsefWriteState');
 const { assertJwtConfigured } = require('./utils/jwt');
 
 let httpServer = null;
@@ -143,18 +144,35 @@ async function startServer() {
     }
 
     // Критичні індекси: docs/operations/maintenance-mode.md
-    const syncCritical = async ({ key, title, whatBroke, howToFix, models }) => {
+    const syncCritical = async ({ key, title, whatBroke, howToFix, models, failureScope = 'global' }) => {
       try {
-        for (const model of models) await model.syncIndexes();
+        for (const model of models) {
+          await model.syncIndexes();
+          const diff = await model.diffIndexes();
+          const toCreate = Array.isArray(diff?.toCreate) ? diff.toCreate : [];
+          const toDrop = Array.isArray(diff?.toDrop) ? diff.toDrop : [];
+          if (toCreate.length || toDrop.length) {
+            const error = new Error(
+              `${model.modelName} index drift remains after sync: ` +
+              `toCreate=${JSON.stringify(toCreate)} toDrop=${JSON.stringify(toDrop)}`,
+            );
+            error.code = 'critical_index_drift';
+            throw error;
+          }
+        }
+        console.log(`[indexes] ${key} PASS`);
       } catch (err) {
-        enterMaintenance({
+        console.error(`[indexes] ${key} FAILED`, err?.stack || err);
+        const issue = {
           key,
           title,
           whatBroke,
           technicalDetails: err?.message || String(err),
           howToFix,
           docsPath: 'docs/operations/maintenance-mode.md',
-        });
+        };
+        if (failureScope === 'invoice_ksef') blockInvoiceKsefWrites(issue);
+        else enterMaintenance(issue);
       }
     };
 
@@ -269,7 +287,32 @@ async function startServer() {
 
 
     await syncCritical({
+      key: 'invoice_ksef_outbound',
+      failureScope: 'invoice_ksef',
+      title: 'Не створилися критичні індекси Invoice/KSeF outbound',
+      whatBroke: 'Не підтверджено унікальність юросіб, фактур, immutable snapshots, KSeF submissions, connections, XAdES/auth sessions або certificates.',
+      howToFix: [
+        'Не видаляйте UNIQUE indexes навмання. Знайдіть [indexes] invoice_ksef_outbound FAILED у startup log.',
+        'Якщо Mongo повертає E11000, перевірте collection/index/dup key: перенесені документи конфліктують із поточним schema contract.',
+        'Залиште канонічний документ, виправте посилання на нього та перезапустіть сервер.',
+        'Успішний startup має містити [indexes] invoice_ksef_outbound PASS.',
+      ],
+      models: [
+        require('./models/LegalEntity'),
+        require('./models/Invoice'),
+        require('./models/InvoiceSnapshot'),
+        require('./models/FiscalSubmission'),
+        require('./models/KsefConnection'),
+        require('./models/KsefXadesCredential'),
+        require('./models/KsefXadesAuthSession'),
+        require('./models/KsefCertificateEnrollment'),
+        require('./models/KsefOfflineCertificate'),
+      ],
+    });
+
+    await syncCritical({
       key: 'invoice_ksef_inbound',
+      failureScope: 'invoice_ksef',
       title: 'Не створилися критичні індекси inbound KSeF',
       whatBroke: 'Не підтверджено дедуплікацію отриманих фактур KSeF та унікальний Durable HWM cursor на юридичну особу/середовище.',
       howToFix: [
@@ -292,6 +335,7 @@ async function startServer() {
 
     await syncCritical({
       key: 'invoice_ksef_corrections',
+      failureScope: 'invoice_ksef',
       title: 'Не створилися критичні індекси KSeF corrections',
       whatBroke: 'Не підтверджено durable identity технічної корекції offline-фактури.',
       howToFix: [
@@ -311,11 +355,17 @@ async function startServer() {
       console.error('[ksef-operations] telemetry index sync failed', err?.stack || err);
     }
 
-    // Restart recovery is intentionally local/GET-safe. An inbound export that
-    // died while POST may have been in flight becomes ambiguous_submit and is
-    // never replayed automatically.
-    await recoverStaleKsefLeases({ source: 'startup' });
-    await cleanupKsefOperationalState();
+    // Invoice/KSeF index drift degrades only this domain. Do not mutate its
+    // durable state until indexes are healthy, but keep the rest of ERP alive.
+    if (areInvoiceKsefWritesBlocked()) {
+      console.warn('[invoice-ksef] write domain disabled: startup recovery and KSeF schedulers will be skipped');
+    } else {
+      // Restart recovery is intentionally local/GET-safe. An inbound export that
+      // died while POST may have been in flight becomes ambiguous_submit and is
+      // never replayed automatically.
+      await recoverStaleKsefLeases({ source: 'startup' });
+      await cleanupKsefOperationalState();
+    }
 
     // BaseLinker Print Agent queue/status indexes are operational but not
     // boot-critical: a transient index problem must not take the whole ERP down.
@@ -396,9 +446,11 @@ async function startServer() {
       startPickingMaintenanceScheduler();
       startBaseLinkerQueueScheduler();
       startAllegroOrderScheduler();
-      startKsefReconciliationScheduler();
-      startKsefInboundScheduler();
-      startKsefOperationalScheduler();
+      if (!areInvoiceKsefWritesBlocked()) {
+        startKsefReconciliationScheduler();
+        startKsefInboundScheduler();
+        startKsefOperationalScheduler();
+      }
     }
 
     server.on('error', (err) => {
