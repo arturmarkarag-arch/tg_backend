@@ -66,6 +66,12 @@ function qty(value) {
   return Number.isFinite(n) && n >= 0 ? n : 0;
 }
 
+function moneyOrNull(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
 
 
 function sourceLineBaseKey(product) {
@@ -105,11 +111,14 @@ function buildSourceItems(order) {
       ean: text(product?.ean),
       name: text(product?.name),
       attributes: text(product?.attributes),
+      priceBrutto: moneyOrNull(product?.price_brutto),
       requestedQty: qty(product?.quantity),
     };
+    const fingerprintSnapshot = { ...sourceSnapshot };
+    delete fingerprintSnapshot.priceBrutto;
     return {
       ...sourceSnapshot,
-      sourceFingerprint: sha(JSON.stringify(sourceSnapshot)),
+      sourceFingerprint: sha(JSON.stringify(fingerprintSnapshot)),
     };
   });
 }
@@ -391,11 +400,12 @@ function syncDocWithOrder(doc, order, actor) {
     sourceId: text(order?.order_source_id),
     sourceDateAdd: Number(order?.date_add || 0) || 0,
     sourceDateConfirmed: Number(order?.date_confirmed || 0) || 0,
+    sourceCurrency: text(order?.currency).trim().toUpperCase().slice(0, 3),
     sourceDeliveryMethod: text(order?.delivery_method),
     sourceDeliveryPackageModule: text(order?.delivery_package_module),
     sourceDeliveryPackageNr: text(order?.delivery_package_nr),
   };
-  const metadataChanged = Object.entries(nextSourceMeta).some(([key, value]) => String(doc?.[key] ?? '') !== String(value ?? ''));
+  let metadataChanged = Object.entries(nextSourceMeta).some(([key, value]) => String(doc?.[key] ?? '') !== String(value ?? ''));
   Object.assign(doc, nextSourceMeta);
   const resolvedSourceName = text(order?.sourceName);
   if (resolvedSourceName) {
@@ -427,6 +437,15 @@ function syncDocWithOrder(doc, order, actor) {
 
   const observedFingerprint = String(doc.lastUpstreamOrderFingerprint || doc.orderFingerprint || '');
   if (observedFingerprint === nextFingerprint) {
+    const currentByKey = new Map((doc.items || []).map((item) => [String(item.lineKey), item]));
+    for (const source of sourceItems) {
+      const current = currentByKey.get(String(source.lineKey));
+      if (!current) continue;
+      if (!physicalSnapshotLocked || current.priceBrutto === null || current.priceBrutto === undefined) {
+        if (current.priceBrutto !== source.priceBrutto) metadataChanged = true;
+        current.priceBrutto = source.priceBrutto;
+      }
+    }
     doc.lastUpstreamOrderFingerprint = nextFingerprint;
     return { changed: false, metadataChanged, summary: { added: 0, removed: 0, changed: 0 } };
   }
@@ -890,6 +909,8 @@ function buildExistingClaimUpdate({ doc, order, scope, actor, now, adminForce })
       sourceExternalOrderId: plain.sourceExternalOrderId || '',
       sourceDateAdd: Number(plain.sourceDateAdd || 0),
       sourceDateConfirmed: Number(plain.sourceDateConfirmed || 0),
+      sourceCurrency: plain.sourceCurrency || '',
+      sourceDeliveryMethod: plain.sourceDeliveryMethod || '',
       sourceDeliveryPackageModule: plain.sourceDeliveryPackageModule || '',
       sourceDeliveryPackageNr: plain.sourceDeliveryPackageNr || '',
       ownerTelegramId: actor.by,

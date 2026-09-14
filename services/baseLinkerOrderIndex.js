@@ -141,10 +141,12 @@ function orderFromPicking(doc, account = null) {
     delivery_method: doc.sourceDeliveryMethod || '',
     delivery_package_module: doc.sourceDeliveryPackageModule || '',
     delivery_package_nr: doc.sourceDeliveryPackageNr || '',
+    currency: doc.sourceCurrency || '',
     products: (Array.isArray(doc.items) ? doc.items : []).map((item) => ({
       order_product_id: item.orderProductId || '', storage: item.storage || '', storage_id: item.storageId || '',
       product_id: item.productId || '', variant_id: item.variantId || '', auction_id: item.auctionId || '',
-      sku: item.sku || '', ean: item.ean || '', name: item.name || '', attributes: item.attributes || '', quantity: Number(item.requestedQty || 0),
+      sku: item.sku || '', ean: item.ean || '', name: item.name || '', attributes: item.attributes || '',
+      price_brutto: item.priceBrutto ?? undefined, quantity: Number(item.requestedQty || 0),
     })),
   };
   return order;

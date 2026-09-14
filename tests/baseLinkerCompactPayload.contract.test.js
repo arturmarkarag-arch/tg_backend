@@ -17,6 +17,7 @@ describe('BaseLinker compact worker payload', () => {
       confirmed: true,
       date_confirmed: 100,
       date_add: 90,
+      currency: 'PLN',
       delivery_method: 'InPost Paczkomaty',
       delivery_package_module: 'inpost',
       delivery_package_nr: '620100045678901234',
@@ -55,6 +56,7 @@ describe('BaseLinker compact worker payload', () => {
       confirmed: true,
       date_confirmed: 100,
       date_add: 90,
+      currency: 'PLN',
       delivery_method: 'InPost Paczkomaty',
       delivery_package_module: 'inpost',
       delivery_package_nr: '620100045678901234',
@@ -68,10 +70,11 @@ describe('BaseLinker compact worker payload', () => {
         sku: 'SKU',
         ean: '5900000000000',
         auction_id: 'A1',
+        price_brutto: 25,
         quantity: 17,
       }],
     });
-    expect(JSON.stringify(compact)).not.toMatch(/phone|email|invoice|payment|commission|transaction|price_brutto|tax_rate|weight/);
+    expect(JSON.stringify(compact)).not.toMatch(/phone|email|invoice|payment|commission|transaction|tax_rate|weight/);
   });
 
   it('returns only one image and never exposes the full BaseLinker product object', () => {

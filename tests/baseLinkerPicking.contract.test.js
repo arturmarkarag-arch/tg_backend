@@ -30,6 +30,21 @@ describe('BaseLinker local picking workflow', () => {
     expect(items[0].requestedQty).toBe(2);
   });
 
+  it('keeps the BaseLinker gross unit price without treating repricing as a physical picking change', () => {
+    const first = buildSourceItems({
+      order_id: 10,
+      products: [{ order_product_id: 1, name: 'A', quantity: 2, price_brutto: '13.99' }],
+    });
+    const repriced = buildSourceItems({
+      order_id: 10,
+      products: [{ order_product_id: 1, name: 'A', quantity: 2, price_brutto: '15.49' }],
+    });
+
+    expect(first[0].priceBrutto).toBe(13.99);
+    expect(repriced[0].priceBrutto).toBe(15.49);
+    expect(repriced[0].sourceFingerprint).toBe(first[0].sourceFingerprint);
+  });
+
   it('allows exactly one BaseLinker write path: exact order_id status transition to Sent', () => {
     const picking = read('services/baseLinkerPicking.js');
     const commands = read('services/baseLinkerOrderCommands.js');

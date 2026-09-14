@@ -28,8 +28,13 @@ describe('BaseLinker ID-index pagination contract', () => {
 
   it('renders already-tracked shelves from the local PickingOrder business state', () => {
     const index = read('services/baseLinkerOrderIndex.js');
+    const model = read('models/BaseLinkerPickingOrder.js');
     expect(index).toContain('function orderFromPicking');
     expect(index).toContain('BaseLinkerPickingOrder.find(mongoFilter).lean()');
+    expect(index).toContain('currency: doc.sourceCurrency');
+    expect(index).toContain('price_brutto: item.priceBrutto');
+    expect(model).toContain('priceBrutto:');
+    expect(model).toContain('sourceCurrency:');
     for (const stage of ['processing', 'deferred', 'sent', 'cancelled', 'updated']) expect(index).toContain(stage);
     expect(index).toContain("=== 'packed' || String(doc?.status || '') === 'packed') return 'processing'");
     expect(index).toContain("safeWorkflow === 'sent'");

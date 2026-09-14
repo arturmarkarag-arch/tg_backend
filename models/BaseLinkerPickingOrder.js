@@ -37,6 +37,7 @@ const PickingItemSchema = new mongoose.Schema({
   ean: { type: String, default: '' },
   name: { type: String, default: '' },
   attributes: { type: String, default: '' },
+  priceBrutto: { type: Number, default: null },
   requestedQty: { type: Number, default: 0 },
   sourceFingerprint: { type: String, default: '' },
 
@@ -72,6 +73,7 @@ const BaseLinkerPickingOrderSchema = new mongoose.Schema({
   sourceResolvedAt: { type: Date, default: null },
   sourceDateAdd: { type: Number, default: 0 },
   sourceDateConfirmed: { type: Number, default: 0 },
+  sourceCurrency: { type: String, default: '', trim: true, uppercase: true, maxlength: 3 },
   sourceDeliveryMethod: { type: String, default: '', trim: true, maxlength: 160 },
   sourceDeliveryPackageModule: { type: String, default: '' },
   sourceDeliveryPackageNr: { type: String, default: '' },
