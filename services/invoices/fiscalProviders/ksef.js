@@ -1,12 +1,12 @@
 'use strict';
 
-const { CAPABILITIES, IMPLEMENTATION, createFiscalProviderAdapter } = require('./contract');
+const { CAPABILITIES, IMPLEMENTATION, createFiscalProvider } = require('./contract');
 const { validateInvoiceForKsef, prepareOffline24Invoice, submitInvoiceToKsef, getSubmissionStatus, reconcileInvoiceSubmission, getSubmissionUpo } = require('../ksef/submissions');
 const { KSEF_SCHEMA } = require('../ksef/config');
 const { providerBlockers } = require('../ksef/fa3');
 const { runInboundSync } = require('../ksef/inboundSync');
 
-module.exports = createFiscalProviderAdapter({
+module.exports = createFiscalProvider({
   id: 'ksef',
   name: 'KSeF',
   jurisdiction: 'PL',

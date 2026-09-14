@@ -16,7 +16,7 @@ function text(value, max = 200) {
   return String(value ?? '').trim().slice(0, max);
 }
 
-function createFiscalProviderAdapter(definition = {}) {
+function createFiscalProvider(definition = {}) {
   const id = text(definition.id, 80).toLowerCase();
   const name = text(definition.name, 160);
   const jurisdiction = text(definition.jurisdiction, 20).toUpperCase();
@@ -69,5 +69,8 @@ module.exports = {
   FISCAL_PROVIDER_CONTRACT_VERSION,
   IMPLEMENTATION,
   CAPABILITIES,
-  createFiscalProviderAdapter,
+  createFiscalProvider,
+  // Compatibility alias for callers created before the provider/adapter naming
+  // was separated. New code must use createFiscalProvider.
+  createFiscalProviderAdapter: createFiscalProvider,
 };

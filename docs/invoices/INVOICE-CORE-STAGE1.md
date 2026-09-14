@@ -4,9 +4,9 @@
 
 Invoice creation and fiscal delivery are two independent axes:
 
-`SOURCE PROVIDER -> INVOICE CORE -> FISCAL PROVIDER`
+`EXTERNAL SERVICE -> SOURCE ADAPTER -> INVOICE CORE -> FISCAL PROVIDER`
 
-A source provider knows how to build a canonical invoice draft from one business source. A fiscal provider knows how to validate/submit a finalized immutable snapshot to an external fiscal/e-invoice system.
+A source adapter knows only how to read one external service and map its data into the canonical invoice draft. A fiscal provider owns jurisdiction-specific validation and delivery. The KSeF provider therefore validates the same canonical draft whether it originated in BaseLinker, Allegro, OLX, Temu, Warehouse, or the manual adapter.
 
 KSeF is therefore **not** an invoice source and Warehouse Order is **not** allowed to call KSeF directly.
 
@@ -14,11 +14,13 @@ KSeF is therefore **not** an invoice source and Warehouse Order is **not** allow
 
 - `Invoice` — mutable canonical draft, then finalized pointer.
 - `InvoiceSnapshot` — one immutable canonical payload + SHA-256 per finalized invoice.
-- `sourceProviders/` — provider-neutral source contract and registry.
+- `sourceProviders/` — legacy directory name containing source-adapter contracts and registry.
   - `manual`
   - `warehouse_order`
+  - `baselinker_order`
+  - `allegro_order`
 - `fiscalProviders/` — independent fiscal-provider contract and registry.
-  - `ksef` is registered as `planned`; there is intentionally no API/auth/XML/network code in Stage 1.
+  - `ksef` owns FA(3) preflight, validation, submission, status, reconciliation, UPO and inbound capabilities.
 
 ## Warehouse Order safety rule
 

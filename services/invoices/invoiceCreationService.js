@@ -37,9 +37,10 @@ function applyLegalEntityDefaults(draft, entity) {
   });
 }
 
-async function prepareInvoiceFromSource({ sourceProvider, sourceRef = {}, input = {}, legalEntityId = '', context = {} } = {}) {
+async function prepareInvoiceFromSource({ sourceAdapter, sourceProvider, sourceRef = {}, input = {}, legalEntityId = '', context = {} } = {}) {
   const entity = await resolveLegalEntity(legalEntityId, { allowDefault: true, requireActive: true });
-  const draft = await previewInvoiceDraftFromSource(sourceProvider, { sourceRef, input, context });
+  const adapterId = String(sourceAdapter || sourceProvider || '').trim().toLowerCase();
+  const draft = await previewInvoiceDraftFromSource(adapterId, { sourceRef, input, context });
   const sourceInput = input?.draft && typeof input.draft === 'object' ? input.draft : input;
   if (!sourceInput?.currency && entity.defaultCurrency) draft.currency = entity.defaultCurrency;
   const prepared = applyLegalEntityDefaults(draft, entity);
@@ -58,8 +59,8 @@ function sourceIdempotencyKey(draft = {}, legalEntityId = '') {
   return `invoice-source:${provider}:${accountId}:${orderId}:${sellerId}`.slice(0, 240);
 }
 
-async function createInvoiceFromSource({ sourceProvider, sourceRef = {}, input = {}, legalEntityId = '', idempotencyKey = '', context = {} } = {}, actor = {}) {
-  const prepared = await prepareInvoiceFromSource({ sourceProvider, sourceRef, input, legalEntityId, context });
+async function createInvoiceFromSource({ sourceAdapter, sourceProvider, sourceRef = {}, input = {}, legalEntityId = '', idempotencyKey = '', context = {} } = {}, actor = {}) {
+  const prepared = await prepareInvoiceFromSource({ sourceAdapter, sourceProvider, sourceRef, input, legalEntityId, context });
   const effectiveIdempotencyKey = String(idempotencyKey || '').trim() || sourceIdempotencyKey(prepared.draft, String(prepared.legalEntity?._id || legalEntityId || ''));
   const invoice = await createInvoiceDraft(prepared.draft, actor, { idempotencyKey: effectiveIdempotencyKey });
   return { invoice, blockers: prepared.blockers, legalEntity: prepared.legalEntity };

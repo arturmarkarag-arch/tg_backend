@@ -65,8 +65,8 @@ const {
 const { asyncHandler, appError } = require('../utils/errors');
 const { requireTelegramRole } = require('../middleware/telegramAuth');
 const { invoiceKsefWriteGuard } = require('../services/invoices/invoiceKsefWriteState');
-const { getInvoiceSourceRegistry } = require('../services/invoices/sourceProviders/registry');
-const { getFiscalProviderAdapter, getFiscalProviderRegistry } = require('../services/invoices/fiscalProviders/registry');
+const { getInvoiceSourceAdapterRegistry } = require('../services/invoices/sourceProviders/registry');
+const { getFiscalProvider, getFiscalProviderRegistry } = require('../services/invoices/fiscalProviders/registry');
 const {
   prepareInvoiceFromSource,
   createInvoiceFromSource,
@@ -117,8 +117,10 @@ function noStore(res) {
 
 router.get('/meta', asyncHandler(async (_req, res) => {
   noStore(res);
+  const sourceAdapters = getInvoiceSourceAdapterRegistry();
   res.json({
-    sourceProviders: getInvoiceSourceRegistry(),
+    sourceAdapters,
+    sourceProviders: sourceAdapters,
     fiscalProviders: getFiscalProviderRegistry(),
   });
 }));
@@ -501,6 +503,7 @@ router.get('/ksef/technical-corrections/:correctionId/upo', asyncHandler(async (
 
 router.post('/preview', asyncHandler(async (req, res) => {
   const result = await prepareInvoiceFromSource({
+    sourceAdapter: req.body?.sourceAdapter,
     sourceProvider: req.body?.sourceProvider,
     sourceRef: req.body?.sourceRef || {},
     input: req.body?.input || {},
@@ -509,7 +512,7 @@ router.post('/preview', asyncHandler(async (req, res) => {
   const fiscalProviderId = String(req.body?.fiscalProvider || '').trim().toLowerCase();
   let fiscal = null;
   if (fiscalProviderId) {
-    const fiscalProvider = getFiscalProviderAdapter(fiscalProviderId, { requireLive: true });
+    const fiscalProvider = getFiscalProvider(fiscalProviderId, { requireLive: true });
     if (typeof fiscalProvider.preflightDraft === 'function') {
       fiscal = {
         provider: fiscalProvider.id,
@@ -523,6 +526,7 @@ router.post('/preview', asyncHandler(async (req, res) => {
 
 router.post('/', asyncHandler(async (req, res) => {
   const result = await createInvoiceFromSource({
+    sourceAdapter: req.body?.sourceAdapter,
     sourceProvider: req.body?.sourceProvider,
     sourceRef: req.body?.sourceRef || {},
     input: req.body?.input || {},

@@ -7,19 +7,20 @@ const ROOT = path.resolve(__dirname, '..');
 const read = (rel) => fs.readFileSync(path.join(ROOT, rel), 'utf8');
 
 describe('Invoice Core Stage 1 architecture contract', () => {
-  it('keeps source providers and fiscal providers independent', () => {
+  it('keeps source adapters and fiscal providers independent', () => {
     const source = read('services/invoices/sourceProviders/registry.js');
     const fiscal = read('services/invoices/fiscalProviders/registry.js');
     const service = read('services/invoices/invoiceService.js');
     expect(source).toContain('buildInvoiceDraftFromSource');
-    expect(fiscal).toContain('getFiscalProviderAdapter');
+    expect(source).toContain('getInvoiceSourceAdapterRegistry');
+    expect(fiscal).toContain('getFiscalProvider');
     expect(service).not.toContain('fiscalProviders/ksef');
   });
 
   it('keeps KSeF behind the fiscal-provider adapter boundary as later stages evolve', () => {
     const ksef = read('services/invoices/fiscalProviders/ksef.js');
     const service = read('services/invoices/invoiceService.js');
-    expect(ksef).toContain('createFiscalProviderAdapter');
+    expect(ksef).toContain('createFiscalProvider');
     expect(ksef).toContain("id: 'ksef'");
     expect(service).not.toContain('fiscalProviders/ksef');
     expect(service).not.toContain('services/invoices/ksef');

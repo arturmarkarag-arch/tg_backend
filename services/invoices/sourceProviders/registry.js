@@ -5,7 +5,7 @@ const manual = require('./manual');
 const warehouseOrder = require('./warehouseOrder');
 const allegroOrder = require('./allegroOrder');
 const baseLinkerOrder = require('./baseLinkerOrder');
-const { SOURCE_PROVIDER_CONTRACT_VERSION } = require('./contract');
+const { SOURCE_ADAPTER_CONTRACT_VERSION } = require('./contract');
 
 const adapters = new Map([
   [manual.id, manual],
@@ -28,9 +28,9 @@ function listInvoiceSourceAdapters() {
   return [...adapters.values()];
 }
 
-function getInvoiceSourceRegistry() {
+function getInvoiceSourceAdapterRegistry() {
   return {
-    contractVersion: SOURCE_PROVIDER_CONTRACT_VERSION,
+    contractVersion: SOURCE_ADAPTER_CONTRACT_VERSION,
     providers: listInvoiceSourceAdapters().map((adapter) => ({
       id: adapter.id,
       name: adapter.name,
@@ -67,7 +67,8 @@ async function verifyInvoiceSource(invoice, context = {}) {
 module.exports = {
   getInvoiceSourceAdapter,
   listInvoiceSourceAdapters,
-  getInvoiceSourceRegistry,
+  getInvoiceSourceAdapterRegistry,
+  getInvoiceSourceRegistry: getInvoiceSourceAdapterRegistry,
   buildInvoiceDraftFromSource,
   verifyInvoiceSource,
 };

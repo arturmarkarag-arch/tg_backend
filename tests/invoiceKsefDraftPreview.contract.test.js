@@ -11,11 +11,12 @@ describe('KSeF draft preflight contract', () => {
     const provider = read('services/invoices/fiscalProviders/ksef.js');
     const contract = read('services/invoices/fiscalProviders/contract.js');
 
-    expect(route).toContain('getFiscalProviderAdapter');
+    expect(route).toContain('getFiscalProvider');
     expect(route).toContain("typeof fiscalProvider.preflightDraft === 'function'");
     expect(route).not.toContain("services/invoices/ksef/fa3");
     expect(contract).toContain('preflightDraft: definition.preflightDraft || null');
     expect(provider).toContain('preflightDraft: ({ draft })');
+    expect(provider).toContain('createFiscalProvider({');
     expect(provider).toContain("invoiceNumber: draft?.invoiceNumber || '__preview__'");
     expect(provider).toContain("filter((code) => code !== 'invoice_number_required')");
   });

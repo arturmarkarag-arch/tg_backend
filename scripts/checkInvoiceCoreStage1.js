@@ -21,8 +21,8 @@ check('snapshot is separate from Invoice', snapshotModel.includes("mongoose.mode
 check('source providers are registry-based', sourceRegistry.includes('getInvoiceSourceAdapter') && sourceRegistry.includes('warehouseOrder'));
 check('Warehouse Order does not guess tax basis', warehouse.includes("priceBasis: override.priceBasis || input.priceBasis || 'unknown'"));
 check('Warehouse Order requires explicit quantity mode', warehouse.includes("invoice_source_quantity_mode_required"));
-check('fiscal providers are separate from source providers', fiscalRegistry.includes('getFiscalProviderAdapter'));
-check('KSeF stays behind the fiscal-provider adapter boundary', ksef.includes('createFiscalProviderAdapter') && !service.includes('fiscalProviders/ksef'));
+check('fiscal providers are separate from source adapters', fiscalRegistry.includes('getFiscalProvider'));
+check('KSeF stays behind the fiscal-provider boundary', ksef.includes('createFiscalProvider') && !service.includes('fiscalProviders/ksef'));
 check('finalization hashes canonical snapshot', service.includes("createHash('sha256')") && service.includes('InvoiceSnapshot.create'));
 check('finalized invoice is immutable through core update command', service.includes("invoice_finalized_immutable"));
 check('Invoice Core never imports KSeF provider', !service.includes('fiscalProviders/ksef'));
