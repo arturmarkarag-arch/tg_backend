@@ -135,9 +135,10 @@ async function refreshInvoiceDraftFromSource(invoiceId, actor = {}, context = {}
         dueDate: current.payment?.dueDate || '',
         bankAccount: current.payment?.bankAccount || '',
       },
-      notes: current.notes || '',
-      requireInvoiceRequested: current.source?.metadata?.invoiceRequested === true,
-    },
+        notes: current.notes || '',
+        requireInvoiceRequested: current.source?.metadata?.invoiceRequested === true,
+        sourceOverrides: context.sourceOverrides || current.source?.metadata?.overrides || {},
+      },
     context,
   });
 

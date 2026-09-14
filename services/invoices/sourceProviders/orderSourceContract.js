@@ -6,6 +6,7 @@ const { stableStringify } = require('../stableJson');
 
 const ORDER_SOURCE_CONTRACT_VERSION = 1;
 const SOURCE_AUTHORITY = 'upstream_order';
+const SUPPORTED_DELIVERY_VAT_RATES = new Set(['23', '8', '5']);
 
 function text(value, max = 500) {
   return String(value ?? '').trim().slice(0, max);
@@ -164,11 +165,36 @@ function snapshotHash(snapshot) {
   return crypto.createHash('sha256').update(stableStringify(canonical), 'utf8').digest('hex');
 }
 
+function deliveryVatOverride(input = {}) {
+  const raw = text(input?.sourceOverrides?.deliveryVatRate, 10).replace('%', '');
+  if (!raw) return { requested: false, rate: '' };
+  const rate = decimalString(raw);
+  return { requested: true, rate: SUPPORTED_DELIVERY_VAT_RATES.has(rate) ? rate : '' };
+}
+
 function buildInvoiceDraftFromOrderSnapshot(rawSnapshot = {}, input = {}) {
-  const snapshot = assertOrderSourceSnapshot(rawSnapshot, {
+  // Keep the checksum tied strictly to facts returned by the provider. An
+  // operator override may complete a missing delivery VAT rate, but must never
+  // rewrite the upstream snapshot or weaken the stale-source check.
+  const sourceSnapshot = normalizeOrderSourceSnapshot(rawSnapshot);
+  const snapshot = normalizeOrderSourceSnapshot(sourceSnapshot);
+  const override = deliveryVatOverride(input);
+  const paidDeliveryNeedsVat = Boolean(snapshot.delivery.gross && Number(snapshot.delivery.gross) > 0 && !snapshot.delivery.vat.code);
+  if (override.requested && !override.rate) {
+    throw appError('invoice_source_contract_invalid', {
+      sourceProvider: snapshot.provider,
+      sourceAccountId: snapshot.accountId,
+      sourceOrderId: snapshot.orderId,
+      blockers: ['invoice_source_delivery_vat_invalid'],
+    });
+  }
+  if (paidDeliveryNeedsVat && override.rate) {
+    snapshot.delivery.vat = { code: override.rate, rate: override.rate };
+  }
+  const validatedSnapshot = assertOrderSourceSnapshot(snapshot, {
     requireInvoiceRequested: input.requireInvoiceRequested === true,
   });
-  const items = snapshot.items.map((item) => ({
+  const items = validatedSnapshot.items.map((item) => ({
     sourceLineId: item.sourceLineId,
     productRef: item.productRef,
     name: item.name,
@@ -179,16 +205,16 @@ function buildInvoiceDraftFromOrderSnapshot(rawSnapshot = {}, input = {}) {
     vat: item.vat,
     metadata: { ...item.metadata, sourceAuthority: SOURCE_AUTHORITY },
   }));
-  if (snapshot.delivery.gross && Number(snapshot.delivery.gross) > 0) {
+  if (validatedSnapshot.delivery.gross && Number(validatedSnapshot.delivery.gross) > 0) {
     items.push({
       sourceLineId: 'delivery',
       productRef: '',
-      name: snapshot.delivery.name || 'Dostawa',
+      name: validatedSnapshot.delivery.name || 'Dostawa',
       quantity: '1',
       unit: 'szt.',
-      unitPrice: snapshot.delivery.gross,
+      unitPrice: validatedSnapshot.delivery.gross,
       priceBasis: 'gross',
-      vat: snapshot.delivery.vat,
+      vat: validatedSnapshot.delivery.vat,
       metadata: { sourceAuthority: SOURCE_AUTHORITY, kind: 'delivery' },
     });
   }
@@ -196,40 +222,43 @@ function buildInvoiceDraftFromOrderSnapshot(rawSnapshot = {}, input = {}) {
   return {
     type: input.type || 'invoice',
     source: {
-      provider: snapshot.provider,
+      provider: validatedSnapshot.provider,
       entityType: 'order',
-      entityId: snapshot.orderId,
-      externalNumber: snapshot.externalNumber || snapshot.orderId,
+      entityId: validatedSnapshot.orderId,
+      externalNumber: validatedSnapshot.externalNumber || validatedSnapshot.orderId,
       metadata: {
         authority: SOURCE_AUTHORITY,
-        adapter: snapshot.adapter,
-        accountId: snapshot.accountId,
-        orderId: snapshot.orderId,
-        revision: snapshot.revision,
-        observedAt: snapshot.observedAt,
-        invoiceRequested: snapshot.invoiceRequested,
-        snapshotSha256: snapshotHash(snapshot),
+        adapter: validatedSnapshot.adapter,
+        accountId: validatedSnapshot.accountId,
+        orderId: validatedSnapshot.orderId,
+        revision: validatedSnapshot.revision,
+        observedAt: validatedSnapshot.observedAt,
+        invoiceRequested: validatedSnapshot.invoiceRequested,
+        snapshotSha256: snapshotHash(sourceSnapshot),
         contractVersion: ORDER_SOURCE_CONTRACT_VERSION,
+        ...(paidDeliveryNeedsVat && override.rate ? {
+          overrides: { deliveryVatRate: override.rate, deliveryVatSource: 'operator' },
+        } : {}),
       },
     },
-    buyer: snapshot.buyer,
+    buyer: validatedSnapshot.buyer,
     issueDate: input.issueDate || '',
-    saleDate: input.saleDate || snapshot.saleDate || '',
-    currency: snapshot.currency,
+    saleDate: input.saleDate || validatedSnapshot.saleDate || '',
+    currency: validatedSnapshot.currency,
     items,
     payment: {
-      method: snapshot.payment.method || input.payment?.method || '',
+      method: validatedSnapshot.payment.method || input.payment?.method || '',
       dueDate: input.payment?.dueDate || '',
       bankAccount: input.payment?.bankAccount || '',
-      paid: snapshot.payment.paid,
-      paidAt: snapshot.payment.paidAt,
+      paid: validatedSnapshot.payment.paid,
+      paidAt: validatedSnapshot.payment.paidAt,
     },
     references: {
       sourceOrder: {
-        provider: snapshot.provider,
-        accountId: snapshot.accountId,
-        orderId: snapshot.orderId,
-        externalNumber: snapshot.externalNumber || '',
+        provider: validatedSnapshot.provider,
+        accountId: validatedSnapshot.accountId,
+        orderId: validatedSnapshot.orderId,
+        externalNumber: validatedSnapshot.externalNumber || '',
       },
     },
     notes: input.notes || '',

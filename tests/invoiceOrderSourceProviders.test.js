@@ -69,6 +69,26 @@ describe('provider-authoritative invoice order source contract', () => {
     expect(validateOrderSourceSnapshot(input).blockers).toContain('invoice_source_delivery_vat_required');
   });
 
+  test('allows an explicit audited delivery VAT override without changing the upstream hash', () => {
+    const input = validSnapshot({ delivery: { name: 'Kurier', gross: '12.99', currency: 'PLN', vat: {} } });
+    const draft = buildInvoiceDraftFromOrderSnapshot(input, {
+      issueDate: '2026-09-15',
+      sourceOverrides: { deliveryVatRate: '23' },
+    });
+    expect(draft.items.at(-1)).toMatchObject({
+      sourceLineId: 'delivery', unitPrice: '12.99', vat: { code: '23', rate: '23' },
+    });
+    expect(draft.source.metadata.overrides).toEqual({ deliveryVatRate: '23', deliveryVatSource: 'operator' });
+    expect(draft.source.metadata.snapshotSha256).toBe(snapshotHash(input));
+  });
+
+  test('rejects a delivery VAT override outside the supported KSeF rates', () => {
+    const input = validSnapshot({ delivery: { name: 'Kurier', gross: '12.99', currency: 'PLN', vat: {} } });
+    expect(() => buildInvoiceDraftFromOrderSnapshot(input, {
+      sourceOverrides: { deliveryVatRate: '7' },
+    })).toThrow(expect.objectContaining({ code: 'invoice_source_contract_invalid' }));
+  });
+
   test('fails closed while upstream discounts are not losslessly allocated', () => {
     expect(validateOrderSourceSnapshot(validSnapshot({ discountsPresent: true })).blockers)
       .toContain('invoice_source_discounts_not_supported');

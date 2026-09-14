@@ -652,7 +652,9 @@ router.patch('/:id', asyncHandler(async (req, res) => {
 
 router.post('/:id/source/refresh', asyncHandler(async (req, res) => {
   const id = requireObjectId(req.params.id, 'invoice_id_invalid');
-  const invoice = await refreshInvoiceDraftFromSource(id, actorFromReq(req));
+  const invoice = await refreshInvoiceDraftFromSource(id, actorFromReq(req), {
+    sourceOverrides: req.body?.sourceOverrides || {},
+  });
   noStore(res);
   res.json({ invoice });
 }));
