@@ -6,7 +6,6 @@ const { stableStringify } = require('../stableJson');
 
 const ORDER_SOURCE_CONTRACT_VERSION = 1;
 const SOURCE_AUTHORITY = 'upstream_order';
-const SUPPORTED_DELIVERY_VAT_RATES = new Set(['23', '8', '5']);
 
 function text(value, max = 500) {
   return String(value ?? '').trim().slice(0, max);
@@ -169,7 +168,11 @@ function deliveryVatOverride(input = {}) {
   const raw = text(input?.sourceOverrides?.deliveryVatRate, 10).replace('%', '');
   if (!raw) return { requested: false, rate: '' };
   const rate = decimalString(raw);
-  return { requested: true, rate: SUPPORTED_DELIVERY_VAT_RATES.has(rate) ? rate : '' };
+  const number = finiteNumber(rate);
+  // The source adapter checks only that the override is structurally a VAT
+  // percentage. Jurisdiction-specific allowed rates belong to the fiscal
+  // provider (KSeF), which validates the canonical draft afterwards.
+  return { requested: true, rate: number !== null && number >= 0 && number <= 100 ? rate : '' };
 }
 
 function buildInvoiceDraftFromOrderSnapshot(rawSnapshot = {}, input = {}) {

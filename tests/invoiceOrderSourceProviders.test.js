@@ -8,6 +8,7 @@ const {
 } = require('../services/invoices/sourceProviders/orderSourceContract');
 const { snapshotFromBaseLinkerOrder } = require('../services/invoices/sourceProviders/baseLinkerOrder');
 const { snapshotFromAllegroOrder } = require('../services/invoices/sourceProviders/allegroOrder');
+const { getFiscalProvider } = require('../services/invoices/fiscalProviders/registry');
 
 function validSnapshot(overrides = {}) {
   return {
@@ -82,10 +83,19 @@ describe('provider-authoritative invoice order source contract', () => {
     expect(draft.source.metadata.snapshotSha256).toBe(snapshotHash(input));
   });
 
-  test('rejects a delivery VAT override outside the supported KSeF rates', () => {
+  test('leaves jurisdiction-specific delivery VAT rules to the KSeF provider', async () => {
+    const input = validSnapshot({ delivery: { name: 'Kurier', gross: '12.99', currency: 'PLN', vat: {} } });
+    const draft = buildInvoiceDraftFromOrderSnapshot(input, {
+      sourceOverrides: { deliveryVatRate: '7' },
+    });
+    const preflight = await getFiscalProvider('ksef', { requireLive: true }).preflightDraft({ draft });
+    expect(preflight.blockers).toContain('ksef_item_1_vat_rate_not_supported');
+  });
+
+  test('rejects a structurally invalid delivery VAT override in the source adapter', () => {
     const input = validSnapshot({ delivery: { name: 'Kurier', gross: '12.99', currency: 'PLN', vat: {} } });
     expect(() => buildInvoiceDraftFromOrderSnapshot(input, {
-      sourceOverrides: { deliveryVatRate: '7' },
+      sourceOverrides: { deliveryVatRate: 'abc' },
     })).toThrow(expect.objectContaining({ code: 'invoice_source_contract_invalid' }));
   });
 
