@@ -53,6 +53,7 @@ function createFiscalProviderAdapter(definition = {}) {
     implementation,
     description: text(definition.description, 1000),
     capabilities,
+    preflightDraft: definition.preflightDraft || null,
     validate: definition.validate || null,
     submit: definition.submit || null,
     getStatus: definition.getStatus || null,

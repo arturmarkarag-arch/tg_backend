@@ -3,6 +3,7 @@
 const { CAPABILITIES, IMPLEMENTATION, createFiscalProviderAdapter } = require('./contract');
 const { validateInvoiceForKsef, prepareOffline24Invoice, submitInvoiceToKsef, getSubmissionStatus, reconcileInvoiceSubmission, getSubmissionUpo } = require('../ksef/submissions');
 const { KSEF_SCHEMA } = require('../ksef/config');
+const { providerBlockers } = require('../ksef/fa3');
 const { runInboundSync } = require('../ksef/inboundSync');
 
 module.exports = createFiscalProviderAdapter({
@@ -20,6 +21,13 @@ module.exports = createFiscalProviderAdapter({
     [CAPABILITIES.OFFLINE]: true,
     [CAPABILITIES.UPO]: true,
   },
+  preflightDraft: ({ draft }) => ({
+    blockers: providerBlockers({
+      ...draft,
+      // Invoice numbering is deliberately allocated only at immutable finalize.
+      invoiceNumber: draft?.invoiceNumber || '__preview__',
+    }).filter((code) => code !== 'invoice_number_required'),
+  }),
   validate: ({ invoiceId }) => validateInvoiceForKsef(invoiceId),
   submit: ({ invoiceId, environment }) => submitInvoiceToKsef(invoiceId, { environment }),
   getStatus: ({ invoiceId, environment, refresh = true }) => getSubmissionStatus(invoiceId, { environment, refresh }),

@@ -65,7 +65,7 @@ const {
 const { asyncHandler, appError } = require('../utils/errors');
 const { requireTelegramRole } = require('../middleware/telegramAuth');
 const { getInvoiceSourceRegistry } = require('../services/invoices/sourceProviders/registry');
-const { getFiscalProviderRegistry } = require('../services/invoices/fiscalProviders/registry');
+const { getFiscalProviderAdapter, getFiscalProviderRegistry } = require('../services/invoices/fiscalProviders/registry');
 const {
   prepareInvoiceFromSource,
   createInvoiceFromSource,
@@ -504,8 +504,19 @@ router.post('/preview', asyncHandler(async (req, res) => {
     input: req.body?.input || {},
     legalEntityId: req.body?.legalEntityId || '',
   });
+  const fiscalProviderId = String(req.body?.fiscalProvider || '').trim().toLowerCase();
+  let fiscal = null;
+  if (fiscalProviderId) {
+    const fiscalProvider = getFiscalProviderAdapter(fiscalProviderId, { requireLive: true });
+    if (typeof fiscalProvider.preflightDraft === 'function') {
+      fiscal = {
+        provider: fiscalProvider.id,
+        ...(await fiscalProvider.preflightDraft({ draft: result.draft })),
+      };
+    }
+  }
   noStore(res);
-  res.json({ draft: result.draft, blockers: result.blockers });
+  res.json({ draft: result.draft, blockers: result.blockers, fiscal });
 }));
 
 router.post('/', asyncHandler(async (req, res) => {
