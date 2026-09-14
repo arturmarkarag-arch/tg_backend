@@ -4,7 +4,7 @@ This is a complete inventory of runtime Express route declarations, discovered r
 A check mark means that the role passes the route-entry auth/role middleware. Resource ownership, shop/group/session
 scope, one-time tokens, rate limits, feature flags, and request validation can still deny a request as noted.
 
-Routes: **474** · anonymous: **18** · seller: **75** · warehouse: **200** · admin: **464**
+Routes: **475** · anonymous: **18** · seller: **75** · warehouse: **200** · admin: **465**
 
 | Endpoint | Anonymous | Seller | Warehouse | Admin | Source | Boundary note |
 |---|:---:|:---:|:---:|:---:|---|---|
@@ -97,12 +97,12 @@ Routes: **474** · anonymous: **18** · seller: **75** · warehouse: **200** · 
 | `GET /api/delivery-groups/summary` | — | — | ✓ | ✓ | `routes/deliveryGroups.js:109` | route-entry authorization |
 | `GET /api/gemini-status` | — | — | — | ✓ | `app.js:161` | route-entry authorization |
 | `GET /api/health` | ✓ | ✓ | ✓ | ✓ | `app.js:131` | public allowlist; endpoint-specific proof/rate limits may still apply |
-| `GET /api/invoices` | — | — | — | ✓ | `routes/invoices.js:523` | route-entry authorization |
-| `GET /api/invoices/:id` | — | — | — | ✓ | `routes/invoices.js:622` | route-entry authorization |
-| `GET /api/invoices/:id/fiscal/ksef/pdf-visualization` | — | — | — | ✓ | `routes/invoices.js:590` | route-entry authorization |
-| `GET /api/invoices/:id/fiscal/ksef/status` | — | — | — | ✓ | `routes/invoices.js:575` | route-entry authorization |
-| `GET /api/invoices/:id/fiscal/ksef/upo` | — | — | — | ✓ | `routes/invoices.js:608` | route-entry authorization |
-| `GET /api/invoices/:id/fiscal/ksef/xml` | — | — | — | ✓ | `routes/invoices.js:597` | route-entry authorization |
+| `GET /api/invoices` | — | — | — | ✓ | `routes/invoices.js:534` | route-entry authorization |
+| `GET /api/invoices/:id` | — | — | — | ✓ | `routes/invoices.js:633` | route-entry authorization |
+| `GET /api/invoices/:id/fiscal/ksef/pdf-visualization` | — | — | — | ✓ | `routes/invoices.js:601` | route-entry authorization |
+| `GET /api/invoices/:id/fiscal/ksef/status` | — | — | — | ✓ | `routes/invoices.js:586` | route-entry authorization |
+| `GET /api/invoices/:id/fiscal/ksef/upo` | — | — | — | ✓ | `routes/invoices.js:619` | route-entry authorization |
+| `GET /api/invoices/:id/fiscal/ksef/xml` | — | — | — | ✓ | `routes/invoices.js:608` | route-entry authorization |
 | `GET /api/invoices/business-counterparties` | — | — | — | ✓ | `routes/invoices.js:330` | route-entry authorization |
 | `GET /api/invoices/ksef/certificate-enrollments` | — | — | — | ✓ | `routes/invoices.js:265` | route-entry authorization |
 | `GET /api/invoices/ksef/certificate-enrollments/:enrollmentId` | — | — | — | ✓ | `routes/invoices.js:281` | route-entry authorization |
@@ -233,7 +233,7 @@ Routes: **474** · anonymous: **18** · seller: **75** · warehouse: **200** · 
 | `PATCH /api/commerce/catalog/:id` | — | — | — | ✓ | `routes/commerce.js:242` | provider-worker boundary; among these four roles only admin passes (baselinker is outside the table) |
 | `PATCH /api/commerce/categories/:id` | — | — | — | ✓ | `routes/commerce.js:209` | provider-worker boundary; among these four roles only admin passes (baselinker is outside the table) |
 | `PATCH /api/delivery-groups/:id` | — | — | — | ✓ | `routes/deliveryGroups.js:265` | route-entry authorization |
-| `PATCH /api/invoices/:id` | — | — | — | ✓ | `routes/invoices.js:633` | route-entry authorization |
+| `PATCH /api/invoices/:id` | — | — | — | ✓ | `routes/invoices.js:644` | route-entry authorization |
 | `PATCH /api/invoices/business-counterparties/:id` | — | — | — | ✓ | `routes/invoices.js:342` | route-entry authorization |
 | `PATCH /api/invoices/ksef/connections/:connectionId` | — | — | — | ✓ | `routes/invoices.js:211` | route-entry authorization |
 | `PATCH /api/invoices/ksef/inbound-syncs/:syncId` | — | — | — | ✓ | `routes/invoices.js:364` | route-entry authorization |
@@ -337,14 +337,15 @@ Routes: **474** · anonymous: **18** · seller: **75** · warehouse: **200** · 
 | `POST /api/delivery-groups/:id/broadcast` | — | — | — | ✓ | `routes/deliveryGroups.js:552` | route-entry authorization |
 | `POST /api/delivery-groups/:id/close-ordering-session` | — | — | — | ✓ | `routes/deliveryGroups.js:152` | route-entry authorization |
 | `POST /api/delivery-groups/catalog-reviewed` | — | ✓ | ✓ | ✓ | `routes/deliveryGroups.js:65` | route-entry authorization |
-| `POST /api/invoices` | — | — | — | ✓ | `routes/invoices.js:511` | route-entry authorization |
-| `POST /api/invoices/:id/corrections` | — | — | — | ✓ | `routes/invoices.js:539` | route-entry authorization |
-| `POST /api/invoices/:id/finalize` | — | — | — | ✓ | `routes/invoices.js:640` | route-entry authorization |
-| `POST /api/invoices/:id/fiscal/ksef/offline24/prepare` | — | — | — | ✓ | `routes/invoices.js:561` | route-entry authorization |
-| `POST /api/invoices/:id/fiscal/ksef/reconcile` | — | — | — | ✓ | `routes/invoices.js:582` | route-entry authorization |
-| `POST /api/invoices/:id/fiscal/ksef/submit` | — | — | — | ✓ | `routes/invoices.js:568` | route-entry authorization |
-| `POST /api/invoices/:id/fiscal/ksef/technical-correction/prepare` | — | — | — | ✓ | `routes/invoices.js:546` | route-entry authorization |
-| `POST /api/invoices/:id/fiscal/ksef/validate` | — | — | — | ✓ | `routes/invoices.js:553` | route-entry authorization |
+| `POST /api/invoices` | — | — | — | ✓ | `routes/invoices.js:522` | route-entry authorization |
+| `POST /api/invoices/:id/corrections` | — | — | — | ✓ | `routes/invoices.js:550` | route-entry authorization |
+| `POST /api/invoices/:id/finalize` | — | — | — | ✓ | `routes/invoices.js:658` | route-entry authorization |
+| `POST /api/invoices/:id/fiscal/ksef/offline24/prepare` | — | — | — | ✓ | `routes/invoices.js:572` | route-entry authorization |
+| `POST /api/invoices/:id/fiscal/ksef/reconcile` | — | — | — | ✓ | `routes/invoices.js:593` | route-entry authorization |
+| `POST /api/invoices/:id/fiscal/ksef/submit` | — | — | — | ✓ | `routes/invoices.js:579` | route-entry authorization |
+| `POST /api/invoices/:id/fiscal/ksef/technical-correction/prepare` | — | — | — | ✓ | `routes/invoices.js:557` | route-entry authorization |
+| `POST /api/invoices/:id/fiscal/ksef/validate` | — | — | — | ✓ | `routes/invoices.js:564` | route-entry authorization |
+| `POST /api/invoices/:id/source/refresh` | — | — | — | ✓ | `routes/invoices.js:651` | route-entry authorization |
 | `POST /api/invoices/business-counterparties` | — | — | — | ✓ | `routes/invoices.js:336` | route-entry authorization |
 | `POST /api/invoices/ksef/certificate-enrollments` | — | — | — | ✓ | `routes/invoices.js:274` | route-entry authorization |
 | `POST /api/invoices/ksef/certificate-enrollments/:enrollmentId/reconcile` | — | — | — | ✓ | `routes/invoices.js:287` | route-entry authorization |

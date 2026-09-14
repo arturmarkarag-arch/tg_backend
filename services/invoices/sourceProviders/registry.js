@@ -3,11 +3,15 @@
 const { appError } = require('../../../utils/errors');
 const manual = require('./manual');
 const warehouseOrder = require('./warehouseOrder');
+const allegroOrder = require('./allegroOrder');
+const baseLinkerOrder = require('./baseLinkerOrder');
 const { SOURCE_PROVIDER_CONTRACT_VERSION } = require('./contract');
 
 const adapters = new Map([
   [manual.id, manual],
   [warehouseOrder.id, warehouseOrder],
+  [allegroOrder.id, allegroOrder],
+  [baseLinkerOrder.id, baseLinkerOrder],
 ]);
 
 function normalizeProviderId(value) {
@@ -42,9 +46,28 @@ async function buildInvoiceDraftFromSource(providerId, request = {}) {
   return adapter.buildDraft(request);
 }
 
+async function verifyInvoiceSource(invoice, context = {}) {
+  const adapterId = String(invoice?.source?.metadata?.adapter || '').trim().toLowerCase();
+  if (!adapterId) return { verified: true, skipped: true };
+  const adapter = getInvoiceSourceAdapter(adapterId);
+  if (typeof adapter.verifySource !== 'function') return { verified: true, skipped: true };
+  const result = await adapter.verifySource({ invoice, context });
+  const expectedSha256 = String(result?.expectedSha256 || '').trim();
+  const currentSha256 = String(result?.currentSha256 || '').trim();
+  if (!expectedSha256 || !currentSha256) throw appError('invoice_source_contract_invalid', { blockers: ['invoice_source_snapshot_hash_missing'] });
+  if (expectedSha256 !== currentSha256) {
+    throw appError('invoice_source_stale', {
+      sourceProvider: String(invoice?.source?.provider || ''),
+      sourceOrderId: String(invoice?.source?.entityId || ''),
+    });
+  }
+  return { verified: true, skipped: false, currentSha256 };
+}
+
 module.exports = {
   getInvoiceSourceAdapter,
   listInvoiceSourceAdapters,
   getInvoiceSourceRegistry,
   buildInvoiceDraftFromSource,
+  verifyInvoiceSource,
 };

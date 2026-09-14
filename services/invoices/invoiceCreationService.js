@@ -48,15 +48,27 @@ async function prepareInvoiceFromSource({ sourceProvider, sourceRef = {}, input 
   return { draft: prepared, blockers, legalEntity: entity };
 }
 
+function sourceIdempotencyKey(draft = {}, legalEntityId = '') {
+  if (String(draft?.source?.metadata?.authority || '').trim().toLowerCase() !== 'upstream_order') return '';
+  const provider = String(draft?.source?.provider || '').trim().toLowerCase();
+  const accountId = String(draft?.source?.metadata?.accountId || '').trim();
+  const orderId = String(draft?.source?.entityId || draft?.source?.metadata?.orderId || '').trim();
+  const sellerId = String(legalEntityId || draft?.seller?.legalEntityId || '').trim();
+  if (!provider || !accountId || !orderId || !sellerId) return '';
+  return `invoice-source:${provider}:${accountId}:${orderId}:${sellerId}`.slice(0, 240);
+}
+
 async function createInvoiceFromSource({ sourceProvider, sourceRef = {}, input = {}, legalEntityId = '', idempotencyKey = '', context = {} } = {}, actor = {}) {
   const prepared = await prepareInvoiceFromSource({ sourceProvider, sourceRef, input, legalEntityId, context });
-  const invoice = await createInvoiceDraft(prepared.draft, actor, { idempotencyKey });
+  const effectiveIdempotencyKey = String(idempotencyKey || '').trim() || sourceIdempotencyKey(prepared.draft, String(prepared.legalEntity?._id || legalEntityId || ''));
+  const invoice = await createInvoiceDraft(prepared.draft, actor, { idempotencyKey: effectiveIdempotencyKey });
   return { invoice, blockers: prepared.blockers, legalEntity: prepared.legalEntity };
 }
 
 module.exports = {
   addDays,
   applyLegalEntityDefaults,
+  sourceIdempotencyKey,
   prepareInvoiceFromSource,
   createInvoiceFromSource,
 };

@@ -13,9 +13,22 @@ const {
   buildSnapshotPayload,
 } = require('./contract');
 const { stableStringify } = require('./stableJson');
-const { buildInvoiceDraftFromSource } = require('./sourceProviders/registry');
+const { buildInvoiceDraftFromSource, verifyInvoiceSource } = require('./sourceProviders/registry');
 const { resolveLegalEntity } = require('./legalEntityService');
 const { allocateInvoiceNumber } = require('./invoiceNumbering');
+
+
+function isUpstreamOrderSource(invoice = {}) {
+  return String(invoice?.source?.metadata?.authority || '').trim().toLowerCase() === 'upstream_order';
+}
+
+function mergeUpstreamPayment(current = {}, requested = {}) {
+  return {
+    ...current,
+    dueDate: Object.prototype.hasOwnProperty.call(requested || {}, 'dueDate') ? requested.dueDate : current.dueDate,
+    bankAccount: Object.prototype.hasOwnProperty.call(requested || {}, 'bankAccount') ? requested.bankAccount : current.bankAccount,
+  };
+}
 
 function applyCanonicalDraft(invoice, draft) {
   for (const field of ['coreVersion', 'type', 'invoiceNumber', 'source', 'seller', 'buyer', 'recipient', 'issueDate', 'saleDate', 'currency', 'items', 'totals', 'payment', 'references', 'notes']) {
@@ -67,28 +80,29 @@ async function updateInvoiceDraft(invoiceId, patch = {}, actor = {}) {
 
   const current = invoice.toObject();
   const correctionLocked = current.type === 'correction' && current.references?.correction;
+  const upstreamLocked = isUpstreamOrderSource(current);
   const requestedReferences = patch.references ?? current.references;
   const references = correctionLocked
     ? { ...(requestedReferences || {}), correction: current.references.correction }
-    : requestedReferences;
+    : (upstreamLocked ? current.references : requestedReferences);
   const merged = {
     ...current,
     ...patch,
-    type: correctionLocked ? current.type : (patch.type ?? current.type),
+    type: correctionLocked || upstreamLocked ? current.type : (patch.type ?? current.type),
     source: current.source,
     // Seller identity belongs to the LegalEntity snapshot chosen at creation.
-    // A generic draft patch cannot silently swap the issuer. A dedicated future
-    // command may rebuild the draft from another LegalEntity before finalization.
+    // Provider-authoritative order drafts additionally lock buyer/items/currency
+    // so an operator cannot silently replace upstream billing facts.
     seller: current.seller,
-    items: patch.items ?? current.items,
-    // Stage 8 common KOR is financial/item-only. Party identity corrections need
-    // Podmiot1K/Podmiot2K provider semantics and cannot leak through generic PATCH.
-    buyer: correctionLocked ? current.buyer : (patch.buyer ?? current.buyer),
-    recipient: correctionLocked
+    items: upstreamLocked ? current.items : (patch.items ?? current.items),
+    buyer: correctionLocked || upstreamLocked ? current.buyer : (patch.buyer ?? current.buyer),
+    recipient: correctionLocked || upstreamLocked
       ? current.recipient
       : (Object.prototype.hasOwnProperty.call(patch, 'recipient') ? patch.recipient : current.recipient),
-    totals: patch.totals ?? current.totals,
-    payment: patch.payment ?? current.payment,
+    currency: upstreamLocked ? current.currency : (patch.currency ?? current.currency),
+    saleDate: upstreamLocked ? current.saleDate : (patch.saleDate ?? current.saleDate),
+    totals: upstreamLocked ? current.totals : (patch.totals ?? current.totals),
+    payment: upstreamLocked ? mergeUpstreamPayment(current.payment || {}, patch.payment || {}) : (patch.payment ?? current.payment),
     references,
   };
   const normalized = normalizeInvoiceDraft(merged);
@@ -98,7 +112,62 @@ async function updateInvoiceDraft(invoiceId, patch = {}, actor = {}) {
   return invoice;
 }
 
+async function refreshInvoiceDraftFromSource(invoiceId, actor = {}, context = {}) {
+  const invoice = await Invoice.findById(invoiceId);
+  if (!invoice) throw appError('invoice_not_found');
+  if (invoice.status !== INVOICE_STATUSES.DRAFT) throw appError('invoice_finalized_immutable');
+
+  const current = invoice.toObject();
+  if (!isUpstreamOrderSource(current)) throw appError('invoice_source_refresh_not_supported');
+  const adapterId = String(current?.source?.metadata?.adapter || '').trim().toLowerCase();
+  const accountId = String(current?.source?.metadata?.accountId || '').trim();
+  const orderId = String(current?.source?.metadata?.orderId || current?.source?.entityId || '').trim();
+  if (!adapterId || !accountId || !orderId) {
+    throw appError('invoice_source_contract_invalid', { blockers: ['invoice_source_identity_incomplete'] });
+  }
+
+  const upstreamDraft = await previewInvoiceDraftFromSource(adapterId, {
+    sourceRef: { accountId, orderId },
+    input: {
+      type: current.type,
+      issueDate: current.issueDate,
+      payment: {
+        dueDate: current.payment?.dueDate || '',
+        bankAccount: current.payment?.bankAccount || '',
+      },
+      notes: current.notes || '',
+      requireInvoiceRequested: current.source?.metadata?.invoiceRequested === true,
+    },
+    context,
+  });
+
+  const normalized = normalizeInvoiceDraft({
+    ...upstreamDraft,
+    seller: current.seller,
+    issueDate: current.issueDate || upstreamDraft.issueDate,
+    notes: current.notes || upstreamDraft.notes,
+    payment: {
+      ...(upstreamDraft.payment || {}),
+      dueDate: current.payment?.dueDate || upstreamDraft.payment?.dueDate || '',
+      bankAccount: current.payment?.bankAccount || upstreamDraft.payment?.bankAccount || '',
+    },
+  });
+  applyCanonicalDraft(invoice, normalized);
+  invoice.updatedBy = normalizeActor(actor);
+  await invoice.save();
+  return invoice;
+}
+
 async function finalizeInvoice(invoiceId, actor = {}) {
+  // Exact-read provider-authoritative order sources immediately before the
+  // irreversible numbering/snapshot transaction. If upstream business facts
+  // changed since draft creation, fail closed instead of finalizing stale data.
+  const sourceCheck = await Invoice.findById(invoiceId).lean();
+  if (!sourceCheck) throw appError('invoice_not_found');
+  if (sourceCheck.status !== INVOICE_STATUSES.FINALIZED && isUpstreamOrderSource(sourceCheck)) {
+    await verifyInvoiceSource(sourceCheck);
+  }
+
   const session = await mongoose.connection.startSession();
   let result = null;
   try {
@@ -164,5 +233,6 @@ module.exports = {
   createInvoiceDraft,
   createInvoiceDraftFromSource,
   updateInvoiceDraft,
+  refreshInvoiceDraftFromSource,
   finalizeInvoice,
 };

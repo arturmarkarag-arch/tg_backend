@@ -22,6 +22,7 @@ function createInvoiceSourceAdapter(definition = {}) {
     entityTypes: Object.freeze(entityTypes),
     description: text(definition.description, 1000),
     buildDraft: definition.buildDraft,
+    verifySource: typeof definition.verifySource === 'function' ? definition.verifySource : null,
     metadata: Object.freeze({ ...(definition.metadata || {}) }),
   });
 }

@@ -82,7 +82,7 @@ const {
   getKsefReadiness, listOperationalIssues: listKsefOperationalIssues, retryOperationalIssue: retryKsefOperationalIssue,
   recoverStaleKsefLeases, cleanupKsefOperationalState, probeKsefEnvironment, listOperationalEvents: listKsefOperationalEvents,
 } = require('../services/invoices/ksef/operations');
-const { updateInvoiceDraft, finalizeInvoice } = require('../services/invoices/invoiceService');
+const { updateInvoiceDraft, refreshInvoiceDraftFromSource, finalizeInvoice } = require('../services/invoices/invoiceService');
 const {
   createLegalEntity,
   updateLegalEntity,
@@ -646,6 +646,13 @@ router.patch('/:id', asyncHandler(async (req, res) => {
   const invoice = await updateInvoiceDraft(id, req.body || {}, actorFromReq(req));
   noStore(res);
   res.json(invoice);
+}));
+
+router.post('/:id/source/refresh', asyncHandler(async (req, res) => {
+  const id = requireObjectId(req.params.id, 'invoice_id_invalid');
+  const invoice = await refreshInvoiceDraftFromSource(id, actorFromReq(req));
+  noStore(res);
+  res.json({ invoice });
 }));
 
 router.post('/:id/finalize', asyncHandler(async (req, res) => {

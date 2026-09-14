@@ -38,6 +38,7 @@ const checks = [
   'scripts/checkConflictLiveHarnessSessionIsolation.js',
   'scripts/checkTelegramDeliveryLedgerV48.js',
   'scripts/checkOrderingReminderDeliveryV48.js',
+  'scripts/checkInvoiceOrderSourceProviders20260914.js',
 ];
 
 let failed = 0;

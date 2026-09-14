@@ -17,10 +17,12 @@ function buildOrdersParameters({
   orderId,
   idFrom,
   includeUnconfirmed = false,
+  includeDiscountsData = false,
 } = {}) {
   const params = {
     ...BASE_INCLUDE_FLAGS,
     get_unconfirmed_orders: Boolean(includeUnconfirmed),
+    ...(includeDiscountsData ? { include_discounts_data: true } : {}),
   };
 
   const status = toOptionalPositiveInt(statusId);
