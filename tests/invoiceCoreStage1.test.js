@@ -13,6 +13,7 @@ describe('Invoice Core Stage 1', () => {
   it('normalizes a complete manual invoice and validates exact totals', () => {
     const draft = normalizeInvoiceDraft({
       type: 'invoice',
+      invoiceNumber: 'TEST/FV/1/2026',
       source: { provider: 'manual', entityType: 'manual', entityId: 'test-1' },
       seller: { legalEntityId: 'le-1', name: 'Seller Sp. z o.o.', taxId: '1234567890', address: { countryCode: 'PL' } },
       buyer: { name: 'Buyer' },

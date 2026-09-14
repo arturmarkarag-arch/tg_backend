@@ -99,7 +99,13 @@
     "test:invoice:stage2": "vitest run tests/invoiceCoreStage2.test.js tests/invoiceCoreStage2.contract.test.js --no-file-parallelism",
     "test:invoice:stage2:static": "node scripts/checkInvoiceCoreStage2.js",
     "test:invoice:stage3": "node tests/invoiceKsefStage3.pure.js && node tests/invoiceKsefStage3.xsd.js",
-    "test:invoice:stage3:static": "node scripts/checkInvoiceKsefStage3.js"
+    "test:invoice:stage3:static": "node scripts/checkInvoiceKsefStage3.js",
+    "test:invoice:stage4": "node tests/invoiceKsefStage4.pure.js",
+    "test:invoice:stage4:static": "node scripts/checkInvoiceKsefStage4.js",
+    "test:invoice:stage5": "node tests/invoiceKsefStage5.pure.js",
+    "test:invoice:stage5:static": "node scripts/checkInvoiceKsefStage5.js",
+    "test:invoice:stage5b": "node tests/invoiceKsefStage5B.pure.js",
+    "test:invoice:stage5b:static": "node scripts/checkInvoiceKsefStage5B.js"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1030.0",
@@ -133,6 +139,9 @@
   "vitest": {
     "globals": true,
     "environment": "node"
+  },
+  "overrides": {
+    "libxml2-wasm": "0.7.1"
   },
   "engines": {
     "node": ">=22.12.0"

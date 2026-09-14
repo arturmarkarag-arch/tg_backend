@@ -40,6 +40,7 @@ const { startTelegramDeliveryScheduler } = require('./services/telegramDeliveryS
 const { startTelegramMemberTagScheduler } = require('./services/telegramMemberTagScheduler');
 const { startBaseLinkerQueueScheduler } = require('./services/baseLinkerQueueScheduler');
 const { startAllegroOrderScheduler } = require('./services/allegroOrderScheduler');
+const { startKsefReconciliationScheduler } = require('./services/invoices/ksef/reconciliationScheduler');
 const { enterMaintenance, isMaintenanceActive } = require('./services/maintenanceState');
 const { assertJwtConfigured } = require('./utils/jwt');
 
@@ -342,6 +343,7 @@ async function startServer() {
       startPickingMaintenanceScheduler();
       startBaseLinkerQueueScheduler();
       startAllegroOrderScheduler();
+      startKsefReconciliationScheduler();
     }
 
     server.on('error', (err) => {

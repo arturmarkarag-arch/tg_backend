@@ -34,6 +34,12 @@ function createFiscalProviderAdapter(definition = {}) {
     for (const method of ['validate', 'submit', 'getStatus', 'reconcile']) {
       if (typeof definition[method] !== 'function') throw new TypeError(`Live fiscal provider ${id} must implement ${method}()`);
     }
+    if (capabilities[CAPABILITIES.OFFLINE] && typeof definition.prepareOffline !== 'function') {
+      throw new TypeError(`Fiscal provider ${id} with OFFLINE capability must implement prepareOffline()`);
+    }
+    if (capabilities[CAPABILITIES.UPO] && typeof definition.getUpo !== 'function') {
+      throw new TypeError(`Fiscal provider ${id} with UPO capability must implement getUpo()`);
+    }
   }
 
   return Object.freeze({
@@ -48,6 +54,8 @@ function createFiscalProviderAdapter(definition = {}) {
     submit: definition.submit || null,
     getStatus: definition.getStatus || null,
     reconcile: definition.reconcile || null,
+    prepareOffline: definition.prepareOffline || null,
+    getUpo: definition.getUpo || null,
     metadata: Object.freeze({ ...(definition.metadata || {}) }),
   });
 }

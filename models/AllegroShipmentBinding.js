@@ -5,7 +5,10 @@ const mongoose = require('mongoose');
 const AllegroShipmentBindingSchema = new mongoose.Schema({
   accountId: { type: String, required: true, trim: true, maxlength: 64, index: true },
   orderId: { type: String, required: true, trim: true, maxlength: 128, index: true },
-  commandId: { type: String, default: '', trim: true, maxlength: 96, index: true },
+  // The unique+sparse index is declared below. Do not also set `index: true`
+  // here: both declarations auto-name themselves commandId_1, and the plain
+  // declaration conflicts with the required unique+sparse definition.
+  commandId: { type: String, default: '', trim: true, maxlength: 96 },
   shipmentId: { type: String, default: '', trim: true, maxlength: 128, index: true },
   status: {
     type: String,

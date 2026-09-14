@@ -6,6 +6,7 @@ const { ksefRequest } = require('./http');
 const { getPublicKey, invalidatePublicKeys } = require('./publicKeys');
 const { createSessionEncryption, encryptInvoiceXml } = require('./crypto');
 const { isRotatedKeyError } = require('./auth');
+const { buildSessionInvoicesRequest } = require('./reconciliationPolicy');
 
 async function openOnlineSession(environment, accessToken, { forceKeys = false } = {}) {
   const key = await getPublicKey(environment, PUBLIC_KEY_USAGE.SESSION, { force: forceKeys });
@@ -40,7 +41,7 @@ async function openOnlineSessionWithKeyRecovery(environment, accessToken) {
   }
 }
 
-async function sendInvoice(environment, accessToken, session, xml) {
+async function sendInvoice(environment, accessToken, session, xml, { offlineMode = false } = {}) {
   const encrypted = encryptInvoiceXml(xml, session.symmetricKey, session.initializationVector);
   const response = await ksefRequest(environment, `/sessions/online/${encodeURIComponent(session.sessionReferenceNumber)}/invoices`, {
     method: 'POST', token: accessToken,
@@ -50,7 +51,7 @@ async function sendInvoice(environment, accessToken, session, xml) {
       encryptedInvoiceHash: encrypted.encryptedInvoiceHash,
       encryptedInvoiceSize: encrypted.encryptedInvoiceSize,
       encryptedInvoiceContent: encrypted.encryptedInvoiceContent,
-      offlineMode: false,
+      offlineMode: offlineMode === true,
     },
   });
   if (!response.body?.referenceNumber) throw appError('ksef_send_response_invalid');
@@ -62,9 +63,54 @@ async function closeOnlineSession(environment, accessToken, sessionReferenceNumb
   return { closed: true };
 }
 
+async function getSessionStatus(environment, accessToken, sessionReferenceNumber) {
+  const response = await ksefRequest(environment, `/sessions/${encodeURIComponent(sessionReferenceNumber)}`, { token: accessToken });
+  return response.body;
+}
+
+async function listSessionInvoices(environment, accessToken, sessionReferenceNumber, { maxPages = 10 } = {}) {
+  const invoices = [];
+  let continuationToken = '';
+  for (let page = 0; page < Math.max(1, maxPages); page += 1) {
+    const request = buildSessionInvoicesRequest(sessionReferenceNumber, continuationToken);
+    const response = await ksefRequest(
+      environment,
+      request.path,
+      { token: accessToken, headers: request.headers },
+    );
+    const pageInvoices = Array.isArray(response.body?.invoices) ? response.body.invoices : [];
+    invoices.push(...pageInvoices);
+    continuationToken = String(response.body?.continuationToken || '').trim();
+    if (!continuationToken) return invoices;
+  }
+  throw appError('ksef_session_invoice_list_truncated');
+}
+
 async function getInvoiceStatus(environment, accessToken, sessionReferenceNumber, invoiceReferenceNumber) {
   const response = await ksefRequest(environment, `/sessions/${encodeURIComponent(sessionReferenceNumber)}/invoices/${encodeURIComponent(invoiceReferenceNumber)}`, { token: accessToken });
   return response.body;
 }
 
-module.exports = { openOnlineSessionWithKeyRecovery, sendInvoice, closeOnlineSession, getInvoiceStatus };
+async function getInvoiceUpo(environment, accessToken, sessionReferenceNumber, invoiceReferenceNumber) {
+  const response = await ksefRequest(
+    environment,
+    `/sessions/${encodeURIComponent(sessionReferenceNumber)}/invoices/${encodeURIComponent(invoiceReferenceNumber)}/upo`,
+    { token: accessToken, responseType: 'buffer', accept: 'application/xml,text/xml;q=0.9,*/*;q=0.1' },
+  );
+  const content = Buffer.isBuffer(response.body) ? response.body : Buffer.from(response.body || '');
+  if (!content.length) throw appError('ksef_upo_response_invalid');
+  return {
+    content,
+    providerHashBase64: String(response.headers.get('x-ms-meta-hash') || '').trim(),
+  };
+}
+
+module.exports = {
+  openOnlineSessionWithKeyRecovery,
+  sendInvoice,
+  closeOnlineSession,
+  getSessionStatus,
+  listSessionInvoices,
+  getInvoiceStatus,
+  getInvoiceUpo,
+};
