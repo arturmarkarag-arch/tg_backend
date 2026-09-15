@@ -82,6 +82,15 @@ describe('Telegram shop member tags contract', () => {
     expect(rateLimitRetryAt({ retryAfterSeconds: null }, now).toISOString()).toBe('2026-09-10T00:01:00.000Z');
   });
 
+
+  it('keeps the admin activity feed human-readable instead of exposing only technical ids', () => {
+    const fs = require('fs');
+    const source = fs.readFileSync(path.join(__dirname, '..', 'services', 'telegramMemberTagSync.js'), 'utf8');
+    expect(source).toContain("'telegramId firstName lastName'");
+    expect(source).toContain('userName: userNameByTelegramId.get');
+    expect(source).toContain('chatTitle: chatTitleById.get');
+  });
+
   it('passes the architecture/source gate', () => {
     const script = path.join(__dirname, '..', 'scripts', 'checkTelegramMemberTagsArchitecture20260910.js');
     expect(() => execFileSync(process.execPath, [script], { stdio: 'pipe' })).not.toThrow();

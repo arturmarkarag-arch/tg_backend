@@ -631,13 +631,35 @@ async function getTelegramMemberTagSyncSummary() {
     TelegramMemberTagSync.aggregate([{ $match: queueMatch }, { $group: { _id: '$status', count: { $sum: 1 } } }]),
     TelegramMemberTagSyncEvent.find(eventMatch).sort({ createdAt: -1 }).limit(25).lean(),
   ]);
+
+  // The admin activity feed is a presentation/read model, not a diagnostic dump.
+  // Enrich the durable technical event with current human-readable names in one
+  // bounded query. Soft-removed users remain in User, so recent history still has
+  // a useful display name without duplicating mutable profile data in every event.
+  const telegramIds = [...new Set(recent.map((row) => normalizeTelegramId(row.telegramId)).filter(Boolean))];
+  const users = telegramIds.length
+    ? await User.find({ telegramId: { $in: telegramIds } }, 'telegramId firstName lastName').lean()
+    : [];
+  const userNameByTelegramId = new Map(users.map((user) => [
+    cleanString(user.telegramId),
+    [cleanString(user.firstName).trim(), cleanString(user.lastName).trim()].filter(Boolean).join(' '),
+  ]));
+  const chatTitleById = new Map((health?.groups || []).map((group) => [
+    cleanString(group.groupId),
+    cleanString(group.chatTitle).trim(),
+  ]));
+
   return {
     health,
     counts: Object.fromEntries(counts.map((row) => [row._id, row.count])),
     recent: recent.map((row) => ({
       id: String(row._id), createdAt: row.createdAt, telegramId: row.telegramId,
-      userId: row.userId || '', shopId: row.shopId || '', shopName: row.shopName || '',
-      chatId: row.chatId || '', telegramStatus: row.telegramStatus || '',
+      userId: row.userId || '',
+      userName: userNameByTelegramId.get(cleanString(row.telegramId)) || '',
+      shopId: row.shopId || '', shopName: row.shopName || '',
+      chatId: row.chatId || '',
+      chatTitle: chatTitleById.get(cleanString(row.chatId)) || '',
+      telegramStatus: row.telegramStatus || '',
       previousTag: row.previousTag || '', desiredTag: row.desiredTag || '',
       result: row.result, source: row.source || '', errorCode: row.errorCode || '', error: row.error || '',
       retryAfterSeconds: row.retryAfterSeconds == null ? null : Number(row.retryAfterSeconds),
