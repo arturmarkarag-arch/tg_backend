@@ -76,6 +76,8 @@ function snapshotFromAllegroOrder(order = {}, { accountId = '' } = {}) {
     adapter: 'allegro_order',
     accountId,
     orderId,
+    canonicalProvider: 'allegro',
+    canonicalOrderId: orderId,
     externalNumber: orderId,
     revision: text(order.revision, 180),
     observedAt: new Date().toISOString(),

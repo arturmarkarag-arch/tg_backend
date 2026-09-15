@@ -32,7 +32,9 @@ check('provider order snapshot hash excludes transport observedAt', () => contra
 check('provider-authoritative buyer items currency and totals are locked in generic draft PATCH', () => invoiceService.includes('items: upstreamLocked ? current.items') && invoiceService.includes('buyer: correctionLocked || upstreamLocked ? current.buyer') && invoiceService.includes('currency: upstreamLocked ? current.currency') && invoiceService.includes('totals: upstreamLocked ? current.totals'));
 check('irreversible finalize exact-verifies source before Mongo transaction', () => invoiceService.includes('await verifyInvoiceSource(sourceCheck)') && invoiceService.indexOf('await verifyInvoiceSource(sourceCheck)') < invoiceService.indexOf('startSession()'));
 check('stale provider draft has exact-read refresh service and route', () => invoiceService.includes('async function refreshInvoiceDraftFromSource') && routes.includes("router.post('/:id/source/refresh'"));
-check('one upstream order gets deterministic primary-invoice idempotency identity per seller', () => creation.includes('function sourceIdempotencyKey') && creation.includes('`invoice-source:${provider}:${accountId}:${orderId}:${sellerId}`'));
+check('one business order gets deterministic primary-invoice idempotency identity per seller', () => creation.includes('function sourceIdempotencyKey') && creation.includes('canonicalProvider') && creation.includes('canonicalOrderId') && creation.includes('`invoice-source:${canonicalProvider}:${canonicalOrderId}:${sellerId}`'));
+check('provider order identity carries canonical cross-provider identity', () => contract.includes('canonicalProvider') && contract.includes('canonicalOrderId'));
+check('BaseLinker Allegro-source orders converge on Allegro canonical identity', () => base.includes("canonicalProvider = sourceType === 'allegro'") && base.includes("canonicalOrderId = canonicalProvider === 'allegro'"));
 
 if (pass !== checks.length) {
   console.error(`Invoice order source provider static contract: FAIL (${pass}/${checks.length})`);

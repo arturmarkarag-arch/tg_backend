@@ -41,6 +41,7 @@ const checks = [
   'scripts/checkInvoiceOrderSourceProviders20260914.js',
   'scripts/checkCommerceProviderIsolation20260915.js',
   'scripts/checkInvoiceKsefIndexReadiness20260915.js',
+  'scripts/checkInvoiceOrderAutomation20260915.js',
 ];
 
 let failed = 0;

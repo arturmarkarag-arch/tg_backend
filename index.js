@@ -307,6 +307,8 @@ async function startServer() {
         require('./models/KsefXadesAuthSession'),
         require('./models/KsefCertificateEnrollment'),
         require('./models/KsefOfflineCertificate'),
+        require('./models/CommerceProviderAccountBinding'),
+        require('./models/InvoiceSourceAutomationState'),
       ],
     });
 

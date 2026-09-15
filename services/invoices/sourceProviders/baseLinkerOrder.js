@@ -52,6 +52,10 @@ function expectedGross(order = {}) {
 
 function snapshotFromBaseLinkerOrder(order = {}, { accountId = '' } = {}) {
   const orderId = text(order.order_id, 180);
+  const sourceType = text(order.order_source, 80).toLowerCase();
+  const externalOrderId = text(order.external_order_id, 180);
+  const canonicalProvider = sourceType === 'allegro' && externalOrderId ? 'allegro' : 'baselinker';
+  const canonicalOrderId = canonicalProvider === 'allegro' ? externalOrderId : `${accountId}:${orderId}`;
   const currency = text(order.currency, 3).toUpperCase();
   const total = expectedGross(order);
   const paidAmount = Number(order.payment_done) || 0;
@@ -60,7 +64,9 @@ function snapshotFromBaseLinkerOrder(order = {}, { accountId = '' } = {}) {
     adapter: 'baselinker_order',
     accountId,
     orderId,
-    externalNumber: text(order.external_order_id || order.shop_order_id || order.order_id, 180),
+    canonicalProvider,
+    canonicalOrderId,
+    externalNumber: externalOrderId || text(order.shop_order_id || order.order_id, 180),
     revision: text(order.date_in_status || order.date_confirmed || order.date_add, 180),
     observedAt: new Date().toISOString(),
     confirmed: order.confirmed === true || order.confirmed === 1 || order.confirmed === '1',

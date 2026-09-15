@@ -1,5 +1,6 @@
 'use strict';
 
+const crypto = require('crypto');
 const AllegroOrderIndex = require('../../../models/AllegroOrderIndex');
 const { listAllegroAccounts } = require('../../allegroAccounts');
 const {
@@ -20,6 +21,33 @@ const {
   effectiveStock,
   isLikelyGtin,
 } = require('../publicationPolicy');
+
+
+function invoiceOrderRevision(order = {}) {
+  const facts = {
+    status: String(order?.status || ''),
+    revision: String(order?.revision || ''),
+    invoice: order?.invoice || null,
+    buyer: order?.buyer || null,
+    delivery: order?.delivery || null,
+    payment: order?.payment || null,
+    lineItems: (Array.isArray(order?.lineItems) ? order.lineItems : []).map((item) => ({
+      id: item?.id || '', offer: item?.offer || null, quantity: item?.quantity ?? null,
+      price: item?.price || null, tax: item?.tax || null, discounts: item?.discounts || [], boughtAt: item?.boughtAt || '',
+    })),
+    discounts: Array.isArray(order?.discounts) ? order.discounts : [],
+  };
+  return crypto.createHash('sha256').update(JSON.stringify(facts), 'utf8').digest('hex');
+}
+
+function invoiceSourceFromOrder({ accountId = '', order = {} } = {}) {
+  return {
+    requested: order?.invoice?.required === true,
+    revision: invoiceOrderRevision(order),
+    sourceRef: { accountId: String(accountId || '').trim(), orderId: String(order?.id || '').trim() },
+    context: { orderDocument: order },
+  };
+}
 
 function publicAllegroAccount(account = {}) {
   const capabilities = account.capabilities || {};
@@ -373,6 +401,7 @@ const adapter = createProviderAdapter({
     [CAPABILITIES.ACCOUNTS]: true,
     [CAPABILITIES.ORDERS_READ]: true,
     [CAPABILITIES.INVENTORY_RESERVATIONS]: true,
+    [CAPABILITIES.INVOICE_SOURCE]: true,
     [CAPABILITIES.PRODUCT_MAPPING]: true,
     [CAPABILITIES.LISTING_PREVIEW]: true,
     [CAPABILITIES.LISTING_CREATE]: true,
@@ -387,6 +416,7 @@ const adapter = createProviderAdapter({
   preparePublicationPreview,
   previewPublicationRow,
   integrationApi,
+  invoiceSource: { adapterId: 'allegro_order', fromOrder: invoiceSourceFromOrder },
   reservationProjection: {
     loadDesiredSnapshots: loadDesiredReservationSnapshots,
     loadCanonicalReservationStates,

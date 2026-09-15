@@ -409,6 +409,12 @@ async function upsertCheckoutForm(order, account, event = null) {
   if (!id) throw appError('allegro_order_response_invalid');
   const provider = clean(order?.fulfillment?.provider?.id, 80).toUpperCase();
 
+  // Provider-neutral invoice automation consumes the exact upstream order already
+  // in memory. It must never perform an extra order read or block warehouse ingest.
+  await require('./invoices/providerOrderAutomation').runProviderOrderInvoiceAutomation('allegro', {
+    accountId: account.accountId, orders: [order],
+  });
+
   // One Fulfillment orders are fulfilled by Allegro warehouse and must never
   // enter our warehouse queue. If an existing order changes provider, block any
   // local picking state first and then remove the operational projection.

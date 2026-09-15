@@ -1,5 +1,6 @@
 'use strict';
 
+const crypto = require('crypto');
 const BaseLinkerOrderIndex = require('../../../models/BaseLinkerOrderIndex');
 const BaseLinkerPickingOrder = require('../../../models/BaseLinkerPickingOrder');
 const { listBaseLinkerAccounts } = require('../../baseLinkerAccounts');
@@ -10,6 +11,46 @@ const {
   createProviderAdapter,
 } = require('./contract');
 const { text, dateOrNull, lineSnapshot } = require('./reservationProjection');
+
+
+function bool(value) {
+  return value === true || value === 1 || value === '1' || String(value || '').toLowerCase() === 'true';
+}
+
+function invoiceOrderRevision(order = {}) {
+  const products = (Array.isArray(order.products) ? order.products : []).map((item) => ({
+    id: String(item?.order_product_id || item?.transaction2_id || item?.transaction_id || ''),
+    name: String(item?.name || ''),
+    quantity: Number(item?.quantity || 0),
+    gross: String(item?.price_brutto ?? ''),
+    vat: String(item?.tax_rate ?? ''),
+  }));
+  const facts = {
+    confirmed: bool(order.confirmed),
+    invoiceRequested: bool(order.want_invoice),
+    buyer: {
+      company: String(order.invoice_company || ''), fullname: String(order.invoice_fullname || ''),
+      nip: String(order.invoice_nip || ''), address: String(order.invoice_address || ''),
+      postcode: String(order.invoice_postcode || ''), city: String(order.invoice_city || ''),
+      country: String(order.invoice_country_code || ''), email: String(order.email || ''), phone: String(order.phone || ''),
+    },
+    currency: String(order.currency || ''),
+    delivery: { method: String(order.delivery_method || ''), gross: String(order.delivery_price ?? '') },
+    products,
+    discounts: Array.isArray(order.discounts) ? order.discounts : [],
+  };
+  return crypto.createHash('sha256').update(JSON.stringify(facts), 'utf8').digest('hex');
+}
+
+function invoiceSourceFromOrder({ accountId = '', order = {} } = {}) {
+  const orderId = String(order?.order_id || '').trim();
+  return {
+    requested: bool(order?.want_invoice),
+    revision: invoiceOrderRevision(order),
+    sourceRef: { accountId: String(accountId || '').trim(), orderId },
+    context: { orderDocument: order },
+  };
+}
 
 function publicBaseLinkerAccount(account = {}) {
   const enabled = account.enabled === true;
@@ -159,10 +200,12 @@ module.exports = createProviderAdapter({
     [CAPABILITIES.ACCOUNTS]: true,
     [CAPABILITIES.ORDERS_READ]: true,
     [CAPABILITIES.INVENTORY_RESERVATIONS]: true,
+    [CAPABILITIES.INVOICE_SOURCE]: true,
   },
   listAccounts: ({ includeDisabled = true } = {}) => listBaseLinkerAccounts({ includeDisabled }),
   publicAccount: publicBaseLinkerAccount,
   integrationApi,
+  invoiceSource: { adapterId: 'baselinker_order', fromOrder: invoiceSourceFromOrder },
   reservationProjection: {
     loadDesiredSnapshots,
     loadSourceReservationStates,

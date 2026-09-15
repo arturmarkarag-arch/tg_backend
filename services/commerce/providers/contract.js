@@ -17,6 +17,7 @@ const CAPABILITIES = Object.freeze({
   ACCOUNTS: 'accounts',
   ORDERS_READ: 'orders.read',
   INVENTORY_RESERVATIONS: 'inventory.reservations',
+  INVOICE_SOURCE: 'invoice.source',
   PRODUCT_MAPPING: 'product.mapping',
   LISTING_PREVIEW: 'listing.preview',
   LISTING_CREATE: 'listing.create',
@@ -41,6 +42,19 @@ function normalizeCapabilities(raw = {}) {
   const out = {};
   for (const [key, value] of Object.entries(raw || {})) out[text(key, 120)] = value === true;
   return Object.freeze(out);
+}
+
+
+function normalizeInvoiceSource(raw = null) {
+  if (!raw) return null;
+  const adapterId = text(raw.adapterId, 80).toLowerCase();
+  if (!adapterId || !/^[a-z0-9][a-z0-9_-]*$/.test(adapterId)) {
+    throw new TypeError('Commerce provider invoiceSource.adapterId is invalid');
+  }
+  if (typeof raw.fromOrder !== 'function') {
+    throw new TypeError(`Commerce provider invoice source ${adapterId} must implement fromOrder()`);
+  }
+  return Object.freeze({ adapterId, fromOrder: raw.fromOrder });
 }
 
 function normalizeOperation(id, raw = {}) {
@@ -70,12 +84,16 @@ function createProviderAdapter(definition = {}) {
   if (!Object.values(IMPLEMENTATION).includes(implementation)) throw new TypeError(`Commerce provider ${id} has invalid implementation`);
 
   const capabilities = normalizeCapabilities(definition.capabilities);
+  const invoiceSource = normalizeInvoiceSource(definition.invoiceSource);
   const operations = {};
   for (const [operationId, operation] of Object.entries(definition.operations || {})) {
     operations[operationId] = normalizeOperation(operationId, operation);
   }
 
   if (implementation === IMPLEMENTATION.LIVE) {
+    if (capabilities[CAPABILITIES.INVOICE_SOURCE] === true && !invoiceSource) {
+      throw new TypeError(`Provider ${id} with invoice.source must implement invoiceSource`);
+    }
     if (typeof definition.listAccounts !== 'function') throw new TypeError(`Live provider ${id} must implement listAccounts()`);
     if (capabilities[CAPABILITIES.LISTING_PREVIEW] === true && typeof definition.preparePublicationPreview !== 'function') {
       throw new TypeError(`Provider ${id} with listing.preview must implement preparePublicationPreview()`);
@@ -99,6 +117,7 @@ function createProviderAdapter(definition = {}) {
     preparePublicationPreview: definition.preparePublicationPreview || (async () => ({})),
     previewPublicationRow: definition.previewPublicationRow || null,
     integrationApi: Array.isArray(definition.integrationApi) ? Object.freeze(definition.integrationApi.map((item) => Object.freeze({ ...item }))) : Object.freeze([]),
+    invoiceSource,
     reservationProjection: definition.reservationProjection && typeof definition.reservationProjection === 'object'
       ? Object.freeze({ ...definition.reservationProjection })
       : null,

@@ -425,6 +425,13 @@ async function performIndexSync(scope, opts = {}) {
   const currentIds = new Set(rows.map((row) => row.orderId));
   const now = new Date();
 
+  // Reuse the authoritative getOrders payload already fetched for the queue.
+  // The generic provider adapter decides whether an order requests an invoice;
+  // no BaseLinker invoice fields leak into Commerce/Invoice Core orchestration.
+  await require('./invoices/providerOrderAutomation').runProviderOrderInvoiceAutomation('baselinker', {
+    accountId, orders: currentOrders,
+  });
+
   let productImageWarmStats = null;
   try {
     const imageWarmResult = await warmBaseLinkerProductCatalog(

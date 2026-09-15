@@ -54,9 +54,12 @@ function sourceIdempotencyKey(draft = {}, legalEntityId = '') {
   const provider = String(draft?.source?.provider || '').trim().toLowerCase();
   const accountId = String(draft?.source?.metadata?.accountId || '').trim();
   const orderId = String(draft?.source?.entityId || draft?.source?.metadata?.orderId || '').trim();
+  const canonicalProvider = String(draft?.source?.metadata?.canonicalProvider || provider).trim().toLowerCase();
+  const canonicalOrderId = String(draft?.source?.metadata?.canonicalOrderId || '').trim()
+    || (provider === 'baselinker' ? `${accountId}:${orderId}` : orderId);
   const sellerId = String(legalEntityId || draft?.seller?.legalEntityId || '').trim();
-  if (!provider || !accountId || !orderId || !sellerId) return '';
-  return `invoice-source:${provider}:${accountId}:${orderId}:${sellerId}`.slice(0, 240);
+  if (!canonicalProvider || !canonicalOrderId || !sellerId) return '';
+  return `invoice-source:${canonicalProvider}:${canonicalOrderId}:${sellerId}`.slice(0, 240);
 }
 
 async function createInvoiceFromSource({ sourceAdapter, sourceProvider, sourceRef = {}, input = {}, legalEntityId = '', idempotencyKey = '', context = {} } = {}, actor = {}) {
