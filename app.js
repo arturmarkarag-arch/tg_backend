@@ -118,15 +118,14 @@ function requireAuthForApi(req, res, next) {
 
 app.use(requireAuthForApi);
 
-// Dedicated marketplace workers stay isolated from warehouse/admin domains,
-// but the role now operates the whole commerce surface rather than one provider.
-// Provider routes keep their own per-endpoint guards (admin-only diagnostics and
-// settings remain admin-only); this boundary only exposes operational namespaces.
+// The dedicated `baselinker` worker is intentionally scoped to BaseLinker only.
+// Commerce Core and other marketplace providers remain admin-only. BaseLinker
+// routes apply their own endpoint-level guard as a second authorization layer.
 app.use((req, res, next) => {
   if (req.telegramUser?.role !== 'baselinker') return next();
-  if (/^\/api\/(?:baselinker|allegro|commerce)(?:\/|$)/.test(req.path)) return next();
+  if (/^\/api\/baselinker(?:\/|$)/.test(req.path)) return next();
   const { appError } = require('./utils/errors');
-  return next(appError('auth_role_required', { allowed: ['admin', 'baselinker'] }));
+  return next(appError('auth_role_required', { allowed: ['admin'] }));
 });
 
 app.get('/api/health', (req, res) => {

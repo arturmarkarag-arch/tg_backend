@@ -82,7 +82,7 @@ Routes: **475** · anonymous: **18** · seller: **75** · warehouse: **200** · 
 | `GET /api/blocks/:number` | — | — | ✓ | ✓ | `routes/blocks.js:248` | route-entry authorization |
 | `GET /api/blocks/incoming/products` | — | — | ✓ | ✓ | `routes/blocks.js:204` | route-entry authorization |
 | `GET /api/blocks/search/products` | — | — | ✓ | ✓ | `routes/blocks.js:232` | route-entry authorization |
-| `GET /api/bot-status` | — | — | — | ✓ | `app.js:148` | route-entry authorization |
+| `GET /api/bot-status` | — | — | — | ✓ | `app.js:147` | route-entry authorization |
 | `GET /api/commerce/catalog` | — | — | — | ✓ | `routes/commerce.js:97` | provider-worker boundary; among these four roles only admin passes (baselinker is outside the table) |
 | `GET /api/commerce/catalog/:id` | — | — | — | ✓ | `routes/commerce.js:119` | provider-worker boundary; among these four roles only admin passes (baselinker is outside the table) |
 | `GET /api/commerce/catalog/warehouse-products` | — | — | — | ✓ | `routes/commerce.js:103` | provider-worker boundary; among these four roles only admin passes (baselinker is outside the table) |
@@ -95,8 +95,8 @@ Routes: **475** · anonymous: **18** · seller: **75** · warehouse: **200** · 
 | `GET /api/delivery-groups/ordering-status` | — | ✓ | ✓ | ✓ | `routes/deliveryGroups.js:49` | route-entry authorization |
 | `GET /api/delivery-groups/session-summaries` | — | — | — | ✓ | `routes/deliveryGroups.js:147` | route-entry authorization |
 | `GET /api/delivery-groups/summary` | — | — | ✓ | ✓ | `routes/deliveryGroups.js:109` | route-entry authorization |
-| `GET /api/gemini-status` | — | — | — | ✓ | `app.js:166` | route-entry authorization |
-| `GET /api/health` | ✓ | ✓ | ✓ | ✓ | `app.js:132` | public allowlist; endpoint-specific proof/rate limits may still apply |
+| `GET /api/gemini-status` | — | — | — | ✓ | `app.js:165` | route-entry authorization |
+| `GET /api/health` | ✓ | ✓ | ✓ | ✓ | `app.js:131` | public allowlist; endpoint-specific proof/rate limits may still apply |
 | `GET /api/invoices` | — | — | — | ✓ | `routes/invoices.js:540` | route-entry authorization |
 | `GET /api/invoices/:id` | — | — | — | ✓ | `routes/invoices.js:639` | route-entry authorization |
 | `GET /api/invoices/:id/fiscal/ksef/pdf-visualization` | — | — | — | ✓ | `routes/invoices.js:607` | route-entry authorization |
@@ -125,9 +125,9 @@ Routes: **475** · anonymous: **18** · seller: **75** · warehouse: **200** · 
 | `GET /api/invoices/legal-entities` | — | — | — | ✓ | `routes/invoices.js:128` | route-entry authorization |
 | `GET /api/invoices/legal-entities/:id` | — | — | — | ✓ | `routes/invoices.js:140` | route-entry authorization |
 | `GET /api/invoices/meta` | — | — | — | ✓ | `routes/invoices.js:118` | route-entry authorization |
-| `GET /api/maintenance` | ✓ | ✓ | ✓ | ✓ | `app.js:144` | public allowlist; endpoint-specific proof/rate limits may still apply |
+| `GET /api/maintenance` | ✓ | ✓ | ✓ | ✓ | `app.js:143` | public allowlist; endpoint-specific proof/rate limits may still apply |
 | `GET /api/nav-badges` | — | ✓ | ✓ | ✓ | `routes/navBadges.js:91` | route-entry authorization |
-| `GET /api/openai-status` | — | — | — | ✓ | `app.js:152` | route-entry authorization |
+| `GET /api/openai-status` | — | — | — | ✓ | `app.js:151` | route-entry authorization |
 | `GET /api/picking/block-tasks` | — | — | ✓ | ✓ | `routes/picking.js:941` | route-entry authorization |
 | `GET /api/picking/blocks-overview` | — | — | ✓ | ✓ | `routes/picking.js:1024` | route-entry authorization |
 | `GET /api/picking/locked-tasks` | — | — | ✓ | ✓ | `routes/picking.js:1415` | route-entry authorization |

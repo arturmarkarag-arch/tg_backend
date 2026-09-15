@@ -25,10 +25,11 @@ describe('Commerce Hub integration registry', () => {
     expect(registry).toContain('[temu.id, temu]');
   });
 
-  it('exposes operational marketplace namespaces to the dedicated commerce worker role only', () => {
+  it('keeps Commerce Core admin-only while the dedicated baselinker worker stays on BaseLinker', () => {
     const app = read('app.js');
     expect(app).toContain("req.telegramUser?.role !== 'baselinker'");
-    expect(app).toContain("if (/^\\/api\\/(?:baselinker|allegro|commerce)(?:\\/|$)/.test(req.path)) return next();");
-    expect(app).toContain("allowed: ['admin', 'baselinker']");
+    expect(app).toContain("if (/^\/api\/baselinker(?:\/|$)/.test(req.path)) return next();");
+    expect(app).not.toContain('(?:baselinker|allegro|commerce)');
+    expect(app).toContain("allowed: ['admin']");
   });
 });

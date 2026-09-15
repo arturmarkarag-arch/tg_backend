@@ -54,13 +54,22 @@ function runChecks({ quiet = false } = {}) {
   includesAll(app, [
     "app.use('/uploads', telegramAuth, requireTelegramRoles(['admin', 'warehouse'])",
     "req.telegramUser?.role !== 'baselinker'",
-    "/^\\/api\\/(?:baselinker|allegro|commerce)(?:\\/|$)/",
+    "/^\\/api\\/baselinker(?:\\/|$)/",
   ], 'app boundary');
   assert(!publicPaths.includes('search-products'), 'public allowlist must not expose search-products');
   assert(!publicPaths.includes('shop-products'), 'public allowlist must not expose shop-products');
   assert(!publicPaths.includes('delivery-groups'), 'public allowlist must not expose delivery-groups');
   assert(!publicPaths.includes('/api\\/v1\\/auth(?:'), 'public allowlist must not expose broad auth namespace');
   pass('anonymous allowlist + uploads boundary');
+
+  const marketplaceAccess = read('utils/marketplaceWarehouseAccess.js');
+  includesAll(marketplaceAccess, [
+    "return user.role === 'admin'",
+    "allowed: ['admin']",
+  ], 'marketplace worker boundary');
+  assert(!marketplaceAccess.includes("role === 'baselinker'"), 'baselinker must not inherit generic marketplace access');
+  pass('generic marketplace/Commerce access is admin-only; BaseLinker role is provider-scoped');
+
 
   const blocks = read('routes/blocks.js');
   includesAll(blocks, [

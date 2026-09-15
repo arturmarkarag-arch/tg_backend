@@ -2,7 +2,7 @@
 
 function hasMarketplaceWarehouseAccess(user) {
   if (!user) return false;
-  return user.role === 'admin' || user.role === 'baselinker';
+  return user.role === 'admin';
 }
 
 function requireMarketplaceWarehouseAccess(req, res, next) {
@@ -12,7 +12,7 @@ function requireMarketplaceWarehouseAccess(req, res, next) {
   }
   if (!hasMarketplaceWarehouseAccess(req.telegramUser)) {
     const { appError } = require('./errors');
-    return next(appError('auth_role_required', { allowed: ['admin', 'baselinker'] }));
+    return next(appError('auth_role_required', { allowed: ['admin'] }));
   }
   req.user = req.telegramUser;
   return next();
