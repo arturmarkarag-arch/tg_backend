@@ -300,13 +300,13 @@ router.patch('/me/shop', asyncHandler(async (req, res) => {
   });
 }));
 
-// PATCH /api/v1/telegram/me/profile — seller/warehouse оновлює власні дані
+// PATCH /api/v1/telegram/me/profile — seller/warehouse/baselinker оновлює власні дані
 // (firstName, lastName, phoneNumber) без створення shop transfer request.
 // Адмін-апрув не потрібен — це лише особисті контактні дані.
 router.patch('/me/profile', asyncHandler(async (req, res) => {
   const user = req.telegramUser;
   if (!user) throw appError('auth_required');
-  if (!['seller', 'warehouse'].includes(user.role)) throw appError('forbidden');
+  if (!['seller', 'warehouse', 'baselinker'].includes(user.role)) throw appError('forbidden');
 
   // Google linking is no longer a typed field here — it is proven via OAuth
   // through /auth/google/link/*. This route handles only plain contact data.

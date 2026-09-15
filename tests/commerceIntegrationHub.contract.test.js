@@ -29,6 +29,7 @@ describe('Commerce Hub integration registry', () => {
     const app = read('app.js');
     expect(app).toContain("req.telegramUser?.role !== 'baselinker'");
     expect(app).toContain("if (/^\/api\/baselinker(?:\/|$)/.test(req.path)) return next();");
+    expect(app).toContain('baseLinkerSelfServicePaths');
     expect(app).not.toContain('(?:baselinker|allegro|commerce)');
     expect(app).toContain("allowed: ['admin']");
   });

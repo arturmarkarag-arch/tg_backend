@@ -55,7 +55,16 @@ function runChecks({ quiet = false } = {}) {
     "app.use('/uploads', telegramAuth, requireTelegramRoles(['admin', 'warehouse'])",
     "req.telegramUser?.role !== 'baselinker'",
     "/^\\/api\\/baselinker(?:\\/|$)/",
+    "/^\\/api\\/v1\\/telegram\\/me\\/profile$/",
+    "/^\\/api\\/v1\\/telegram\\/google\\/link\\/start$/",
+    "/^\\/api\\/v1\\/telegram\\/google\\/unlink$/",
   ], 'app boundary');
+  const telegramSelfService = read('routes/v1/telegram.js');
+  assert(
+    telegramSelfService.includes("['seller', 'warehouse', 'baselinker'].includes(user.role)"),
+    'baselinker must be allowed to update only its own plain profile fields',
+  );
+  assert(!app.includes('/^\/api\/v1\/telegram(?:\/|$)/'), 'baselinker self-service exception must not widen to the whole Telegram API');
   assert(!publicPaths.includes('search-products'), 'public allowlist must not expose search-products');
   assert(!publicPaths.includes('shop-products'), 'public allowlist must not expose shop-products');
   assert(!publicPaths.includes('delivery-groups'), 'public allowlist must not expose delivery-groups');

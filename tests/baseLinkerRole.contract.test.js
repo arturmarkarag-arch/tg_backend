@@ -30,11 +30,16 @@ describe('dedicated BaseLinker role boundary', () => {
     expect(bot).toContain("user.role === 'baselinker'");
   });
 
-  it('hard-isolates authenticated baselinker users to the BaseLinker namespace only', () => {
+  it('isolates baselinker to BaseLinker operations plus exact self-service profile/auth endpoints', () => {
     const app = read('app.js');
     expect(app).toContain("req.telegramUser?.role !== 'baselinker'");
     expect(app).toContain('/^\/api\/baselinker(?:\/|$)/');
+    expect(app).toContain('/^\/api\/v1\/telegram\/me\/profile$/');
+    expect(app).toContain('/^\/api\/v1\/telegram\/google\/link\/start$/');
+    expect(app).toContain('/^\/api\/v1\/telegram\/google\/unlink$/');
     expect(app).not.toContain('(?:baselinker|allegro|commerce)');
     expect(app).toContain("allowed: ['admin']");
+    const telegram = read('routes/v1/telegram.js');
+    expect(telegram).toContain("['seller', 'warehouse', 'baselinker'].includes(user.role)");
   });
 });

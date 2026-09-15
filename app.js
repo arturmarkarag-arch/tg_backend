@@ -118,12 +118,20 @@ function requireAuthForApi(req, res, next) {
 
 app.use(requireAuthForApi);
 
-// The dedicated `baselinker` worker is intentionally scoped to BaseLinker only.
-// Commerce Core and other marketplace providers remain admin-only. BaseLinker
-// routes apply their own endpoint-level guard as a second authorization layer.
+// The dedicated `baselinker` worker is intentionally scoped to BaseLinker
+// operations, with only the exact self-service account endpoints needed to edit
+// its own profile / link Google. Commerce Core and other marketplace providers
+// remain admin-only. BaseLinker routes apply their own endpoint-level guard as a
+// second authorization layer.
+const baseLinkerSelfServicePaths = [
+  /^\/api\/v1\/telegram\/me\/profile$/,
+  /^\/api\/v1\/telegram\/google\/link\/start$/,
+  /^\/api\/v1\/telegram\/google\/unlink$/,
+];
 app.use((req, res, next) => {
   if (req.telegramUser?.role !== 'baselinker') return next();
   if (/^\/api\/baselinker(?:\/|$)/.test(req.path)) return next();
+  if (baseLinkerSelfServicePaths.some((pattern) => pattern.test(req.path))) return next();
   const { appError } = require('./utils/errors');
   return next(appError('auth_role_required', { allowed: ['admin'] }));
 });
