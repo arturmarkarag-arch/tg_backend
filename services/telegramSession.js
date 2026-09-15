@@ -10,13 +10,27 @@ function digestInitData(initData) {
   return crypto.createHash('sha256').update(String(initData || ''), 'utf8').digest('hex');
 }
 
-async function bootstrapTelegramSession(initData, botToken) {
+async function bootstrapTelegramSession(initData, botToken, { existingTelegramId = '' } = {}) {
   const validation = validateTelegramInitData(initData, botToken);
   if (!validation.valid) return { ...validation, replayed: false };
 
   const telegramId = getTelegramId(validation.parsedData);
   if (!telegramId) {
     return { ...validation, valid: false, error: 'Missing Telegram user id', replayed: false };
+  }
+
+  // A Telegram WebView cookie can outlive an account switch. Reuse the cookie
+  // only when the CURRENT signed initData proves the same Telegram identity.
+  // This preserves reload idempotency without allowing user A's old cookie to
+  // authenticate a fresh launch from user B.
+  if (existingTelegramId && String(existingTelegramId) === String(telegramId)) {
+    return {
+      ...validation,
+      telegramId,
+      replayed: false,
+      reusedExistingSession: true,
+      sessionToken: null,
+    };
   }
 
   const authDate = Number.parseInt(validation.rawData?.auth_date, 10);

@@ -88,18 +88,29 @@ async function resolveBotUsername() {
 // HttpOnly first-party Telegram session cookie. A valid existing Telegram cookie
 // makes reloads idempotent without consuming/replaying initData again.
 router.post('/telegram/bootstrap', generalAuthLimit, asyncHandler(async (req, res) => {
-  const existing = verifyTelegramSession(readTelegramSessionCookie(req));
-  if (existing) return res.json({ ok: true, telegramId: existing.telegramId });
-
   const initData = String(req.body?.initData || '');
   if (!initData) throw appError('init_data_required');
-  const result = await bootstrapTelegramSession(initData, process.env.TELEGRAM_BOT_TOKEN);
+
+  // IMPORTANT: never trust an existing Telegram cookie before comparing it to
+  // the identity in the CURRENT signed initData. Telegram clients can reuse the
+  // same WebView cookie jar after the user switches Telegram accounts.
+  const existing = verifyTelegramSession(readTelegramSessionCookie(req));
+  const result = await bootstrapTelegramSession(initData, process.env.TELEGRAM_BOT_TOKEN, {
+    existingTelegramId: existing?.telegramId || '',
+  });
   if (!result.valid) {
     if (result.replayed) throw appError('auth_init_data_replayed');
     throw appError('auth_invalid_init_data', { reason: result.error });
   }
-  setTelegramSessionCookie(res, result.sessionToken);
-  res.json({ ok: true, telegramId: result.telegramId, user: result.parsedData?.user || null });
+
+  // Same identity: keep the existing cookie. Different identity: the service
+  // consumed the fresh initData and issued a token which replaces the old cookie.
+  if (result.sessionToken) setTelegramSessionCookie(res, result.sessionToken);
+  res.json({
+    ok: true,
+    telegramId: result.telegramId,
+    user: result.parsedData?.user || null,
+  });
 }));
 
 router.get('/config', asyncHandler(async (req, res) => {
