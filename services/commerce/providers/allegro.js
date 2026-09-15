@@ -1,5 +1,6 @@
 'use strict';
 
+const AllegroOrderIndex = require('../../../models/AllegroOrderIndex');
 const { listAllegroAccounts } = require('../../allegroAccounts');
 const {
   CAPABILITIES,
@@ -8,6 +9,7 @@ const {
   OPERATION_KINDS,
   createProviderAdapter,
 } = require('./contract');
+const { dateOrNull, lineSnapshot } = require('./reservationProjection');
 
 const LIVE = IMPLEMENTATION.LIVE;
 const {
@@ -294,6 +296,45 @@ function pendingJobsStatus(result) {
   return pending ? 202 : 200;
 }
 
+
+async function loadDesiredReservationSnapshots({ startedAt }) {
+  const rows = await AllegroOrderIndex.find({
+    fulfillmentProviderId: 'SELLER',
+    $or: [
+      { upstreamStage: { $in: ['processing', 'deferred'] } },
+      { upstreamStage: 'sent', orderSortDate: { $gte: startedAt } },
+    ],
+  }).select('accountId checkoutFormId upstreamStage upstreamUpdatedAt lastEventOccurredAt seenAt orderSortDate preview updatedAt').lean();
+
+  return rows.flatMap((row) => {
+    const orderId = text(row?.checkoutFormId, 180);
+    if (!orderId) return [];
+    const state = String(row?.upstreamStage || '') === 'sent' ? 'consumed' : 'reserved';
+    const base = {
+      canonicalProvider: 'allegro',
+      canonicalOrderId: orderId,
+      canonicalOrderKey: `allegro:${orderId}`,
+      sourceProvider: 'allegro',
+      sourceAccountId: text(row?.accountId, 100),
+      sourceOrderId: orderId,
+      sourceType: 'allegro',
+      sourceExternalOrderId: orderId,
+      sourcePriority: 100,
+    };
+    const observedAt = dateOrNull(row?.upstreamUpdatedAt || row?.lastEventOccurredAt || row?.seenAt || row?.updatedAt) || new Date();
+    return (Array.isArray(row?.preview?.products) ? row.preview.products : [])
+      .map((item) => lineSnapshot(base, item, state, observedAt, { preferListingIdentity: true, matchByListingExternalId: true }))
+      .filter(Boolean);
+  });
+}
+
+async function loadCanonicalReservationStates(rows = []) {
+  const orderIds = [...new Set(rows.map((row) => text(row.canonicalOrderId, 180)).filter(Boolean))];
+  if (!orderIds.length) return new Map();
+  const docs = await AllegroOrderIndex.find({ checkoutFormId: { $in: orderIds } }).select('checkoutFormId upstreamStage').lean();
+  return new Map(docs.map((row) => [text(row.checkoutFormId, 180), text(row.upstreamStage, 40).toLowerCase()]));
+}
+
 const integrationApi = [
   { id: 'auth.oauth', label: 'OAuth seller account', operation: 'OAuth 2.0', direction: 'auth', implementation: LIVE },
   { id: 'orders.read', label: 'Замовлення', operation: 'order checkout forms / events', direction: 'read', implementation: LIVE, capability: 'ordersRead', scope: 'allegro:api:orders:read' },
@@ -331,6 +372,7 @@ const adapter = createProviderAdapter({
   capabilities: {
     [CAPABILITIES.ACCOUNTS]: true,
     [CAPABILITIES.ORDERS_READ]: true,
+    [CAPABILITIES.INVENTORY_RESERVATIONS]: true,
     [CAPABILITIES.PRODUCT_MAPPING]: true,
     [CAPABILITIES.LISTING_PREVIEW]: true,
     [CAPABILITIES.LISTING_CREATE]: true,
@@ -345,6 +387,10 @@ const adapter = createProviderAdapter({
   preparePublicationPreview,
   previewPublicationRow,
   integrationApi,
+  reservationProjection: {
+    loadDesiredSnapshots: loadDesiredReservationSnapshots,
+    loadCanonicalReservationStates,
+  },
   metadata: {
     productModel: 'product_offer',
     providerStateNamespace: 'allegro',

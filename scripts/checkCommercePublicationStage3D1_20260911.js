@@ -14,7 +14,8 @@ const registry = read('services/commerce/providers/allegro.js');
 
 check('dedicated draft reconciliation endpoint exists', () => {
   assert(route.includes("router.post('/publications/allegro/drafts/reconcile'"), 'reconcile endpoint missing');
-  assert(route.includes('reconcileAllegroDraft'), 'reconcile service missing');
+  assert(route.includes("legacyPublicationOperation('draft.reconcile')"), 'provider operation alias missing');
+  assert(registry.includes('reconcileAllegroDraft'), 'adapter service wiring missing');
 });
 check('Stage 3D.1 performs only GET /sale/product-offers/{offerId}', () => {
   assert(service.includes("method: 'GET'"), 'GET missing');

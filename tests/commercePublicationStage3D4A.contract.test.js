@@ -52,7 +52,8 @@ describe('Commerce publication Stage 3D.4A contract', () => {
   test('route exposes one read-only update preview command', () => {
     const route = read('routes/commerce.js');
     expect(route).toContain("'/publications/allegro/update-preview'");
-    expect(route).toContain('previewAllegroOfferUpdate');
+    expect(route).toContain("legacyPublicationOperation('content.preview')");
+    expect(read('services/commerce/providers/allegro.js')).toContain('previewAllegroOfferUpdate');
   });
 
   test('integration registry keeps content preview separate from live content/price/stock writes', () => {

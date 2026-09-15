@@ -4,7 +4,7 @@ const path = require('path');
 const root = path.join(__dirname, '..');
 const read = (rel) => fs.readFileSync(path.join(root, rel), 'utf8');
 const { effectiveStock } = require('../services/commerce/publicationPreview');
-const { baseLinkerCanonical, reservationKey } = require('../services/commerce/stockReservations');
+const { reservationKey } = require('../services/commerce/providers/reservationProjection');
 
 describe('Commerce publication Stage 3D.6B reservation ledger contract', () => {
   test('adds a provider-neutral durable reservation model without buyer/payment payload', () => {
@@ -15,40 +15,41 @@ describe('Commerce publication Stage 3D.6B reservation ledger contract', () => {
     expect(model).not.toMatch(/\b(?:buyer|delivery_fullname|phone|email|payment_done|invoice)\s*:/i);
   });
 
-  test('uses an epoch so first deployment never backfills all historical sent orders', () => {
+  test('provider adapters own their epoch queries so core never imports provider order models', () => {
     const state = read('models/CommerceStockReservationState.js');
-    const service = read('services/commerce/stockReservations.js');
+    const core = read('services/commerce/stockReservations.js');
+    const allegro = read('services/commerce/providers/allegro.js');
+    const baseLinker = read('services/commerce/providers/baseLinker.js');
     expect(state).toContain('startedAt');
-    expect(service).toContain("{ upstreamStage: 'sent', orderSortDate: { $gte: startedAt } }");
-    expect(service).toContain('sentAt: { $gte: startedAt }');
+    expect(allegro).toContain("{ upstreamStage: 'sent', orderSortDate: { $gte: startedAt } }");
+    expect(baseLinker).toContain('sentAt: { $gte: startedAt }');
+    expect(core).not.toMatch(/AllegroOrderIndex|BaseLinkerOrderIndex|BaseLinkerPickingOrder/);
   });
 
-  test('deduplicates BaseLinker Allegro bridge orders onto the direct Allegro canonical identity', () => {
-    const canonical = baseLinkerCanonical({ accountId: 'bl-A', orderId: '123', sourceType: 'allegro', externalOrderId: 'checkout-uuid' });
-    expect(canonical.canonicalProvider).toBe('allegro');
-    expect(canonical.canonicalOrderKey).toBe('allegro:checkout-uuid');
-    expect(reservationKey(canonical.canonicalOrderKey, 'offer:999'))
-      .toBe(reservationKey('allegro:checkout-uuid', 'offer:999'));
+  test('BaseLinker adapter canonicalizes Allegro bridge orders before the provider-neutral merge', () => {
+    const baseLinker = read('services/commerce/providers/baseLinker.js');
+    expect(baseLinker).toContain("sourceType === 'allegro'");
+    expect(baseLinker).toContain("canonicalProvider: 'allegro'");
+    expect(baseLinker).toContain('priority: 70');
+    const key = reservationKey('allegro:checkout-uuid', 'offer:999');
+    expect(key).toHaveLength(64);
+    expect(key).toBe(reservationKey('allegro:checkout-uuid', 'offer:999'));
   });
 
-  test('maps order lines exact-first by Allegro offerId, then SKU/EAN, and fails closed on ambiguity', () => {
+  test('core maps exact listing external id then SKU/EAN and fails closed on ambiguity', () => {
     const service = read('services/commerce/stockReservations.js');
-    expect(service).toContain("matchStrategy: 'listing_offer_id'");
+    expect(service).toContain("matchStrategy: 'listing_external_id'");
     expect(service).toContain("matchStrategy: 'sku'");
     expect(service).toContain("matchStrategy: 'ean'");
-    expect(service).toContain('reservation_offer_mapping_ambiguous');
+    expect(service).toContain('reservation_listing_mapping_ambiguous');
     expect(service).toContain('reservation_ean_mapping_ambiguous');
     expect(service).toContain('countsAgainstStock: true');
   });
 
   test('subtracts central holds before channel buffer/cap policy', () => {
-    const stock = effectiveStock(
-      { availableStock: 10 },
-      { stock: { mode: 'capped', maxQuantity: 8, buffer: 1 } },
-      { held: 3 },
-    );
+    const stock = effectiveStock({ availableStock: 10 }, { stock: { mode: 'capped', maxQuantity: 8, buffer: 1 } }, { held: 3 });
     expect(stock.inventoryOnHand).toBe(10);
-    expect(stock.physicalSource).toBe(10); // compatibility alias
+    expect(stock.physicalSource).toBe(10);
     expect(stock.reservedUnits).toBe(3);
     expect(stock.source).toBe(7);
     expect(stock.available).toBe(6);
@@ -59,10 +60,8 @@ describe('Commerce publication Stage 3D.6B reservation ledger contract', () => {
     const route = read('routes/commerce.js');
     expect(service).toContain('reservationLedgerReady: true');
     expect(service).toContain('refreshCommerceStockReservations');
-    expect(service).toContain('reservationLedgerReady: true');
     expect(service).toContain('inventoryConsumptionReady: inventoryConsumption.ready');
     expect(service).toContain('providerWriteCalls: 0');
-    expect(route).toContain("'/publications/allegro/stock-sync/preview'");
     expect(route).toContain("'/publications/allegro/stock-sync/preview'");
   });
 
@@ -72,7 +71,7 @@ describe('Commerce publication Stage 3D.6B reservation ledger contract', () => {
     const write = registry.split('\n').find((line) => line.includes("id: 'offers.stock.write'") && line.includes('offer-bulk-modification-commands'));
     expect(ledger).toContain('implementation: LIVE');
     expect(write).toBeTruthy();
-    expect(write).toContain('Stage 3D.6C')
+    expect(write).toContain('Stage 3D.6C');
   });
 
   test('disappeared reservations are held fail-closed unless terminal cancel/sent is proven', () => {

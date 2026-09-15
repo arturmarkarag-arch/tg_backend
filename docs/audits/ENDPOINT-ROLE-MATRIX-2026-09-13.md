@@ -82,52 +82,52 @@ Routes: **475** · anonymous: **18** · seller: **75** · warehouse: **200** · 
 | `GET /api/blocks/:number` | — | — | ✓ | ✓ | `routes/blocks.js:248` | route-entry authorization |
 | `GET /api/blocks/incoming/products` | — | — | ✓ | ✓ | `routes/blocks.js:204` | route-entry authorization |
 | `GET /api/blocks/search/products` | — | — | ✓ | ✓ | `routes/blocks.js:232` | route-entry authorization |
-| `GET /api/bot-status` | — | — | — | ✓ | `app.js:143` | route-entry authorization |
-| `GET /api/commerce/catalog` | — | — | — | ✓ | `routes/commerce.js:214` | provider-worker boundary; among these four roles only admin passes (baselinker is outside the table) |
-| `GET /api/commerce/catalog/:id` | — | — | — | ✓ | `routes/commerce.js:236` | provider-worker boundary; among these four roles only admin passes (baselinker is outside the table) |
-| `GET /api/commerce/catalog/warehouse-products` | — | — | — | ✓ | `routes/commerce.js:220` | provider-worker boundary; among these four roles only admin passes (baselinker is outside the table) |
-| `GET /api/commerce/categories` | — | — | — | ✓ | `routes/commerce.js:199` | provider-worker boundary; among these four roles only admin passes (baselinker is outside the table) |
-| `GET /api/commerce/integrations` | — | — | — | ✓ | `routes/commerce.js:36` | provider-worker boundary; among these four roles only admin passes (baselinker is outside the table) |
-| `GET /api/commerce/providers` | — | — | — | ✓ | `routes/commerce.js:42` | provider-worker boundary; among these four roles only admin passes (baselinker is outside the table) |
+| `GET /api/bot-status` | — | — | — | ✓ | `app.js:148` | route-entry authorization |
+| `GET /api/commerce/catalog` | — | — | — | ✓ | `routes/commerce.js:97` | provider-worker boundary; among these four roles only admin passes (baselinker is outside the table) |
+| `GET /api/commerce/catalog/:id` | — | — | — | ✓ | `routes/commerce.js:119` | provider-worker boundary; among these four roles only admin passes (baselinker is outside the table) |
+| `GET /api/commerce/catalog/warehouse-products` | — | — | — | ✓ | `routes/commerce.js:103` | provider-worker boundary; among these four roles only admin passes (baselinker is outside the table) |
+| `GET /api/commerce/categories` | — | — | — | ✓ | `routes/commerce.js:82` | provider-worker boundary; among these four roles only admin passes (baselinker is outside the table) |
+| `GET /api/commerce/integrations` | — | — | — | ✓ | `routes/commerce.js:23` | provider-worker boundary; among these four roles only admin passes (baselinker is outside the table) |
+| `GET /api/commerce/providers` | — | — | — | ✓ | `routes/commerce.js:29` | provider-worker boundary; among these four roles only admin passes (baselinker is outside the table) |
 | `GET /api/delivery-groups` | — | — | ✓ | ✓ | `routes/deliveryGroups.js:243` | route-entry authorization |
 | `GET /api/delivery-groups/:groupId/shop-status` | — | — | ✓ | ✓ | `routes/deliveryGroups.js:118` | route-entry authorization |
 | `GET /api/delivery-groups/:groupId/shops/:shopId/ordered-products` | — | — | ✓ | ✓ | `routes/deliveryGroups.js:136` | route-entry authorization |
 | `GET /api/delivery-groups/ordering-status` | — | ✓ | ✓ | ✓ | `routes/deliveryGroups.js:49` | route-entry authorization |
 | `GET /api/delivery-groups/session-summaries` | — | — | — | ✓ | `routes/deliveryGroups.js:147` | route-entry authorization |
 | `GET /api/delivery-groups/summary` | — | — | ✓ | ✓ | `routes/deliveryGroups.js:109` | route-entry authorization |
-| `GET /api/gemini-status` | — | — | — | ✓ | `app.js:161` | route-entry authorization |
-| `GET /api/health` | ✓ | ✓ | ✓ | ✓ | `app.js:131` | public allowlist; endpoint-specific proof/rate limits may still apply |
-| `GET /api/invoices` | — | — | — | ✓ | `routes/invoices.js:534` | route-entry authorization |
-| `GET /api/invoices/:id` | — | — | — | ✓ | `routes/invoices.js:633` | route-entry authorization |
-| `GET /api/invoices/:id/fiscal/ksef/pdf-visualization` | — | — | — | ✓ | `routes/invoices.js:601` | route-entry authorization |
-| `GET /api/invoices/:id/fiscal/ksef/status` | — | — | — | ✓ | `routes/invoices.js:586` | route-entry authorization |
-| `GET /api/invoices/:id/fiscal/ksef/upo` | — | — | — | ✓ | `routes/invoices.js:619` | route-entry authorization |
-| `GET /api/invoices/:id/fiscal/ksef/xml` | — | — | — | ✓ | `routes/invoices.js:608` | route-entry authorization |
-| `GET /api/invoices/business-counterparties` | — | — | — | ✓ | `routes/invoices.js:330` | route-entry authorization |
-| `GET /api/invoices/ksef/certificate-enrollments` | — | — | — | ✓ | `routes/invoices.js:265` | route-entry authorization |
-| `GET /api/invoices/ksef/certificate-enrollments/:enrollmentId` | — | — | — | ✓ | `routes/invoices.js:281` | route-entry authorization |
-| `GET /api/invoices/ksef/certificate-limits` | — | — | — | ✓ | `routes/invoices.js:258` | route-entry authorization |
-| `GET /api/invoices/ksef/connections` | — | — | — | ✓ | `routes/invoices.js:199` | route-entry authorization |
-| `GET /api/invoices/ksef/inbound-documents` | — | — | — | ✓ | `routes/invoices.js:409` | route-entry authorization |
-| `GET /api/invoices/ksef/inbound-documents/:documentId` | — | — | — | ✓ | `routes/invoices.js:421` | route-entry authorization |
-| `GET /api/invoices/ksef/inbound-documents/:documentId/business-links` | — | — | — | ✓ | `routes/invoices.js:433` | route-entry authorization |
-| `GET /api/invoices/ksef/inbound-documents/:documentId/xml` | — | — | — | ✓ | `routes/invoices.js:457` | route-entry authorization |
-| `GET /api/invoices/ksef/inbound-exports` | — | — | — | ✓ | `routes/invoices.js:382` | route-entry authorization |
-| `GET /api/invoices/ksef/inbound-exports/:exportId` | — | — | — | ✓ | `routes/invoices.js:395` | route-entry authorization |
-| `GET /api/invoices/ksef/inbound-syncs` | — | — | — | ✓ | `routes/invoices.js:348` | route-entry authorization |
-| `GET /api/invoices/ksef/offline-certificates` | — | — | — | ✓ | `routes/invoices.js:306` | route-entry authorization |
-| `GET /api/invoices/ksef/ops/events` | — | — | — | ✓ | `routes/invoices.js:172` | route-entry authorization |
-| `GET /api/invoices/ksef/ops/issues` | — | — | — | ✓ | `routes/invoices.js:158` | route-entry authorization |
-| `GET /api/invoices/ksef/ops/readiness` | — | — | — | ✓ | `routes/invoices.js:152` | route-entry authorization |
-| `GET /api/invoices/ksef/technical-corrections/:correctionId` | — | — | — | ✓ | `routes/invoices.js:482` | route-entry authorization |
-| `GET /api/invoices/ksef/technical-corrections/:correctionId/upo` | — | — | — | ✓ | `routes/invoices.js:489` | route-entry authorization |
-| `GET /api/invoices/ksef/xades-credentials` | — | — | — | ✓ | `routes/invoices.js:230` | route-entry authorization |
-| `GET /api/invoices/legal-entities` | — | — | — | ✓ | `routes/invoices.js:124` | route-entry authorization |
-| `GET /api/invoices/legal-entities/:id` | — | — | — | ✓ | `routes/invoices.js:136` | route-entry authorization |
-| `GET /api/invoices/meta` | — | — | — | ✓ | `routes/invoices.js:116` | route-entry authorization |
-| `GET /api/maintenance` | ✓ | ✓ | ✓ | ✓ | `app.js:139` | public allowlist; endpoint-specific proof/rate limits may still apply |
+| `GET /api/gemini-status` | — | — | — | ✓ | `app.js:166` | route-entry authorization |
+| `GET /api/health` | ✓ | ✓ | ✓ | ✓ | `app.js:132` | public allowlist; endpoint-specific proof/rate limits may still apply |
+| `GET /api/invoices` | — | — | — | ✓ | `routes/invoices.js:540` | route-entry authorization |
+| `GET /api/invoices/:id` | — | — | — | ✓ | `routes/invoices.js:639` | route-entry authorization |
+| `GET /api/invoices/:id/fiscal/ksef/pdf-visualization` | — | — | — | ✓ | `routes/invoices.js:607` | route-entry authorization |
+| `GET /api/invoices/:id/fiscal/ksef/status` | — | — | — | ✓ | `routes/invoices.js:592` | route-entry authorization |
+| `GET /api/invoices/:id/fiscal/ksef/upo` | — | — | — | ✓ | `routes/invoices.js:625` | route-entry authorization |
+| `GET /api/invoices/:id/fiscal/ksef/xml` | — | — | — | ✓ | `routes/invoices.js:614` | route-entry authorization |
+| `GET /api/invoices/business-counterparties` | — | — | — | ✓ | `routes/invoices.js:334` | route-entry authorization |
+| `GET /api/invoices/ksef/certificate-enrollments` | — | — | — | ✓ | `routes/invoices.js:269` | route-entry authorization |
+| `GET /api/invoices/ksef/certificate-enrollments/:enrollmentId` | — | — | — | ✓ | `routes/invoices.js:285` | route-entry authorization |
+| `GET /api/invoices/ksef/certificate-limits` | — | — | — | ✓ | `routes/invoices.js:262` | route-entry authorization |
+| `GET /api/invoices/ksef/connections` | — | — | — | ✓ | `routes/invoices.js:203` | route-entry authorization |
+| `GET /api/invoices/ksef/inbound-documents` | — | — | — | ✓ | `routes/invoices.js:413` | route-entry authorization |
+| `GET /api/invoices/ksef/inbound-documents/:documentId` | — | — | — | ✓ | `routes/invoices.js:425` | route-entry authorization |
+| `GET /api/invoices/ksef/inbound-documents/:documentId/business-links` | — | — | — | ✓ | `routes/invoices.js:437` | route-entry authorization |
+| `GET /api/invoices/ksef/inbound-documents/:documentId/xml` | — | — | — | ✓ | `routes/invoices.js:461` | route-entry authorization |
+| `GET /api/invoices/ksef/inbound-exports` | — | — | — | ✓ | `routes/invoices.js:386` | route-entry authorization |
+| `GET /api/invoices/ksef/inbound-exports/:exportId` | — | — | — | ✓ | `routes/invoices.js:399` | route-entry authorization |
+| `GET /api/invoices/ksef/inbound-syncs` | — | — | — | ✓ | `routes/invoices.js:352` | route-entry authorization |
+| `GET /api/invoices/ksef/offline-certificates` | — | — | — | ✓ | `routes/invoices.js:310` | route-entry authorization |
+| `GET /api/invoices/ksef/ops/events` | — | — | — | ✓ | `routes/invoices.js:176` | route-entry authorization |
+| `GET /api/invoices/ksef/ops/issues` | — | — | — | ✓ | `routes/invoices.js:162` | route-entry authorization |
+| `GET /api/invoices/ksef/ops/readiness` | — | — | — | ✓ | `routes/invoices.js:156` | route-entry authorization |
+| `GET /api/invoices/ksef/technical-corrections/:correctionId` | — | — | — | ✓ | `routes/invoices.js:486` | route-entry authorization |
+| `GET /api/invoices/ksef/technical-corrections/:correctionId/upo` | — | — | — | ✓ | `routes/invoices.js:493` | route-entry authorization |
+| `GET /api/invoices/ksef/xades-credentials` | — | — | — | ✓ | `routes/invoices.js:234` | route-entry authorization |
+| `GET /api/invoices/legal-entities` | — | — | — | ✓ | `routes/invoices.js:128` | route-entry authorization |
+| `GET /api/invoices/legal-entities/:id` | — | — | — | ✓ | `routes/invoices.js:140` | route-entry authorization |
+| `GET /api/invoices/meta` | — | — | — | ✓ | `routes/invoices.js:118` | route-entry authorization |
+| `GET /api/maintenance` | ✓ | ✓ | ✓ | ✓ | `app.js:144` | public allowlist; endpoint-specific proof/rate limits may still apply |
 | `GET /api/nav-badges` | — | ✓ | ✓ | ✓ | `routes/navBadges.js:91` | route-entry authorization |
-| `GET /api/openai-status` | — | — | — | ✓ | `app.js:147` | route-entry authorization |
+| `GET /api/openai-status` | — | — | — | ✓ | `app.js:152` | route-entry authorization |
 | `GET /api/picking/block-tasks` | — | — | ✓ | ✓ | `routes/picking.js:941` | route-entry authorization |
 | `GET /api/picking/blocks-overview` | — | — | ✓ | ✓ | `routes/picking.js:1024` | route-entry authorization |
 | `GET /api/picking/locked-tasks` | — | — | ✓ | ✓ | `routes/picking.js:1415` | route-entry authorization |
@@ -230,16 +230,16 @@ Routes: **475** · anonymous: **18** · seller: **75** · warehouse: **200** · 
 | `PATCH /api/admin/cities/:id` | — | — | — | ✓ | `routes/admin.js:351` | route-entry authorization |
 | `PATCH /api/allegro/{pickingPrefix}/items/:lineKey` | — | — | — | ✓ | `routes/allegro.js:252` | provider-worker boundary; among these four roles only admin passes (baselinker is outside the table) |
 | `PATCH /api/baselinker/{pickingPrefix}/items/:lineKey` | — | — | — | ✓ | `routes/baseLinker.js:396` | provider-worker boundary; among these four roles only admin passes (baselinker is outside the table) |
-| `PATCH /api/commerce/catalog/:id` | — | — | — | ✓ | `routes/commerce.js:242` | provider-worker boundary; among these four roles only admin passes (baselinker is outside the table) |
-| `PATCH /api/commerce/categories/:id` | — | — | — | ✓ | `routes/commerce.js:209` | provider-worker boundary; among these four roles only admin passes (baselinker is outside the table) |
+| `PATCH /api/commerce/catalog/:id` | — | — | — | ✓ | `routes/commerce.js:125` | provider-worker boundary; among these four roles only admin passes (baselinker is outside the table) |
+| `PATCH /api/commerce/categories/:id` | — | — | — | ✓ | `routes/commerce.js:92` | provider-worker boundary; among these four roles only admin passes (baselinker is outside the table) |
 | `PATCH /api/delivery-groups/:id` | — | — | — | ✓ | `routes/deliveryGroups.js:265` | route-entry authorization |
-| `PATCH /api/invoices/:id` | — | — | — | ✓ | `routes/invoices.js:644` | route-entry authorization |
-| `PATCH /api/invoices/business-counterparties/:id` | — | — | — | ✓ | `routes/invoices.js:342` | route-entry authorization |
-| `PATCH /api/invoices/ksef/connections/:connectionId` | — | — | — | ✓ | `routes/invoices.js:211` | route-entry authorization |
-| `PATCH /api/invoices/ksef/inbound-syncs/:syncId` | — | — | — | ✓ | `routes/invoices.js:364` | route-entry authorization |
-| `PATCH /api/invoices/ksef/offline-certificates/:certificateId` | — | — | — | ✓ | `routes/invoices.js:323` | route-entry authorization |
-| `PATCH /api/invoices/ksef/xades-credentials/:credentialId` | — | — | — | ✓ | `routes/invoices.js:245` | route-entry authorization |
-| `PATCH /api/invoices/legal-entities/:id` | — | — | — | ✓ | `routes/invoices.js:143` | route-entry authorization |
+| `PATCH /api/invoices/:id` | — | — | — | ✓ | `routes/invoices.js:650` | route-entry authorization |
+| `PATCH /api/invoices/business-counterparties/:id` | — | — | — | ✓ | `routes/invoices.js:346` | route-entry authorization |
+| `PATCH /api/invoices/ksef/connections/:connectionId` | — | — | — | ✓ | `routes/invoices.js:215` | route-entry authorization |
+| `PATCH /api/invoices/ksef/inbound-syncs/:syncId` | — | — | — | ✓ | `routes/invoices.js:368` | route-entry authorization |
+| `PATCH /api/invoices/ksef/offline-certificates/:certificateId` | — | — | — | ✓ | `routes/invoices.js:327` | route-entry authorization |
+| `PATCH /api/invoices/ksef/xades-credentials/:credentialId` | — | — | — | ✓ | `routes/invoices.js:249` | route-entry authorization |
+| `PATCH /api/invoices/legal-entities/:id` | — | — | — | ✓ | `routes/invoices.js:147` | route-entry authorization |
 | `PATCH /api/picking/tasks/:taskId/progress` | — | — | ✓ | ✓ | `routes/picking.js:1122` | route-entry authorization |
 | `PATCH /api/products/:id` | — | — | ✓ | ✓ | `routes/products.js:1460` | route-entry authorization |
 | `PATCH /api/products/reorder` | — | — | ✓ | ✓ | `routes/products.js:962` | route-entry authorization |
@@ -311,67 +311,67 @@ Routes: **475** · anonymous: **18** · seller: **75** · warehouse: **200** · 
 | `POST /api/blocks` | — | — | ✓ | ✓ | `routes/blocks.js:172` | route-entry authorization |
 | `POST /api/blocks/:number/add` | — | — | ✓ | ✓ | `routes/blocks.js:362` | route-entry authorization |
 | `POST /api/blocks/move` | — | — | ✓ | ✓ | `routes/blocks.js:264` | route-entry authorization |
-| `POST /api/commerce/catalog` | — | — | — | ✓ | `routes/commerce.js:231` | provider-worker boundary; among these four roles only admin passes (baselinker is outside the table) |
-| `POST /api/commerce/catalog/import-warehouse` | — | — | — | ✓ | `routes/commerce.js:226` | provider-worker boundary; among these four roles only admin passes (baselinker is outside the table) |
-| `POST /api/commerce/categories` | — | — | — | ✓ | `routes/commerce.js:204` | provider-worker boundary; among these four roles only admin passes (baselinker is outside the table) |
-| `POST /api/commerce/providers/:provider/operations/:operation` | — | — | — | ✓ | `routes/commerce.js:51` | provider-worker boundary; among these four roles only admin passes (baselinker is outside the table) |
-| `POST /api/commerce/publications/allegro/activate` | — | — | — | ✓ | `routes/commerce.js:121` | provider-worker boundary; among these four roles only admin passes (baselinker is outside the table) |
-| `POST /api/commerce/publications/allegro/drafts` | — | — | — | ✓ | `routes/commerce.js:76` | provider-worker boundary; among these four roles only admin passes (baselinker is outside the table) |
-| `POST /api/commerce/publications/allegro/drafts/reconcile` | — | — | — | ✓ | `routes/commerce.js:89` | provider-worker boundary; among these four roles only admin passes (baselinker is outside the table) |
-| `POST /api/commerce/publications/allegro/drafts/status` | — | — | — | ✓ | `routes/commerce.js:83` | provider-worker boundary; among these four roles only admin passes (baselinker is outside the table) |
-| `POST /api/commerce/publications/allegro/health` | — | — | — | ✓ | `routes/commerce.js:193` | provider-worker boundary; among these four roles only admin passes (baselinker is outside the table) |
-| `POST /api/commerce/publications/allegro/lifecycle` | — | — | — | ✓ | `routes/commerce.js:184` | provider-worker boundary; among these four roles only admin passes (baselinker is outside the table) |
-| `POST /api/commerce/publications/allegro/lifecycle/preview` | — | — | — | ✓ | `routes/commerce.js:178` | provider-worker boundary; among these four roles only admin passes (baselinker is outside the table) |
-| `POST /api/commerce/publications/allegro/mapping/resolve` | — | — | — | ✓ | `routes/commerce.js:64` | provider-worker boundary; among these four roles only admin passes (baselinker is outside the table) |
-| `POST /api/commerce/publications/allegro/price-sync` | — | — | — | ✓ | `routes/commerce.js:152` | provider-worker boundary; among these four roles only admin passes (baselinker is outside the table) |
-| `POST /api/commerce/publications/allegro/price-sync/preview` | — | — | — | ✓ | `routes/commerce.js:146` | provider-worker boundary; among these four roles only admin passes (baselinker is outside the table) |
-| `POST /api/commerce/publications/allegro/sales-settings/apply` | — | — | — | ✓ | `routes/commerce.js:107` | provider-worker boundary; among these four roles only admin passes (baselinker is outside the table) |
-| `POST /api/commerce/publications/allegro/sales-settings/resolve` | — | — | — | ✓ | `routes/commerce.js:95` | provider-worker boundary; among these four roles only admin passes (baselinker is outside the table) |
-| `POST /api/commerce/publications/allegro/sales-settings/status` | — | — | — | ✓ | `routes/commerce.js:113` | provider-worker boundary; among these four roles only admin passes (baselinker is outside the table) |
-| `POST /api/commerce/publications/allegro/stock-sync` | — | — | — | ✓ | `routes/commerce.js:168` | provider-worker boundary; among these four roles only admin passes (baselinker is outside the table) |
-| `POST /api/commerce/publications/allegro/stock-sync/preview` | — | — | — | ✓ | `routes/commerce.js:162` | provider-worker boundary; among these four roles only admin passes (baselinker is outside the table) |
-| `POST /api/commerce/publications/allegro/update-content` | — | — | — | ✓ | `routes/commerce.js:137` | provider-worker boundary; among these four roles only admin passes (baselinker is outside the table) |
-| `POST /api/commerce/publications/allegro/update-preview` | — | — | — | ✓ | `routes/commerce.js:129` | provider-worker boundary; among these four roles only admin passes (baselinker is outside the table) |
-| `POST /api/commerce/publications/preview` | — | — | — | ✓ | `routes/commerce.js:58` | provider-worker boundary; among these four roles only admin passes (baselinker is outside the table) |
+| `POST /api/commerce/catalog` | — | — | — | ✓ | `routes/commerce.js:114` | provider-worker boundary; among these four roles only admin passes (baselinker is outside the table) |
+| `POST /api/commerce/catalog/import-warehouse` | — | — | — | ✓ | `routes/commerce.js:109` | provider-worker boundary; among these four roles only admin passes (baselinker is outside the table) |
+| `POST /api/commerce/categories` | — | — | — | ✓ | `routes/commerce.js:87` | provider-worker boundary; among these four roles only admin passes (baselinker is outside the table) |
+| `POST /api/commerce/providers/:provider/operations/:operation` | — | — | — | ✓ | `routes/commerce.js:38` | provider-worker boundary; among these four roles only admin passes (baselinker is outside the table) |
+| `POST /api/commerce/publications/allegro/activate` | — | — | — | ✓ | `routes/commerce.js:71` | provider-worker boundary; among these four roles only admin passes (baselinker is outside the table) |
+| `POST /api/commerce/publications/allegro/drafts` | — | — | — | ✓ | `routes/commerce.js:64` | provider-worker boundary; among these four roles only admin passes (baselinker is outside the table) |
+| `POST /api/commerce/publications/allegro/drafts/reconcile` | — | — | — | ✓ | `routes/commerce.js:66` | provider-worker boundary; among these four roles only admin passes (baselinker is outside the table) |
+| `POST /api/commerce/publications/allegro/drafts/status` | — | — | — | ✓ | `routes/commerce.js:65` | provider-worker boundary; among these four roles only admin passes (baselinker is outside the table) |
+| `POST /api/commerce/publications/allegro/health` | — | — | — | ✓ | `routes/commerce.js:80` | provider-worker boundary; among these four roles only admin passes (baselinker is outside the table) |
+| `POST /api/commerce/publications/allegro/lifecycle` | — | — | — | ✓ | `routes/commerce.js:79` | provider-worker boundary; among these four roles only admin passes (baselinker is outside the table) |
+| `POST /api/commerce/publications/allegro/lifecycle/preview` | — | — | — | ✓ | `routes/commerce.js:78` | provider-worker boundary; among these four roles only admin passes (baselinker is outside the table) |
+| `POST /api/commerce/publications/allegro/mapping/resolve` | — | — | — | ✓ | `routes/commerce.js:62` | provider-worker boundary; among these four roles only admin passes (baselinker is outside the table) |
+| `POST /api/commerce/publications/allegro/price-sync` | — | — | — | ✓ | `routes/commerce.js:75` | provider-worker boundary; among these four roles only admin passes (baselinker is outside the table) |
+| `POST /api/commerce/publications/allegro/price-sync/preview` | — | — | — | ✓ | `routes/commerce.js:74` | provider-worker boundary; among these four roles only admin passes (baselinker is outside the table) |
+| `POST /api/commerce/publications/allegro/sales-settings/apply` | — | — | — | ✓ | `routes/commerce.js:69` | provider-worker boundary; among these four roles only admin passes (baselinker is outside the table) |
+| `POST /api/commerce/publications/allegro/sales-settings/resolve` | — | — | — | ✓ | `routes/commerce.js:67` | provider-worker boundary; among these four roles only admin passes (baselinker is outside the table) |
+| `POST /api/commerce/publications/allegro/sales-settings/status` | — | — | — | ✓ | `routes/commerce.js:70` | provider-worker boundary; among these four roles only admin passes (baselinker is outside the table) |
+| `POST /api/commerce/publications/allegro/stock-sync` | — | — | — | ✓ | `routes/commerce.js:77` | provider-worker boundary; among these four roles only admin passes (baselinker is outside the table) |
+| `POST /api/commerce/publications/allegro/stock-sync/preview` | — | — | — | ✓ | `routes/commerce.js:76` | provider-worker boundary; among these four roles only admin passes (baselinker is outside the table) |
+| `POST /api/commerce/publications/allegro/update-content` | — | — | — | ✓ | `routes/commerce.js:73` | provider-worker boundary; among these four roles only admin passes (baselinker is outside the table) |
+| `POST /api/commerce/publications/allegro/update-preview` | — | — | — | ✓ | `routes/commerce.js:72` | provider-worker boundary; among these four roles only admin passes (baselinker is outside the table) |
+| `POST /api/commerce/publications/preview` | — | — | — | ✓ | `routes/commerce.js:45` | provider-worker boundary; among these four roles only admin passes (baselinker is outside the table) |
 | `POST /api/delivery-groups` | — | — | — | ✓ | `routes/deliveryGroups.js:248` | route-entry authorization |
 | `POST /api/delivery-groups/:id/broadcast` | — | — | — | ✓ | `routes/deliveryGroups.js:552` | route-entry authorization |
 | `POST /api/delivery-groups/:id/close-ordering-session` | — | — | — | ✓ | `routes/deliveryGroups.js:152` | route-entry authorization |
 | `POST /api/delivery-groups/catalog-reviewed` | — | ✓ | ✓ | ✓ | `routes/deliveryGroups.js:65` | route-entry authorization |
-| `POST /api/invoices` | — | — | — | ✓ | `routes/invoices.js:522` | route-entry authorization |
-| `POST /api/invoices/:id/corrections` | — | — | — | ✓ | `routes/invoices.js:550` | route-entry authorization |
-| `POST /api/invoices/:id/finalize` | — | — | — | ✓ | `routes/invoices.js:658` | route-entry authorization |
-| `POST /api/invoices/:id/fiscal/ksef/offline24/prepare` | — | — | — | ✓ | `routes/invoices.js:572` | route-entry authorization |
-| `POST /api/invoices/:id/fiscal/ksef/reconcile` | — | — | — | ✓ | `routes/invoices.js:593` | route-entry authorization |
-| `POST /api/invoices/:id/fiscal/ksef/submit` | — | — | — | ✓ | `routes/invoices.js:579` | route-entry authorization |
-| `POST /api/invoices/:id/fiscal/ksef/technical-correction/prepare` | — | — | — | ✓ | `routes/invoices.js:557` | route-entry authorization |
-| `POST /api/invoices/:id/fiscal/ksef/validate` | — | — | — | ✓ | `routes/invoices.js:564` | route-entry authorization |
-| `POST /api/invoices/:id/source/refresh` | — | — | — | ✓ | `routes/invoices.js:651` | route-entry authorization |
-| `POST /api/invoices/business-counterparties` | — | — | — | ✓ | `routes/invoices.js:336` | route-entry authorization |
-| `POST /api/invoices/ksef/certificate-enrollments` | — | — | — | ✓ | `routes/invoices.js:274` | route-entry authorization |
-| `POST /api/invoices/ksef/certificate-enrollments/:enrollmentId/reconcile` | — | — | — | ✓ | `routes/invoices.js:287` | route-entry authorization |
-| `POST /api/invoices/ksef/certificates/:certificateSerialNumber/revoke` | — | — | — | ✓ | `routes/invoices.js:293` | route-entry authorization |
-| `POST /api/invoices/ksef/connections` | — | — | — | ✓ | `routes/invoices.js:205` | route-entry authorization |
-| `POST /api/invoices/ksef/connections/:connectionId/check` | — | — | — | ✓ | `routes/invoices.js:223` | route-entry authorization |
-| `POST /api/invoices/ksef/connections/:connectionId/token` | — | — | — | ✓ | `routes/invoices.js:217` | route-entry authorization |
-| `POST /api/invoices/ksef/inbound-documents/:documentId/business-links/:linkId/reject` | — | — | — | ✓ | `routes/invoices.js:451` | route-entry authorization |
-| `POST /api/invoices/ksef/inbound-documents/:documentId/business-links/confirm` | — | — | — | ✓ | `routes/invoices.js:445` | route-entry authorization |
-| `POST /api/invoices/ksef/inbound-documents/:documentId/business-links/refresh` | — | — | — | ✓ | `routes/invoices.js:439` | route-entry authorization |
-| `POST /api/invoices/ksef/inbound-documents/:documentId/fetch` | — | — | — | ✓ | `routes/invoices.js:427` | route-entry authorization |
-| `POST /api/invoices/ksef/inbound-syncs` | — | — | — | ✓ | `routes/invoices.js:358` | route-entry authorization |
-| `POST /api/invoices/ksef/inbound-syncs/:syncId/export` | — | — | — | ✓ | `routes/invoices.js:401` | route-entry authorization |
-| `POST /api/invoices/ksef/inbound-syncs/:syncId/reset-cursor` | — | — | — | ✓ | `routes/invoices.js:376` | route-entry authorization |
-| `POST /api/invoices/ksef/inbound-syncs/:syncId/run` | — | — | — | ✓ | `routes/invoices.js:370` | route-entry authorization |
-| `POST /api/invoices/ksef/offline-certificates` | — | — | — | ✓ | `routes/invoices.js:316` | route-entry authorization |
-| `POST /api/invoices/ksef/ops/cleanup` | — | — | — | ✓ | `routes/invoices.js:193` | route-entry authorization |
-| `POST /api/invoices/ksef/ops/issues/:kind/:id/retry` | — | — | — | ✓ | `routes/invoices.js:166` | route-entry authorization |
-| `POST /api/invoices/ksef/ops/probe` | — | — | — | ✓ | `routes/invoices.js:181` | route-entry authorization |
-| `POST /api/invoices/ksef/ops/recover-stale-leases` | — | — | — | ✓ | `routes/invoices.js:187` | route-entry authorization |
-| `POST /api/invoices/ksef/technical-corrections/:correctionId/reconcile` | — | — | — | ✓ | `routes/invoices.js:475` | route-entry authorization |
-| `POST /api/invoices/ksef/technical-corrections/:correctionId/submit` | — | — | — | ✓ | `routes/invoices.js:468` | route-entry authorization |
-| `POST /api/invoices/ksef/xades-credentials` | — | — | — | ✓ | `routes/invoices.js:239` | route-entry authorization |
-| `POST /api/invoices/ksef/xades-credentials/:credentialId/check` | — | — | — | ✓ | `routes/invoices.js:251` | route-entry authorization |
-| `POST /api/invoices/legal-entities` | — | — | — | ✓ | `routes/invoices.js:130` | route-entry authorization |
-| `POST /api/invoices/preview` | — | — | — | ✓ | `routes/invoices.js:500` | route-entry authorization |
+| `POST /api/invoices` | — | — | — | ✓ | `routes/invoices.js:527` | route-entry authorization |
+| `POST /api/invoices/:id/corrections` | — | — | — | ✓ | `routes/invoices.js:556` | route-entry authorization |
+| `POST /api/invoices/:id/finalize` | — | — | — | ✓ | `routes/invoices.js:666` | route-entry authorization |
+| `POST /api/invoices/:id/fiscal/ksef/offline24/prepare` | — | — | — | ✓ | `routes/invoices.js:578` | route-entry authorization |
+| `POST /api/invoices/:id/fiscal/ksef/reconcile` | — | — | — | ✓ | `routes/invoices.js:599` | route-entry authorization |
+| `POST /api/invoices/:id/fiscal/ksef/submit` | — | — | — | ✓ | `routes/invoices.js:585` | route-entry authorization |
+| `POST /api/invoices/:id/fiscal/ksef/technical-correction/prepare` | — | — | — | ✓ | `routes/invoices.js:563` | route-entry authorization |
+| `POST /api/invoices/:id/fiscal/ksef/validate` | — | — | — | ✓ | `routes/invoices.js:570` | route-entry authorization |
+| `POST /api/invoices/:id/source/refresh` | — | — | — | ✓ | `routes/invoices.js:657` | route-entry authorization |
+| `POST /api/invoices/business-counterparties` | — | — | — | ✓ | `routes/invoices.js:340` | route-entry authorization |
+| `POST /api/invoices/ksef/certificate-enrollments` | — | — | — | ✓ | `routes/invoices.js:278` | route-entry authorization |
+| `POST /api/invoices/ksef/certificate-enrollments/:enrollmentId/reconcile` | — | — | — | ✓ | `routes/invoices.js:291` | route-entry authorization |
+| `POST /api/invoices/ksef/certificates/:certificateSerialNumber/revoke` | — | — | — | ✓ | `routes/invoices.js:297` | route-entry authorization |
+| `POST /api/invoices/ksef/connections` | — | — | — | ✓ | `routes/invoices.js:209` | route-entry authorization |
+| `POST /api/invoices/ksef/connections/:connectionId/check` | — | — | — | ✓ | `routes/invoices.js:227` | route-entry authorization |
+| `POST /api/invoices/ksef/connections/:connectionId/token` | — | — | — | ✓ | `routes/invoices.js:221` | route-entry authorization |
+| `POST /api/invoices/ksef/inbound-documents/:documentId/business-links/:linkId/reject` | — | — | — | ✓ | `routes/invoices.js:455` | route-entry authorization |
+| `POST /api/invoices/ksef/inbound-documents/:documentId/business-links/confirm` | — | — | — | ✓ | `routes/invoices.js:449` | route-entry authorization |
+| `POST /api/invoices/ksef/inbound-documents/:documentId/business-links/refresh` | — | — | — | ✓ | `routes/invoices.js:443` | route-entry authorization |
+| `POST /api/invoices/ksef/inbound-documents/:documentId/fetch` | — | — | — | ✓ | `routes/invoices.js:431` | route-entry authorization |
+| `POST /api/invoices/ksef/inbound-syncs` | — | — | — | ✓ | `routes/invoices.js:362` | route-entry authorization |
+| `POST /api/invoices/ksef/inbound-syncs/:syncId/export` | — | — | — | ✓ | `routes/invoices.js:405` | route-entry authorization |
+| `POST /api/invoices/ksef/inbound-syncs/:syncId/reset-cursor` | — | — | — | ✓ | `routes/invoices.js:380` | route-entry authorization |
+| `POST /api/invoices/ksef/inbound-syncs/:syncId/run` | — | — | — | ✓ | `routes/invoices.js:374` | route-entry authorization |
+| `POST /api/invoices/ksef/offline-certificates` | — | — | — | ✓ | `routes/invoices.js:320` | route-entry authorization |
+| `POST /api/invoices/ksef/ops/cleanup` | — | — | — | ✓ | `routes/invoices.js:197` | route-entry authorization |
+| `POST /api/invoices/ksef/ops/issues/:kind/:id/retry` | — | — | — | ✓ | `routes/invoices.js:170` | route-entry authorization |
+| `POST /api/invoices/ksef/ops/probe` | — | — | — | ✓ | `routes/invoices.js:185` | route-entry authorization |
+| `POST /api/invoices/ksef/ops/recover-stale-leases` | — | — | — | ✓ | `routes/invoices.js:191` | route-entry authorization |
+| `POST /api/invoices/ksef/technical-corrections/:correctionId/reconcile` | — | — | — | ✓ | `routes/invoices.js:479` | route-entry authorization |
+| `POST /api/invoices/ksef/technical-corrections/:correctionId/submit` | — | — | — | ✓ | `routes/invoices.js:472` | route-entry authorization |
+| `POST /api/invoices/ksef/xades-credentials` | — | — | — | ✓ | `routes/invoices.js:243` | route-entry authorization |
+| `POST /api/invoices/ksef/xades-credentials/:credentialId/check` | — | — | — | ✓ | `routes/invoices.js:255` | route-entry authorization |
+| `POST /api/invoices/legal-entities` | — | — | — | ✓ | `routes/invoices.js:134` | route-entry authorization |
+| `POST /api/invoices/preview` | — | — | — | ✓ | `routes/invoices.js:504` | route-entry authorization |
 | `POST /api/picking/cancel-start` | — | — | ✓ | ✓ | `routes/picking.js:686` | route-entry authorization |
 | `POST /api/picking/next-task` | — | — | ✓ | ✓ | `routes/picking.js:934` | route-entry authorization |
 | `POST /api/picking/resolve-coverage-gap` | — | — | ✓ | ✓ | `routes/picking.js:768` | route-entry authorization |
@@ -481,8 +481,8 @@ Routes: **475** · anonymous: **18** · seller: **75** · warehouse: **200** · 
 | `POST /api/warehouse-test/test-upload-image` | — | — | — | ✓ | `routes/warehouseTest.js:1184` | admin and ENABLE_TEST_API outside production |
 | `POST /telegram-webhook/<token-derived-path>` | ✓ | — | — | — | `app.js:67` | Telegram secret-token header + unguessable path; no app user role |
 | `PUT /api/admin/openai-key` | — | — | — | ✓ | `routes/admin.js:429` | route-entry authorization |
-| `PUT /api/commerce/publications/allegro/mapping` | — | — | — | ✓ | `routes/commerce.js:70` | provider-worker boundary; among these four roles only admin passes (baselinker is outside the table) |
-| `PUT /api/commerce/publications/allegro/sales-settings` | — | — | — | ✓ | `routes/commerce.js:101` | provider-worker boundary; among these four roles only admin passes (baselinker is outside the table) |
+| `PUT /api/commerce/publications/allegro/mapping` | — | — | — | ✓ | `routes/commerce.js:63` | provider-worker boundary; among these four roles only admin passes (baselinker is outside the table) |
+| `PUT /api/commerce/publications/allegro/sales-settings` | — | — | — | ✓ | `routes/commerce.js:68` | provider-worker boundary; among these four roles only admin passes (baselinker is outside the table) |
 
 ## Coverage contract
 

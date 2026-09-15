@@ -6,7 +6,7 @@ const read = (rel) => fs.readFileSync(path.join(root, rel), 'utf8');
 const checks=[]; const assert=(v,m)=>{if(!v) throw new Error(m)}; const check=(n,fn)=>{try{fn();checks.push([n,true])}catch(e){checks.push([n,false,e.message])}};
 const model=read('models/CommerceInventoryItem.js');
 const catalog=read('services/commerce/catalog.js');
-const preview=read('services/commerce/publicationPreview.js');
+const preview=read('services/commerce/publicationPolicy.js');
 const stock=read('services/commerce/allegroStockSync.js');
 check('dedicated commerce inventory model',()=>{assert(model.includes('commerceProductId'), 'product key missing'); assert(model.includes('onHand'), 'onHand missing');});
 check('catalog stock comes from commerce inventory',()=>{assert(catalog.includes('CommerceInventoryItem.find'), 'inventory query missing'); assert(catalog.includes('availableStock: onHand'), 'catalog onHand missing'); assert(!catalog.includes('calculateBindingStock('), 'legacy live warehouse calculation remains');});

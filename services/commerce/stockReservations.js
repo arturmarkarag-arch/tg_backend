@@ -6,161 +6,17 @@ const CommerceStockReservation = require('../../models/CommerceStockReservation'
 const CommerceStockReservationState = require('../../models/CommerceStockReservationState');
 const CommerceProduct = require('../../models/CommerceProduct');
 const ChannelListing = require('../../models/ChannelListing');
-const AllegroOrderIndex = require('../../models/AllegroOrderIndex');
-const BaseLinkerOrderIndex = require('../../models/BaseLinkerOrderIndex');
-const BaseLinkerPickingOrder = require('../../models/BaseLinkerPickingOrder');
 const { withLock } = require('../../utils/lock');
+const { listProviderAdapters } = require('./providers/registry');
+const {
+  text,
+  quantity,
+  dateOrNull,
+  reservationKey,
+} = require('./providers/reservationProjection');
 
 const LEDGER_KEY = 'marketplace';
 const STOCK_STATES = Object.freeze(['reserved', 'consumed', 'unknown']);
-
-function text(value, max = 500) {
-  return String(value ?? '').trim().slice(0, max);
-}
-
-function quantity(value) {
-  const n = Number(value);
-  return Number.isFinite(n) && n > 0 ? Math.max(0, Math.floor(n)) : 0;
-}
-
-function hash(value) {
-  return crypto.createHash('sha256').update(String(value)).digest('hex');
-}
-
-function dateOrNull(value) {
-  if (!value) return null;
-  const d = new Date(value);
-  return Number.isFinite(d.getTime()) ? d : null;
-}
-
-function canonicalLineKey({ canonicalProvider, auctionId, sourceLineId, sku, ean, name }) {
-  if (canonicalProvider === 'allegro' && auctionId) return `offer:${auctionId}`;
-  if (sourceLineId) return `line:${sourceLineId}`;
-  if (auctionId) return `auction:${auctionId}`;
-  const identity = [sku, ean, name].map((value) => text(value, 300).toLowerCase()).join('|');
-  return `identity:${hash(identity).slice(0, 32)}`;
-}
-
-function reservationKey(canonicalOrderKey, lineKey) {
-  return hash(`${canonicalOrderKey}|${lineKey}`);
-}
-
-function baseLinkerCanonical({ accountId, orderId, sourceType, externalOrderId }) {
-  const type = text(sourceType, 80).toLowerCase();
-  const external = text(externalOrderId, 180);
-  if (type === 'allegro' && external) {
-    return {
-      canonicalProvider: 'allegro',
-      canonicalOrderId: external,
-      canonicalOrderKey: `allegro:${external}`,
-      sourcePriority: 70,
-    };
-  }
-  const oid = text(orderId, 180);
-  const aid = text(accountId, 100);
-  return {
-    canonicalProvider: 'baselinker',
-    canonicalOrderId: oid,
-    canonicalOrderKey: `baselinker:${aid}:${oid}`,
-    sourcePriority: 80,
-  };
-}
-
-function lineSnapshot(base, item, state, observedAt) {
-  const auctionId = text(item?.auction_id ?? item?.auctionId, 180);
-  const sourceLineId = text(item?.order_product_id ?? item?.orderProductId ?? item?.lineKey, 180);
-  const sku = text(item?.sku, 240);
-  const ean = text(item?.ean, 120).replace(/\s+/g, '');
-  const name = text(item?.name, 600);
-  const qty = quantity(item?.quantity ?? item?.requestedQty);
-  if (!qty) return null;
-  const lineKey = canonicalLineKey({
-    canonicalProvider: base.canonicalProvider,
-    auctionId,
-    sourceLineId,
-    sku,
-    ean,
-    name,
-  });
-  return {
-    ...base,
-    canonicalLineKey: lineKey,
-    reservationKey: reservationKey(base.canonicalOrderKey, lineKey),
-    sourceLineId,
-    auctionId,
-    sku,
-    ean,
-    nameSnapshot: name,
-    quantity: qty,
-    state,
-    upstreamDisposition: state === 'consumed' ? 'sent' : 'active',
-    countsAgainstStock: true,
-    sourceObservedAt: observedAt,
-  };
-}
-
-function snapshotsFromAllegroRow(row, state) {
-  const orderId = text(row?.checkoutFormId, 180);
-  if (!orderId) return [];
-  const base = {
-    canonicalProvider: 'allegro',
-    canonicalOrderId: orderId,
-    canonicalOrderKey: `allegro:${orderId}`,
-    sourceProvider: 'allegro',
-    sourceAccountId: text(row?.accountId, 100),
-    sourceOrderId: orderId,
-    sourceType: 'allegro',
-    sourceExternalOrderId: orderId,
-    sourcePriority: 100,
-  };
-  const observedAt = dateOrNull(row?.upstreamUpdatedAt || row?.lastEventOccurredAt || row?.seenAt || row?.updatedAt) || new Date();
-  return (Array.isArray(row?.preview?.products) ? row.preview.products : [])
-    .map((item) => lineSnapshot(base, item, state, observedAt))
-    .filter(Boolean);
-}
-
-function snapshotsFromBaseLinkerIndex(row) {
-  const preview = row?.preview || {};
-  const accountId = text(row?.baseLinkerAccountId, 100);
-  const orderId = text(row?.orderId || preview?.order_id, 180);
-  if (!accountId || !orderId) return [];
-  const sourceType = text(preview?.order_source || row?.sourceType, 80).toLowerCase();
-  const externalOrderId = text(preview?.external_order_id, 180);
-  const canonical = baseLinkerCanonical({ accountId, orderId, sourceType, externalOrderId });
-  const base = {
-    ...canonical,
-    sourceProvider: 'baselinker',
-    sourceAccountId: accountId,
-    sourceOrderId: orderId,
-    sourceType,
-    sourceExternalOrderId: externalOrderId,
-  };
-  const observedAt = dateOrNull(row?.seenAt || row?.updatedAt) || new Date();
-  return (Array.isArray(preview?.products) ? preview.products : [])
-    .map((item) => lineSnapshot(base, item, 'reserved', observedAt))
-    .filter(Boolean);
-}
-
-function snapshotsFromBaseLinkerSent(row) {
-  const accountId = text(row?.baseLinkerAccountId, 100);
-  const orderId = text(row?.orderId, 180);
-  if (!accountId || !orderId) return [];
-  const sourceType = text(row?.sourceType, 80).toLowerCase();
-  const externalOrderId = text(row?.sourceExternalOrderId, 180);
-  const canonical = baseLinkerCanonical({ accountId, orderId, sourceType, externalOrderId });
-  const base = {
-    ...canonical,
-    sourceProvider: 'baselinker',
-    sourceAccountId: accountId,
-    sourceOrderId: orderId,
-    sourceType,
-    sourceExternalOrderId: externalOrderId,
-  };
-  const observedAt = dateOrNull(row?.sentAt || row?.updatedAt) || new Date();
-  return (Array.isArray(row?.items) ? row.items : [])
-    .map((item) => lineSnapshot(base, item, 'consumed', observedAt))
-    .filter(Boolean);
-}
 
 function mergeSnapshot(target, incoming) {
   const current = target.get(incoming.reservationKey);
@@ -168,9 +24,9 @@ function mergeSnapshot(target, incoming) {
     target.set(incoming.reservationKey, incoming);
     return;
   }
-  // Direct marketplace data outranks an aggregator bridge for the same canonical
-  // order line. Quantity disagreements are held at the larger value (fail-closed)
-  // so a stale duplicate can cause undersell, never oversell.
+  // A provider adapter declares sourcePriority. Direct source data can therefore
+  // outrank aggregator bridges without Commerce Core knowing provider names.
+  // Quantity disagreements keep the larger hold (fail-closed: undersell, never oversell).
   const winner = incoming.sourcePriority > current.sourcePriority ? incoming : current;
   target.set(incoming.reservationKey, {
     ...winner,
@@ -181,46 +37,38 @@ function mergeSnapshot(target, incoming) {
   });
 }
 
-async function loadDesiredSnapshots(startedAt) {
-  const [allegroRows, baseLinkerRows, recentBaseLinkerSent] = await Promise.all([
-    AllegroOrderIndex.find({
-      fulfillmentProviderId: 'SELLER',
-      $or: [
-        { upstreamStage: { $in: ['processing', 'deferred'] } },
-        { upstreamStage: 'sent', orderSortDate: { $gte: startedAt } },
-      ],
-    }).select('accountId checkoutFormId upstreamStage upstreamUpdatedAt lastEventOccurredAt seenAt orderSortDate preview updatedAt').lean(),
-    BaseLinkerOrderIndex.find({}).select('baseLinkerAccountId orderId sourceType seenAt preview updatedAt').lean(),
-    BaseLinkerPickingOrder.find({
-      $or: [{ workflowStage: 'sent' }, { status: 'sent' }, { upstreamDisposition: 'sent' }],
-      sentAt: { $gte: startedAt },
-    }).select('baseLinkerAccountId orderId sourceType sourceExternalOrderId sentAt items updatedAt').lean(),
-  ]);
+function reservationAdapters() {
+  return listProviderAdapters().filter((adapter) => adapter?.reservationProjection);
+}
 
+async function loadDesiredSnapshots(startedAt) {
+  const batches = await Promise.all(reservationAdapters()
+    .filter((adapter) => typeof adapter.reservationProjection?.loadDesiredSnapshots === 'function')
+    .map((adapter) => adapter.reservationProjection.loadDesiredSnapshots({ startedAt })));
   const map = new Map();
-  for (const row of allegroRows) {
-    const state = String(row?.upstreamStage || '') === 'sent' ? 'consumed' : 'reserved';
-    for (const snapshot of snapshotsFromAllegroRow(row, state)) mergeSnapshot(map, snapshot);
-  }
-  for (const row of baseLinkerRows) {
-    for (const snapshot of snapshotsFromBaseLinkerIndex(row)) mergeSnapshot(map, snapshot);
-  }
-  for (const row of recentBaseLinkerSent) {
-    for (const snapshot of snapshotsFromBaseLinkerSent(row)) mergeSnapshot(map, snapshot);
+  for (const batch of batches) {
+    for (const snapshot of Array.isArray(batch) ? batch : []) mergeSnapshot(map, snapshot);
   }
   return [...map.values()];
 }
 
 async function resolveSnapshots(snapshots) {
-  const auctionIds = [...new Set(snapshots.filter((row) => row.canonicalProvider === 'allegro').map((row) => row.auctionId).filter(Boolean))];
+  const listingIdsByProvider = new Map();
+  for (const snapshot of snapshots) {
+    if (!snapshot.matchByListingExternalId || !snapshot.canonicalProvider || !snapshot.auctionId) continue;
+    if (!listingIdsByProvider.has(snapshot.canonicalProvider)) listingIdsByProvider.set(snapshot.canonicalProvider, new Set());
+    listingIdsByProvider.get(snapshot.canonicalProvider).add(snapshot.auctionId);
+  }
+  const listingFilters = [...listingIdsByProvider.entries()].map(([provider, ids]) => ({
+    provider,
+    externalId: { $in: [...ids] },
+  }));
   const skuKeys = [...new Set(snapshots.map((row) => text(row.sku, 240).toLocaleUpperCase('en-US')).filter(Boolean))];
   const eanKeys = [...new Set(snapshots.map((row) => text(row.ean, 120).replace(/\s+/g, '')).filter(Boolean))];
 
   const [listings, products] = await Promise.all([
-    auctionIds.length
-      ? ChannelListing.find({ provider: 'allegro', externalId: { $in: auctionIds } })
-        .select('_id commerceProductId accountId externalId')
-        .lean()
+    listingFilters.length
+      ? ChannelListing.find({ $or: listingFilters }).select('_id commerceProductId provider accountId externalId').lean()
       : [],
     (skuKeys.length || eanKeys.length)
       ? CommerceProduct.find({
@@ -232,11 +80,11 @@ async function resolveSnapshots(snapshots) {
       : [],
   ]);
 
-  const listingByOffer = new Map();
+  const listingsByExternalId = new Map();
   for (const listing of listings) {
-    const key = text(listing.externalId, 180);
-    if (!listingByOffer.has(key)) listingByOffer.set(key, []);
-    listingByOffer.get(key).push(listing);
+    const key = `${text(listing.provider, 80)}:${text(listing.externalId, 180)}`;
+    if (!listingsByExternalId.has(key)) listingsByExternalId.set(key, []);
+    listingsByExternalId.get(key).push(listing);
   }
   const bySku = new Map();
   const byEan = new Map();
@@ -251,9 +99,10 @@ async function resolveSnapshots(snapshots) {
   }
 
   return snapshots.map((snapshot) => {
-    if (snapshot.canonicalProvider === 'allegro' && snapshot.auctionId) {
-      let candidates = listingByOffer.get(snapshot.auctionId) || [];
-      if (snapshot.sourceProvider === 'allegro' && snapshot.sourceAccountId) {
+    if (snapshot.matchByListingExternalId && snapshot.canonicalProvider && snapshot.auctionId) {
+      const key = `${snapshot.canonicalProvider}:${snapshot.auctionId}`;
+      let candidates = listingsByExternalId.get(key) || [];
+      if (snapshot.sourceProvider === snapshot.canonicalProvider && snapshot.sourceAccountId) {
         const exactAccount = candidates.filter((row) => text(row.accountId, 100) === snapshot.sourceAccountId);
         if (exactAccount.length) candidates = exactAccount;
       }
@@ -263,7 +112,7 @@ async function resolveSnapshots(snapshots) {
           commerceProductId: candidates[0].commerceProductId,
           channelListingId: candidates[0]._id,
           matchState: 'resolved',
-          matchStrategy: 'listing_offer_id',
+          matchStrategy: 'listing_external_id',
           issueCode: '',
           issueMessage: '',
         };
@@ -275,8 +124,8 @@ async function resolveSnapshots(snapshots) {
           channelListingId: null,
           matchState: 'ambiguous',
           matchStrategy: 'ambiguous',
-          issueCode: 'reservation_offer_mapping_ambiguous',
-          issueMessage: 'Один marketplace offer відповідає кільком ChannelListing. Reservation не можна безпечно прив’язати до CommerceProduct.',
+          issueCode: 'reservation_listing_mapping_ambiguous',
+          issueMessage: 'Один provider listing відповідає кільком ChannelListing. Reservation не можна безпечно прив’язати до CommerceProduct.',
         };
       }
     }
@@ -326,61 +175,52 @@ async function resolveSnapshots(snapshots) {
       matchState: 'unresolved',
       matchStrategy: 'unresolved',
       issueCode: 'reservation_product_unresolved',
-      issueMessage: 'Не вдалося однозначно зіставити marketplace order line з CommerceProduct за offerId/SKU/EAN.',
+      issueMessage: 'Не вдалося однозначно зіставити provider order line з CommerceProduct за listing/SKU/EAN.',
     };
   });
 }
 
 async function terminalStateMaps(rows) {
-  const allegroIds = [...new Set(rows.filter((row) => row.canonicalProvider === 'allegro').map((row) => row.canonicalOrderId).filter(Boolean))];
-  const baseLinkerKeys = rows
-    .filter((row) => row.sourceProvider === 'baselinker')
-    .map((row) => ({ accountId: text(row.sourceAccountId, 100), orderId: text(row.sourceOrderId, 180) }))
-    .filter((row) => row.accountId && row.orderId);
-
-  const [allegroRows, baseLinkerPicking] = await Promise.all([
-    allegroIds.length
-      ? AllegroOrderIndex.find({ checkoutFormId: { $in: allegroIds } }).select('checkoutFormId upstreamStage').lean()
-      : [],
-    baseLinkerKeys.length
-      ? BaseLinkerPickingOrder.find({
-        $or: baseLinkerKeys.map((row) => ({ baseLinkerAccountId: row.accountId, orderId: row.orderId })),
-      }).select('baseLinkerAccountId orderId workflowStage status upstreamDisposition sentAt').lean()
-      : [],
-  ]);
-
-  const allegro = new Map(allegroRows.map((row) => [text(row.checkoutFormId, 180), text(row.upstreamStage, 40).toLowerCase()]));
-  const baseLinker = new Map(baseLinkerPicking.map((row) => [`${text(row.baseLinkerAccountId, 100)}:${text(row.orderId, 180)}`, row]));
-  return { allegro, baseLinker };
+  const canonical = new Map();
+  const source = new Map();
+  await Promise.all(reservationAdapters().map(async (adapter) => {
+    const projection = adapter.reservationProjection || {};
+    if (typeof projection.loadCanonicalReservationStates === 'function') {
+      const relevant = rows.filter((row) => row.canonicalProvider === adapter.id);
+      if (relevant.length) canonical.set(adapter.id, await projection.loadCanonicalReservationStates(relevant));
+    }
+    if (typeof projection.loadSourceReservationStates === 'function') {
+      const relevant = rows.filter((row) => row.sourceProvider === adapter.id);
+      if (relevant.length) source.set(adapter.id, await projection.loadSourceReservationStates(relevant));
+    }
+  }));
+  return { canonical, source };
 }
 
 function transitionForMissing(row, maps) {
-  if (row.canonicalProvider === 'allegro') {
-    const stage = maps.allegro.get(text(row.canonicalOrderId, 180));
-    if (stage === 'sent') return { state: 'consumed', countsAgainstStock: true, disposition: 'sent', issueCode: '', issueMessage: '' };
-    if (stage === 'cancelled') return { state: 'released', countsAgainstStock: false, disposition: 'cancelled', issueCode: '', issueMessage: '' };
-    if (['processing', 'deferred'].includes(stage)) {
-      return {
-        state: 'unknown', countsAgainstStock: true, disposition: stage,
-        issueCode: 'reservation_line_missing_from_active_order',
-        issueMessage: 'Order лишається активним, але ця line більше не присутня в локальній проєкції. Одиниці продовжують утримуватися fail-closed.',
-      };
-    }
+  const canonicalState = text(
+    maps.canonical.get(text(row.canonicalProvider, 80))?.get(text(row.canonicalOrderId, 180)),
+    40,
+  ).toLowerCase();
+  if (canonicalState === 'sent') return { state: 'consumed', countsAgainstStock: true, disposition: 'sent', issueCode: '', issueMessage: '' };
+  if (canonicalState === 'cancelled') return { state: 'released', countsAgainstStock: false, disposition: 'cancelled', issueCode: '', issueMessage: '' };
+  if (['processing', 'deferred', 'active'].includes(canonicalState)) {
+    return {
+      state: 'unknown', countsAgainstStock: true, disposition: canonicalState,
+      issueCode: 'reservation_line_missing_from_active_order',
+      issueMessage: 'Order лишається активним, але ця line більше не присутня в provider projection. Одиниці продовжують утримуватися fail-closed.',
+    };
   }
 
-  if (row.sourceProvider === 'baselinker') {
-    const doc = maps.baseLinker.get(`${text(row.sourceAccountId, 100)}:${text(row.sourceOrderId, 180)}`);
-    const disposition = text(doc?.upstreamDisposition, 40).toLowerCase();
-    const workflow = text(doc?.workflowStage, 40).toLowerCase();
-    const status = text(doc?.status, 40).toLowerCase();
-    if (disposition === 'cancelled') return { state: 'released', countsAgainstStock: false, disposition: 'cancelled', issueCode: '', issueMessage: '' };
-    if (disposition === 'sent' || workflow === 'sent' || status === 'sent') return { state: 'consumed', countsAgainstStock: true, disposition: 'sent', issueCode: '', issueMessage: '' };
-  }
+  const sourceKey = `${text(row.sourceAccountId, 100)}:${text(row.sourceOrderId, 180)}`;
+  const sourceState = text(maps.source.get(text(row.sourceProvider, 80))?.get(sourceKey), 40).toLowerCase();
+  if (sourceState === 'cancelled') return { state: 'released', countsAgainstStock: false, disposition: 'cancelled', issueCode: '', issueMessage: '' };
+  if (sourceState === 'sent') return { state: 'consumed', countsAgainstStock: true, disposition: 'sent', issueCode: '', issueMessage: '' };
 
   return {
     state: 'unknown', countsAgainstStock: true, disposition: 'unverified',
     issueCode: 'reservation_source_disappeared_unverified',
-    issueMessage: 'Order line зникла з активної локальної черги без підтвердженого cancel/sent. Reservation утримується fail-closed до reconciliation.',
+    issueMessage: 'Order line зникла з активної provider projection без підтвердженого cancel/sent. Reservation утримується fail-closed до reconciliation.',
   };
 }
 
@@ -571,5 +411,4 @@ module.exports = {
   refreshCommerceStockReservations,
   getReservationTotals,
   reservationKey,
-  baseLinkerCanonical,
 };

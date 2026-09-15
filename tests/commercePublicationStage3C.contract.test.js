@@ -38,8 +38,8 @@ describe('Commerce publication Stage 3C contract', () => {
     const routes = read('routes/commerce.js');
     expect(routes).toContain("'/publications/allegro/drafts'");
     expect(routes).toContain("'/publications/allegro/drafts/status'");
-    expect(routes).toContain('createAllegroDraft');
-    expect(routes).toContain('refreshAllegroDraft');
+    expect(routes).toContain("legacyPublicationOperation('draft.create')");
+    expect(routes).toContain("legacyPublicationOperation('draft.refresh')");
   });
 
   test('integration registry marks draft create live and draft service itself never activates', () => {

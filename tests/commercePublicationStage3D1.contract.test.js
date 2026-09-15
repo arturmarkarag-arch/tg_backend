@@ -38,7 +38,9 @@ describe('Commerce publication Stage 3D.1 contract', () => {
     const routes = read('routes/commerce.js');
     const registry = read('services/commerce/providers/allegro.js');
     expect(routes).toContain("'/publications/allegro/drafts/reconcile'");
-    expect(routes).toContain('reconcileAllegroDraft');
+    expect(routes).toContain("legacyPublicationOperation('draft.reconcile')");
+    expect(registry).toContain("'draft.reconcile':");
+    expect(registry).toContain('reconcileAllegroDraft');
     expect(registry).toMatch(/id: 'offers\.draft\.reconcile'[\s\S]*direction: 'read'[\s\S]*implementation: LIVE/);
     expect(registry).toMatch(/id: 'offers\.publish'[\s\S]*implementation: LIVE/);
   });

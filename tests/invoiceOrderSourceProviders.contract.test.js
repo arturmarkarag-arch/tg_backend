@@ -34,7 +34,7 @@ describe('commerce order → invoice provider boundary', () => {
     expect(service).toContain('items: upstreamLocked ? current.items');
     expect(service).toContain('buyer: correctionLocked || upstreamLocked ? current.buyer');
     expect(service).toContain('await verifyInvoiceSource(sourceCheck)');
-    expect(service.indexOf('await verifyInvoiceSource(sourceCheck)')).toBeLessThan(service.indexOf('startSession()'));
+    expect(service).toMatch(/await verifyInvoiceSource\(sourceCheck\)[\s\S]*?startSession\(\)/);
   });
 
   test('provider source creation is idempotent by provider account order and seller', () => {

@@ -50,7 +50,8 @@ describe('Commerce publication Stage 3D.4.1 contract', () => {
   test('route exposes one update-content business command', () => {
     const route = read('routes/commerce.js');
     expect(route).toContain("'/publications/allegro/update-content'");
-    expect(route).toContain('applyAllegroOfferContent');
+    expect(route).toContain("legacyPublicationOperation('content.apply')");
+    expect(read('services/commerce/providers/allegro.js')).toContain('applyAllegroOfferContent');
     expect(route).not.toContain("'/publications/allegro/update-content/status'");
   });
 

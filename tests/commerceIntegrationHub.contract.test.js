@@ -14,14 +14,15 @@ describe('Commerce Hub integration registry', () => {
     expect(route).toContain('requireMarketplaceWarehouseAccess');
   });
 
-  it('keeps the registry local-only and provider-neutral', () => {
-    const registry = read('services/commerce/integrationRegistry.js');
-    expect(registry).toContain('listBaseLinkerAccounts');
-    expect(registry).toContain('listAllegroAccounts');
-    expect(registry).toContain("id: 'olx'");
-    expect(registry).toContain("id: 'temu'");
-    expect(registry).not.toContain('makeBaseLinkerAccountCaller');
-    expect(registry).not.toContain('allegroRequest');
+  it('derives integrations from the single Provider Core registry', () => {
+    const facade = read('services/commerce/integrationRegistry.js');
+    const registry = read('services/commerce/providers/registry.js');
+    expect(facade).toContain("require('./providers/registry')");
+    expect(facade).not.toMatch(/listBaseLinkerAccounts|listAllegroAccounts|BaseLinkerAccount|AllegroAccount/);
+    expect(registry).toContain("require('./baseLinker')");
+    expect(registry).toContain("require('./allegro')");
+    expect(registry).toContain('[olx.id, olx]');
+    expect(registry).toContain('[temu.id, temu]');
   });
 
   it('exposes operational marketplace namespaces to the dedicated commerce worker role only', () => {

@@ -13,6 +13,7 @@ describe('Commerce Provider Core v1 contract', () => {
     expect(contract).toContain("LISTING_CREATE: 'listing.create'");
     expect(contract).toContain("PRICE_SYNC: 'listing.price.sync'");
     expect(contract).toContain("STOCK_SYNC: 'listing.stock.sync'");
+    expect(contract).toContain("INVENTORY_RESERVATIONS: 'inventory.reservations'");
   });
 
   test('publication preview dispatches to provider adapter without provider branches', () => {
@@ -26,8 +27,9 @@ describe('Commerce Provider Core v1 contract', () => {
     expect(preview).toContain('providerCalls: 0');
   });
 
-  test('Allegro is an adapter and provider-specific state stays namespaced', () => {
+  test('live providers are adapters and provider-specific state stays namespaced', () => {
     const adapter = read('services/commerce/providers/allegro.js');
+    const baseLinker = read('services/commerce/providers/baseLinker.js');
     expect(adapter).toContain("id: 'allegro'");
     expect(adapter).toContain('createProviderAdapter');
     expect(adapter).toContain('listing?.providerData?.allegro');
@@ -36,6 +38,8 @@ describe('Commerce Provider Core v1 contract', () => {
     expect(adapter).toContain("'stock.apply'");
     expect(adapter).toContain("'lifecycle.apply'");
     expect(adapter).toContain("'health.scan'");
+    expect(baseLinker).toContain("id: 'baselinker'");
+    expect(baseLinker).toContain('reservationProjection:');
   });
 
   test('OLX and Temu are registered planned adapters without contaminating core product', () => {
@@ -64,6 +68,14 @@ describe('Commerce Provider Core v1 contract', () => {
     expect(job).toContain('provider: { type: String');
     expect(job).toContain('action: { type: String');
     expect(job).not.toMatch(/allegro|olx|temu/i);
+  });
+
+  test('reservation orchestration is provider-neutral and adapters own provider projections', () => {
+    const reservations = read('services/commerce/stockReservations.js');
+    expect(reservations).toContain('listProviderAdapters()');
+    expect(reservations).toContain('reservationProjection');
+    expect(reservations).not.toMatch(/AllegroOrderIndex|BaseLinkerOrderIndex|BaseLinkerPickingOrder/);
+    expect(reservations).not.toMatch(/['"](?:allegro|baselinker|olx|temu)['"]/i);
   });
 
   test('architecture document freezes the isolation rules', () => {

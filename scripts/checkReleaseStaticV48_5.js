@@ -39,6 +39,7 @@ const checks = [
   'scripts/checkTelegramDeliveryLedgerV48.js',
   'scripts/checkOrderingReminderDeliveryV48.js',
   'scripts/checkInvoiceOrderSourceProviders20260914.js',
+  'scripts/checkCommerceProviderIsolation20260915.js',
   'scripts/checkInvoiceKsefIndexReadiness20260915.js',
 ];
 

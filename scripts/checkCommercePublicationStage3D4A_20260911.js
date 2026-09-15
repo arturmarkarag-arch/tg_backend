@@ -36,7 +36,8 @@ check('image array replacement is explicit', () => {
 });
 check('route exposes update preview only', () => {
   assert(route.includes("'/publications/allegro/update-preview'"), 'route missing');
-  assert(route.includes('previewAllegroOfferUpdate'), 'service wiring missing');
+  assert(route.includes("legacyPublicationOperation('content.preview')"), 'provider operation alias missing');
+  assert(registry.includes('previewAllegroOfferUpdate'), 'adapter service wiring missing');
 });
 check('registry records live preview and planned write', () => {
   assert(registry.includes("id: 'offers.update.preview'"), 'preview registry missing');

@@ -16,6 +16,7 @@ const PROVIDER_TYPES = Object.freeze({
 const CAPABILITIES = Object.freeze({
   ACCOUNTS: 'accounts',
   ORDERS_READ: 'orders.read',
+  INVENTORY_RESERVATIONS: 'inventory.reservations',
   PRODUCT_MAPPING: 'product.mapping',
   LISTING_PREVIEW: 'listing.preview',
   LISTING_CREATE: 'listing.create',
@@ -98,6 +99,9 @@ function createProviderAdapter(definition = {}) {
     preparePublicationPreview: definition.preparePublicationPreview || (async () => ({})),
     previewPublicationRow: definition.previewPublicationRow || null,
     integrationApi: Array.isArray(definition.integrationApi) ? Object.freeze(definition.integrationApi.map((item) => Object.freeze({ ...item }))) : Object.freeze([]),
+    reservationProjection: definition.reservationProjection && typeof definition.reservationProjection === 'object'
+      ? Object.freeze({ ...definition.reservationProjection })
+      : null,
     metadata: Object.freeze({ ...(definition.metadata || {}) }),
   });
 }

@@ -2,10 +2,12 @@
 
 const { appError } = require('../../../utils/errors');
 const { PROVIDER_CONTRACT_VERSION, IMPLEMENTATION, CAPABILITIES } = require('./contract');
+const baseLinker = require('./baseLinker');
 const allegro = require('./allegro');
 const { olx, temu } = require('./planned');
 
 const adapters = new Map([
+  [baseLinker.id, baseLinker],
   [allegro.id, allegro],
   [olx.id, olx],
   [temu.id, temu],
@@ -31,6 +33,31 @@ function providerSupports(adapter, capability) {
   return adapter?.capabilities?.[capability] === true;
 }
 
+function providerStatus(adapter, accounts) {
+  if (adapter.implementation !== IMPLEMENTATION.LIVE) return 'planned';
+  if (!accounts.length) return 'not_configured';
+  if (accounts.some((account) => account.enabled === true)) return 'active';
+  return 'configured_inactive';
+}
+
+function integrationCoverage(adapter, accounts) {
+  const activeAccounts = accounts.filter((account) => account.enabled === true);
+  return (adapter.integrationApi || []).map((entry) => {
+    if (entry.implementation !== IMPLEMENTATION.LIVE) {
+      return { ...entry, availableAccounts: 0, activeAccounts: activeAccounts.length };
+    }
+    if (!entry.capability) {
+      return {
+        ...entry,
+        availableAccounts: activeAccounts.length,
+        activeAccounts: activeAccounts.length,
+      };
+    }
+    const availableAccounts = activeAccounts.filter((account) => account.capabilities?.[entry.capability] === true).length;
+    return { ...entry, availableAccounts, activeAccounts: activeAccounts.length };
+  });
+}
+
 async function publicProviderDescriptor(adapter, { includeAccounts = true } = {}) {
   const rawAccounts = includeAccounts && adapter.implementation === IMPLEMENTATION.LIVE
     ? await adapter.listAccounts({ includeDisabled: true })
@@ -45,6 +72,7 @@ async function publicProviderDescriptor(adapter, { includeAccounts = true } = {}
     type: adapter.type,
     implementation: adapter.implementation,
     description: adapter.description,
+    status: providerStatus(adapter, accounts),
     capabilities: adapter.capabilities,
     metadata: adapter.metadata,
     selectableForPublication: adapter.implementation === IMPLEMENTATION.LIVE && providerSupports(adapter, CAPABILITIES.LISTING_PREVIEW),
@@ -54,6 +82,7 @@ async function publicProviderDescriptor(adapter, { includeAccounts = true } = {}
       publicationAccounts,
     },
     accounts,
+    api: integrationCoverage(adapter, accounts),
     operations: Object.values(adapter.operations).map((operation) => ({
       id: operation.id,
       kind: operation.kind,
@@ -69,6 +98,16 @@ async function getCommerceProviderRegistry() {
     contractVersion: PROVIDER_CONTRACT_VERSION,
     generatedAt: new Date().toISOString(),
     providers,
+  };
+}
+
+async function getCommerceIntegrationRegistry() {
+  const registry = await getCommerceProviderRegistry();
+  return {
+    version: 12,
+    contractVersion: registry.contractVersion,
+    generatedAt: registry.generatedAt,
+    providers: registry.providers,
   };
 }
 
@@ -93,5 +132,6 @@ module.exports = {
   providerSupports,
   publicProviderDescriptor,
   getCommerceProviderRegistry,
+  getCommerceIntegrationRegistry,
   executeProviderOperation,
 };
