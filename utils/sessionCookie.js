@@ -1,8 +1,11 @@
 'use strict';
 
+const { normalizeTelegramSessionSlot } = require('./telegramRequestIdentity');
+
 const IS_PRODUCTION = process.env.NODE_ENV === 'production';
 const SESSION_COOKIE_NAME = IS_PRODUCTION ? '__Host-zlotoweczka_session' : 'zlotoweczka_session';
 const TELEGRAM_SESSION_COOKIE_NAME = IS_PRODUCTION ? '__Host-zlotoweczka_telegram' : 'zlotoweczka_telegram';
+const TELEGRAM_SESSION_COOKIE_PREFIX = IS_PRODUCTION ? '__Host-zlotoweczka_telegram_' : 'zlotoweczka_telegram_';
 const GOOGLE_LINK_COOKIE_NAME = IS_PRODUCTION ? '__Host-zlotoweczka_google_link' : 'zlotoweczka_google_link';
 const SESSION_MAX_AGE_MS = Number(process.env.SESSION_COOKIE_MAX_AGE_MS) || 7 * 24 * 60 * 60 * 1000;
 const TELEGRAM_SESSION_MAX_AGE_MS = Number(process.env.TELEGRAM_SESSION_COOKIE_MAX_AGE_MS) || 12 * 60 * 60 * 1000;
@@ -45,8 +48,13 @@ function readSessionCookie(req) {
   return readCookie(req, SESSION_COOKIE_NAME);
 }
 
-function readTelegramSessionCookie(req) {
-  return readCookie(req, TELEGRAM_SESSION_COOKIE_NAME);
+function telegramSessionCookieName(sessionSlot = '') {
+  const slot = normalizeTelegramSessionSlot(sessionSlot);
+  return slot ? `${TELEGRAM_SESSION_COOKIE_PREFIX}${slot}` : TELEGRAM_SESSION_COOKIE_NAME;
+}
+
+function readTelegramSessionCookie(req, sessionSlot = '') {
+  return readCookie(req, telegramSessionCookieName(sessionSlot));
 }
 
 function readGoogleLinkCookie(req) {
@@ -61,12 +69,12 @@ function clearSessionCookie(res) {
   res.clearCookie(SESSION_COOKIE_NAME, cookieOptions());
 }
 
-function setTelegramSessionCookie(res, token) {
-  res.cookie(TELEGRAM_SESSION_COOKIE_NAME, String(token), cookieOptions(TELEGRAM_SESSION_MAX_AGE_MS));
+function setTelegramSessionCookie(res, token, sessionSlot = '') {
+  res.cookie(telegramSessionCookieName(sessionSlot), String(token), cookieOptions(TELEGRAM_SESSION_MAX_AGE_MS));
 }
 
-function clearTelegramSessionCookie(res) {
-  res.clearCookie(TELEGRAM_SESSION_COOKIE_NAME, cookieOptions());
+function clearTelegramSessionCookie(res, sessionSlot = '') {
+  res.clearCookie(telegramSessionCookieName(sessionSlot), cookieOptions());
 }
 
 function setGoogleLinkCookie(res, secret) {
@@ -80,8 +88,10 @@ function clearGoogleLinkCookie(res) {
 module.exports = {
   SESSION_COOKIE_NAME,
   TELEGRAM_SESSION_COOKIE_NAME,
+  TELEGRAM_SESSION_COOKIE_PREFIX,
   GOOGLE_LINK_COOKIE_NAME,
   readSessionCookie,
+  telegramSessionCookieName,
   readTelegramSessionCookie,
   readGoogleLinkCookie,
   setSessionCookie,

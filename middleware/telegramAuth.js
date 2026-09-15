@@ -3,6 +3,7 @@ const { verifySession, verifyTelegramSession, isSessionNotRevoked } = require('.
 const { readSessionCookie, readTelegramSessionCookie } = require('../utils/sessionCookie');
 const { appError } = require('../utils/errors');
 const { isRemovedUser } = require('../utils/userAccountState');
+const { readTelegramClientId, readTelegramSessionSlot } = require('../utils/telegramRequestIdentity');
 
 // Two first-party HttpOnly session transports converge here:
 // - x-auth-context: telegram -> Telegram proof session cookie (created once from
@@ -16,8 +17,19 @@ async function telegramAuth(req, res, next) {
   let browserSession = null;
 
   if (isTelegramContext) {
-    const telegramSession = verifyTelegramSession(readTelegramSessionCookie(req));
+    const telegramSessionSlot = readTelegramSessionSlot(req);
+    const telegramSession = verifyTelegramSession(readTelegramSessionCookie(req, telegramSessionSlot));
     if (!telegramSession) return next(appError('auth_telegram_session_required'));
+
+    // Safety selector only: the header is not trusted as authentication. It is
+    // derived from the current Telegram initData on the client and can only make
+    // a request fail closed when a shared WebView cookie belongs to another
+    // Telegram account. The signed cookie remains the actual credential.
+    const expectedTelegramId = readTelegramClientId(req);
+    if (expectedTelegramId && expectedTelegramId !== String(telegramSession.telegramId)) {
+      return next(appError('auth_telegram_session_mismatch', { telegramId: expectedTelegramId }));
+    }
+
     if (!['GET', 'HEAD', 'OPTIONS'].includes(String(req.method || '').toUpperCase())
         && req.get('x-csrf-protection') !== '1') {
       return next(appError('auth_csrf_required'));

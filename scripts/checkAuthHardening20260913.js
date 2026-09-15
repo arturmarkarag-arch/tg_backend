@@ -82,7 +82,7 @@ check(cookies.includes('httpOnly: true') && cookies.includes("sameSite: IS_PRODU
   'browser session/link cookies are HttpOnly, Strict-SameSite and Secure in production');
 check(cookies.includes("'__Host-zlotoweczka_session'") && cookies.includes("'__Host-zlotoweczka_telegram'") && cookies.includes("'__Host-zlotoweczka_google_link'"),
   'all production auth cookies use __Host- prefix');
-check(authMiddleware.includes('readSessionCookie(req)') && authMiddleware.includes('readTelegramSessionCookie(req)')
+check(authMiddleware.includes('readSessionCookie(req)') && authMiddleware.includes('readTelegramSessionCookie(req, telegramSessionSlot)')
     && authMiddleware.includes("req.get('x-csrf-protection') !== '1'")
     && !authMiddleware.includes('getInitDataFromRequest') && !authMiddleware.includes('x-telegram-initdata'),
   'protected API uses first-party HttpOnly cookies only and enforces mutation CSRF header');
@@ -114,8 +114,10 @@ check(authRoute.includes("router.post('/telegram/bootstrap'") && authRoute.inclu
     && authRoute.includes('setTelegramSessionCookie'),
   'raw Telegram initData is accepted only by the one-time bootstrap exchange');
 check(telegramSession.includes("createHash('sha256')") && telegramSession.includes('TelegramInitDataUse.create')
-    && telegramSession.includes("err?.code === 11000"),
-  'Telegram initData replay ledger stores only SHA-256 digest and rejects duplicate consumption');
+    && telegramSession.includes("err?.code !== 11000")
+    && telegramSession.includes('sessionSlotHash')
+    && telegramSession.includes('previous?.sessionSlotHash === sessionSlotHash'),
+  'Telegram initData replay ledger stores SHA-256 digests and permits resume only in the bound WebView slot');
 check(telegramUseModel.includes('unique: true') && telegramUseModel.includes('expireAfterSeconds: 0'),
   'Telegram initData replay ledger has unique digest and TTL cleanup');
 const startup = read('index.js');

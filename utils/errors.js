@@ -581,8 +581,10 @@ const ERRORS = {
                                   : reason
                                     ? `Помилка авторизації Telegram: ${reason}`
                                     : 'Невалідні дані авторизації Telegram' },
-  auth_init_data_replayed: { status: 401, message: 'Ця сесія Telegram уже була використана. Закрийте застосунок і відкрийте його знову.' },
-  auth_telegram_session_required: { status: 401, message: 'Сесію Telegram не знайдено. Відкрийте застосунок через Telegram ще раз.' },
+  auth_init_data_replayed: { status: 401, message: 'Не вдалося повторно підтвердити Telegram-сесію.' },
+  auth_telegram_session_required: { status: 401, message: 'Сесію Telegram не знайдено.' },
+  auth_telegram_session_mismatch: { status: 409, message: 'Telegram-сесія належить іншому активному акаунту.' },
+  auth_telegram_session_slot_invalid: { status: 400, message: 'Некоректний Telegram session slot.' },
   auth_telegram_id_missing: { status: 400, message: 'Не передано Telegram user id' },
   auth_not_registered:      { status: 403, message: 'Користувача не зареєстровано. Зверніться до менеджера або адміністратора.' },
   // Backwards-compat alias used by mini-app client code that switches on `error` value.

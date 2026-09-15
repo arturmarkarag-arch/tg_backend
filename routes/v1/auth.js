@@ -17,7 +17,6 @@ const {
   setSessionCookie,
   clearSessionCookie,
   setTelegramSessionCookie,
-  clearTelegramSessionCookie,
   setGoogleLinkCookie,
   clearGoogleLinkCookie,
 } = require('../../utils/sessionCookie');
@@ -26,6 +25,7 @@ const { createAuthRateLimit } = require('../../middleware/authRateLimit');
 const { getBot } = require('../../telegramBot');
 const { buildUserProfile } = require('./telegram');
 const { isRemovedUser } = require('../../utils/userAccountState');
+const { normalizeTelegramSessionSlot } = require('../../utils/telegramRequestIdentity');
 
 const router = express.Router();
 function positiveEnvInt(name, fallback) {
@@ -91,12 +91,21 @@ router.post('/telegram/bootstrap', generalAuthLimit, asyncHandler(async (req, re
   const initData = String(req.body?.initData || '');
   if (!initData) throw appError('init_data_required');
 
+  // Each live Telegram WebView gets a non-secret session slot. The actual
+  // credential remains an HttpOnly cookie, but the slot selects a dedicated
+  // cookie name so several Telegram accounts can keep this Mini App open at the
+  // same time without overwriting one another's session. Older clients without
+  // a slot temporarily fall back to the legacy single-cookie transport.
+  const rawSessionSlot = String(req.body?.sessionSlot || '').trim();
+  const sessionSlot = normalizeTelegramSessionSlot(rawSessionSlot);
+  if (rawSessionSlot && !sessionSlot) throw appError('auth_telegram_session_slot_invalid');
+
   // IMPORTANT: never trust an existing Telegram cookie before comparing it to
-  // the identity in the CURRENT signed initData. Telegram clients can reuse the
-  // same WebView cookie jar after the user switches Telegram accounts.
-  const existing = verifyTelegramSession(readTelegramSessionCookie(req));
+  // the identity in the CURRENT signed initData.
+  const existing = verifyTelegramSession(readTelegramSessionCookie(req, sessionSlot));
   const result = await bootstrapTelegramSession(initData, process.env.TELEGRAM_BOT_TOKEN, {
     existingTelegramId: existing?.telegramId || '',
+    sessionSlot,
   });
   if (!result.valid) {
     if (result.replayed) throw appError('auth_init_data_replayed');
@@ -105,10 +114,11 @@ router.post('/telegram/bootstrap', generalAuthLimit, asyncHandler(async (req, re
 
   // Same identity: keep the existing cookie. Different identity: the service
   // consumed the fresh initData and issued a token which replaces the old cookie.
-  if (result.sessionToken) setTelegramSessionCookie(res, result.sessionToken);
+  if (result.sessionToken) setTelegramSessionCookie(res, result.sessionToken, sessionSlot);
   res.json({
     ok: true,
     telegramId: result.telegramId,
+    sessionSlot: sessionSlot || null,
     user: result.parsedData?.user || null,
   });
 }));

@@ -2,6 +2,7 @@
 const { verifyTelegramSession } = require('../utils/jwt');
 const { readTelegramSessionCookie } = require('../utils/sessionCookie');
 const { appError } = require('../utils/errors');
+const { readTelegramClientId, readTelegramSessionSlot } = require('../utils/telegramRequestIdentity');
 
 function requireCookieCsrf(req) {
   if (!['GET', 'HEAD', 'OPTIONS'].includes(String(req.method || '').toUpperCase())
@@ -14,8 +15,13 @@ function requireCookieCsrf(req) {
 // full telegramAuth middleware it does NOT require a User row, so a group member
 // can legitimately reach registration-invite/register-request.
 function telegramIdentity(req, res, next) {
-  const session = verifyTelegramSession(readTelegramSessionCookie(req));
+  const telegramSessionSlot = readTelegramSessionSlot(req);
+  const session = verifyTelegramSession(readTelegramSessionCookie(req, telegramSessionSlot));
   if (!session) return next(appError('auth_telegram_session_required'));
+  const expectedTelegramId = readTelegramClientId(req);
+  if (expectedTelegramId && expectedTelegramId !== String(session.telegramId)) {
+    return next(appError('auth_telegram_session_mismatch', { telegramId: expectedTelegramId }));
+  }
   try { requireCookieCsrf(req); } catch (err) { return next(err); }
   req.telegramId = session.telegramId;
   req.telegramSession = session;

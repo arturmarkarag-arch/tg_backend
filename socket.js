@@ -6,6 +6,7 @@ const Shop = require('./models/Shop');
 const { isRemovedUser } = require('./utils/userAccountState');
 const { verifySession, verifyTelegramSession, isSessionNotRevoked } = require('./utils/jwt');
 const { readSessionCookie, readTelegramSessionCookie } = require('./utils/sessionCookie');
+const { readSocketTelegramClientId, readSocketTelegramSessionSlot } = require('./utils/telegramRequestIdentity');
 const { pubClient, subClient, isEnabled: redisEnabled } = require('./utils/redis');
 const { hasBaseLinkerPickingAccess } = require('./utils/baseLinkerAccess');
 const { hasMarketplaceWarehouseAccess } = require('./utils/marketplaceWarehouseAccess');
@@ -89,9 +90,22 @@ function initSocket(httpServer) {
 
     if (isTelegramContext) {
       const telegramSession = verifyTelegramSession(
-        readTelegramSessionCookie({ headers: socket.handshake.headers || {} }),
+        readTelegramSessionCookie(
+          { headers: socket.handshake.headers || {} },
+          readSocketTelegramSessionSlot(socket),
+        ),
       );
-      if (!telegramSession) return next(new Error('Unauthorized: Invalid Telegram session'));
+      if (!telegramSession) {
+        const missing = new Error('Unauthorized: Invalid Telegram session');
+        missing.data = { code: 'auth_telegram_session_required' };
+        return next(missing);
+      }
+      const expectedTelegramId = readSocketTelegramClientId(socket);
+      if (expectedTelegramId && expectedTelegramId !== String(telegramSession.telegramId)) {
+        const mismatch = new Error('Telegram session belongs to another active account');
+        mismatch.data = { code: 'auth_telegram_session_mismatch' };
+        return next(mismatch);
+      }
       telegramId = telegramSession.telegramId;
     } else {
       const session = verifySession(readSessionCookie({ headers: socket.handshake.headers || {} }));
