@@ -82,7 +82,7 @@ Routes: **475** · anonymous: **18** · seller: **75** · warehouse: **200** · 
 | `GET /api/blocks/:number` | — | — | ✓ | ✓ | `routes/blocks.js:248` | route-entry authorization |
 | `GET /api/blocks/incoming/products` | — | — | ✓ | ✓ | `routes/blocks.js:204` | route-entry authorization |
 | `GET /api/blocks/search/products` | — | — | ✓ | ✓ | `routes/blocks.js:232` | route-entry authorization |
-| `GET /api/bot-status` | — | — | — | ✓ | `app.js:155` | route-entry authorization |
+| `GET /api/bot-status` | — | — | — | ✓ | `app.js:163` | route-entry authorization |
 | `GET /api/commerce/catalog` | — | — | — | ✓ | `routes/commerce.js:97` | provider-worker boundary; among these four roles only admin passes (baselinker is outside the table) |
 | `GET /api/commerce/catalog/:id` | — | — | — | ✓ | `routes/commerce.js:119` | provider-worker boundary; among these four roles only admin passes (baselinker is outside the table) |
 | `GET /api/commerce/catalog/warehouse-products` | — | — | — | ✓ | `routes/commerce.js:103` | provider-worker boundary; among these four roles only admin passes (baselinker is outside the table) |
@@ -95,8 +95,8 @@ Routes: **475** · anonymous: **18** · seller: **75** · warehouse: **200** · 
 | `GET /api/delivery-groups/ordering-status` | — | ✓ | ✓ | ✓ | `routes/deliveryGroups.js:49` | route-entry authorization |
 | `GET /api/delivery-groups/session-summaries` | — | — | — | ✓ | `routes/deliveryGroups.js:147` | route-entry authorization |
 | `GET /api/delivery-groups/summary` | — | — | ✓ | ✓ | `routes/deliveryGroups.js:109` | route-entry authorization |
-| `GET /api/gemini-status` | — | — | — | ✓ | `app.js:173` | route-entry authorization |
-| `GET /api/health` | ✓ | ✓ | ✓ | ✓ | `app.js:139` | public allowlist; endpoint-specific proof/rate limits may still apply |
+| `GET /api/gemini-status` | — | — | — | ✓ | `app.js:181` | route-entry authorization |
+| `GET /api/health` | ✓ | ✓ | ✓ | ✓ | `app.js:147` | public allowlist; endpoint-specific proof/rate limits may still apply |
 | `GET /api/invoices` | — | — | — | ✓ | `routes/invoices.js:540` | route-entry authorization |
 | `GET /api/invoices/:id` | — | — | — | ✓ | `routes/invoices.js:639` | route-entry authorization |
 | `GET /api/invoices/:id/fiscal/ksef/pdf-visualization` | — | — | — | ✓ | `routes/invoices.js:607` | route-entry authorization |
@@ -125,9 +125,9 @@ Routes: **475** · anonymous: **18** · seller: **75** · warehouse: **200** · 
 | `GET /api/invoices/legal-entities` | — | — | — | ✓ | `routes/invoices.js:128` | route-entry authorization |
 | `GET /api/invoices/legal-entities/:id` | — | — | — | ✓ | `routes/invoices.js:140` | route-entry authorization |
 | `GET /api/invoices/meta` | — | — | — | ✓ | `routes/invoices.js:118` | route-entry authorization |
-| `GET /api/maintenance` | ✓ | ✓ | ✓ | ✓ | `app.js:151` | public allowlist; endpoint-specific proof/rate limits may still apply |
+| `GET /api/maintenance` | ✓ | ✓ | ✓ | ✓ | `app.js:159` | public allowlist; endpoint-specific proof/rate limits may still apply |
 | `GET /api/nav-badges` | — | ✓ | ✓ | ✓ | `routes/navBadges.js:91` | route-entry authorization |
-| `GET /api/openai-status` | — | — | — | ✓ | `app.js:159` | route-entry authorization |
+| `GET /api/openai-status` | — | — | — | ✓ | `app.js:167` | route-entry authorization |
 | `GET /api/picking/block-tasks` | — | — | ✓ | ✓ | `routes/picking.js:941` | route-entry authorization |
 | `GET /api/picking/blocks-overview` | — | — | ✓ | ✓ | `routes/picking.js:1024` | route-entry authorization |
 | `GET /api/picking/locked-tasks` | — | — | ✓ | ✓ | `routes/picking.js:1415` | route-entry authorization |
@@ -192,8 +192,8 @@ Routes: **475** · anonymous: **18** · seller: **75** · warehouse: **200** · 
 | `GET /api/users/:telegramId` | — | — | — | ✓ | `routes/users.js:111` | route-entry authorization |
 | `GET /api/users/:telegramId/cleared-carts` | — | — | — | ✓ | `routes/users.js:119` | route-entry authorization |
 | `GET /api/users/assignment-candidates` | — | — | — | ✓ | `routes/users.js:91` | route-entry authorization |
-| `GET /api/v1/auth/config` | ✓ | ✓ | ✓ | ✓ | `routes/v1/auth.js:105` | public allowlist; endpoint-specific proof/rate limits may still apply |
-| `GET /api/v1/auth/me` | ✓ | ✓ | ✓ | ✓ | `routes/v1/auth.js:221` | public allowlist; endpoint-specific proof/rate limits may still apply |
+| `GET /api/v1/auth/config` | ✓ | ✓ | ✓ | ✓ | `routes/v1/auth.js:126` | public allowlist; endpoint-specific proof/rate limits may still apply |
+| `GET /api/v1/auth/me` | ✓ | ✓ | ✓ | ✓ | `routes/v1/auth.js:242` | public allowlist; endpoint-specific proof/rate limits may still apply |
 | `GET /api/v1/orders` | — | ✓ | ✓ | ✓ | `routes/orders.js:486` | route entry only; ownership/shop/session checks run in handler |
 | `GET /api/v1/orders/:id` | — | ✓ | ✓ | ✓ | `routes/orders.js:699` | route entry only; ownership/shop/session checks run in handler |
 | `GET /api/v1/orders/conflicts` | — | — | ✓ | ✓ | `routes/orders.js:339` | route entry only; ownership/shop/session checks run in handler |
@@ -433,10 +433,10 @@ Routes: **475** · anonymous: **18** · seller: **75** · warehouse: **200** · 
 | `POST /api/supplement/waves/:waveId/freeze` | — | — | ✓ | ✓ | `routes/supplement.js:487` | route-entry authorization |
 | `POST /api/users` | — | — | — | ✓ | `routes/users.js:152` | route-entry authorization |
 | `POST /api/users/:telegramId/cleared-carts/:cartId/restore` | — | — | — | ✓ | `routes/users.js:145` | route-entry authorization |
-| `POST /api/v1/auth/google` | ✓ | ✓ | ✓ | ✓ | `routes/v1/auth.js:114` | public allowlist; endpoint-specific proof/rate limits may still apply |
-| `POST /api/v1/auth/google/link/bootstrap` | ✓ | ✓ | ✓ | ✓ | `routes/v1/auth.js:135` | public allowlist; endpoint-specific proof/rate limits may still apply |
-| `POST /api/v1/auth/google/link/complete` | ✓ | ✓ | ✓ | ✓ | `routes/v1/auth.js:155` | public allowlist; endpoint-specific proof/rate limits may still apply |
-| `POST /api/v1/auth/logout` | ✓ | ✓ | ✓ | ✓ | `routes/v1/auth.js:235` | public allowlist; endpoint-specific proof/rate limits may still apply |
+| `POST /api/v1/auth/google` | ✓ | ✓ | ✓ | ✓ | `routes/v1/auth.js:135` | public allowlist; endpoint-specific proof/rate limits may still apply |
+| `POST /api/v1/auth/google/link/bootstrap` | ✓ | ✓ | ✓ | ✓ | `routes/v1/auth.js:156` | public allowlist; endpoint-specific proof/rate limits may still apply |
+| `POST /api/v1/auth/google/link/complete` | ✓ | ✓ | ✓ | ✓ | `routes/v1/auth.js:176` | public allowlist; endpoint-specific proof/rate limits may still apply |
+| `POST /api/v1/auth/logout` | ✓ | ✓ | ✓ | ✓ | `routes/v1/auth.js:256` | public allowlist; endpoint-specific proof/rate limits may still apply |
 | `POST /api/v1/auth/telegram/bootstrap` | ✓ | ✓ | ✓ | ✓ | `routes/v1/auth.js:90` | public allowlist; endpoint-specific proof/rate limits may still apply |
 | `POST /api/v1/orders` | — | ✓ | ✓ | ✓ | `routes/orders.js:724` | route entry only; ownership/shop/session checks run in handler |
 | `POST /api/v1/orders/:id/fulfill` | — | — | ✓ | ✓ | `routes/orders.js:691` | route entry only; ownership/shop/session checks run in handler |

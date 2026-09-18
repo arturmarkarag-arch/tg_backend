@@ -1,6 +1,6 @@
 const User = require('../models/User');
-const { verifySession, verifyTelegramSession, isSessionNotRevoked } = require('../utils/jwt');
-const { readSessionCookie, readTelegramSessionCookie } = require('../utils/sessionCookie');
+const { isSessionNotRevoked } = require('../utils/jwt');
+const { readContextSessionProof } = require('./sessionProof');
 const { appError } = require('../utils/errors');
 const { isRemovedUser } = require('../utils/userAccountState');
 const { readTelegramClientId, readTelegramSessionSlot } = require('../utils/telegramRequestIdentity');
@@ -18,7 +18,7 @@ async function telegramAuth(req, res, next) {
 
   if (isTelegramContext) {
     const telegramSessionSlot = readTelegramSessionSlot(req);
-    const telegramSession = verifyTelegramSession(readTelegramSessionCookie(req, telegramSessionSlot));
+    const telegramSession = readContextSessionProof(req).session;
     if (!telegramSession) return next(appError('auth_telegram_session_required'));
 
     // Safety selector only: the header is not trusted as authentication. It is
@@ -37,8 +37,7 @@ async function telegramAuth(req, res, next) {
     telegramId = telegramSession.telegramId;
     req.telegramSession = telegramSession;
   } else {
-    const cookieToken = readSessionCookie(req);
-    const session = verifySession(cookieToken);
+    const session = readContextSessionProof(req).session;
     if (!session) return next(appError('auth_required'));
     if (!['GET', 'HEAD', 'OPTIONS'].includes(String(req.method || '').toUpperCase())
         && req.get('x-csrf-protection') !== '1') {

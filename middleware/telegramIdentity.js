@@ -1,6 +1,5 @@
 'use strict';
-const { verifyTelegramSession } = require('../utils/jwt');
-const { readTelegramSessionCookie } = require('../utils/sessionCookie');
+const { readTelegramSessionProof } = require('./sessionProof');
 const { appError } = require('../utils/errors');
 const { readTelegramClientId, readTelegramSessionSlot } = require('../utils/telegramRequestIdentity');
 
@@ -16,7 +15,7 @@ function requireCookieCsrf(req) {
 // can legitimately reach registration-invite/register-request.
 function telegramIdentity(req, res, next) {
   const telegramSessionSlot = readTelegramSessionSlot(req);
-  const session = verifyTelegramSession(readTelegramSessionCookie(req, telegramSessionSlot));
+  const session = readTelegramSessionProof(req, telegramSessionSlot);
   if (!session) return next(appError('auth_telegram_session_required'));
   const expectedTelegramId = readTelegramClientId(req);
   if (expectedTelegramId && expectedTelegramId !== String(session.telegramId)) {

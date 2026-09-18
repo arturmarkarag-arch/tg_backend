@@ -111,6 +111,7 @@ const ERRORS = {
   // ── Generic ────────────────────────────────────────────────────────────────
   internal_error:           { status: 500, message: 'Внутрішня помилка сервера' },
   auth_rate_limited:        { status: 429, message: 'Забагато спроб авторизації. Зачекайте трохи та повторіть.' },
+  api_rate_limited:         { status: 429, message: 'Забагато запитів. Зачекайте трохи та повторіть.' },
   auth_csrf_required:       { status: 403, message: 'Не вдалося підтвердити безпечне джерело запиту.' },
   lock_busy:                { status: 409, message: ({ resource } = {}) => resource
                                 ? `Ресурс «${resource}» зараз змінюється іншим користувачем. Спробуйте ще раз за кілька секунд.`

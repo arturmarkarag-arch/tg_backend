@@ -33,6 +33,7 @@ const { getPublicMaintenanceState, maintenanceReadOnlyMiddleware } = require('./
 const { getPublicInvoiceKsefWriteState } = require('./services/invoices/invoiceKsefWriteState');
 const { telegramAuth, requireTelegramRole, requireTelegramRoles } = require('./middleware/telegramAuth');
 const { egressRequestContextMiddleware } = require('./services/egressTrafficMonitor');
+const { createApiAbuseGuard } = require('./middleware/apiAbuseGuard');
 
 // The warehouse test harness (destructive: cleanup/seed/reset of real
 // collections) must NEVER be reachable in production. Outside production it is
@@ -42,42 +43,6 @@ const ENABLE_TEST_API = process.env.NODE_ENV !== 'production'
   && process.env.ENABLE_TEST_API === 'true';
 
 const { expressCorsOptions } = require('./utils/corsOptions');
-
-const app = express();
-// Не розповідаємо кожній відповіді, на чому працює бекенд.
-app.disable('x-powered-by');
-app.use(cors(expressCorsOptions));
-app.use(express.json());
-// Tags automatic outbound HTTP metadata with the inbound API route that caused
-// it. Background schedulers remain source=background without manual registration.
-app.use(egressRequestContextMiddleware);
-// Legacy local uploads are warehouse-domain. Keep them behind auth instead of
-// exposing every existing file as anonymous static content. Public product media
-// is served from the explicitly public R2 domain instead.
-app.use('/uploads', telegramAuth, requireTelegramRoles(['admin', 'warehouse']), express.static(path.join(__dirname, 'uploads')));
-if (ENABLE_TEST_API) {
-  app.use('/warehouse-test', express.static(path.join(__dirname, '../Тести Е2Е/test-warehouse')));
-}
-
-// Telegram webhook delivery. Mounted BEFORE the API auth gate: Telegram posts
-// server-to-server with no telegram initData / JWT, so the auth here is the
-// unguessable token-derived path + the secret-token header. Body is already
-// JSON-parsed by express.json() above. Always mounted (dormant in polling mode,
-// since no webhook URL is registered then) — the path is unguessable regardless.
-{
-  const wh = getWebhookConfig();
-  app.post(wh.path, (req, res) => {
-    if (wh.secretToken && req.get('x-telegram-bot-api-secret-token') !== wh.secretToken) {
-      return res.sendStatus(403);
-    }
-    // Ack immediately, then process — never make Telegram wait on (or retry over)
-    // our handler work. processUpdate emits synchronously; handlers run detached.
-    res.sendStatus(200);
-    try { handleWebhookUpdate(req.body); } catch (err) {
-    }
-  });
-}
-
 
 const publicApiPaths = [
   /^\/api\/v1\/auth\/config$/,
@@ -111,10 +76,53 @@ const publicApiPaths = [
 
 function requireAuthForApi(req, res, next) {
   if (!req.path.startsWith('/api')) return next();
-  const isPublic = publicApiPaths.some((pattern) => pattern.test(req.path));
-  if (isPublic) return next();
+  if (isPublicApiPath(req.path)) return next();
   return telegramAuth(req, res, next);
 }
+
+function isPublicApiPath(pathname) {
+  return publicApiPaths.some((pattern) => pattern.test(String(pathname || '')));
+}
+
+const app = express();
+// Не розповідаємо кожній відповіді, на чому працює бекенд.
+app.disable('x-powered-by');
+app.use(cors(expressCorsOptions));
+// Reject anonymous API floods before JSON parsing, MongoDB auth lookups or route work.
+// Valid first-party sessions bypass this anonymous guard completely, so normal page
+// bootstrap/polling fan-out keeps its existing behaviour.
+app.use(createApiAbuseGuard({ isPublicApiPath }));
+app.use(express.json());
+// Tags automatic outbound HTTP metadata with the inbound API route that caused
+// it. Background schedulers remain source=background without manual registration.
+app.use(egressRequestContextMiddleware);
+// Legacy local uploads are warehouse-domain. Keep them behind auth instead of
+// exposing every existing file as anonymous static content. Public product media
+// is served from the explicitly public R2 domain instead.
+app.use('/uploads', telegramAuth, requireTelegramRoles(['admin', 'warehouse']), express.static(path.join(__dirname, 'uploads')));
+if (ENABLE_TEST_API) {
+  app.use('/warehouse-test', express.static(path.join(__dirname, '../Тести Е2Е/test-warehouse')));
+}
+
+// Telegram webhook delivery. Mounted BEFORE the API auth gate: Telegram posts
+// server-to-server with no telegram initData / JWT, so the auth here is the
+// unguessable token-derived path + the secret-token header. Body is already
+// JSON-parsed by express.json() above. Always mounted (dormant in polling mode,
+// since no webhook URL is registered then) — the path is unguessable regardless.
+{
+  const wh = getWebhookConfig();
+  app.post(wh.path, (req, res) => {
+    if (wh.secretToken && req.get('x-telegram-bot-api-secret-token') !== wh.secretToken) {
+      return res.sendStatus(403);
+    }
+    // Ack immediately, then process — never make Telegram wait on (or retry over)
+    // our handler work. processUpdate emits synchronously; handlers run detached.
+    res.sendStatus(200);
+    try { handleWebhookUpdate(req.body); } catch (err) {
+    }
+  });
+}
+
 
 app.use(requireAuthForApi);
 
