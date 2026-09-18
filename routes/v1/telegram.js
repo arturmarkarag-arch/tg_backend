@@ -24,6 +24,7 @@ const { isRemovedUser } = require('../../utils/userAccountState');
 const { buildSellerOrderingStatusReadModel } = require('../../services/readModels/sellerOrderingStatusReadModel');
 const { getTelegramUsernameMap } = require('../../utils/telegramUsername');
 const { createAuthRateLimit } = require('../../middleware/authRateLimit');
+const { resolveSellerTelegramGroupAccess } = require('../../services/sellerTelegramGroupAccess');
 
 const router = express.Router();
 const adminOnly = requireTelegramRole('admin');
@@ -47,6 +48,14 @@ const googleLinkLimit = createAuthRateLimit({
   max: positiveEnvInt('TELEGRAM_GOOGLE_LINK_RATE_MAX', 120),
   windowMs: positiveEnvInt('TELEGRAM_GOOGLE_LINK_RATE_WINDOW_MS', 10 * 60 * 1000),
 });
+
+async function requireSellerTelegramGroupAccess(user, source) {
+  const decision = await resolveSellerTelegramGroupAccess(user, { source });
+  if (decision.allowed) return decision;
+  if (decision.reason === 'not_in_group') throw appError('auth_telegram_group_required');
+  if (decision.reason === 'group_not_configured') throw appError('auth_telegram_group_not_configured');
+  throw appError('auth_telegram_group_check_failed');
+}
 
 function normalizePhoneNumber(raw) {
   if (!raw) return '';
@@ -226,6 +235,8 @@ router.post('/me', telegramAuthLimit, telegramIdentity, asyncHandler(async (req,
     if (request?.status === 'rejected') throw appError('registration_rejected', { reason: request.moderationReason || '' });
     throw appError('not_registered');
   }
+
+  await requireSellerTelegramGroupAccess(user, 'telegram_me');
 
   // 3. Повертаємо профіль (без чутливих полів). Shop резолвиться з кешу.
   res.json(await buildUserProfile(user));
@@ -714,6 +725,12 @@ router.post('/register-request', registrationLimit, telegramIdentity, asyncHandl
           lastName: cleanLastName,
           phoneNumber: cleanPhone,
           shopId: String(shop._id),
+          sellerGroupAccess: {
+            state: 'allowed',
+            checkedAt: new Date(),
+            groupId: String(membership.groupId || ''),
+            source: 'registration',
+          },
         });
         createdUser = resolution.user;
         assignmentTransition = resolution.assignmentTransition;

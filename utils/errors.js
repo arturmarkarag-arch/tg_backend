@@ -592,6 +592,9 @@ const ERRORS = {
   // Backwards-compat alias used by mini-app client code that switches on `error` value.
   not_registered:           { status: 403, message: 'Користувача не зареєстровано. Зверніться до менеджера або адміністратора.' },
   auth_required:            { status: 401, message: 'Потрібна авторизація через Telegram' },
+  auth_telegram_group_required: { status: 403, message: 'Доступ втрачено: вас немає в робочій Telegram-групі «Оголошення». Попросіть менеджера або адміністратора додати вас назад.' },
+  auth_telegram_group_check_failed: { status: 503, message: 'Не вдалося підтвердити ваше членство в робочій Telegram-групі. Спробуйте ще раз через хвилину.' },
+  auth_telegram_group_not_configured: { status: 503, message: 'Робочу Telegram-групу ще не налаштовано. Зверніться до адміністратора.' },
 
   // ── Google browser login ───────────────────────────────────────────────────
   google_auth_not_configured: { status: 503, message: 'Вхід через Google тимчасово недоступний (сервер не налаштовано).' },

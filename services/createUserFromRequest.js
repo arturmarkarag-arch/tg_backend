@@ -23,6 +23,7 @@ async function resolveAndCreateUser({
   lastName,
   phoneNumber,
   shopId,
+  sellerGroupAccess = null,
 }) {
   let resolvedShopId = null;
   let resolvedShop = null;
@@ -82,6 +83,19 @@ async function resolveAndCreateUser({
     // A successful registration is an explicit return to the system. Keep the
     // historical Google link, but clear stale runtime/account flags.
     existing.botBlocked = false;
+    if (role === 'seller' && sellerGroupAccess?.state === 'allowed') {
+      existing.telegramGroupAccessState = 'allowed';
+      existing.telegramGroupAccessCheckedAt = sellerGroupAccess.checkedAt || now;
+      existing.telegramGroupAccessGroupId = String(sellerGroupAccess.groupId || '');
+      existing.telegramGroupAccessSource = String(sellerGroupAccess.source || 'registration');
+    } else {
+      // Re-registering into a non-seller role (or without a fresh membership
+      // proof) must never inherit an old seller authorization projection.
+      existing.telegramGroupAccessState = 'unverified';
+      existing.telegramGroupAccessCheckedAt = now;
+      existing.telegramGroupAccessGroupId = '';
+      existing.telegramGroupAccessSource = 'account_reregistered';
+    }
     existing.miniAppState = { updatedAt: null };
     existing.cartState = {
       navigationSessionId: '', lastViewedProductId: '',
@@ -120,6 +134,14 @@ async function resolveAndCreateUser({
     phoneNumber: phoneNumber || '',
     shopId: resolvedShopId,
     accountState: 'active',
+    ...(role === 'seller' && sellerGroupAccess?.state === 'allowed'
+      ? {
+          telegramGroupAccessState: 'allowed',
+          telegramGroupAccessCheckedAt: sellerGroupAccess.checkedAt || new Date(),
+          telegramGroupAccessGroupId: String(sellerGroupAccess.groupId || ''),
+          telegramGroupAccessSource: String(sellerGroupAccess.source || 'registration'),
+        }
+      : {}),
   }], { session });
 
   // If an old GroupMember row was manually hidden before this account existed,

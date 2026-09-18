@@ -37,6 +37,20 @@ const UserSchema = new mongoose.Schema(
     // їх так само, як раніше.
     shopId: { type: mongoose.Schema.Types.ObjectId, ref: 'Shop', default: null },
     botBlocked: { type: Boolean, default: false },
+    // Seller-only Telegram work-group authorization projection. The source of
+    // truth is Telegram membership in telegram.allowedGroupIds; this compact
+    // projection makes normal HTTP/socket auth a zero-extra-read operation.
+    // Legacy/manual seller rows are `unverified` until the first auth attempt
+    // resolves persisted GroupMember evidence (then one live Telegram fallback).
+    // `denied` is written only from deterministic absence, never API uncertainty.
+    telegramGroupAccessState: {
+      type: String,
+      enum: ['unverified', 'allowed', 'denied'],
+      default: 'unverified',
+    },
+    telegramGroupAccessCheckedAt: { type: Date, default: null },
+    telegramGroupAccessGroupId: { type: String, default: '' },
+    telegramGroupAccessSource: { type: String, default: '' },
     // Soft-removal state. `removed` closes ALL application access but keeps the
     // row as historical information. Missing field on legacy rows is treated as
     // active for backwards compatibility; successful self-registration can

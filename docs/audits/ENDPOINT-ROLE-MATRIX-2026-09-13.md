@@ -8,13 +8,13 @@ Routes: **475** · anonymous: **7** · seller: **74** · warehouse: **199** · a
 
 | Endpoint | Anonymous | Seller | Warehouse | Admin | Source | Boundary note |
 |---|:---:|:---:|:---:|:---:|---|---|
-| `DELETE /api/admin/allegro-settings/accounts/:accountId` | — | — | — | ✓ | `routes/admin.js:54` | route-entry authorization |
-| `DELETE /api/admin/cities/:id` | — | — | — | ✓ | `routes/admin.js:371` | route-entry authorization |
-| `DELETE /api/admin/price-groups/:groupId` | — | — | — | ✓ | `routes/admin.js:709` | route-entry authorization |
-| `DELETE /api/admin/telegram-groups/:groupId` | — | — | — | ✓ | `routes/admin.js:468` | route-entry authorization |
-| `DELETE /api/admin/telegram-groups/:groupId/members/:telegramId` | — | — | — | ✓ | `routes/admin.js:743` | route-entry authorization |
-| `DELETE /api/admin/telegram-member-tag-groups/:groupId` | — | — | — | ✓ | `routes/admin.js:516` | route-entry authorization |
-| `DELETE /api/admin/telegram-support-admins/:username` | — | — | — | ✓ | `routes/admin.js:580` | route-entry authorization |
+| `DELETE /api/admin/allegro-settings/accounts/:accountId` | — | — | — | ✓ | `routes/admin.js:55` | route-entry authorization |
+| `DELETE /api/admin/cities/:id` | — | — | — | ✓ | `routes/admin.js:372` | route-entry authorization |
+| `DELETE /api/admin/price-groups/:groupId` | — | — | — | ✓ | `routes/admin.js:725` | route-entry authorization |
+| `DELETE /api/admin/telegram-groups/:groupId` | — | — | — | ✓ | `routes/admin.js:478` | route-entry authorization |
+| `DELETE /api/admin/telegram-groups/:groupId/members/:telegramId` | — | — | — | ✓ | `routes/admin.js:759` | route-entry authorization |
+| `DELETE /api/admin/telegram-member-tag-groups/:groupId` | — | — | — | ✓ | `routes/admin.js:532` | route-entry authorization |
+| `DELETE /api/admin/telegram-support-admins/:username` | — | — | — | ✓ | `routes/admin.js:596` | route-entry authorization |
 | `DELETE /api/blocks/:number` | — | — | ✓ | ✓ | `routes/blocks.js:395` | route-entry authorization |
 | `DELETE /api/blocks/:number/products/:productId` | — | — | ✓ | ✓ | `routes/blocks.js:323` | route-entry authorization |
 | `DELETE /api/delivery-groups/:id` | — | — | — | ✓ | `routes/deliveryGroups.js:478` | route-entry authorization |
@@ -27,34 +27,34 @@ Routes: **475** · anonymous: **7** · seller: **74** · warehouse: **199** · a
 | `DELETE /api/shops/:id` | — | — | — | ✓ | `routes/shops.js:341` | route entry only; response projection may vary by role |
 | `DELETE /api/supplement/:offerId/request` | — | ✓ | — | ✓ | `routes/supplement.js:281` | route-entry authorization |
 | `DELETE /api/supplement/requests/:requestId` | — | ✓ | — | ✓ | `routes/supplement.js:259` | route-entry authorization |
-| `DELETE /api/users/:telegramId` | — | — | — | ✓ | `routes/users.js:275` | route-entry authorization |
+| `DELETE /api/users/:telegramId` | — | — | — | ✓ | `routes/users.js:285` | route-entry authorization |
 | `DELETE /api/v1/products/:id` | — | — | ✓ | ✓ | `routes/products.js:1678` | route-entry authorization |
 | `DELETE /api/v1/products/orphan-photo` | — | — | ✓ | ✓ | `routes/products.js:384` | route-entry authorization |
-| `DELETE /api/v1/telegram/register-requests/:id` | — | — | — | ✓ | `routes/v1/telegram.js:910` | route-entry authorization |
+| `DELETE /api/v1/telegram/register-requests/:id` | — | — | — | ✓ | `routes/v1/telegram.js:927` | route-entry authorization |
 | `DELETE /api/vision-search/logs` | — | — | — | ✓ | `routes/visionSearch.js:456` | route-entry authorization |
-| `GET /api/admin/allegro-settings` | — | — | — | ✓ | `routes/admin.js:34` | route-entry authorization |
-| `GET /api/admin/baselinker-settings` | — | — | — | ✓ | `routes/admin.js:59` | route-entry authorization |
-| `GET /api/admin/baselinker-settings/accounts/:accountId/statuses` | — | — | — | ✓ | `routes/admin.js:155` | route-entry authorization |
-| `GET /api/admin/cities` | — | — | — | ✓ | `routes/admin.js:331` | route-entry authorization |
-| `GET /api/admin/egress-traffic` | — | — | — | ✓ | `routes/admin.js:808` | route-entry authorization |
-| `GET /api/admin/openai-key` | — | — | — | ✓ | `routes/admin.js:415` | route-entry authorization |
-| `GET /api/admin/openai/costs` | — | — | — | ✓ | `routes/admin.js:828` | route-entry authorization |
-| `GET /api/admin/openai/models` | — | — | — | ✓ | `routes/admin.js:186` | route-entry authorization |
-| `GET /api/admin/openai/settings` | — | — | — | ✓ | `routes/admin.js:192` | route-entry authorization |
-| `GET /api/admin/openai/usage` | — | — | — | ✓ | `routes/admin.js:841` | route-entry authorization |
-| `GET /api/admin/ordering-schedule` | — | — | — | ✓ | `routes/admin.js:292` | route-entry authorization |
-| `GET /api/admin/price-groups` | — | — | — | ✓ | `routes/admin.js:683` | route-entry authorization |
-| `GET /api/admin/supplement-settings` | — | — | — | ✓ | `routes/admin.js:315` | route-entry authorization |
-| `GET /api/admin/telegram-delivery/events` | — | — | — | ✓ | `routes/admin.js:213` | route-entry authorization |
-| `GET /api/admin/telegram-delivery/events/:eventKey` | — | — | — | ✓ | `routes/admin.js:223` | route-entry authorization |
-| `GET /api/admin/telegram-groups` | — | — | — | ✓ | `routes/admin.js:442` | route-entry authorization |
-| `GET /api/admin/telegram-groups/:groupId/members` | — | — | — | ✓ | `routes/admin.js:723` | route-entry authorization |
-| `GET /api/admin/telegram-member-tag-groups` | — | — | — | ✓ | `routes/admin.js:482` | route-entry authorization |
-| `GET /api/admin/telegram-member-tags` | — | — | — | ✓ | `routes/admin.js:529` | route-entry authorization |
-| `GET /api/admin/telegram-new-products-group` | — | — | — | ✓ | `routes/admin.js:590` | route-entry authorization |
-| `GET /api/admin/telegram-new-products-history` | — | — | — | ✓ | `routes/admin.js:663` | route-entry authorization |
-| `GET /api/admin/telegram-support-admins` | — | — | — | ✓ | `routes/admin.js:549` | route-entry authorization |
-| `GET /api/admin/vision-settings` | — | — | — | ✓ | `routes/admin.js:275` | route-entry authorization |
+| `GET /api/admin/allegro-settings` | — | — | — | ✓ | `routes/admin.js:35` | route-entry authorization |
+| `GET /api/admin/baselinker-settings` | — | — | — | ✓ | `routes/admin.js:60` | route-entry authorization |
+| `GET /api/admin/baselinker-settings/accounts/:accountId/statuses` | — | — | — | ✓ | `routes/admin.js:156` | route-entry authorization |
+| `GET /api/admin/cities` | — | — | — | ✓ | `routes/admin.js:332` | route-entry authorization |
+| `GET /api/admin/egress-traffic` | — | — | — | ✓ | `routes/admin.js:826` | route-entry authorization |
+| `GET /api/admin/openai-key` | — | — | — | ✓ | `routes/admin.js:416` | route-entry authorization |
+| `GET /api/admin/openai/costs` | — | — | — | ✓ | `routes/admin.js:846` | route-entry authorization |
+| `GET /api/admin/openai/models` | — | — | — | ✓ | `routes/admin.js:187` | route-entry authorization |
+| `GET /api/admin/openai/settings` | — | — | — | ✓ | `routes/admin.js:193` | route-entry authorization |
+| `GET /api/admin/openai/usage` | — | — | — | ✓ | `routes/admin.js:859` | route-entry authorization |
+| `GET /api/admin/ordering-schedule` | — | — | — | ✓ | `routes/admin.js:293` | route-entry authorization |
+| `GET /api/admin/price-groups` | — | — | — | ✓ | `routes/admin.js:699` | route-entry authorization |
+| `GET /api/admin/supplement-settings` | — | — | — | ✓ | `routes/admin.js:316` | route-entry authorization |
+| `GET /api/admin/telegram-delivery/events` | — | — | — | ✓ | `routes/admin.js:214` | route-entry authorization |
+| `GET /api/admin/telegram-delivery/events/:eventKey` | — | — | — | ✓ | `routes/admin.js:224` | route-entry authorization |
+| `GET /api/admin/telegram-groups` | — | — | — | ✓ | `routes/admin.js:443` | route-entry authorization |
+| `GET /api/admin/telegram-groups/:groupId/members` | — | — | — | ✓ | `routes/admin.js:739` | route-entry authorization |
+| `GET /api/admin/telegram-member-tag-groups` | — | — | — | ✓ | `routes/admin.js:498` | route-entry authorization |
+| `GET /api/admin/telegram-member-tags` | — | — | — | ✓ | `routes/admin.js:545` | route-entry authorization |
+| `GET /api/admin/telegram-new-products-group` | — | — | — | ✓ | `routes/admin.js:606` | route-entry authorization |
+| `GET /api/admin/telegram-new-products-history` | — | — | — | ✓ | `routes/admin.js:679` | route-entry authorization |
+| `GET /api/admin/telegram-support-admins` | — | — | — | ✓ | `routes/admin.js:565` | route-entry authorization |
+| `GET /api/admin/vision-settings` | — | — | — | ✓ | `routes/admin.js:276` | route-entry authorization |
 | `GET /api/allegro/accounts/:accountId/orders/:orderId` | — | — | — | ✓ | `routes/allegro.js:201` | provider-worker boundary; among these four roles only admin passes (baselinker is outside the table) |
 | `GET /api/allegro/accounts/:accountId/orders/:orderId/picking` | — | — | — | ✓ | `routes/allegro.js:241` | provider-worker boundary; among these four roles only admin passes (baselinker is outside the table) |
 | `GET /api/allegro/accounts/:accountId/orders/:orderId/shipment` | — | — | — | ✓ | `routes/allegro.js:209` | provider-worker boundary; among these four roles only admin passes (baselinker is outside the table) |
@@ -188,12 +188,12 @@ Routes: **475** · anonymous: **7** · seller: **74** · warehouse: **199** · a
 | `GET /api/supplement/group/:deliveryGroupId` | — | — | ✓ | ✓ | `routes/supplement.js:420` | route-entry authorization |
 | `GET /api/supplement/my` | — | ✓ | — | ✓ | `routes/supplement.js:293` | route-entry authorization |
 | `GET /api/supplement/offers/:offerId` | — | — | ✓ | ✓ | `routes/supplement.js:580` | route-entry authorization |
-| `GET /api/users` | — | — | — | ✓ | `routes/users.js:64` | route-entry authorization |
-| `GET /api/users/:telegramId` | — | — | — | ✓ | `routes/users.js:111` | route-entry authorization |
-| `GET /api/users/:telegramId/cleared-carts` | — | — | — | ✓ | `routes/users.js:119` | route-entry authorization |
-| `GET /api/users/assignment-candidates` | — | — | — | ✓ | `routes/users.js:91` | route-entry authorization |
-| `GET /api/v1/auth/config` | ✓ | ✓ | ✓ | ✓ | `routes/v1/auth.js:126` | explicit auth/check entry; route-specific credential/state/rate limits may still apply |
-| `GET /api/v1/auth/me` | — | ✓ | ✓ | ✓ | `routes/v1/auth.js:242` | first-party session proof required before route; pre-registration/browser probe path |
+| `GET /api/users` | — | — | — | ✓ | `routes/users.js:74` | route-entry authorization |
+| `GET /api/users/:telegramId` | — | — | — | ✓ | `routes/users.js:121` | route-entry authorization |
+| `GET /api/users/:telegramId/cleared-carts` | — | — | — | ✓ | `routes/users.js:129` | route-entry authorization |
+| `GET /api/users/assignment-candidates` | — | — | — | ✓ | `routes/users.js:101` | route-entry authorization |
+| `GET /api/v1/auth/config` | ✓ | ✓ | ✓ | ✓ | `routes/v1/auth.js:123` | explicit auth/check entry; route-specific credential/state/rate limits may still apply |
+| `GET /api/v1/auth/me` | — | ✓ | ✓ | ✓ | `routes/v1/auth.js:240` | first-party session proof required before route; pre-registration/browser probe path |
 | `GET /api/v1/orders` | — | ✓ | ✓ | ✓ | `routes/orders.js:486` | route entry only; ownership/shop/session checks run in handler |
 | `GET /api/v1/orders/:id` | — | ✓ | ✓ | ✓ | `routes/orders.js:699` | route entry only; ownership/shop/session checks run in handler |
 | `GET /api/v1/orders/conflicts` | — | — | ✓ | ✓ | `routes/orders.js:339` | route entry only; ownership/shop/session checks run in handler |
@@ -215,7 +215,7 @@ Routes: **475** · anonymous: **7** · seller: **74** · warehouse: **199** · a
 | `GET /api/v1/products/upload-url-public` | — | ✓ | ✓ | ✓ | `routes/products.js:404` | route-entry authorization |
 | `GET /api/v1/products/upload-url-triple` | — | — | ✓ | ✓ | `routes/products.js:362` | route-entry authorization |
 | `GET /api/v1/products/warehouse-stats` | — | — | ✓ | ✓ | `routes/products.js:192` | route-entry authorization |
-| `GET /api/v1/telegram/register-requests` | — | — | — | ✓ | `routes/v1/telegram.js:781` | route-entry authorization |
+| `GET /api/v1/telegram/register-requests` | — | — | — | ✓ | `routes/v1/telegram.js:798` | route-entry authorization |
 | `GET /api/vision-search/logs` | — | — | ✓ | ✓ | `routes/visionSearch.js:426` | route-entry authorization |
 | `GET /api/vision-search/upload-url` | — | ✓ | ✓ | ✓ | `routes/visionSearch.js:54` | route-entry authorization |
 | `GET /api/warehouse-test/health` | — | — | — | ✓ | `routes/warehouseTest.js:118` | admin and ENABLE_TEST_API outside production |
@@ -225,9 +225,9 @@ Routes: **475** · anonymous: **7** · seller: **74** · warehouse: **199** · a
 | `GET /api/warehouse-test/suite/status/:jobId` | — | — | — | ✓ | `routes/warehouseTest.js:1139` | admin and ENABLE_TEST_API outside production |
 | `GET/HEAD /uploads/*` | — | — | ✓ | ✓ | `app.js:55` | authenticated legacy static uploads |
 | `GET/HEAD /warehouse-test/*` | — | — | — | ✓ | `app.js:111` | admin-authenticated static test UI; only mounted outside production with ENABLE_TEST_API=true |
-| `PATCH /api/admin/allegro-settings/accounts/:accountId` | — | — | — | ✓ | `routes/admin.js:49` | route-entry authorization |
-| `PATCH /api/admin/baselinker-settings/accounts/:accountId` | — | — | — | ✓ | `routes/admin.js:103` | route-entry authorization |
-| `PATCH /api/admin/cities/:id` | — | — | — | ✓ | `routes/admin.js:351` | route-entry authorization |
+| `PATCH /api/admin/allegro-settings/accounts/:accountId` | — | — | — | ✓ | `routes/admin.js:50` | route-entry authorization |
+| `PATCH /api/admin/baselinker-settings/accounts/:accountId` | — | — | — | ✓ | `routes/admin.js:104` | route-entry authorization |
+| `PATCH /api/admin/cities/:id` | — | — | — | ✓ | `routes/admin.js:352` | route-entry authorization |
 | `PATCH /api/allegro/{pickingPrefix}/items/:lineKey` | — | — | — | ✓ | `routes/allegro.js:252` | provider-worker boundary; among these four roles only admin passes (baselinker is outside the table) |
 | `PATCH /api/baselinker/{pickingPrefix}/items/:lineKey` | — | — | — | ✓ | `routes/baseLinker.js:396` | provider-worker boundary; among these four roles only admin passes (baselinker is outside the table) |
 | `PATCH /api/commerce/catalog/:id` | — | — | — | ✓ | `routes/commerce.js:125` | provider-worker boundary; among these four roles only admin passes (baselinker is outside the table) |
@@ -253,38 +253,38 @@ Routes: **475** · anonymous: **7** · seller: **74** · warehouse: **199** · a
 | `PATCH /api/shops/:id/sellers` | — | — | — | ✓ | `routes/shops.js:379` | route entry only; response projection may vary by role |
 | `PATCH /api/supplement/requests/:requestId` | — | ✓ | — | ✓ | `routes/supplement.js:249` | route-entry authorization |
 | `PATCH /api/supplement/requests/:requestId/packed` | — | — | ✓ | ✓ | `routes/supplement.js:615` | route-entry authorization |
-| `PATCH /api/users/:telegramId` | — | — | — | ✓ | `routes/users.js:213` | route-entry authorization |
-| `PATCH /api/users/:telegramId/shop` | — | — | — | ✓ | `routes/users.js:186` | route-entry authorization |
+| `PATCH /api/users/:telegramId` | — | — | — | ✓ | `routes/users.js:223` | route-entry authorization |
+| `PATCH /api/users/:telegramId/shop` | — | — | — | ✓ | `routes/users.js:196` | route-entry authorization |
 | `PATCH /api/v1/orders/:id` | — | ✓ | ✓ | ✓ | `routes/orders.js:1700` | route entry only; ownership/shop/session checks run in handler |
 | `PATCH /api/v1/orders/:id/snapshot` | — | — | ✓ | ✓ | `routes/orders.js:1157` | route entry only; ownership/shop/session checks run in handler |
 | `PATCH /api/v1/products/:id` | — | — | ✓ | ✓ | `routes/products.js:1460` | route-entry authorization |
 | `PATCH /api/v1/products/reorder` | — | — | ✓ | ✓ | `routes/products.js:962` | route-entry authorization |
-| `PATCH /api/v1/telegram/me/profile` | — | ✓ | ✓ | ✓ | `routes/v1/telegram.js:306` | route-entry authorization |
-| `PATCH /api/v1/telegram/me/shop` | — | ✓ | ✓ | ✓ | `routes/v1/telegram.js:239` | route-entry authorization |
+| `PATCH /api/v1/telegram/me/profile` | — | ✓ | ✓ | ✓ | `routes/v1/telegram.js:317` | route-entry authorization |
+| `PATCH /api/v1/telegram/me/shop` | — | ✓ | ✓ | ✓ | `routes/v1/telegram.js:250` | route-entry authorization |
 | `PATCH /api/vision-search/logs/:id` | — | — | ✓ | ✓ | `routes/visionSearch.js:444` | route-entry authorization |
-| `POST /api/admin/allegro-settings/accounts` | — | — | — | ✓ | `routes/admin.js:40` | route-entry authorization |
-| `POST /api/admin/baselinker-settings/accounts` | — | — | — | ✓ | `routes/admin.js:81` | route-entry authorization |
-| `POST /api/admin/baselinker-settings/accounts/:accountId/queue` | — | — | — | ✓ | `routes/admin.js:161` | route-entry authorization |
-| `POST /api/admin/baselinker-settings/accounts/:accountId/refresh` | — | — | — | ✓ | `routes/admin.js:148` | route-entry authorization |
-| `POST /api/admin/baselinker-settings/accounts/:accountId/token` | — | — | — | ✓ | `routes/admin.js:136` | route-entry authorization |
-| `POST /api/admin/baselinker-settings/validate` | — | — | — | ✓ | `routes/admin.js:75` | route-entry authorization |
-| `POST /api/admin/cities` | — | — | — | ✓ | `routes/admin.js:337` | route-entry authorization |
-| `POST /api/admin/openai/settings` | — | — | — | ✓ | `routes/admin.js:198` | route-entry authorization |
-| `POST /api/admin/ordering-schedule` | — | — | — | ✓ | `routes/admin.js:297` | route-entry authorization |
-| `POST /api/admin/price-groups` | — | — | — | ✓ | `routes/admin.js:691` | route-entry authorization |
-| `POST /api/admin/supplement-settings` | — | — | — | ✓ | `routes/admin.js:319` | route-entry authorization |
-| `POST /api/admin/telegram-groups` | — | — | — | ✓ | `routes/admin.js:451` | route-entry authorization |
-| `POST /api/admin/telegram-groups/:groupId/check-all` | — | — | — | ✓ | `routes/admin.js:793` | route-entry authorization |
-| `POST /api/admin/telegram-groups/:groupId/members/:telegramId/recheck` | — | — | — | ✓ | `routes/admin.js:777` | route-entry authorization |
-| `POST /api/admin/telegram-member-tag-groups` | — | — | — | ✓ | `routes/admin.js:487` | route-entry authorization |
-| `POST /api/admin/telegram-member-tags/reconcile` | — | — | — | ✓ | `routes/admin.js:535` | route-entry authorization |
-| `POST /api/admin/telegram-new-products-bindings/:bindingId/identify` | — | — | — | ✓ | `routes/admin.js:645` | route-entry authorization |
-| `POST /api/admin/telegram-new-products-bindings/:bindingId/resolve-absent` | — | — | — | ✓ | `routes/admin.js:634` | route-entry authorization |
-| `POST /api/admin/telegram-new-products-cleanups/:cleanupId/resolve` | — | — | — | ✓ | `routes/admin.js:615` | route-entry authorization |
-| `POST /api/admin/telegram-new-products-cleanups/:cleanupId/retry` | — | — | — | ✓ | `routes/admin.js:626` | route-entry authorization |
-| `POST /api/admin/telegram-new-products-group` | — | — | — | ✓ | `routes/admin.js:601` | route-entry authorization |
-| `POST /api/admin/telegram-support-admins` | — | — | — | ✓ | `routes/admin.js:553` | route-entry authorization |
-| `POST /api/admin/vision-settings` | — | — | — | ✓ | `routes/admin.js:280` | route-entry authorization |
+| `POST /api/admin/allegro-settings/accounts` | — | — | — | ✓ | `routes/admin.js:41` | route-entry authorization |
+| `POST /api/admin/baselinker-settings/accounts` | — | — | — | ✓ | `routes/admin.js:82` | route-entry authorization |
+| `POST /api/admin/baselinker-settings/accounts/:accountId/queue` | — | — | — | ✓ | `routes/admin.js:162` | route-entry authorization |
+| `POST /api/admin/baselinker-settings/accounts/:accountId/refresh` | — | — | — | ✓ | `routes/admin.js:149` | route-entry authorization |
+| `POST /api/admin/baselinker-settings/accounts/:accountId/token` | — | — | — | ✓ | `routes/admin.js:137` | route-entry authorization |
+| `POST /api/admin/baselinker-settings/validate` | — | — | — | ✓ | `routes/admin.js:76` | route-entry authorization |
+| `POST /api/admin/cities` | — | — | — | ✓ | `routes/admin.js:338` | route-entry authorization |
+| `POST /api/admin/openai/settings` | — | — | — | ✓ | `routes/admin.js:199` | route-entry authorization |
+| `POST /api/admin/ordering-schedule` | — | — | — | ✓ | `routes/admin.js:298` | route-entry authorization |
+| `POST /api/admin/price-groups` | — | — | — | ✓ | `routes/admin.js:707` | route-entry authorization |
+| `POST /api/admin/supplement-settings` | — | — | — | ✓ | `routes/admin.js:320` | route-entry authorization |
+| `POST /api/admin/telegram-groups` | — | — | — | ✓ | `routes/admin.js:452` | route-entry authorization |
+| `POST /api/admin/telegram-groups/:groupId/check-all` | — | — | — | ✓ | `routes/admin.js:811` | route-entry authorization |
+| `POST /api/admin/telegram-groups/:groupId/members/:telegramId/recheck` | — | — | — | ✓ | `routes/admin.js:794` | route-entry authorization |
+| `POST /api/admin/telegram-member-tag-groups` | — | — | — | ✓ | `routes/admin.js:503` | route-entry authorization |
+| `POST /api/admin/telegram-member-tags/reconcile` | — | — | — | ✓ | `routes/admin.js:551` | route-entry authorization |
+| `POST /api/admin/telegram-new-products-bindings/:bindingId/identify` | — | — | — | ✓ | `routes/admin.js:661` | route-entry authorization |
+| `POST /api/admin/telegram-new-products-bindings/:bindingId/resolve-absent` | — | — | — | ✓ | `routes/admin.js:650` | route-entry authorization |
+| `POST /api/admin/telegram-new-products-cleanups/:cleanupId/resolve` | — | — | — | ✓ | `routes/admin.js:631` | route-entry authorization |
+| `POST /api/admin/telegram-new-products-cleanups/:cleanupId/retry` | — | — | — | ✓ | `routes/admin.js:642` | route-entry authorization |
+| `POST /api/admin/telegram-new-products-group` | — | — | — | ✓ | `routes/admin.js:617` | route-entry authorization |
+| `POST /api/admin/telegram-support-admins` | — | — | — | ✓ | `routes/admin.js:569` | route-entry authorization |
+| `POST /api/admin/vision-settings` | — | — | — | ✓ | `routes/admin.js:281` | route-entry authorization |
 | `POST /api/allegro/{pickingPrefix}/claim` | — | — | — | ✓ | `routes/allegro.js:246` | provider-worker boundary; among these four roles only admin passes (baselinker is outside the table) |
 | `POST /api/allegro/{pickingPrefix}/heartbeat` | — | — | — | ✓ | `routes/allegro.js:249` | provider-worker boundary; among these four roles only admin passes (baselinker is outside the table) |
 | `POST /api/allegro/{pickingPrefix}/release` | — | — | — | ✓ | `routes/allegro.js:265` | provider-worker boundary; among these four roles only admin passes (baselinker is outside the table) |
@@ -431,13 +431,13 @@ Routes: **475** · anonymous: **7** · seller: **74** · warehouse: **199** · a
 | `POST /api/supplement/requests/:requestId/restore` | — | — | ✓ | ✓ | `routes/supplement.js:555` | route-entry authorization |
 | `POST /api/supplement/waves/:waveId/cancel` | — | — | ✓ | ✓ | `routes/supplement.js:503` | route-entry authorization |
 | `POST /api/supplement/waves/:waveId/freeze` | — | — | ✓ | ✓ | `routes/supplement.js:487` | route-entry authorization |
-| `POST /api/users` | — | — | — | ✓ | `routes/users.js:152` | route-entry authorization |
-| `POST /api/users/:telegramId/cleared-carts/:cartId/restore` | — | — | — | ✓ | `routes/users.js:145` | route-entry authorization |
-| `POST /api/v1/auth/google` | ✓ | ✓ | ✓ | ✓ | `routes/v1/auth.js:135` | explicit auth/check entry; route-specific credential/state/rate limits may still apply |
-| `POST /api/v1/auth/google/link/bootstrap` | ✓ | ✓ | ✓ | ✓ | `routes/v1/auth.js:156` | explicit auth/check entry; route-specific credential/state/rate limits may still apply |
-| `POST /api/v1/auth/google/link/complete` | ✓ | ✓ | ✓ | ✓ | `routes/v1/auth.js:176` | explicit auth/check entry; route-specific credential/state/rate limits may still apply |
-| `POST /api/v1/auth/logout` | — | ✓ | ✓ | ✓ | `routes/v1/auth.js:256` | first-party session proof required before route; pre-registration/browser probe path |
-| `POST /api/v1/auth/telegram/bootstrap` | ✓ | ✓ | ✓ | ✓ | `routes/v1/auth.js:90` | explicit auth/check entry; route-specific credential/state/rate limits may still apply |
+| `POST /api/users` | — | — | — | ✓ | `routes/users.js:162` | route-entry authorization |
+| `POST /api/users/:telegramId/cleared-carts/:cartId/restore` | — | — | — | ✓ | `routes/users.js:155` | route-entry authorization |
+| `POST /api/v1/auth/google` | ✓ | ✓ | ✓ | ✓ | `routes/v1/auth.js:131` | explicit auth/check entry; route-specific credential/state/rate limits may still apply |
+| `POST /api/v1/auth/google/link/bootstrap` | ✓ | ✓ | ✓ | ✓ | `routes/v1/auth.js:153` | explicit auth/check entry; route-specific credential/state/rate limits may still apply |
+| `POST /api/v1/auth/google/link/complete` | ✓ | ✓ | ✓ | ✓ | `routes/v1/auth.js:173` | explicit auth/check entry; route-specific credential/state/rate limits may still apply |
+| `POST /api/v1/auth/logout` | — | ✓ | ✓ | ✓ | `routes/v1/auth.js:255` | first-party session proof required before route; pre-registration/browser probe path |
+| `POST /api/v1/auth/telegram/bootstrap` | ✓ | ✓ | ✓ | ✓ | `routes/v1/auth.js:87` | explicit auth/check entry; route-specific credential/state/rate limits may still apply |
 | `POST /api/v1/orders` | — | ✓ | ✓ | ✓ | `routes/orders.js:724` | route entry only; ownership/shop/session checks run in handler |
 | `POST /api/v1/orders/:id/fulfill` | — | — | ✓ | ✓ | `routes/orders.js:691` | route entry only; ownership/shop/session checks run in handler |
 | `POST /api/v1/orders/:id/stale/expire` | — | — | — | ✓ | `routes/orders.js:1643` | route entry only; ownership/shop/session checks run in handler |
@@ -453,18 +453,18 @@ Routes: **475** · anonymous: **7** · seller: **74** · warehouse: **199** · a
 | `POST /api/v1/products/broadcast` | — | ✓ | ✓ | ✓ | `routes/products.js:990` | route-entry authorization |
 | `POST /api/v1/products/receive` | — | — | ✓ | ✓ | `routes/products.js:1343` | route-entry authorization |
 | `POST /api/v1/products/report-missing` | — | ✓ | ✓ | ✓ | `routes/products.js:1011` | route-entry authorization |
-| `POST /api/v1/telegram/google/link/start` | — | ✓ | ✓ | ✓ | `routes/v1/telegram.js:346` | route-entry authorization |
-| `POST /api/v1/telegram/google/unlink` | — | ✓ | ✓ | ✓ | `routes/v1/telegram.js:358` | route-entry authorization |
-| `POST /api/v1/telegram/me` | — | ✓ | ✓ | ✓ | `routes/v1/telegram.js:214` | first-party session proof required before route; pre-registration/browser probe path |
-| `POST /api/v1/telegram/mini-app/reset-state` | — | ✓ | ✓ | ✓ | `routes/v1/telegram.js:505` | route-entry authorization |
-| `POST /api/v1/telegram/mini-app/state` | — | ✓ | ✓ | ✓ | `routes/v1/telegram.js:384` | route-entry authorization |
-| `POST /api/v1/telegram/register-request` | — | ✓ | ✓ | ✓ | `routes/v1/telegram.js:617` | first-party session proof required before route; pre-registration/browser probe path |
-| `POST /api/v1/telegram/register-requests/:id/approve` | — | — | — | ✓ | `routes/v1/telegram.js:795` | route-entry authorization |
-| `POST /api/v1/telegram/register-requests/:id/block` | — | — | — | ✓ | `routes/v1/telegram.js:892` | route-entry authorization |
-| `POST /api/v1/telegram/register-requests/:id/reject` | — | — | — | ✓ | `routes/v1/telegram.js:882` | route-entry authorization |
-| `POST /api/v1/telegram/register-requests/:id/unblock` | — | — | — | ✓ | `routes/v1/telegram.js:902` | route-entry authorization |
-| `POST /api/v1/telegram/registration-invite` | — | ✓ | ✓ | ✓ | `routes/v1/telegram.js:545` | first-party session proof required before route; pre-registration/browser probe path |
-| `POST /api/v1/telegram/validate` | — | ✓ | ✓ | ✓ | `routes/v1/telegram.js:208` | first-party session proof required before route; pre-registration/browser probe path |
+| `POST /api/v1/telegram/google/link/start` | — | ✓ | ✓ | ✓ | `routes/v1/telegram.js:357` | route-entry authorization |
+| `POST /api/v1/telegram/google/unlink` | — | ✓ | ✓ | ✓ | `routes/v1/telegram.js:369` | route-entry authorization |
+| `POST /api/v1/telegram/me` | — | ✓ | ✓ | ✓ | `routes/v1/telegram.js:223` | first-party session proof required before route; pre-registration/browser probe path |
+| `POST /api/v1/telegram/mini-app/reset-state` | — | ✓ | ✓ | ✓ | `routes/v1/telegram.js:516` | route-entry authorization |
+| `POST /api/v1/telegram/mini-app/state` | — | ✓ | ✓ | ✓ | `routes/v1/telegram.js:395` | route-entry authorization |
+| `POST /api/v1/telegram/register-request` | — | ✓ | ✓ | ✓ | `routes/v1/telegram.js:628` | first-party session proof required before route; pre-registration/browser probe path |
+| `POST /api/v1/telegram/register-requests/:id/approve` | — | — | — | ✓ | `routes/v1/telegram.js:812` | route-entry authorization |
+| `POST /api/v1/telegram/register-requests/:id/block` | — | — | — | ✓ | `routes/v1/telegram.js:909` | route-entry authorization |
+| `POST /api/v1/telegram/register-requests/:id/reject` | — | — | — | ✓ | `routes/v1/telegram.js:899` | route-entry authorization |
+| `POST /api/v1/telegram/register-requests/:id/unblock` | — | — | — | ✓ | `routes/v1/telegram.js:919` | route-entry authorization |
+| `POST /api/v1/telegram/registration-invite` | — | ✓ | ✓ | ✓ | `routes/v1/telegram.js:556` | first-party session proof required before route; pre-registration/browser probe path |
+| `POST /api/v1/telegram/validate` | — | ✓ | ✓ | ✓ | `routes/v1/telegram.js:217` | first-party session proof required before route; pre-registration/browser probe path |
 | `POST /api/vision-search/ask` | — | ✓ | ✓ | ✓ | `routes/visionSearch.js:404` | route-entry authorization |
 | `POST /api/vision-search/describe` | — | ✓ | ✓ | ✓ | `routes/visionSearch.js:361` | route-entry authorization |
 | `POST /api/vision-search/embed-all` | — | — | — | ✓ | `routes/visionSearch.js:126` | route-entry authorization |
@@ -480,7 +480,7 @@ Routes: **475** · anonymous: **7** · seller: **74** · warehouse: **199** · a
 | `POST /api/warehouse-test/suite/stop/:jobId` | — | — | — | ✓ | `routes/warehouseTest.js:1151` | admin and ENABLE_TEST_API outside production |
 | `POST /api/warehouse-test/test-upload-image` | — | — | — | ✓ | `routes/warehouseTest.js:1184` | admin and ENABLE_TEST_API outside production |
 | `POST /telegram-webhook/<token-derived-path>` | — | — | — | — | `app.js:73` | Telegram secret-token header + token-derived path; machine-authenticated, no app user role |
-| `PUT /api/admin/openai-key` | — | — | — | ✓ | `routes/admin.js:429` | route-entry authorization |
+| `PUT /api/admin/openai-key` | — | — | — | ✓ | `routes/admin.js:430` | route-entry authorization |
 | `PUT /api/commerce/publications/allegro/mapping` | — | — | — | ✓ | `routes/commerce.js:63` | provider-worker boundary; among these four roles only admin passes (baselinker is outside the table) |
 | `PUT /api/commerce/publications/allegro/sales-settings` | — | — | — | ✓ | `routes/commerce.js:68` | provider-worker boundary; among these four roles only admin passes (baselinker is outside the table) |
 

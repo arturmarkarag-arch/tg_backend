@@ -1,9 +1,10 @@
 'use strict';
 
 // Admin-facing, notification-free Telegram membership audit.
-// This service deliberately does ONE thing: ask Telegram for the current status
-// and persist that technical answer. It never posts/deletes messages and never
-// changes registration state or user access.
+// It asks Telegram for the current status and persists that technical answer.
+// It never posts/deletes messages or mutates registration state. Determinate
+// results additionally refresh the seller access projection; unknown/API errors
+// never revoke a previously confirmed access state.
 
 const GroupMember = require('../models/GroupMember');
 const User = require('../models/User');
@@ -79,7 +80,7 @@ function profileFields(result, fallback = {}) {
 }
 
 /** Persist a check without causing any user-facing side effect. */
-async function persistCheck(groupChatId, telegramId, result, fallback = {}) {
+async function persistCheck(groupChatId, telegramId, result, fallback = {}, options = {}) {
   const gid = String(groupChatId);
   const tid = String(telegramId);
   const now = new Date();
@@ -109,6 +110,26 @@ async function persistCheck(groupChatId, telegramId, result, fallback = {}) {
     },
     { upsert: true, new: true },
   ).lean();
+
+  let sellerGroupAccess = null;
+  // An infrastructure/API uncertainty must not revoke a previously confirmed
+  // seller access state. Only a determinate Telegram result can re-project it.
+  if (result.known && options.syncSellerAccess !== false) {
+    try {
+      const {
+        projectSellerAccessFromPersisted,
+        disconnectSellerSessions,
+      } = require('./sellerTelegramGroupAccess');
+      sellerGroupAccess = await projectSellerAccessFromPersisted(tid, { source: 'membership_audit' });
+      if (sellerGroupAccess && sellerGroupAccess.state !== 'allowed') {
+        await disconnectSellerSessions(tid, {
+          reason: sellerGroupAccess.state === 'denied'
+            ? 'telegram_group_membership_required'
+            : 'telegram_group_membership_recheck_required',
+        });
+      }
+    } catch (_) {}
+  }
 
   return { ...result, statusCheckedAt: now };
 }
@@ -169,6 +190,8 @@ async function auditGroup(groupChatId) {
     unknown: 0,
   };
 
+  const sellerIdsWithKnownResult = [];
+
   for (let i = 0; i < ids.length; i += 1) {
     const tid = ids[i];
     const member = memberByTid.get(tid) || {};
@@ -181,7 +204,8 @@ async function auditGroup(groupChatId) {
     };
 
     const result = await checkOneGroup(bot, gid, tid);
-    await persistCheck(gid, tid, result, fallback);
+    await persistCheck(gid, tid, result, fallback, { syncSellerAccess: false });
+    if (result.known && sellerByTid.has(tid)) sellerIdsWithKnownResult.push(tid);
     stats.checked += 1;
 
     const isRegistered = registeredIds.has(tid);
@@ -192,6 +216,26 @@ async function auditGroup(groupChatId) {
     else stats.ok += 1;
 
     if (i < ids.length - 1) await sleep(CALL_SPACING_MS);
+  }
+
+  // Re-project seller access once per bulk audit, not once per Telegram call.
+  // This keeps a 100-person audit from doing 100 extra allowed-group reads.
+  if (sellerIdsWithKnownResult.length) {
+    try {
+      const {
+        projectSellerAccessBulkFromPersisted,
+        disconnectSellerSessions,
+      } = require('./sellerTelegramGroupAccess');
+      const decisions = await projectSellerAccessBulkFromPersisted(sellerIdsWithKnownResult, {
+        source: 'membership_audit_bulk',
+      });
+      const blocked = [...decisions.entries()]
+        .filter(([, decision]) => decision.state !== 'allowed')
+        .map(([tid]) => tid);
+      if (blocked.length) {
+        await disconnectSellerSessions(blocked, { reason: 'telegram_group_membership_recheck_required' });
+      }
+    } catch (_) {}
   }
 
   return { ok: true, groupId: gid, ...stats, checkedAt: new Date() };

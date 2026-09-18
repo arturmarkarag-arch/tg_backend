@@ -29,7 +29,7 @@ async function trackMemberFromMessage(groupChatId, from) {
   const telegramId = String(from.id);
   const now = new Date();
 
-  await GroupMember.findOneAndUpdate(
+  const before = await GroupMember.findOneAndUpdate(
     { groupChatId: String(groupChatId), telegramId },
     {
       $set: {
@@ -48,7 +48,21 @@ async function trackMemberFromMessage(groupChatId, from) {
       $setOnInsert: { joinedAt: null },
     },
     { upsert: true, new: false },
-  ).catch((e) => {});
+  ).catch(() => null);
+
+  // A group message is positive membership proof and also repairs the rare case
+  // where Telegram's chat_member transition was missed. Re-project only on a
+  // presence transition, not on every ordinary group message.
+  const wasPresent = before && (
+    PRESENT_STATUSES.includes(String(before.telegramStatus || ''))
+    || (!before.telegramStatus && before.left === false)
+  );
+  if (!from.is_bot && !wasPresent) {
+    try {
+      const { projectSellerAccessFromPersisted } = require('./sellerTelegramGroupAccess');
+      await projectSellerAccessFromPersisted(telegramId, { source: 'group_message_presence' });
+    } catch (_) {}
+  }
 }
 
 /** Handle a chat_member update (join / leave / kick). */
@@ -64,6 +78,7 @@ async function handleChatMemberUpdate(update) {
   const isActive = PRESENT_STATUSES.includes(status);
   const now = new Date();
 
+  let membershipPersisted = true;
   const before = await GroupMember.findOneAndUpdate(
     { groupChatId, telegramId },
     {
@@ -83,9 +98,33 @@ async function handleChatMemberUpdate(update) {
       $setOnInsert: { joinedAt: isActive ? now : null },
     },
     { upsert: true, new: false },
-  ).catch((e) => {
+  ).catch(() => {
+    membershipPersisted = false;
     return null;
   });
+
+  // chat_member is our realtime authority. Project the new persisted state onto
+  // an existing seller User immediately; no Telegram call is needed here.
+  if (membershipPersisted && !from.is_bot) {
+    try {
+      const {
+        projectSellerAccessFromPersisted,
+        disconnectSellerSessions,
+      } = require('./sellerTelegramGroupAccess');
+      const decision = await projectSellerAccessFromPersisted(telegramId, { source: 'chat_member' });
+      if (decision && decision.state !== 'allowed') {
+        await disconnectSellerSessions(telegramId, {
+          reason: decision.state === 'denied'
+            ? 'telegram_group_membership_required'
+            : 'telegram_group_membership_recheck_required',
+        });
+      }
+    } catch (_) {
+      // GroupMember remains durable authority. HTTP/socket auth will resolve an
+      // unverified legacy projection on the next access attempt if this best-
+      // effort projection side effect was unavailable.
+    }
+  }
 
   if (!isActive || from.is_bot) return null;
   const isNew = !before || before.left;

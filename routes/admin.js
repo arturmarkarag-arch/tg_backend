@@ -14,6 +14,7 @@ const {
   getAllowedGroupIds,
   setAllowedGroupIds,
 } = require('../utils/telegramGroupSettings');
+const { reconcileSellerAccessAfterGroupConfigChange } = require('../services/sellerTelegramGroupAccess');
 const {
   getTelegramMemberTagGroupIds,
   setTelegramMemberTagGroupIds,
@@ -459,6 +460,15 @@ router.post('/telegram-groups', telegramAuth, requireTelegramRole('admin'), asyn
       return res.status(409).json({ error: 'Ця група вже додана' });
     }
     const updated = await setAllowedGroupIds([...current, groupId]);
+    try {
+      await reconcileSellerAccessAfterGroupConfigChange(updated);
+    } catch (error) {
+      // Group configuration and seller authorization are one logical contract.
+      // If we cannot invalidate/reconcile seller projections, restore the old
+      // allow-list instead of leaving stale `allowed` decisions behind.
+      await setAllowedGroupIds(current).catch(() => {});
+      throw error;
+    }
     res.json({ groups: updated });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -470,6 +480,12 @@ router.delete('/telegram-groups/:groupId', telegramAuth, requireTelegramRole('ad
     const groupId = String(req.params.groupId).trim();
     const current = await getAllowedGroupIds();
     const updated = await setAllowedGroupIds(current.filter((id) => id !== groupId));
+    try {
+      await reconcileSellerAccessAfterGroupConfigChange(updated);
+    } catch (error) {
+      await setAllowedGroupIds(current).catch(() => {});
+      throw error;
+    }
     res.json({ groups: updated });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -772,8 +788,9 @@ router.delete('/telegram-groups/:groupId/members/:telegramId', telegramAuth, req
 }));
 
 // Live-check one person. IMPORTANT: this is a notification-free admin audit.
-// It only reads getChatMember and updates technical status fields in GroupMember.
-// No welcome / registration / push message is sent or deleted.
+// It reads getChatMember, updates GroupMember and refreshes the seller access
+// projection only when Telegram returned a determinate answer. No welcome /
+// registration / push message is sent or deleted.
 router.post('/telegram-groups/:groupId/members/:telegramId/recheck', telegramAuth, requireTelegramRole('admin'), asyncHandler(async (req, res) => {
   const { checkAndPersistGroupMember } = require('../services/groupMemberAudit');
   const groupId = String(req.params.groupId).trim();
@@ -789,7 +806,8 @@ router.post('/telegram-groups/:groupId/members/:telegramId/recheck', telegramAut
 // Bulk live-check for the selected group. Includes everyone the bot has ever
 // observed in that group + all registered sellers, which surfaces the reverse
 // discrepancy "є в додатку, але немає в Telegram-групі". Sequential by design
-// to stay below Telegram rate limits. Never sends notifications.
+// to stay below Telegram rate limits. Never sends notifications; determinate
+// results are projected to seller authorization after the batch completes.
 router.post('/telegram-groups/:groupId/check-all', telegramAuth, requireTelegramRole('admin'), asyncHandler(async (req, res) => {
   const { auditGroup } = require('../services/groupMemberAudit');
   const groupId = String(req.params.groupId).trim();

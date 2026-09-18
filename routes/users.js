@@ -31,6 +31,16 @@ async function sanitizeUserPayload(payload, existing = null) {
   const role = payload.role ?? existing?.role ?? 'seller';
   const data = { role };
 
+  // A role transition changes the authorization contract. Never let an old
+  // seller Telegram-group decision survive warehouse/admin -> seller (or vice
+  // versa). The next seller auth resolves the current work-group membership.
+  if (existing && payload.role !== undefined && role !== existing.role) {
+    data.telegramGroupAccessState = 'unverified';
+    data.telegramGroupAccessCheckedAt = new Date();
+    data.telegramGroupAccessGroupId = '';
+    data.telegramGroupAccessSource = 'role_changed';
+  }
+
   // Only write fields that were explicitly provided — undefined means "not in payload, leave as-is"
   if (payload.firstName  !== undefined) data.firstName  = payload.firstName;
   if (payload.lastName   !== undefined) data.lastName   = payload.lastName;

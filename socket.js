@@ -11,6 +11,7 @@ const { pubClient, subClient, isEnabled: redisEnabled } = require('./utils/redis
 const { hasBaseLinkerPickingAccess } = require('./utils/baseLinkerAccess');
 const { hasMarketplaceWarehouseAccess } = require('./utils/marketplaceWarehouseAccess');
 const { expressCorsOptions } = require('./utils/corsOptions');
+const { resolveSellerTelegramGroupAccess } = require('./services/sellerTelegramGroupAccess');
 const { createAdapter } = require('@socket.io/redis-adapter');
 
 let io = null;
@@ -127,6 +128,24 @@ function initSocket(httpServer) {
     if (browserSession && !isSessionNotRevoked(browserSession, dbUser)) {
       return next(new Error('Unauthorized: Session revoked'));
     }
+
+    const sellerAccess = await resolveSellerTelegramGroupAccess(dbUser, { source: 'socket_auth' });
+    if (!sellerAccess.allowed) {
+      const denied = new Error(
+        sellerAccess.reason === 'not_in_group'
+          ? 'Forbidden: Telegram group membership required'
+          : 'Unavailable: Telegram group membership could not be verified',
+      );
+      denied.data = {
+        code: sellerAccess.reason === 'not_in_group'
+          ? 'auth_telegram_group_required'
+          : sellerAccess.reason === 'group_not_configured'
+            ? 'auth_telegram_group_not_configured'
+            : 'auth_telegram_group_check_failed',
+      };
+      return next(denied);
+    }
+
     if (!['admin', 'warehouse', 'seller', 'baselinker'].includes(dbUser.role)) {
       return next(new Error('Forbidden: Insufficient role'));
     }

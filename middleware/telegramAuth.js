@@ -5,6 +5,7 @@ const { appError } = require('../utils/errors');
 const { consumeRejectedFirstPartySession } = require('./apiAbuseGuard');
 const { isRemovedUser } = require('../utils/userAccountState');
 const { readTelegramClientId, readTelegramSessionSlot } = require('../utils/telegramRequestIdentity');
+const { resolveSellerTelegramGroupAccess } = require('../services/sellerTelegramGroupAccess');
 
 
 async function rejectProofedRequest(req, res, next, error, proof) {
@@ -75,7 +76,7 @@ async function telegramAuth(req, res, next) {
   }
 
   const user = await User.findOne({ telegramId })
-    .select('_id telegramId role firstName lastName phoneNumber shopNumber shopId accountState botBlocked sessionVersion createdAt updatedAt')
+    .select('_id telegramId role firstName lastName phoneNumber shopNumber shopId accountState botBlocked sessionVersion telegramGroupAccessState telegramGroupAccessCheckedAt telegramGroupAccessGroupId telegramGroupAccessSource createdAt updatedAt')
     .lean();
   if (!user || isRemovedUser(user)) {
     return rejectProofedRequest(req, res, next, appError('not_registered'), sessionProof);
@@ -85,6 +86,27 @@ async function telegramAuth(req, res, next) {
   }
   if (browserSession && !isSessionNotRevoked(browserSession, user)) {
     return rejectProofedRequest(req, res, next, appError('auth_required'), sessionProof);
+  }
+
+  const sellerAccess = await resolveSellerTelegramGroupAccess(user, { source: 'http_auth' });
+  if (!sellerAccess.allowed) {
+    if (sellerAccess.reason === 'not_in_group') {
+      return rejectProofedRequest(
+        req,
+        res,
+        next,
+        appError('auth_telegram_group_required'),
+        sessionProof,
+      );
+    }
+    if (sellerAccess.reason === 'group_not_configured') {
+      return next(appError('auth_telegram_group_not_configured'));
+    }
+    return next(appError('auth_telegram_group_check_failed'));
+  }
+  if (user.role === 'seller' && sellerAccess.state === 'allowed') {
+    user.telegramGroupAccessState = 'allowed';
+    user.telegramGroupAccessGroupId = sellerAccess.groupId || '';
   }
 
   req.telegramUser = user;

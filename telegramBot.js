@@ -15,6 +15,7 @@ const { getAllowedGroupIds } = require('./utils/telegramGroupSettings');
 const { checkMembershipAcrossGroups } = require('./services/registrationMembershipGate');
 const { getTelegramMemberTagGroupIds } = require('./utils/telegramMemberTagGroupSettings');
 const { emitUserAndStaff } = require('./utils/socketScope');
+const { resolveSellerTelegramGroupAccess } = require('./services/sellerTelegramGroupAccess');
 const {
   issueRegistrationToken,
   peekRegistrationToken,
@@ -743,6 +744,24 @@ async function initBot(token) {
           await bot.sendMessage(chatId, `Ціну ${match[1]} збережено.`, {
             reply_to_message_id: msg.message_id,
           });
+          return;
+        }
+      }
+
+      // Seller membership is an application authorization rule, not just
+      // a registration hint. Private bot commands must obey the same projection
+      // as HTTP/Socket access; group messages themselves are handled above.
+      if (!isGroupChat && user?.role === 'seller') {
+        const sellerAccess = await resolveSellerTelegramGroupAccess(user, { source: 'bot_private' });
+        if (!sellerAccess.allowed) {
+          await sendRegistrationCheckProblemMessage(
+            chatId,
+            sellerAccess.reason === 'not_in_group'
+              ? 'not_in_group'
+              : sellerAccess.reason === 'group_not_configured'
+                ? 'group_not_configured'
+                : 'check_failed',
+          );
           return;
         }
       }

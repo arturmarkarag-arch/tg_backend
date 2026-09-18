@@ -22,10 +22,10 @@ const {
 } = require('../../utils/sessionCookie');
 const { bootstrapTelegramSession } = require('../../services/telegramSession');
 const { createAuthRateLimit } = require('../../middleware/authRateLimit');
-const { getBot } = require('../../telegramBot');
 const { buildUserProfile } = require('./telegram');
 const { isRemovedUser } = require('../../utils/userAccountState');
 const { normalizeTelegramSessionSlot } = require('../../utils/telegramRequestIdentity');
+const { resolveSellerTelegramGroupAccess } = require('../../services/sellerTelegramGroupAccess');
 
 const router = express.Router();
 function positiveEnvInt(name, fallback) {
@@ -63,6 +63,14 @@ async function throwRegistrationState(telegramId, mongoSession = null) {
 }
 
 
+async function requireSellerTelegramGroupAccess(user, source) {
+  const decision = await resolveSellerTelegramGroupAccess(user, { source });
+  if (decision.allowed) return decision;
+  if (decision.reason === 'not_in_group') throw appError('auth_telegram_group_required');
+  if (decision.reason === 'group_not_configured') throw appError('auth_telegram_group_not_configured');
+  throw appError('auth_telegram_group_check_failed');
+}
+
 function requireBrowserMutationHeader(req) {
   // Cookie auth is protected by SameSite (Strict in production) + CORS and this non-simple custom
   // header. Cross-site forms cannot manufacture it; cross-site JS must pass the
@@ -70,17 +78,6 @@ function requireBrowserMutationHeader(req) {
   if (readSessionCookie(req) && req.get('x-csrf-protection') !== '1') {
     throw appError('auth_csrf_required');
   }
-}
-
-let cachedBotUsername = null;
-async function resolveBotUsername() {
-  if (cachedBotUsername) return cachedBotUsername;
-  const bot = getBot();
-  if (bot) {
-    try { const me = await bot.getMe(); cachedBotUsername = me?.username || null; }
-    catch { /* bot not ready — caller will retry */ }
-  }
-  return cachedBotUsername;
 }
 
 // Telegram Mini App bootstrap. Raw initData is accepted ONLY here. The first
@@ -123,12 +120,11 @@ router.post('/telegram/bootstrap', generalAuthLimit, asyncHandler(async (req, re
   });
 }));
 
-router.get('/config', asyncHandler(async (req, res) => {
+router.get('/config', (req, res) => {
   res.json({
-    botUsername: await resolveBotUsername(),
     googleClientId: process.env.GOOGLE_AUTH_CLIENT_ID || '',
   });
-}));
+});
 
 // Browser Google Sign-In. A successful login creates an HttpOnly session cookie;
 // no bearer token is exposed to JavaScript or persisted in localStorage.
@@ -143,6 +139,7 @@ router.post('/google', generalAuthLimit, asyncHandler(async (req, res) => {
   if (!user) throw appError('google_email_not_linked', { email: result.email });
   if (isRemovedUser(user)) await throwRegistrationState(user.telegramId);
   if (user.botBlocked) throw appError('registration_blocked');
+  await requireSellerTelegramGroupAccess(user, 'google_login');
 
   const signedSession = signSession(user.telegramId, user.sessionVersion);
   setSessionCookie(res, signedSession);
@@ -233,6 +230,7 @@ router.post('/google/link/complete', linkAuthLimit, asyncHandler(async (req, res
   }
 
   clearGoogleLinkCookie(res);
+  await requireSellerTelegramGroupAccess(fresh, 'google_link_complete');
   const signedSession = signSession(fresh.telegramId, fresh.sessionVersion);
   setSessionCookie(res, signedSession);
   res.json({ profile: await buildUserProfile(fresh) });
@@ -247,6 +245,7 @@ router.get('/me', generalAuthLimit, asyncHandler(async (req, res) => {
   if (!user || isRemovedUser(user)) await throwRegistrationState(session.telegramId);
   if (user.botBlocked) throw appError('registration_blocked');
   if (!isSessionNotRevoked(session, user)) throw appError('auth_required');
+  await requireSellerTelegramGroupAccess(user, 'browser_me');
 
   res.json(await buildUserProfile(user));
 }));
