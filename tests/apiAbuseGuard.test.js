@@ -4,7 +4,7 @@ process.env.JWT_SECRET = process.env.JWT_SECRET || 'api-abuse-guard-test-secret'
 
 const fs = require('fs');
 const path = require('path');
-const { createApiAbuseGuard } = require('../middleware/apiAbuseGuard');
+const { createApiAbuseGuard, consumeRejectedFirstPartySession, defaultPolicies } = require('../middleware/apiAbuseGuard');
 const { resetLocalRateLimitStateForTests } = require('../middleware/rateLimitCore');
 const { signSession } = require('../utils/jwt');
 const { SESSION_COOKIE_NAME } = require('../utils/sessionCookie');
@@ -52,6 +52,18 @@ const testPolicies = {
     { name: 'burst', max: 3, windowMs: 60_000 },
     { name: 'sustained', max: 10, windowMs: 60_000 },
   ],
+  proofedPreAuth: [
+    { name: 'burst', max: 100, windowMs: 60_000 },
+    { name: 'sustained', max: 100, windowMs: 60_000 },
+  ],
+  rejectedProof: [
+    { name: 'burst', max: 2, windowMs: 60_000 },
+    { name: 'sustained', max: 10, windowMs: 60_000 },
+  ],
+  rejectedProofIp: [
+    { name: 'burst', max: 4, windowMs: 60_000 },
+    { name: 'sustained', max: 10, windowMs: 60_000 },
+  ],
   ingressAnonymous: [
     { name: 'burst', max: 100, windowMs: 60_000 },
     { name: 'sustained', max: 100, windowMs: 60_000 },
@@ -90,7 +102,7 @@ describe('API anonymous abuse guard', () => {
     expect((await run(guard, request({ path: '/api/public' }))).err?.code).toBe('api_rate_limited');
   });
 
-  it('does not rate-limit a cryptographically valid first-party browser session', async () => {
+  it('gives a valid first-party proof a generous but finite pre-auth safety ceiling', async () => {
     const guard = makeGuard();
     const token = signSession('123456789', 0);
     const cookie = `${SESSION_COOKIE_NAME}=${encodeURIComponent(token)}`;
@@ -99,6 +111,42 @@ describe('API anonymous abuse guard', () => {
       const result = await run(guard, request({ headers: { cookie } }));
       expect(result.err).toBe(null);
     }
+
+    const tight = createApiAbuseGuard({
+      isAnonymousEntryPath: () => false,
+      policies: {
+        ...testPolicies,
+        proofedPreAuth: [
+          { name: 'burst', max: 2, windowMs: 60_000 },
+          { name: 'sustained', max: 10, windowMs: 60_000 },
+        ],
+      },
+    });
+    resetLocalRateLimitStateForTests();
+    expect((await run(tight, request({ headers: { cookie } }))).err).toBe(null);
+    expect((await run(tight, request({ headers: { cookie } }))).err).toBe(null);
+    expect((await run(tight, request({ headers: { cookie } }))).err?.code).toBe('api_rate_limited');
+  });
+
+  it('rate-limits a cryptographically valid proof after authoritative auth rejects it', async () => {
+    const token = signSession('not-registered', 0);
+    const cookie = `${SESSION_COOKIE_NAME}=${encodeURIComponent(token)}`;
+    const req = request({ headers: { cookie } });
+    const proof = { kind: 'browser', session: { telegramId: 'not-registered', sessionVersion: 0 } };
+
+    expect((await consumeRejectedFirstPartySession(req, proof, testPolicies)).limited).toBe(false);
+    expect((await consumeRejectedFirstPartySession(req, proof, testPolicies)).limited).toBe(false);
+    const blocked = await consumeRejectedFirstPartySession(req, proof, testPolicies);
+    expect(blocked.limited).toBe(true);
+    expect(blocked.retryAfterMs).toBeGreaterThan(0);
+  });
+
+  it('ships much tighter defaults for anonymous protected paths than auth-entry paths', () => {
+    const policies = defaultPolicies();
+    expect(policies.protectedAnonymous[0]).toMatchObject({ max: 6, windowMs: 10_000 });
+    expect(policies.protectedAnonymous[1]).toMatchObject({ max: 24, windowMs: 5 * 60_000 });
+    expect(policies.entryAnonymous[0].max).toBeGreaterThan(policies.protectedAnonymous[0].max);
+    expect(policies.rejectedProof[0]).toMatchObject({ max: 4, windowMs: 10_000 });
   });
 
   it('treats a forged/invalid session cookie as anonymous', async () => {
@@ -139,5 +187,11 @@ describe('API anonymous abuse guard', () => {
 
     expect(jsonIndex).toBeGreaterThan(guardIndex);
     expect(authIndex).toBeGreaterThan(jsonIndex);
+
+    const authSource = fs.readFileSync(path.join(__dirname, '..', 'middleware', 'telegramAuth.js'), 'utf8');
+    expect(authSource).toContain('consumeRejectedFirstPartySession');
+    expect(authSource).toContain("appError('not_registered'), sessionProof");
+    expect(authSource).toContain("appError('registration_blocked'), sessionProof");
+    expect(authSource).toContain("appError('auth_required'), sessionProof");
   });
 });
