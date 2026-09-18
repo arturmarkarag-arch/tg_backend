@@ -1,14 +1,19 @@
 'use strict';
 
-const crypto = require('crypto');
 const { consumeRateLimit } = require('./rateLimitCore');
 const { getClientNetworkIdentity } = require('../utils/clientNetworkIdentity');
 const { readContextSessionProof } = require('./sessionProof');
+const { isAnonymousEntryApiPath, hasValidPrintAgentToken } = require('./accessBoundary');
 const { appError } = require('../utils/errors');
 
 function positiveEnvInt(name, fallback) {
   const value = Number(process.env[name]);
   return Number.isSafeInteger(value) && value > 0 ? value : fallback;
+}
+
+function positiveEnvIntCompat(primary, legacy, fallback) {
+  if (process.env[primary] !== undefined) return positiveEnvInt(primary, fallback);
+  return positiveEnvInt(legacy, fallback);
 }
 
 function defaultPolicies() {
@@ -20,9 +25,9 @@ function defaultPolicies() {
       { name: 'burst', max: positiveEnvInt('API_ANON_PROTECTED_BURST_MAX', 50), windowMs: positiveEnvInt('API_ANON_PROTECTED_BURST_WINDOW_MS', 10_000) },
       { name: 'sustained', max: positiveEnvInt('API_ANON_PROTECTED_SUSTAINED_MAX', 150), windowMs: positiveEnvInt('API_ANON_PROTECTED_SUSTAINED_WINDOW_MS', 5 * 60_000) },
     ],
-    publicAnonymous: [
-      { name: 'burst', max: positiveEnvInt('API_ANON_PUBLIC_BURST_MAX', 80), windowMs: positiveEnvInt('API_ANON_PUBLIC_BURST_WINDOW_MS', 10_000) },
-      { name: 'sustained', max: positiveEnvInt('API_ANON_PUBLIC_SUSTAINED_MAX', 400), windowMs: positiveEnvInt('API_ANON_PUBLIC_SUSTAINED_WINDOW_MS', 5 * 60_000) },
+    entryAnonymous: [
+      { name: 'burst', max: positiveEnvIntCompat('API_ANON_ENTRY_BURST_MAX', 'API_ANON_PUBLIC_BURST_MAX', 80), windowMs: positiveEnvIntCompat('API_ANON_ENTRY_BURST_WINDOW_MS', 'API_ANON_PUBLIC_BURST_WINDOW_MS', 10_000) },
+      { name: 'sustained', max: positiveEnvIntCompat('API_ANON_ENTRY_SUSTAINED_MAX', 'API_ANON_PUBLIC_SUSTAINED_MAX', 400), windowMs: positiveEnvIntCompat('API_ANON_ENTRY_SUSTAINED_WINDOW_MS', 'API_ANON_PUBLIC_SUSTAINED_WINDOW_MS', 5 * 60_000) },
     ],
     // This is a broad secondary ceiling for anonymous requests whose reported
     // client IP differs from the ingress-facing hop. It makes casual XFF rotation
@@ -34,28 +39,13 @@ function defaultPolicies() {
   };
 }
 
-function safeEqual(left, right) {
-  const a = Buffer.from(String(left || ''));
-  const b = Buffer.from(String(right || ''));
-  if (!a.length || a.length !== b.length) return false;
-  return crypto.timingSafeEqual(a, b);
-}
-
 /**
- * Cheap, local proof only. This intentionally does NOT query MongoDB and does
- * not decide authorization/role/account state. Its only purpose is to keep the
- * anonymous flood budget away from normal first-party sessions before the real
- * telegramAuth middleware performs authoritative DB checks.
+ * Cheap local proof only. This intentionally does NOT query MongoDB and does
+ * not decide authorization/role/account state. It only keeps authenticated
+ * first-party sessions out of the anonymous flood budget.
  */
 function hasValidFirstPartySession(req) {
   return Boolean(readContextSessionProof(req)?.session);
-}
-
-function hasValidPrintAgentToken(req) {
-  if (!/^\/api\/print-agent(?:\/|$)/.test(String(req?.path || ''))) return false;
-  const expected = String(process.env.BASELINKER_PRINT_AGENT_TOKEN || '').trim();
-  const actual = String(req?.get?.('x-print-agent-token') || '').trim();
-  return Boolean(expected && safeEqual(actual, expected));
 }
 
 function setRetryAfter(res, retryAfterMs) {
@@ -64,8 +54,8 @@ function setRetryAfter(res, retryAfterMs) {
   return seconds;
 }
 
-function createApiAbuseGuard({ isPublicApiPath, policies = defaultPolicies() } = {}) {
-  if (typeof isPublicApiPath !== 'function') throw new Error('isPublicApiPath is required');
+function createApiAbuseGuard({ isAnonymousEntryPath = isAnonymousEntryApiPath, policies = defaultPolicies() } = {}) {
+  if (typeof isAnonymousEntryPath !== 'function') throw new Error('isAnonymousEntryPath must be a function');
 
   return async function apiAbuseGuard(req, res, next) {
     try {
@@ -80,9 +70,9 @@ function createApiAbuseGuard({ isPublicApiPath, policies = defaultPolicies() } =
       if (hasValidFirstPartySession(req) || hasValidPrintAgentToken(req)) return next();
 
       const network = getClientNetworkIdentity(req);
-      const publicPath = isPublicApiPath(pathname);
-      const primaryPolicy = publicPath ? policies.publicAnonymous : policies.protectedAnonymous;
-      const primaryScope = publicPath ? 'anonymous-public' : 'anonymous-protected';
+      const entryPath = isAnonymousEntryPath(pathname);
+      const primaryPolicy = entryPath ? policies.entryAnonymous : policies.protectedAnonymous;
+      const primaryScope = entryPath ? 'anonymous-entry' : 'anonymous-protected';
 
       const primary = await consumeRateLimit({
         namespace: `api-abuse:${primaryScope}`,

@@ -560,6 +560,7 @@ const ERRORS = {
   baselinker_picking_not_ready_after_upstream_change: { status: 409, message: 'Після оновлення BaseLinker замовлення більше не готове до відправлення. Поверніть його в роботу та перевірте змінені позиції.' },
   baselinker_picking_not_packed: { status: 409, message: 'Спочатку підтвердьте, що замовлення запаковано.' },
   baselinker_print_agent_not_configured: { status: 503, message: 'Віддалений друк не налаштовано. Додайте BASELINKER_PRINT_AGENT_TOKEN на backend і підключіть Print Agent.' },
+  print_agent_unauthorized: { status: 401, message: 'Невірний Print Agent token.' },
   baselinker_print_agent_offline: { status: 503, message: 'Print Agent зараз не в мережі. Перевірте ПК складу та програму друку.' },
   baselinker_print_agent_id_invalid: { status: 400, message: 'Некоректний Print Agent ID.' },
   baselinker_print_printer_invalid: { status: 400, message: 'Print Agent не передав коректну назву принтера.' },

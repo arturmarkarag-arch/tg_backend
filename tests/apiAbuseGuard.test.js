@@ -48,7 +48,7 @@ const testPolicies = {
     { name: 'burst', max: 2, windowMs: 60_000 },
     { name: 'sustained', max: 10, windowMs: 60_000 },
   ],
-  publicAnonymous: [
+  entryAnonymous: [
     { name: 'burst', max: 3, windowMs: 60_000 },
     { name: 'sustained', max: 10, windowMs: 60_000 },
   ],
@@ -60,7 +60,7 @@ const testPolicies = {
 
 function makeGuard() {
   return createApiAbuseGuard({
-    isPublicApiPath: (pathname) => pathname === '/api/public' || pathname.startsWith('/api/print-agent'),
+    isAnonymousEntryPath: (pathname) => pathname === '/api/public',
     policies: testPolicies,
   });
 }
@@ -82,7 +82,7 @@ describe('API anonymous abuse guard', () => {
     expect(Number(blocked.res.headers['retry-after'])).toBeGreaterThan(0);
   });
 
-  it('gives public bootstrap endpoints a separate, larger anonymous budget', async () => {
+  it('gives explicit auth/check entry endpoints a separate, larger anonymous budget', async () => {
     const guard = makeGuard();
     for (let i = 0; i < 3; i += 1) {
       expect((await run(guard, request({ path: '/api/public' }))).err).toBe(null);
@@ -133,7 +133,7 @@ describe('API anonymous abuse guard', () => {
 
   it('is mounted before JSON parsing and before the authoritative API auth gate', () => {
     const appSource = fs.readFileSync(path.join(__dirname, '..', 'app.js'), 'utf8');
-    const guardIndex = indexOrThrow(appSource, 'app.use(createApiAbuseGuard({ isPublicApiPath }))', { label: 'abuse guard mount' });
+    const guardIndex = indexOrThrow(appSource, 'app.use(createApiAbuseGuard({ isAnonymousEntryPath: isAnonymousEntryApiPath }))', { label: 'abuse guard mount' });
     const jsonIndex = indexOrThrow(appSource, 'app.use(express.json())', { label: 'JSON parser mount' });
     const authIndex = indexOrThrow(appSource, 'app.use(requireAuthForApi)', { label: 'API auth gate mount' });
 

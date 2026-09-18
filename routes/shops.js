@@ -7,6 +7,7 @@ const DeliveryGroup = require('../models/DeliveryGroup');
 const User = require('../models/User');
 const Order = require('../models/Order');
 const { telegramAuth, requireTelegramRole, requireTelegramRoles } = require('../middleware/telegramAuth');
+const { telegramIdentity } = require('../middleware/telegramIdentity');
 const cache = require('../utils/cache');
 const { invalidateShop } = require('../utils/modelCache');
 const { migrateSellerShop } = require('../services/migrateSellerShop');
@@ -25,16 +26,16 @@ const {
 
 const router = express.Router();
 
-// Public / non-staff projection of a shop — ONLY the fields registration and a
+// Minimal / non-staff projection of a shop — ONLY the fields registration and a
 // shop-picker need. Carries NO seller personal data (name/phone/telegramId/cart/
-// history). Used by the public /registry endpoint and the non-staff branch of GET /.
+// history). Registration access still requires a first-party Telegram proof.
 const toMinimalShop = toReferenceShop;
 
 // ─── GET /api/shops ──────────────────────────────────────────────────────────
 // Список магазинів. За замовчуванням тільки активні. Requires auth (mounted
 // behind the global telegramAuth gate). Seller PII is returned ONLY to staff
 // (admin/warehouse); every other authenticated role gets the minimal projection.
-// Public registration uses GET /api/shops/registry instead.
+// Pre-registration uses GET /api/shops/registry with Telegram proof.
 // Query: ?cityId=xxx  ?deliveryGroupId=xxx  ?includeInactive=true
 router.get('/', asyncHandler(async (req, res) => {
     const filter = {};
@@ -216,8 +217,9 @@ async function computeLastExSellersByShopName(shops) {
 }
 
 // ─── GET /api/shops/cities ────────────────────────────────────────────────────
-// Публічний список міст (для реєстрації та seller)
-router.get('/cities', asyncHandler(async (req, res) => {
+// Pre-registration list of cities. A signed first-party Telegram proof is
+// required even though the caller does not have a User row yet.
+router.get('/cities', telegramIdentity, asyncHandler(async (req, res) => {
   let cities = await cache.get(cache.KEYS.CITIES);
   if (!cities) {
     cities = await City.find().sort({ name: 1 }).lean();
@@ -227,11 +229,11 @@ router.get('/cities', asyncHandler(async (req, res) => {
 }));
 
 // ─── GET /api/shops/registry ──────────────────────────────────────────────────
-// PUBLIC minimal shop list for the registration screen. A not-yet-registered
-// Telegram user cannot pass telegramAuth (no User record), so registration must
-// stay public — but it gets NO seller data, only id/name/address/city/group.
+// Minimal shop list for the registration screen. A not-yet-registered Telegram
+// user cannot pass full telegramAuth (no User row), so this route uses the
+// first-party Telegram proof instead. It exposes NO seller data.
 // Active shops only, optionally filtered by ?cityId=.
-router.get('/registry', asyncHandler(async (req, res) => {
+router.get('/registry', telegramIdentity, asyncHandler(async (req, res) => {
   const filter = { isActive: true };
   if (req.query.cityId) filter.cityId = req.query.cityId;
   const shops = await Shop.find(filter).select(REFERENCE_SHOP_FIELDS).populate('cityId', 'name').sort({ name: 1, _id: 1 }).lean();
@@ -269,7 +271,7 @@ router.get('/without-seller', telegramAuth, requireTelegramRoles(['admin', 'ware
 }));
 
 // Authenticated reference data for staff dropdowns. No seller joins, history
-// lookup or Order aggregation. /registry remains the public registration route.
+// lookup or Order aggregation. /registry remains the Telegram-proof registration route.
 router.get('/reference', telegramAuth, requireTelegramRoles(['admin', 'warehouse']), asyncHandler(async (req, res) => {
   const filter = req.query.includeInactive === 'true' ? {} : { isActive: true };
   if (req.query.cityId) filter.cityId = req.query.cityId;

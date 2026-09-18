@@ -56,20 +56,37 @@ function loadRouterMounts() {
 
 const ROUTER_MOUNTS = loadRouterMounts();
 
-function loadPublicPatterns() {
-  const app = fs.readFileSync(path.join(ROOT, 'app.js'), 'utf8');
-  const match = app.match(/const publicApiPaths = (\[[\s\S]*?\n\]);/);
-  if (!match) throw new Error('Cannot locate publicApiPaths in app.js');
+function loadAccessPatterns(constName) {
+  const source = fs.readFileSync(path.join(ROOT, 'middleware', 'accessBoundary.js'), 'utf8');
+  const re = new RegExp(String.raw`const\s+${constName}\s*=\s*Object\.freeze\((\[[\s\S]*?\])\);`);
+  const match = source.match(re);
+  if (!match) throw new Error(`Cannot locate ${constName} in middleware/accessBoundary.js`);
   const patterns = vm.runInNewContext(match[1], Object.create(null), { timeout: 100 });
   if (!Array.isArray(patterns) || patterns.some((item) => Object.prototype.toString.call(item) !== '[object RegExp]')) {
-    throw new Error('publicApiPaths must remain an array of RegExp values');
+    throw new Error(`${constName} must remain an array of RegExp values`);
   }
   return patterns;
 }
 
-const PUBLIC_PATTERNS = loadPublicPatterns();
-function isPublicUrl(url) {
-  return PUBLIC_PATTERNS.some((pattern) => pattern.test(url));
+const ANONYMOUS_PATTERNS = loadAccessPatterns('ANONYMOUS_ENTRY_API_PATHS');
+const TELEGRAM_PROOF_PATTERNS = loadAccessPatterns('TELEGRAM_PROOF_API_PATHS');
+const BROWSER_PROOF_PATTERNS = loadAccessPatterns('BROWSER_PROOF_API_PATHS');
+const SERVICE_PATTERNS = loadAccessPatterns('SERVICE_TOKEN_API_PATHS');
+
+function matchesAccess(patterns, url) {
+  return patterns.some((pattern) => pattern.test(url));
+}
+
+function isAnonymousUrl(url) {
+  return matchesAccess(ANONYMOUS_PATTERNS, url);
+}
+
+function isProofOnlyUrl(url) {
+  return matchesAccess(TELEGRAM_PROOF_PATTERNS, url) || matchesAccess(BROWSER_PROOF_PATTERNS, url);
+}
+
+function isServiceUrl(url) {
+  return matchesAccess(SERVICE_PATTERNS, url);
 }
 
 function rolesAcceptedBy(predicate) {
@@ -144,8 +161,9 @@ function assertSupportedRouteSyntax(source, owner) {
 
 function sourceNote(rel, endpoint, declaration) {
   const url = endpoint.slice(endpoint.indexOf(' ') + 1);
-  if (isPublicUrl(url) && rel !== 'routes/baseLinkerPrintAgent.js') return 'public allowlist; endpoint-specific proof/rate limits may still apply';
-  if (rel === 'routes/baseLinkerPrintAgent.js') return 'Print Agent token, not a user role';
+  if (isAnonymousUrl(url)) return 'explicit auth/check entry; route-specific credential/state/rate limits may still apply';
+  if (isProofOnlyUrl(url)) return 'first-party session proof required before route; pre-registration/browser probe path';
+  if (rel === 'routes/baseLinkerPrintAgent.js' || isServiceUrl(url)) return 'Print Agent token, not a user role';
   if (rel === 'routes/warehouseTest.js') return 'admin and ENABLE_TEST_API outside production';
   if (rel === 'routes/baseLinker.js' || rel === 'routes/allegro.js' || rel === 'routes/commerce.js') {
     return 'provider-worker boundary; among these four roles only admin passes (baselinker is outside the table)';
@@ -177,7 +195,9 @@ function collectRouterRoutes() {
         const endpoint = `${method} ${url}`;
         const routeRoles = explicitRoles(line);
         const mountRoles = explicitRoles(middlewareList);
-        let roles = isPublicUrl(url) ? ROLES : ['seller', 'warehouse', 'admin'];
+        let roles = isAnonymousUrl(url) ? ROLES : ['seller', 'warehouse', 'admin'];
+        if (isServiceUrl(url)) roles = [];
+        if (isProofOnlyUrl(url)) roles = ['seller', 'warehouse', 'admin'];
         if (routerRoles !== null) roles = intersectRoles(roles, routerRoles);
         if (mountRoles !== null) roles = intersectRoles(roles, mountRoles);
         if (routeRoles !== null) roles = intersectRoles(roles, routeRoles);
@@ -208,12 +228,14 @@ function collectAppRoutes() {
     const url = routePathFromExpression(match[2]);
     const endpoint = `${method} ${url}`;
     let roles = explicitRoles(line) || ['seller', 'warehouse', 'admin'];
-    if (isPublicUrl(url)) roles = ROLES;
+    if (isAnonymousUrl(url)) roles = ROLES;
+    if (isServiceUrl(url)) roles = [];
+    if (isProofOnlyUrl(url)) roles = ['seller', 'warehouse', 'admin'];
     rows.push({ endpoint, rel: 'app.js', line: index + 1, roles, note: sourceNote('app.js', endpoint, line) });
   }
   rows.push({
-    endpoint: 'POST /telegram-webhook/<token-derived-path>', rel: 'app.js', line: 67,
-    roles: ['anonymous'], note: 'Telegram secret-token header + unguessable path; no app user role',
+    endpoint: 'POST /telegram-webhook/<token-derived-path>', rel: 'app.js', line: 73,
+    roles: [], note: 'Telegram secret-token header + token-derived path; machine-authenticated, no app user role',
   });
   const syntacticDeclarations = [...appSource.matchAll(/\bapp\.(?:get|post|put|patch|delete)\s*\(/g)].length;
   if (declarations !== syntacticDeclarations) {
@@ -229,8 +251,8 @@ function collectStaticSurfaces() {
       roles: ['warehouse', 'admin'], note: 'authenticated legacy static uploads',
     },
     {
-      endpoint: 'GET/HEAD /warehouse-test/*', rel: 'app.js', line: 57,
-      roles: ROLES, note: 'anonymous static test UI; only mounted outside production with ENABLE_TEST_API=true',
+      endpoint: 'GET/HEAD /warehouse-test/*', rel: 'app.js', line: 111,
+      roles: ['admin'], note: 'admin-authenticated static test UI; only mounted outside production with ENABLE_TEST_API=true',
     },
   ];
 }

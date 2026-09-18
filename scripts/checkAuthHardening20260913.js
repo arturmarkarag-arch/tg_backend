@@ -67,6 +67,9 @@ const userModel = read('models/User.js');
 const telegramRoute = read('routes/v1/telegram.js');
 const app = read('app.js');
 const rateLimit = read('middleware/authRateLimit.js');
+const rateLimitCore = read('middleware/rateLimitCore.js');
+const sessionProof = read('middleware/sessionProof.js');
+const accessBoundary = read('middleware/accessBoundary.js');
 const telegramSession = read('services/telegramSession.js');
 const telegramUseModel = read('models/TelegramInitDataUse.js');
 const socket = read('socket.js');
@@ -82,7 +85,9 @@ check(cookies.includes('httpOnly: true') && cookies.includes("sameSite: IS_PRODU
   'browser session/link cookies are HttpOnly, Strict-SameSite and Secure in production');
 check(cookies.includes("'__Host-zlotoweczka_session'") && cookies.includes("'__Host-zlotoweczka_telegram'") && cookies.includes("'__Host-zlotoweczka_google_link'"),
   'all production auth cookies use __Host- prefix');
-check(authMiddleware.includes('readSessionCookie(req)') && authMiddleware.includes('readTelegramSessionCookie(req, telegramSessionSlot)')
+check(authMiddleware.includes('readContextSessionProof(req)')
+    && sessionProof.includes('readSessionCookie(req)')
+    && sessionProof.includes('readTelegramSessionCookie(req, slot)')
     && authMiddleware.includes("req.get('x-csrf-protection') !== '1'")
     && !authMiddleware.includes('getInitDataFromRequest') && !authMiddleware.includes('x-telegram-initdata'),
   'protected API uses first-party HttpOnly cookies only and enforces mutation CSRF header');
@@ -100,15 +105,17 @@ check(authRoute.includes('withTransaction') && authRoute.includes('consumeGoogle
   'Google credential update and one-time link consumption are transaction-bound');
 check(authRoute.includes("$inc: { sessionVersion: 1 }") && authRoute.includes("router.post('/logout'"),
   'logout increments sessionVersion and revokes prior browser sessions immediately');
-check(rateLimit.includes('redis.incr') && rateLimit.includes('localIncrement') && rateLimit.includes("appError('auth_rate_limited')"),
-  'auth rate limit uses Redis with local fallback and explicit 429 path');
+check(rateLimit.includes('consumeRateLimit') && rateLimit.includes("appError('auth_rate_limited')")
+    && rateLimitCore.includes('redis.eval') && rateLimitCore.includes('consumeLocal'),
+  'auth rate limit uses shared Redis core with local fallback and explicit 429 path');
 check(telegramRoute.includes("router.post('/google/link/start', googleLinkLimit") && telegramRoute.includes('registrationLimit'),
   'registration and Google-link minting have deliberately mild auth rate limits');
 check(authRoute.includes('AUTH_BROWSER_RATE_MAX') && authRoute.includes('AUTH_GOOGLE_LINK_RATE_MAX')
     && telegramRoute.includes('TELEGRAM_AUTH_RATE_MAX') && telegramRoute.includes('TELEGRAM_REGISTRATION_RATE_MAX'),
   'auth rate limits keep mild defaults but can be tuned from environment');
-check(app.includes("/^\\/api\\/v1\\/auth\\/google\\/link\\/bootstrap$/"),
-  'Google link bootstrap is in the exact public pre-auth allowlist');
+check(accessBoundary.includes(String.raw`/^\/api\/v1\/auth\/google\/link\/bootstrap$/`)
+    && !accessBoundary.includes(String.raw`/^\/api\/v1\/auth(?:\/|$)/`),
+  'Google link bootstrap is an exact auth-entry exception without widening the auth namespace');
 
 check(authRoute.includes("router.post('/telegram/bootstrap'") && authRoute.includes('bootstrapTelegramSession')
     && authRoute.includes('setTelegramSessionCookie'),

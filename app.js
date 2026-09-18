@@ -34,6 +34,11 @@ const { getPublicInvoiceKsefWriteState } = require('./services/invoices/invoiceK
 const { telegramAuth, requireTelegramRole, requireTelegramRoles } = require('./middleware/telegramAuth');
 const { egressRequestContextMiddleware } = require('./services/egressTrafficMonitor');
 const { createApiAbuseGuard } = require('./middleware/apiAbuseGuard');
+const {
+  createStrictAccessBoundary,
+  isAnonymousEntryApiPath,
+  isUserAuthBypassApiPath,
+} = require('./middleware/accessBoundary');
 
 // The warehouse test harness (destructive: cleanup/seed/reset of real
 // collections) must NEVER be reachable in production. Outside production it is
@@ -44,83 +49,68 @@ const ENABLE_TEST_API = process.env.NODE_ENV !== 'production'
 
 const { expressCorsOptions } = require('./utils/corsOptions');
 
-const publicApiPaths = [
-  /^\/api\/v1\/auth\/config$/,
-  /^\/api\/v1\/auth\/telegram\/bootstrap$/,
-  /^\/api\/v1\/auth\/google$/,
-  /^\/api\/v1\/auth\/google\/link\/bootstrap$/,
-  /^\/api\/v1\/auth\/google\/link\/complete$/,
-  /^\/api\/v1\/auth\/me$/,
-  /^\/api\/v1\/auth\/logout$/,
-  /^\/api\/v1\/telegram\/validate$/,
-  /^\/api\/v1\/telegram\/register-request$/,
-  // Self-service invite for a group member who opened the mini-app without a
-  // ?regToken. Necessarily pre-registration (the caller has no User row yet),
-  // so it cannot sit behind telegramAuth. It authenticates the caller itself
-  // via the first-party Telegram proof session and re-checks group membership live before minting.
-  /^\/api\/v1\/telegram\/registration-invite$/,
-  /^\/api\/v1\/telegram\/me$/,
-  /^\/api\/shops\/cities$/,
-  // Minimal, seller-PII-free shop list for the registration screen. The full
-  // GET /api/shops (with seller data) now requires auth and is staff-only.
-  /^\/api\/shops\/registry$/,
-  /^\/api\/health$/,
-  /^\/api\/maintenance$/,
-  // Local Windows Print Agent authenticates with its own long random token.
-  /^\/api\/print-agent(?:\/.*)?$/,
-  // Allegro OAuth returns from allegro.pl without our Telegram/JWT session.
-  // Only this exact callback is public; one-time server-side state authenticates it.
-  /^\/api\/allegro\/oauth\/callback$/,
-
-];
-
 function requireAuthForApi(req, res, next) {
   if (!req.path.startsWith('/api')) return next();
-  if (isPublicApiPath(req.path)) return next();
+  if (isUserAuthBypassApiPath(req.path)) return next();
   return telegramAuth(req, res, next);
-}
-
-function isPublicApiPath(pathname) {
-  return publicApiPaths.some((pattern) => pattern.test(String(pathname || '')));
 }
 
 const app = express();
 // Не розповідаємо кожній відповіді, на чому працює бекенд.
 app.disable('x-powered-by');
 app.use(cors(expressCorsOptions));
-// Reject anonymous API floods before JSON parsing, MongoDB auth lookups or route work.
-// Valid first-party sessions bypass this anonymous guard completely, so normal page
-// bootstrap/polling fan-out keeps its existing behaviour.
-app.use(createApiAbuseGuard({ isPublicApiPath }));
-app.use(express.json());
-// Tags automatic outbound HTTP metadata with the inbound API route that caused
-// it. Background schedulers remain source=background without manual registration.
-app.use(egressRequestContextMiddleware);
-// Legacy local uploads are warehouse-domain. Keep them behind auth instead of
-// exposing every existing file as anonymous static content. Public product media
-// is served from the explicitly public R2 domain instead.
-app.use('/uploads', telegramAuth, requireTelegramRoles(['admin', 'warehouse']), express.static(path.join(__dirname, 'uploads')));
-if (ENABLE_TEST_API) {
-  app.use('/warehouse-test', express.static(path.join(__dirname, '../Тести Е2Е/test-warehouse')));
-}
 
-// Telegram webhook delivery. Mounted BEFORE the API auth gate: Telegram posts
-// server-to-server with no telegram initData / JWT, so the auth here is the
-// unguessable token-derived path + the secret-token header. Body is already
-// JSON-parsed by express.json() above. Always mounted (dormant in polling mode,
-// since no webhook URL is registered then) — the path is unguessable regardless.
+// Tag all inbound work before any special ingress route can branch away from
+// the normal API stack. This is body-independent and keeps webhook/provider
+// egress attributable without making those callbacks pass user auth.
+app.use(egressRequestContextMiddleware);
+
+// Telegram webhook is a machine-authenticated ingress, not a public app route.
+// Verify the secret header BEFORE parsing JSON so a caller who somehow learns
+// the token-derived path cannot spend our CPU/RAM on arbitrary request bodies.
 {
   const wh = getWebhookConfig();
-  app.post(wh.path, (req, res) => {
-    if (wh.secretToken && req.get('x-telegram-bot-api-secret-token') !== wh.secretToken) {
-      return res.sendStatus(403);
-    }
-    // Ack immediately, then process — never make Telegram wait on (or retry over)
-    // our handler work. processUpdate emits synchronously; handlers run detached.
-    res.sendStatus(200);
-    try { handleWebhookUpdate(req.body); } catch (err) {
-    }
-  });
+  app.post(wh.path,
+    (req, res, next) => {
+      if (wh.secretToken && req.get('x-telegram-bot-api-secret-token') !== wh.secretToken) {
+        return res.sendStatus(403);
+      }
+      return next();
+    },
+    express.json({ limit: '256kb' }),
+    (req, res) => {
+      // Ack immediately, then process — never make Telegram wait on (or retry over)
+      // our handler work. processUpdate emits synchronously; handlers run detached.
+      res.sendStatus(200);
+      try { handleWebhookUpdate(req.body); } catch (err) {
+      }
+    },
+  );
+}
+
+// Anonymous flood protection remains the outer API budget. Exact auth-entry
+// routes get their own bucket; invalid callers aimed at any protected path get
+// the tighter budget. Valid first-party/service proofs bypass it completely.
+app.use(createApiAbuseGuard({ isAnonymousEntryPath: isAnonymousEntryApiPath }));
+
+// Hard fail-closed ingress boundary for the ENTIRE server, not just /api. It
+// runs before the general JSON parser, static folders and Mongo-backed auth.
+// Only explicit login/registration/check capabilities and machine-authenticated
+// callbacks can proceed without a normal user proof.
+app.use(createStrictAccessBoundary());
+app.use(express.json());
+
+// Legacy local uploads are warehouse-domain. Keep them behind full user auth +
+// staff role. Public product media stays on the separate R2 image domain.
+app.use('/uploads', telegramAuth, requireTelegramRoles(['admin', 'warehouse']), express.static(path.join(__dirname, 'uploads')));
+if (ENABLE_TEST_API) {
+  // Even in local/test mode the test harness static files are never anonymous.
+  app.use(
+    '/warehouse-test',
+    telegramAuth,
+    requireTelegramRole('admin'),
+    express.static(path.join(__dirname, '../Тести Е2Е/test-warehouse')),
+  );
 }
 
 

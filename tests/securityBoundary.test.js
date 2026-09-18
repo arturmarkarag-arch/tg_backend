@@ -78,10 +78,10 @@ describe('security boundaries', () => {
     expect(socketSource).toContain('...expressCorsOptions');
   });
 
-  it('warehouse test API is opt-in and never part of the public API allowlist', () => {
+  it('warehouse test surfaces are opt-in and admin-authenticated even outside production', () => {
     const source = require('fs').readFileSync(path.join(__dirname, '..', 'app.js'), 'utf8');
     expect(source).toContain("process.env.ENABLE_TEST_API === 'true'");
-    expect(source).not.toContain("publicApiPaths.push(/^\\/api\\/warehouse-test");
+    expect(source).toContain("'/warehouse-test',\n    telegramAuth,\n    requireTelegramRole('admin')");
     expect(source).toContain("app.use('/api/warehouse-test', requireTelegramRole('admin')");
   });
 
@@ -90,7 +90,7 @@ describe('security boundaries', () => {
     expect(source).toContain("app.disable('x-powered-by')");
   });
 
-  it('bot status is admin-only, while public health does not reveal environment', () => {
+  it('bot status is admin-only, while the minimal health check does not reveal environment', () => {
     const source = require('fs').readFileSync(path.join(__dirname, '..', 'app.js'), 'utf8');
     expect(source).not.toContain('/^\\/api\\/bot-status$/');
     expect(source).toContain("app.get('/api/bot-status', requireTelegramRole('admin')");

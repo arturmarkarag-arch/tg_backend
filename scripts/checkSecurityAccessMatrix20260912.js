@@ -50,26 +50,40 @@ function runChecks({ quiet = false } = {}) {
   const pass = (name) => checks.push(name);
 
   const app = read('app.js');
-  const publicPaths = section(app, 'const publicApiPaths = [', '];\n\nfunction requireAuthForApi');
+  const accessBoundary = read('middleware/accessBoundary.js');
   includesAll(app, [
+    "app.use(createStrictAccessBoundary())",
     "app.use('/uploads', telegramAuth, requireTelegramRoles(['admin', 'warehouse'])",
     "req.telegramUser?.role !== 'baselinker'",
-    "/^\\/api\\/baselinker(?:\\/|$)/",
-    "/^\\/api\\/v1\\/telegram\\/me\\/profile$/",
-    "/^\\/api\\/v1\\/telegram\\/google\\/link\\/start$/",
-    "/^\\/api\\/v1\\/telegram\\/google\\/unlink$/",
+    String.raw`/^\/api\/baselinker(?:\/|$)/`,
+    String.raw`/^\/api\/v1\/telegram\/me\/profile$/`,
+    String.raw`/^\/api\/v1\/telegram\/google\/link\/start$/`,
+    String.raw`/^\/api\/v1\/telegram\/google\/unlink$/`,
   ], 'app boundary');
+  includesAll(accessBoundary, [
+    'ANONYMOUS_ENTRY_API_PATHS',
+    'TELEGRAM_PROOF_API_PATHS',
+    'BROWSER_PROOF_API_PATHS',
+    'SERVICE_TOKEN_API_PATHS',
+    String.raw`/^\/api\/health$/`,
+    String.raw`/^\/api\/shops\/cities$/`,
+    String.raw`/^\/api\/shops\/registry$/`,
+    String.raw`/^\/api\/print-agent(?:\/.*)?$/`,
+  ], 'strict ingress boundary');
   const telegramSelfService = read('routes/v1/telegram.js');
   assert(
     telegramSelfService.includes("['seller', 'warehouse', 'baselinker'].includes(user.role)"),
     'baselinker must be allowed to update only its own plain profile fields',
   );
   assert(!app.includes('/^\/api\/v1\/telegram(?:\/|$)/'), 'baselinker self-service exception must not widen to the whole Telegram API');
-  assert(!publicPaths.includes('search-products'), 'public allowlist must not expose search-products');
-  assert(!publicPaths.includes('shop-products'), 'public allowlist must not expose shop-products');
-  assert(!publicPaths.includes('delivery-groups'), 'public allowlist must not expose delivery-groups');
-  assert(!publicPaths.includes('/api\\/v1\\/auth(?:'), 'public allowlist must not expose broad auth namespace');
-  pass('anonymous allowlist + uploads boundary');
+  assert(!accessBoundary.includes('search-products'), 'anonymous/proof exceptions must not expose search-products');
+  assert(!accessBoundary.includes('shop-products'), 'anonymous/proof exceptions must not expose shop-products');
+  assert(!accessBoundary.includes('delivery-groups'), 'anonymous/proof exceptions must not expose delivery-groups');
+  assert(!accessBoundary.includes(String.raw`/^\/api\/v1\/auth(?:\/|$)/`), 'auth exception must never widen to the whole namespace');
+  const shopsBoundary = read('routes/shops.js');
+  assert(shopsBoundary.includes("router.get('/cities', telegramIdentity,"), 'registration cities must require Telegram proof');
+  assert(shopsBoundary.includes("router.get('/registry', telegramIdentity,"), 'registration registry must require Telegram proof');
+  pass('strict ingress boundary + protected registration support + uploads boundary');
 
   const marketplaceAccess = read('utils/marketplaceWarehouseAccess.js');
   includesAll(marketplaceAccess, [
