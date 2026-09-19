@@ -8,6 +8,7 @@ const {
   createStrictAccessBoundary,
   isAnonymousEntryApiPath,
   isTelegramProofApiPath,
+  isContextProofApiPath,
   isBrowserProofApiPath,
   isServiceTokenApiPath,
 } = require('../middleware/accessBoundary');
@@ -110,8 +111,6 @@ describe('strict server access boundary', () => {
       '/api/v1/telegram/me',
       '/api/v1/telegram/registration-invite',
       '/api/v1/telegram/register-request',
-      '/api/shops/cities',
-      '/api/shops/registry',
     ]) {
       expect(isTelegramProofApiPath(pathname)).toBe(true);
       const missing = await run(gate, fakeRequest({ pathname, method: 'POST' }));
@@ -124,6 +123,45 @@ describe('strict server access boundary', () => {
       }));
       expect(allowed).toBe(null);
     }
+  });
+
+  it('accepts either Telegram or browser proof for registration reference data', async () => {
+    const gate = createStrictAccessBoundary();
+    for (const pathname of ['/api/shops/cities', '/api/shops/registry']) {
+      expect(isContextProofApiPath(pathname)).toBe(true);
+      expect(isTelegramProofApiPath(pathname)).toBe(false);
+
+      const anonymous = await run(gate, fakeRequest({ pathname }));
+      expect(anonymous?.code).toBe('auth_required');
+
+      const telegram = await run(gate, fakeRequest({
+        pathname,
+        headers: {
+          cookie: telegramCookie(),
+          'x-auth-context': 'telegram',
+        },
+      }));
+      expect(telegram).toBe(null);
+
+      const browser = await run(gate, fakeRequest({
+        pathname,
+        headers: { cookie: browserCookie() },
+      }));
+      expect(browser).toBe(null);
+    }
+  });
+
+  it('makes registration reference routes select authoritative auth by transport', () => {
+    const middleware = fs.readFileSync(
+      path.join(__dirname, '..', 'middleware', 'registrationReferenceAuth.js'),
+      'utf8',
+    );
+    const shops = fs.readFileSync(path.join(__dirname, '..', 'routes', 'shops.js'), 'utf8');
+    expect(middleware).toContain("=== 'telegram'");
+    expect(middleware).toContain('telegramIdentity(req, res, next)');
+    expect(middleware).toContain('telegramAuth(req, res, next)');
+    expect(shops).toContain("router.get('/cities', registrationReferenceAuth");
+    expect(shops).toContain("router.get('/registry', registrationReferenceAuth");
   });
 
   it('requires browser proof for auth/me and logout instead of treating them as public', async () => {

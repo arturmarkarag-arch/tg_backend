@@ -7,7 +7,7 @@ const DeliveryGroup = require('../models/DeliveryGroup');
 const User = require('../models/User');
 const Order = require('../models/Order');
 const { telegramAuth, requireTelegramRole, requireTelegramRoles } = require('../middleware/telegramAuth');
-const { telegramIdentity } = require('../middleware/telegramIdentity');
+const { registrationReferenceAuth } = require('../middleware/registrationReferenceAuth');
 const cache = require('../utils/cache');
 const { invalidateShop } = require('../utils/modelCache');
 const { migrateSellerShop } = require('../services/migrateSellerShop');
@@ -217,9 +217,9 @@ async function computeLastExSellersByShopName(shops) {
 }
 
 // ─── GET /api/shops/cities ────────────────────────────────────────────────────
-// Pre-registration list of cities. A signed first-party Telegram proof is
-// required even though the caller does not have a User row yet.
-router.get('/cities', telegramIdentity, asyncHandler(async (req, res) => {
+// Registration accepts a Telegram proof before a User row exists; normal app
+// screens may read the same reference data through a full browser session.
+router.get('/cities', registrationReferenceAuth, asyncHandler(async (req, res) => {
   let cities = await cache.get(cache.KEYS.CITIES);
   if (!cities) {
     cities = await City.find().sort({ name: 1 }).lean();
@@ -230,10 +230,10 @@ router.get('/cities', telegramIdentity, asyncHandler(async (req, res) => {
 
 // ─── GET /api/shops/registry ──────────────────────────────────────────────────
 // Minimal shop list for the registration screen. A not-yet-registered Telegram
-// user cannot pass full telegramAuth (no User row), so this route uses the
-// first-party Telegram proof instead. It exposes NO seller data.
+// user cannot pass full telegramAuth (no User row), so this route also accepts
+// a first-party Telegram proof. Browser callers still require a full user.
 // Active shops only, optionally filtered by ?cityId=.
-router.get('/registry', telegramIdentity, asyncHandler(async (req, res) => {
+router.get('/registry', registrationReferenceAuth, asyncHandler(async (req, res) => {
   const filter = { isActive: true };
   if (req.query.cityId) filter.cityId = req.query.cityId;
   const shops = await Shop.find(filter).select(REFERENCE_SHOP_FIELDS).populate('cityId', 'name').sort({ name: 1, _id: 1 }).lean();

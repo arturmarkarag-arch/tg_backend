@@ -9,8 +9,10 @@ describe('Telegram multi-account session recovery contract', () => {
   test('HTTP auth selects a per-WebView Telegram cookie and fails closed on identity mismatch', () => {
     const auth = src('middleware/telegramAuth.js');
     const identity = src('middleware/telegramIdentity.js');
+    const proof = src('middleware/sessionProof.js');
     expect(auth).toContain('readTelegramSessionSlot(req)');
-    expect(auth).toContain('readTelegramSessionCookie(req, telegramSessionSlot)');
+    expect(auth).toContain('sessionProof = readContextSessionProof(req)');
+    expect(proof).toContain('readTelegramSessionCookie(req, slot)');
     expect(auth).toContain("appError('auth_telegram_session_mismatch'");
     expect(identity).toContain('readTelegramSessionSlot(req)');
     expect(identity).toContain("appError('auth_telegram_session_mismatch'");

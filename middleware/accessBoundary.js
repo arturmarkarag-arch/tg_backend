@@ -39,9 +39,13 @@ const TELEGRAM_PROOF_API_PATHS = Object.freeze([
   /^\/api\/v1\/telegram\/me$/,
   /^\/api\/v1\/telegram\/registration-invite$/,
   /^\/api\/v1\/telegram\/register-request$/,
+]);
 
-  // Registration support data is not anonymous anymore. A caller must first
-  // bootstrap a valid Telegram proof session.
+const CONTEXT_PROOF_API_PATHS = Object.freeze([
+  // Registration needs these reads before a User row exists, while the same
+  // reference data is also used by already-authenticated browser sessions.
+  // Accept the proof selected by x-auth-context: Telegram for pre-registration,
+  // browser otherwise. The route performs the matching authoritative check.
   /^\/api\/shops\/cities$/,
   /^\/api\/shops\/registry$/,
 ]);
@@ -76,6 +80,10 @@ function isBrowserProofApiPath(pathname) {
   return matchesAny(BROWSER_PROOF_API_PATHS, pathname);
 }
 
+function isContextProofApiPath(pathname) {
+  return matchesAny(CONTEXT_PROOF_API_PATHS, pathname);
+}
+
 function isServiceTokenApiPath(pathname) {
   return matchesAny(SERVICE_TOKEN_API_PATHS, pathname);
 }
@@ -83,6 +91,7 @@ function isServiceTokenApiPath(pathname) {
 function isUserAuthBypassApiPath(pathname) {
   return isAnonymousEntryApiPath(pathname)
     || isTelegramProofApiPath(pathname)
+    || isContextProofApiPath(pathname)
     || isBrowserProofApiPath(pathname)
     || isServiceTokenApiPath(pathname);
 }
@@ -132,6 +141,14 @@ function createStrictAccessBoundary() {
       return next(appError('auth_telegram_session_required'));
     }
 
+    if (isContextProofApiPath(pathname)) {
+      const proof = readContextSessionProof(req);
+      if (proof?.session) return next();
+      return next(appError(proof?.kind === 'telegram'
+        ? 'auth_telegram_session_required'
+        : 'auth_required'));
+    }
+
     if (isBrowserProofApiPath(pathname)) {
       if (readBrowserSessionProof(req)) return next();
       return next(appError('auth_required'));
@@ -151,10 +168,12 @@ function createStrictAccessBoundary() {
 module.exports = {
   ANONYMOUS_ENTRY_API_PATHS,
   TELEGRAM_PROOF_API_PATHS,
+  CONTEXT_PROOF_API_PATHS,
   BROWSER_PROOF_API_PATHS,
   SERVICE_TOKEN_API_PATHS,
   isAnonymousEntryApiPath,
   isTelegramProofApiPath,
+  isContextProofApiPath,
   isBrowserProofApiPath,
   isServiceTokenApiPath,
   isUserAuthBypassApiPath,
