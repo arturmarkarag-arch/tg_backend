@@ -34,6 +34,7 @@ const { getPublicInvoiceKsefWriteState } = require('./services/invoices/invoiceK
 const { telegramAuth, requireTelegramRole, requireTelegramRoles } = require('./middleware/telegramAuth');
 const { egressRequestContextMiddleware } = require('./services/egressTrafficMonitor');
 const { createApiAbuseGuard } = require('./middleware/apiAbuseGuard');
+const { securityResponseHeaders } = require('./middleware/securityResponseHeaders');
 const {
   createStrictAccessBoundary,
   isAnonymousEntryApiPath,
@@ -58,6 +59,9 @@ function requireAuthForApi(req, res, next) {
 const app = express();
 // Не розповідаємо кожній відповіді, на чому працює бекенд.
 app.disable('x-powered-by');
+// Baseline transport/browser hardening must run before CORS, rate limits and
+// auth boundaries so even early 401/403/429 responses carry the headers.
+app.use(securityResponseHeaders);
 app.use(cors(expressCorsOptions));
 
 // Tag all inbound work before any special ingress route can branch away from
@@ -135,6 +139,7 @@ app.use((req, res, next) => {
 });
 
 app.get('/api/health', (req, res) => {
+  res.set('Cache-Control', 'no-store');
   const maintenance = getPublicMaintenanceState();
   const invoiceKsef = getPublicInvoiceKsefWriteState();
   res.json({
@@ -147,6 +152,7 @@ app.get('/api/health', (req, res) => {
 });
 
 app.get('/api/maintenance', (req, res) => {
+  res.set('Cache-Control', 'no-store');
   res.json(getPublicMaintenanceState());
 });
 
