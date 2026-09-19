@@ -157,7 +157,7 @@ router.post('/google', generalAuthLimit, asyncHandler(async (req, res) => {
   if (!result) throw appError('google_invalid_token');
   if (!result.emailVerified) throw appError('google_email_unverified');
 
-  const user = await User.findOne({ googleSub: result.sub }).lean();
+  const user = await User.findOne({ googleEmail: result.email }).lean();
   if (!user) throw appError('google_email_not_linked', { email: result.email });
   if (isRemovedUser(user)) await throwRegistrationState(user.telegramId);
   if (user.botBlocked) throw appError('registration_blocked');
