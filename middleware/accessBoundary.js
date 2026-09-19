@@ -18,6 +18,7 @@ const ANONYMOUS_ENTRY_API_PATHS = Object.freeze([
   // themselves with signed Telegram initData or Google credentials.
   /^\/api\/v1\/auth\/config$/,
   /^\/api\/v1\/auth\/telegram\/bootstrap$/,
+  /^\/api\/v1\/auth\/telegram\/diagnostic$/,
   /^\/api\/v1\/auth\/google$/,
   /^\/api\/v1\/auth\/google\/link\/bootstrap$/,
   /^\/api\/v1\/auth\/google\/link\/complete$/,

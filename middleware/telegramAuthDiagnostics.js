@@ -79,6 +79,47 @@ function write(level, payload) {
   else console.log(message);
 }
 
+function safeClientString(value, max = 240) {
+  if (value == null) return '';
+  return String(value).slice(0, max);
+}
+
+function sanitizeClientDiagnostic(raw) {
+  const source = raw && typeof raw === 'object' ? raw : {};
+  const payload = {};
+  const stringKeys = [
+    'flowId', 'stage', 'clientBuild', 'telegramVersion', 'telegramPlatform',
+    'visibilityState', 'operation', 'errorName', 'errorCode', 'errorMessage', 'authStage',
+  ];
+  const booleanKeys = [
+    'online', 'responseOk', 'jsonParsed', 'telegramIdPresent', 'sessionSlotPresent',
+    'identityMatch', 'sessionSlotMatch', 'cancelled',
+  ];
+  const numberKeys = ['seq', 'at', 'httpStatus', 'attempt'];
+
+  for (const key of stringKeys) {
+    if (source[key] != null && source[key] !== '') {
+      payload[key] = safeClientString(source[key], key === 'errorMessage' ? 500 : 160);
+    }
+  }
+  for (const key of booleanKeys) {
+    if (typeof source[key] === 'boolean') payload[key] = source[key];
+  }
+  for (const key of numberKeys) {
+    const value = Number(source[key]);
+    if (Number.isFinite(value)) payload[key] = value;
+  }
+  return payload;
+}
+
+function telegramAuthClientDiagnostic(req, rawPayload) {
+  write('info', {
+    event: 'CLIENT',
+    ...requestContext(req),
+    client: sanitizeClientDiagnostic(rawPayload),
+  });
+}
+
 function telegramAuthRequestDiagnostics(req, res, next) {
   if (!isTelegramAuthRequest(req)) return next();
 
@@ -119,4 +160,6 @@ module.exports = {
   isTelegramAuthRequest,
   telegramAuthRequestDiagnostics,
   telegramAuthErrorDiagnostics,
+  telegramAuthClientDiagnostic,
+  sanitizeClientDiagnostic,
 };

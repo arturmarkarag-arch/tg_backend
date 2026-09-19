@@ -4,7 +4,7 @@ This is a complete inventory of runtime Express route declarations, discovered r
 A check mark means that the role passes the route-entry auth/role middleware. Resource ownership, shop/group/session
 scope, one-time tokens, rate limits, feature flags, and request validation can still deny a request as noted.
 
-Routes: **475** · anonymous: **7** · seller: **74** · warehouse: **199** · admin: **465**
+Routes: **476** · anonymous: **8** · seller: **75** · warehouse: **200** · admin: **466**
 
 | Endpoint | Anonymous | Seller | Warehouse | Admin | Source | Boundary note |
 |---|:---:|:---:|:---:|:---:|---|---|
@@ -82,7 +82,7 @@ Routes: **475** · anonymous: **7** · seller: **74** · warehouse: **199** · a
 | `GET /api/blocks/:number` | — | — | ✓ | ✓ | `routes/blocks.js:248` | route-entry authorization |
 | `GET /api/blocks/incoming/products` | — | — | ✓ | ✓ | `routes/blocks.js:204` | route-entry authorization |
 | `GET /api/blocks/search/products` | — | — | ✓ | ✓ | `routes/blocks.js:232` | route-entry authorization |
-| `GET /api/bot-status` | — | — | — | ✓ | `app.js:159` | route-entry authorization |
+| `GET /api/bot-status` | — | — | — | ✓ | `app.js:167` | route-entry authorization |
 | `GET /api/commerce/catalog` | — | — | — | ✓ | `routes/commerce.js:97` | provider-worker boundary; among these four roles only admin passes (baselinker is outside the table) |
 | `GET /api/commerce/catalog/:id` | — | — | — | ✓ | `routes/commerce.js:119` | provider-worker boundary; among these four roles only admin passes (baselinker is outside the table) |
 | `GET /api/commerce/catalog/warehouse-products` | — | — | — | ✓ | `routes/commerce.js:103` | provider-worker boundary; among these four roles only admin passes (baselinker is outside the table) |
@@ -95,8 +95,8 @@ Routes: **475** · anonymous: **7** · seller: **74** · warehouse: **199** · a
 | `GET /api/delivery-groups/ordering-status` | — | ✓ | ✓ | ✓ | `routes/deliveryGroups.js:49` | route-entry authorization |
 | `GET /api/delivery-groups/session-summaries` | — | — | — | ✓ | `routes/deliveryGroups.js:147` | route-entry authorization |
 | `GET /api/delivery-groups/summary` | — | — | ✓ | ✓ | `routes/deliveryGroups.js:109` | route-entry authorization |
-| `GET /api/gemini-status` | — | — | — | ✓ | `app.js:177` | route-entry authorization |
-| `GET /api/health` | ✓ | ✓ | ✓ | ✓ | `app.js:141` | explicit auth/check entry; route-specific credential/state/rate limits may still apply |
+| `GET /api/gemini-status` | — | — | — | ✓ | `app.js:185` | route-entry authorization |
+| `GET /api/health` | ✓ | ✓ | ✓ | ✓ | `app.js:149` | explicit auth/check entry; route-specific credential/state/rate limits may still apply |
 | `GET /api/invoices` | — | — | — | ✓ | `routes/invoices.js:540` | route-entry authorization |
 | `GET /api/invoices/:id` | — | — | — | ✓ | `routes/invoices.js:639` | route-entry authorization |
 | `GET /api/invoices/:id/fiscal/ksef/pdf-visualization` | — | — | — | ✓ | `routes/invoices.js:607` | route-entry authorization |
@@ -125,9 +125,9 @@ Routes: **475** · anonymous: **7** · seller: **74** · warehouse: **199** · a
 | `GET /api/invoices/legal-entities` | — | — | — | ✓ | `routes/invoices.js:128` | route-entry authorization |
 | `GET /api/invoices/legal-entities/:id` | — | — | — | ✓ | `routes/invoices.js:140` | route-entry authorization |
 | `GET /api/invoices/meta` | — | — | — | ✓ | `routes/invoices.js:118` | route-entry authorization |
-| `GET /api/maintenance` | — | ✓ | ✓ | ✓ | `app.js:154` | route-entry authorization |
+| `GET /api/maintenance` | — | ✓ | ✓ | ✓ | `app.js:162` | route-entry authorization |
 | `GET /api/nav-badges` | — | ✓ | ✓ | ✓ | `routes/navBadges.js:91` | route-entry authorization |
-| `GET /api/openai-status` | — | — | — | ✓ | `app.js:163` | route-entry authorization |
+| `GET /api/openai-status` | — | — | — | ✓ | `app.js:171` | route-entry authorization |
 | `GET /api/picking/block-tasks` | — | — | ✓ | ✓ | `routes/picking.js:941` | route-entry authorization |
 | `GET /api/picking/blocks-overview` | — | — | ✓ | ✓ | `routes/picking.js:1024` | route-entry authorization |
 | `GET /api/picking/locked-tasks` | — | — | ✓ | ✓ | `routes/picking.js:1415` | route-entry authorization |
@@ -192,8 +192,8 @@ Routes: **475** · anonymous: **7** · seller: **74** · warehouse: **199** · a
 | `GET /api/users/:telegramId` | — | — | — | ✓ | `routes/users.js:121` | route-entry authorization |
 | `GET /api/users/:telegramId/cleared-carts` | — | — | — | ✓ | `routes/users.js:129` | route-entry authorization |
 | `GET /api/users/assignment-candidates` | — | — | — | ✓ | `routes/users.js:101` | route-entry authorization |
-| `GET /api/v1/auth/config` | ✓ | ✓ | ✓ | ✓ | `routes/v1/auth.js:123` | explicit auth/check entry; route-specific credential/state/rate limits may still apply |
-| `GET /api/v1/auth/me` | — | ✓ | ✓ | ✓ | `routes/v1/auth.js:240` | first-party session proof required before route; pre-registration/browser probe path |
+| `GET /api/v1/auth/config` | ✓ | ✓ | ✓ | ✓ | `routes/v1/auth.js:145` | explicit auth/check entry; route-specific credential/state/rate limits may still apply |
+| `GET /api/v1/auth/me` | — | ✓ | ✓ | ✓ | `routes/v1/auth.js:262` | first-party session proof required before route; pre-registration/browser probe path |
 | `GET /api/v1/orders` | — | ✓ | ✓ | ✓ | `routes/orders.js:486` | route entry only; ownership/shop/session checks run in handler |
 | `GET /api/v1/orders/:id` | — | ✓ | ✓ | ✓ | `routes/orders.js:699` | route entry only; ownership/shop/session checks run in handler |
 | `GET /api/v1/orders/conflicts` | — | — | ✓ | ✓ | `routes/orders.js:339` | route entry only; ownership/shop/session checks run in handler |
@@ -433,11 +433,12 @@ Routes: **475** · anonymous: **7** · seller: **74** · warehouse: **199** · a
 | `POST /api/supplement/waves/:waveId/freeze` | — | — | ✓ | ✓ | `routes/supplement.js:487` | route-entry authorization |
 | `POST /api/users` | — | — | — | ✓ | `routes/users.js:162` | route-entry authorization |
 | `POST /api/users/:telegramId/cleared-carts/:cartId/restore` | — | — | — | ✓ | `routes/users.js:155` | route-entry authorization |
-| `POST /api/v1/auth/google` | ✓ | ✓ | ✓ | ✓ | `routes/v1/auth.js:131` | explicit auth/check entry; route-specific credential/state/rate limits may still apply |
-| `POST /api/v1/auth/google/link/bootstrap` | ✓ | ✓ | ✓ | ✓ | `routes/v1/auth.js:153` | explicit auth/check entry; route-specific credential/state/rate limits may still apply |
-| `POST /api/v1/auth/google/link/complete` | ✓ | ✓ | ✓ | ✓ | `routes/v1/auth.js:173` | explicit auth/check entry; route-specific credential/state/rate limits may still apply |
-| `POST /api/v1/auth/logout` | — | ✓ | ✓ | ✓ | `routes/v1/auth.js:255` | first-party session proof required before route; pre-registration/browser probe path |
-| `POST /api/v1/auth/telegram/bootstrap` | ✓ | ✓ | ✓ | ✓ | `routes/v1/auth.js:87` | explicit auth/check entry; route-specific credential/state/rate limits may still apply |
+| `POST /api/v1/auth/google` | ✓ | ✓ | ✓ | ✓ | `routes/v1/auth.js:153` | explicit auth/check entry; route-specific credential/state/rate limits may still apply |
+| `POST /api/v1/auth/google/link/bootstrap` | ✓ | ✓ | ✓ | ✓ | `routes/v1/auth.js:175` | explicit auth/check entry; route-specific credential/state/rate limits may still apply |
+| `POST /api/v1/auth/google/link/complete` | ✓ | ✓ | ✓ | ✓ | `routes/v1/auth.js:195` | explicit auth/check entry; route-specific credential/state/rate limits may still apply |
+| `POST /api/v1/auth/logout` | — | ✓ | ✓ | ✓ | `routes/v1/auth.js:277` | first-party session proof required before route; pre-registration/browser probe path |
+| `POST /api/v1/auth/telegram/bootstrap` | ✓ | ✓ | ✓ | ✓ | `routes/v1/auth.js:109` | explicit auth/check entry; route-specific credential/state/rate limits may still apply |
+| `POST /api/v1/auth/telegram/diagnostic` | ✓ | ✓ | ✓ | ✓ | `routes/v1/auth.js:94` | explicit auth/check entry; route-specific credential/state/rate limits may still apply |
 | `POST /api/v1/orders` | — | ✓ | ✓ | ✓ | `routes/orders.js:724` | route entry only; ownership/shop/session checks run in handler |
 | `POST /api/v1/orders/:id/fulfill` | — | — | ✓ | ✓ | `routes/orders.js:691` | route entry only; ownership/shop/session checks run in handler |
 | `POST /api/v1/orders/:id/stale/expire` | — | — | — | ✓ | `routes/orders.js:1643` | route entry only; ownership/shop/session checks run in handler |

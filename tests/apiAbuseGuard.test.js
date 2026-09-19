@@ -179,6 +179,19 @@ describe('API anonymous abuse guard', () => {
     }
   });
 
+  it('does not let Telegram client diagnostics consume the normal anonymous entry budget', async () => {
+    const guard = makeGuard();
+    for (let i = 0; i < 10; i += 1) {
+      expect((await run(guard, request({ path: '/api/v1/auth/telegram/diagnostic', method: 'POST' }))).err).toBe(null);
+    }
+
+    // The real auth entry bucket is still untouched by those diagnostic calls.
+    for (let i = 0; i < 3; i += 1) {
+      expect((await run(guard, request({ path: '/api/public' }))).err).toBe(null);
+    }
+    expect((await run(guard, request({ path: '/api/public' }))).err?.code).toBe('api_rate_limited');
+  });
+
   it('is mounted before JSON parsing and before the authoritative API auth gate', () => {
     const appSource = fs.readFileSync(path.join(__dirname, '..', 'app.js'), 'utf8');
     const guardIndex = indexOrThrow(appSource, 'app.use(createApiAbuseGuard({ isAnonymousEntryPath: isAnonymousEntryApiPath }))', { label: 'abuse guard mount' });
