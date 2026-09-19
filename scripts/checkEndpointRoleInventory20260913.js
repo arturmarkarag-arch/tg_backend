@@ -70,6 +70,7 @@ function loadAccessPatterns(constName) {
 
 const ANONYMOUS_PATTERNS = loadAccessPatterns('ANONYMOUS_ENTRY_API_PATHS');
 const TELEGRAM_PROOF_PATTERNS = loadAccessPatterns('TELEGRAM_PROOF_API_PATHS');
+const CONTEXT_PROOF_PATTERNS = loadAccessPatterns('CONTEXT_PROOF_API_PATHS');
 const BROWSER_PROOF_PATTERNS = loadAccessPatterns('BROWSER_PROOF_API_PATHS');
 const SERVICE_PATTERNS = loadAccessPatterns('SERVICE_TOKEN_API_PATHS');
 
@@ -82,7 +83,9 @@ function isAnonymousUrl(url) {
 }
 
 function isProofOnlyUrl(url) {
-  return matchesAccess(TELEGRAM_PROOF_PATTERNS, url) || matchesAccess(BROWSER_PROOF_PATTERNS, url);
+  return matchesAccess(TELEGRAM_PROOF_PATTERNS, url)
+    || matchesAccess(CONTEXT_PROOF_PATTERNS, url)
+    || matchesAccess(BROWSER_PROOF_PATTERNS, url);
 }
 
 function isServiceUrl(url) {

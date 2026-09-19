@@ -81,8 +81,14 @@ function runChecks({ quiet = false } = {}) {
   assert(!accessBoundary.includes('delivery-groups'), 'anonymous/proof exceptions must not expose delivery-groups');
   assert(!accessBoundary.includes(String.raw`/^\/api\/v1\/auth(?:\/|$)/`), 'auth exception must never widen to the whole namespace');
   const shopsBoundary = read('routes/shops.js');
-  assert(shopsBoundary.includes("router.get('/cities', telegramIdentity,"), 'registration cities must require Telegram proof');
-  assert(shopsBoundary.includes("router.get('/registry', telegramIdentity,"), 'registration registry must require Telegram proof');
+  const registrationReferenceAuth = read('middleware/registrationReferenceAuth.js');
+  assert(shopsBoundary.includes("router.get('/cities', registrationReferenceAuth,"), 'registration cities must require context-selected first-party proof');
+  assert(shopsBoundary.includes("router.get('/registry', registrationReferenceAuth,"), 'registration registry must require context-selected first-party proof');
+  includesAll(registrationReferenceAuth, [
+    "=== 'telegram'",
+    'telegramIdentity(req, res, next)',
+    'telegramAuth(req, res, next)',
+  ], 'registration reference auth must support Telegram pre-registration and full browser auth');
   pass('strict ingress boundary + protected registration support + uploads boundary');
 
   const marketplaceAccess = read('utils/marketplaceWarehouseAccess.js');
