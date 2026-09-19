@@ -15,6 +15,7 @@ function diagnosticApp({ fail = false } = {}) {
     if (fail) return next(Object.assign(new Error('diagnostic failure'), { code: 'boom' }));
     return res.json({ ok: true });
   });
+  app.post('/api/v1/telegram/me', (req, res) => res.json({ role: 'admin' }));
   app.use(telegramAuthErrorDiagnostics);
   app.use((err, req, res, next) => { // eslint-disable-line no-unused-vars
     res.status(500).json({ error: 'internal_error' });
@@ -67,6 +68,34 @@ describe('Telegram auth diagnostics', () => {
     expect(errors).toContain('diagnostic failure');
     expect(logs).toContain('"event":"FINISH"');
     expect(logs).toContain('"status":500');
+  });
+
+  it('shows whether the profile request returned the selected Telegram cookie', async () => {
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const slot = 'abcdefghijklmnopqrstuvwx';
+    const cookieName = process.env.NODE_ENV === 'production'
+      ? `__Host-zlotoweczka_telegram_${slot}`
+      : `zlotoweczka_telegram_${slot}`;
+
+    await request(diagnosticApp())
+      .post('/api/v1/telegram/me')
+      .set('x-auth-context', 'telegram')
+      .set('x-telegram-client-id', '123456')
+      .set('x-telegram-session-slot', slot)
+      .set('Cookie', `${cookieName}=signed-session-value`)
+      .expect(200);
+
+    const output = log.mock.calls.flat().join('\n');
+    log.mockRestore();
+
+    expect(output).toContain('"path":"/api/v1/telegram/me"');
+    expect(output).toContain('"hasTelegramContext":true');
+    expect(output).toContain('"hasTelegramClientId":true');
+    expect(output).toContain('"hasSessionSlotHeader":true');
+    expect(output).toContain('"hasSelectedTelegramSessionCookie":true');
+    expect(output).not.toContain('123456');
+    expect(output).not.toContain(slot);
+    expect(output).not.toContain('signed-session-value');
   });
 
   it('stays silent for unrelated endpoints', async () => {
