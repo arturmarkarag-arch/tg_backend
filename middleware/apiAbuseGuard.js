@@ -6,8 +6,6 @@ const { readContextSessionProof } = require('./sessionProof');
 const { isAnonymousEntryApiPath, hasValidPrintAgentToken } = require('./accessBoundary');
 const { appError } = require('../utils/errors');
 
-const TELEGRAM_AUTH_DIAGNOSTIC_PATH = '/api/v1/auth/telegram/diagnostic';
-
 function positiveEnvInt(name, fallback) {
   const value = Number(process.env[name]);
   return Number.isSafeInteger(value) && value > 0 ? value : fallback;
@@ -115,11 +113,6 @@ function createApiAbuseGuard({ isAnonymousEntryPath = isAnonymousEntryApiPath, p
       const pathname = String(req?.path || '');
       if (!pathname.startsWith('/api')) return next();
       if (String(req?.method || '').toUpperCase() === 'OPTIONS') return next();
-
-      // Client auth breadcrumbs have their own narrow route-level limiter. Do
-      // not let temporary diagnostics consume the normal anonymous login budget
-      // and accidentally perturb the bootstrap flow we are trying to observe.
-      if (pathname === TELEGRAM_AUTH_DIAGNOSTIC_PATH) return next();
 
       // The dedicated print service has its own machine credential. Normal app
       // session proofs are NOT an unlimited bypass: before Mongo-backed auth we

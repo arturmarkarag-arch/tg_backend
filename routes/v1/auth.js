@@ -26,7 +26,6 @@ const { buildUserProfile } = require('./telegram');
 const { isRemovedUser } = require('../../utils/userAccountState');
 const { normalizeTelegramSessionSlot } = require('../../utils/telegramRequestIdentity');
 const { resolveSellerTelegramGroupAccess } = require('../../services/sellerTelegramGroupAccess');
-const { telegramAuthClientDiagnostic } = require('../../middleware/telegramAuthDiagnostics');
 
 const router = express.Router();
 function positiveEnvInt(name, fallback) {
@@ -43,11 +42,6 @@ const linkAuthLimit = createAuthRateLimit({
   name: 'google-link',
   max: positiveEnvInt('AUTH_GOOGLE_LINK_RATE_MAX', 120),
   windowMs: positiveEnvInt('AUTH_GOOGLE_LINK_RATE_WINDOW_MS', 10 * 60 * 1000),
-});
-const telegramDiagnosticLimit = createAuthRateLimit({
-  name: 'telegram-auth-diagnostic',
-  max: positiveEnvInt('AUTH_TELEGRAM_DIAGNOSTIC_RATE_MAX', 180),
-  windowMs: positiveEnvInt('AUTH_TELEGRAM_DIAGNOSTIC_RATE_WINDOW_MS', 5 * 60 * 1000),
 });
 
 router.use((req, res, next) => {
@@ -85,22 +79,6 @@ function requireBrowserMutationHeader(req) {
     throw appError('auth_csrf_required');
   }
 }
-
-// Temporary safe client breadcrumbs for device-specific Telegram WebView auth
-// failures. This endpoint is deliberately independent of user auth/cookies so it
-// can report the exact stage at which auth transport breaks. It accepts only a
-// tiny text/plain JSON envelope; the logger whitelists fields and never records
-// initData, cookies, Telegram ids or the actual session-slot value.
-router.post('/telegram/diagnostic', telegramDiagnosticLimit, express.text({ type: 'text/plain', limit: '8kb' }), (req, res) => {
-  let payload = {};
-  try {
-    payload = JSON.parse(String(req.body || '{}'));
-  } catch {
-    payload = { stage: 'diagnostic_payload_invalid' };
-  }
-  telegramAuthClientDiagnostic(req, payload);
-  res.status(204).end();
-});
 
 // Telegram Mini App bootstrap. Raw initData is accepted ONLY here. The first
 // successful use is recorded by SHA-256 digest in Mongo and exchanged for an

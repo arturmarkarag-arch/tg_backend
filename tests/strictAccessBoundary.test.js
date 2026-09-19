@@ -53,7 +53,6 @@ describe('strict server access boundary', () => {
   it('keeps the anonymous entry surface exact and narrow', () => {
     expect(isAnonymousEntryApiPath('/api/v1/auth/config')).toBe(true);
     expect(isAnonymousEntryApiPath('/api/v1/auth/telegram/bootstrap')).toBe(true);
-    expect(isAnonymousEntryApiPath('/api/v1/auth/telegram/diagnostic')).toBe(true);
     expect(isAnonymousEntryApiPath('/api/v1/auth/google')).toBe(true);
     expect(isAnonymousEntryApiPath('/api/health')).toBe(true);
     expect(isAnonymousEntryApiPath('/api/allegro/oauth/callback')).toBe(true);
@@ -69,7 +68,6 @@ describe('strict server access boundary', () => {
     const gate = createStrictAccessBoundary();
     expect(await run(gate, fakeRequest({ pathname: '/api/v1/auth/config' }))).toBe(null);
     expect(await run(gate, fakeRequest({ pathname: '/api/v1/auth/telegram/bootstrap', method: 'POST' }))).toBe(null);
-    expect(await run(gate, fakeRequest({ pathname: '/api/v1/auth/telegram/diagnostic', method: 'POST' }))).toBe(null);
     expect(await run(gate, fakeRequest({ pathname: '/api/health' }))).toBe(null);
   });
 
