@@ -36,6 +36,10 @@ const { egressRequestContextMiddleware } = require('./services/egressTrafficMoni
 const { createApiAbuseGuard } = require('./middleware/apiAbuseGuard');
 const { securityResponseHeaders } = require('./middleware/securityResponseHeaders');
 const {
+  telegramAuthRequestDiagnostics,
+  telegramAuthErrorDiagnostics,
+} = require('./middleware/telegramAuthDiagnostics');
+const {
   createStrictAccessBoundary,
   isAnonymousEntryApiPath,
   isUserAuthBypassApiPath,
@@ -59,6 +63,10 @@ function requireAuthForApi(req, res, next) {
 const app = express();
 // Не розповідаємо кожній відповіді, на чому працює бекенд.
 app.disable('x-powered-by');
+// Keep a safe, grep-friendly trace around Telegram login while diagnosing
+// device-specific WebView failures. This runs before CORS so a rejected
+// preflight is visible too; it never logs initData, cookies or session slots.
+app.use(telegramAuthRequestDiagnostics);
 // Baseline transport/browser hardening must run before CORS, rate limits and
 // auth boundaries so even early 401/403/429 responses carry the headers.
 app.use(securityResponseHeaders);
@@ -219,6 +227,10 @@ if (ENABLE_TEST_API) {
   // eslint-disable-next-line global-require
   app.use('/api/warehouse-test', requireTelegramRole('admin'), require('./routes/warehouseTest'));
 }
+
+// Log handled Telegram bootstrap failures too (validation, replay, rate limit,
+// CORS and unexpected errors) before Sentry/the JSON error handler consume them.
+app.use(telegramAuthErrorDiagnostics);
 
 // @sentry/node 10.x requires the Express error handler to be mounted after
 // routes and before our own JSON error handler. It captures server failures but
