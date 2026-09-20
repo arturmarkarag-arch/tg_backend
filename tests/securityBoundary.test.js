@@ -27,13 +27,20 @@ describe('security boundaries', () => {
     }, () => {
       vi.resetModules();
       const { getAllowedOrigins, corsOrigin } = require('../utils/corsOptions');
-      expect(getAllowedOrigins()).toEqual(['https://app.example.test']);
+      expect(getAllowedOrigins()).toEqual([
+        'https://app.example.test',
+        'https://cf-app.zlotoweczka.com.pl',
+      ]);
 
       let allowed = null;
       corsOrigin('https://evil.example', (err, ok) => { allowed = { err, ok }; });
       expect(allowed.err).toBeInstanceOf(Error);
 
       corsOrigin('https://app.example.test', (err, ok) => { allowed = { err, ok }; });
+      expect(allowed.err).toBeNull();
+      expect(allowed.ok).toBe(true);
+
+      corsOrigin('https://cf-app.zlotoweczka.com.pl', (err, ok) => { allowed = { err, ok }; });
       expect(allowed.err).toBeNull();
       expect(allowed.ok).toBe(true);
     });
@@ -43,7 +50,7 @@ describe('security boundaries', () => {
     withEnv({ NODE_ENV: 'production', CORS_ALLOWED_ORIGINS: undefined, WEB_APP_URL: undefined }, () => {
       vi.resetModules();
       const { getAllowedOrigins, corsOrigin } = require('../utils/corsOptions');
-      expect(getAllowedOrigins()).toEqual([]);
+      expect(getAllowedOrigins()).toEqual(['https://cf-app.zlotoweczka.com.pl']);
 
       let result = null;
       corsOrigin('https://evil.example', (err, ok) => { result = { err, ok }; });

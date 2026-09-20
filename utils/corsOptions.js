@@ -22,15 +22,27 @@ function normalizeOrigin(value) {
   }
 }
 
+// First-party migration host served by Cloudflare Workers while the current
+// app.zlotoweczka.com.pl deployment remains live on Vercel. Keep this exact
+// (never wildcard subdomains) so the staging deployment can exercise the real
+// cookie/API/Socket.IO flow without weakening the production origin boundary.
+const MANAGED_MIGRATION_ORIGINS = [
+  'https://cf-app.zlotoweczka.com.pl',
+];
+
+function uniqueOrigins(values) {
+  return [...new Set(values.map(normalizeOrigin).filter(Boolean))];
+}
+
 function getAllowedOrigins() {
   const raw = process.env.CORS_ALLOWED_ORIGINS;
   if (raw) {
-    return raw.split(',').map(normalizeOrigin).filter(Boolean);
+    return uniqueOrigins([...raw.split(','), ...MANAGED_MIGRATION_ORIGINS]);
   }
 
   if (process.env.NODE_ENV === 'production') {
     const fallback = normalizeOrigin(process.env.WEB_APP_URL);
-    return fallback ? [fallback] : [];
+    return uniqueOrigins([fallback, ...MANAGED_MIGRATION_ORIGINS]);
   }
 
   return null; // development only: permissive
