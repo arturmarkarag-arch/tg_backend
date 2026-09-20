@@ -9,6 +9,7 @@ const {
   completePrintJob,
   failPrintJob,
 } = require('../services/baseLinkerPrint');
+const { subscribePrintAgentEvents } = require('../services/baseLinkerPrintAgentEvents');
 
 const router = express.Router();
 
@@ -28,6 +29,47 @@ function requireAgentToken(req, res, next) {
 }
 
 router.use(requireAgentToken);
+
+
+router.get('/events', (req, res) => {
+  const agentId = String(req.query?.agentId || '').trim();
+  if (!agentId || agentId.length > 96 || !/^[a-zA-Z0-9._:-]+$/.test(agentId)) {
+    return res.status(400).json({ error: 'baselinker_print_agent_id_invalid', message: 'Невірний Print Agent ID.' });
+  }
+
+  res.status(200);
+  res.set({
+    'Content-Type': 'text/event-stream; charset=utf-8',
+    'Cache-Control': 'no-cache, no-transform',
+    Connection: 'keep-alive',
+    'X-Accel-Buffering': 'no',
+  });
+  if (typeof res.flushHeaders === 'function') res.flushHeaders();
+
+  let closed = false;
+  const send = ({ eventName, payload }) => {
+    if (closed || res.writableEnded || res.destroyed) return;
+    res.write(`event: ${eventName}\n`);
+    res.write(`data: ${JSON.stringify(payload || {})}\n\n`);
+  };
+  const unsubscribe = subscribePrintAgentEvents(agentId, send);
+  const keepAlive = setInterval(() => {
+    if (!closed && !res.writableEnded && !res.destroyed) res.write(`: keepalive ${Date.now()}\n\n`);
+  }, 15_000);
+  if (typeof keepAlive.unref === 'function') keepAlive.unref();
+
+  send({ eventName: 'ready', payload: { agentId } });
+
+  const cleanup = () => {
+    if (closed) return;
+    closed = true;
+    clearInterval(keepAlive);
+    unsubscribe();
+  };
+  req.on('close', cleanup);
+  res.on('close', cleanup);
+  return undefined;
+});
 
 router.post('/heartbeat', asyncHandler(async (req, res) => {
   const agent = await heartbeatPrintAgent({

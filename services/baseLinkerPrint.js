@@ -11,8 +11,9 @@ const { assertBaseLinkerPrintAllowedCached } = require('./baseLinkerPicking');
 const { getLocalOrderProjection } = require('./baseLinkerOrderIndex');
 const { getBaseLinkerAccount } = require('./baseLinkerAccounts');
 const { appError } = require('../utils/errors');
+const { notifyPrintJobAvailable } = require('./baseLinkerPrintAgentEvents');
 
-const AGENT_ONLINE_MS = Math.max(15_000, Number(process.env.BASELINKER_PRINT_AGENT_ONLINE_MS) || 35_000);
+const AGENT_ONLINE_MS = Math.max(30_000, Number(process.env.BASELINKER_PRINT_AGENT_ONLINE_MS) || 75_000);
 const JOB_EXPIRES_MS = Math.max(60_000, Number(process.env.BASELINKER_PRINT_JOB_EXPIRES_MS) || (10 * 60_000));
 const JOB_LEASE_MS = Math.max(30_000, Number(process.env.BASELINKER_PRINT_JOB_LEASE_MS) || 90_000);
 const DEDUPE_MS = Math.max(2_000, Number(process.env.BASELINKER_PRINT_JOB_DEDUPE_MS) || 15_000);
@@ -189,6 +190,7 @@ async function queuePrintJob({ baseLinkerAccountId, orderId, confirmTerminalTtn 
     createdAt: { $gte: dedupeCutoff },
   }).sort({ createdAt: -1 }).lean();
   if (existing) {
+    if (existing.status === 'pending') notifyPrintJobAvailable(existing);
     return {
       jobId: existing.jobId,
       status: existing.status,
@@ -214,7 +216,9 @@ async function queuePrintJob({ baseLinkerAccountId, orderId, confirmTerminalTtn 
     status: 'pending',
     expiresAt: new Date(now.getTime() + JOB_EXPIRES_MS),
   });
-  emitJob(job.toObject());
+  const queuedJob = job.toObject();
+  emitJob(queuedJob);
+  notifyPrintJobAvailable(queuedJob);
 
   return {
     jobId: job.jobId,

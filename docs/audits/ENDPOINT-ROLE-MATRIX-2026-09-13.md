@@ -4,7 +4,7 @@ This is a complete inventory of runtime Express route declarations, discovered r
 A check mark means that the role passes the route-entry auth/role middleware. Resource ownership, shop/group/session
 scope, one-time tokens, rate limits, feature flags, and request validation can still deny a request as noted.
 
-Routes: **475** · anonymous: **7** · seller: **74** · warehouse: **199** · admin: **465**
+Routes: **476** · anonymous: **7** · seller: **74** · warehouse: **199** · admin: **465**
 
 | Endpoint | Anonymous | Seller | Warehouse | Admin | Source | Boundary note |
 |---|:---:|:---:|:---:|:---:|---|---|
@@ -141,7 +141,8 @@ Routes: **475** · anonymous: **7** · seller: **74** · warehouse: **199** · a
 | `GET /api/picking/shift-board` | — | — | — | ✓ | `routes/picking.js:1494` | route-entry authorization |
 | `GET /api/picking/shift-board/seller-notifications` | — | — | — | ✓ | `routes/picking.js:1698` | route-entry authorization |
 | `GET /api/picking/shift-board/worker-history` | — | — | — | ✓ | `routes/picking.js:1728` | route-entry authorization |
-| `GET /api/print-agent/jobs/:jobId/payload` | — | — | — | — | `routes/baseLinkerPrintAgent.js:49` | Print Agent token, not a user role |
+| `GET /api/print-agent/events` | — | — | — | — | `routes/baseLinkerPrintAgent.js:34` | Print Agent token, not a user role |
+| `GET /api/print-agent/jobs/:jobId/payload` | — | — | — | — | `routes/baseLinkerPrintAgent.js:91` | Print Agent token, not a user role |
 | `GET /api/product-feedback` | — | — | ✓ | ✓ | `routes/productFeedback.js:63` | route-entry authorization |
 | `GET /api/products` | — | — | ✓ | ✓ | `routes/products.js:661` | route-entry authorization |
 | `GET /api/products/:id` | — | — | ✓ | ✓ | `routes/products.js:1235` | route-entry authorization |
@@ -382,11 +383,11 @@ Routes: **475** · anonymous: **7** · seller: **74** · warehouse: **199** · a
 | `POST /api/picking/tasks/:taskId/heartbeat` | — | — | ✓ | ✓ | `routes/picking.js:1222` | route-entry authorization |
 | `POST /api/picking/tasks/:taskId/out-of-stock` | — | — | ✓ | ✓ | `routes/picking.js:1381` | route-entry authorization |
 | `POST /api/picking/tasks/:taskId/release` | — | — | ✓ | ✓ | `routes/picking.js:1185` | route-entry authorization |
-| `POST /api/print-agent/heartbeat` | — | — | — | — | `routes/baseLinkerPrintAgent.js:32` | Print Agent token, not a user role |
-| `POST /api/print-agent/jobs/:jobId/complete` | — | — | — | — | `routes/baseLinkerPrintAgent.js:77` | Print Agent token, not a user role |
-| `POST /api/print-agent/jobs/:jobId/fail` | — | — | — | — | `routes/baseLinkerPrintAgent.js:82` | Print Agent token, not a user role |
-| `POST /api/print-agent/jobs/:jobId/submitted` | — | — | — | — | `routes/baseLinkerPrintAgent.js:68` | Print Agent token, not a user role |
-| `POST /api/print-agent/jobs/claim` | — | — | — | — | `routes/baseLinkerPrintAgent.js:43` | Print Agent token, not a user role |
+| `POST /api/print-agent/heartbeat` | — | — | — | — | `routes/baseLinkerPrintAgent.js:74` | Print Agent token, not a user role |
+| `POST /api/print-agent/jobs/:jobId/complete` | — | — | — | — | `routes/baseLinkerPrintAgent.js:119` | Print Agent token, not a user role |
+| `POST /api/print-agent/jobs/:jobId/fail` | — | — | — | — | `routes/baseLinkerPrintAgent.js:124` | Print Agent token, not a user role |
+| `POST /api/print-agent/jobs/:jobId/submitted` | — | — | — | — | `routes/baseLinkerPrintAgent.js:110` | Print Agent token, not a user role |
+| `POST /api/print-agent/jobs/claim` | — | — | — | — | `routes/baseLinkerPrintAgent.js:85` | Print Agent token, not a user role |
 | `POST /api/product-feedback` | — | ✓ | ✓ | ✓ | `routes/productFeedback.js:23` | route-entry authorization |
 | `POST /api/product-feedback/:id/reject` | — | — | ✓ | ✓ | `routes/productFeedback.js:91` | route-entry authorization |
 | `POST /api/product-feedback/:id/resolve` | — | — | ✓ | ✓ | `routes/productFeedback.js:78` | route-entry authorization |
